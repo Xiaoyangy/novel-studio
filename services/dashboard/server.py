@@ -341,8 +341,18 @@ def setting_payload(run: Path) -> dict:
                 "visibility": r.get("visibility") or "",
             })
     axioms = read_json(nd / "meta" / "physics_axioms.json") or {}
+    timeline = []
+    for ev in (read_json(nd / "timeline.json") or [])[-80:]:
+        if isinstance(ev, dict):
+            timeline.append({
+                "chapter": ev.get("chapter"),
+                "time": clip(ev.get("time"), 60),
+                "event": clip(ev.get("event"), 200),
+                "characters": (ev.get("characters") or [])[:6],
+            })
     return {
-        "premise": text_head(nd / "premise.md"),
+        "premise": text_head(nd / "premise.md", 12000),
+        "world_md": text_head(nd / "book_world.md", 12000),
         "prompt": text_head(run / "prompt.md", 1200),
         "world_name": bw.get("name") or "",
         "world_summary": clip(bw.get("summary"), 400),
@@ -352,23 +362,82 @@ def setting_payload(run: Path) -> dict:
         "world_rules": rules,
         "physics_axioms": [clip(n, 200) for n in (axioms.get("notes") or [])][:20],
         "story_calendar": read_json(nd / "meta" / "story_calendar.json") or {},
+        "timeline": timeline,
     }
+
+
+TIER_GROUPS = {"core": "core", "protagonist": "core", "important": "important",
+               "supporting": "important", "secondary": "minor", "background": "minor"}
 
 
 def cast_payload(run: Path) -> dict:
     nd = novel_dir(run)
+    # 零章人物动态：目标 / 压力 / 情绪评价 / 可能行动 / 能力阶段 / 知识账本
+    dynamics = {}
+    dyn = read_json(nd / "meta" / "initial_character_dynamics.json") or {}
+    for item in dyn.get("characters") or []:
+        if isinstance(item, dict) and item.get("character"):
+            dynamics[item["character"]] = item
     chars = []
     for c in read_json(nd / "characters.json") or []:
         if not isinstance(c, dict):
             continue
+        name = c.get("name") or ""
+        psych = c.get("psych") or {}
+        dna = psych.get("dna") or {}
+        d = dynamics.get(name) or {}
+        emo = d.get("emotion_appraisal") or {}
+        arcax = d.get("arc_axis") or {}
+        know = d.get("knowledge_ledger") or {}
         chars.append({
-            "name": c.get("name") or "",
+            "name": name,
             "role": c.get("role") or "",
             "tier": c.get("tier") or "",
+            "group": TIER_GROUPS.get(str(c.get("tier") or "").lower(), "minor"),
             "traits": [clip(t, 20) for t in (c.get("traits") or [])][:6],
             "description": clip(c.get("description"), 220),
             "arc": clip(c.get("arc"), 160),
+            "big_five": psych.get("big_five") or {},
+            "attachment": ((psych.get("attachment") or {}).get("style")) or "",
+            "dna": {
+                "exposed": [clip(x, 60) for x in (dna.get("exposed") or [])][:4],
+                "hidden": [clip(x, 60) for x in (dna.get("hidden") or [])][:4],
+                "latent": [clip(x, 60) for x in (dna.get("latent") or [])][:4],
+            },
+            "state": {
+                "goal": clip(d.get("current_goal"), 180),
+                "pressure": clip(d.get("pressure"), 200),
+                "likely_action": clip(d.get("likely_action"), 200),
+                "competence": clip(d.get("competence_stage"), 120),
+                "want": clip(arcax.get("want"), 200),
+                "known": len(know.get("known_facts") or []),
+                "unknown": len(know.get("unknown_facts") or []),
+            },
+            "emotion": {
+                "trigger": clip(emo.get("trigger_event"), 160),
+                "visible": clip(emo.get("visible_expression"), 140),
+                "suppressed": clip(emo.get("suppressed_expression"), 140),
+                "coping": clip(emo.get("coping_strategy"), 140),
+            },
         })
+    # 群众：crowd_life NPC + 配角名册
+    crowd = []
+    seen = {c["name"] for c in chars}
+    cl = read_json(nd / "meta" / "crowd_life.json") or {}
+    for npc in cl.get("npcs") or []:
+        if isinstance(npc, dict):
+            nm = npc.get("npc_id") or ""
+            crowd.append({"name": nm, "note": clip("；".join(npc.get("goals") or []), 160),
+                          "source": "crowd_life", "named": nm in seen})
+    ledger = read_json(nd / "meta" / "cast_ledger.json")
+    if isinstance(ledger, dict):
+        for nm, v in ledger.items():
+            if nm in ("version",) or nm in {c["name"] for c in crowd}:
+                continue
+            note = ""
+            if isinstance(v, dict):
+                note = clip(v.get("role") or v.get("note") or v.get("last_seen") or "", 120)
+            crowd.append({"name": str(nm), "note": note, "source": "cast_ledger", "named": False})
     rs = read_json_variants(nd, "relationship_state.json", "relationship_state.initial.json") or {}
     relations = []
     if isinstance(rs, list):  # 旧版扁平形态：[{character_a, character_b, relation, chapter}]
@@ -382,8 +451,8 @@ def cast_payload(run: Path) -> dict:
                     "promise": "", "debt": "",
                     "leverage": f"第 {r.get('chapter')} 章" if r.get("chapter") else "",
                 })
-        return {"characters": chars, "relationship_scope": "", "relationship_chapter": None,
-                "relations": relations}
+        return {"characters": chars, "crowd": crowd, "relationship_scope": "",
+                "relationship_chapter": None, "relations": relations}
     contracts = rs.get("contracts") or []
     if isinstance(contracts, dict):  # {owner: [contract...]} 与 [contract...] 双形态兼容
         pairs = [(owner, c) for owner, lst in contracts.items() for c in (lst or []) if isinstance(c, dict)]
@@ -401,6 +470,7 @@ def cast_payload(run: Path) -> dict:
         })
     return {
         "characters": chars,
+        "crowd": crowd,
         "relationship_scope": rs.get("scope") or "",
         "relationship_chapter": rs.get("chapter"),
         "relations": relations,

@@ -198,6 +198,39 @@
     padding: 14px 16px; max-height: 460px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
     color: #9aa5bd;
   }
+
+  /* Markdown 渲染 */
+  .md { font-size: 13.5px; line-height: 1.85; color: #c6cddc; max-height: 480px; overflow-y: auto; }
+  .md h1, .md h2, .md h3, .md h4 { color: var(--text); margin: 14px 0 8px; line-height: 1.4; }
+  .md h1 { font-size: 17px; } .md h2 { font-size: 15px; border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+  .md h3 { font-size: 14px; } .md h4 { font-size: 13px; color: #aab3c9; }
+  .md ul, .md ol { padding-left: 22px; margin: 6px 0; }
+  .md li { margin: 3px 0; }
+  .md p { margin: 7px 0; }
+  .md strong { color: var(--text); }
+  .md code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,.07); padding: 1px 5px; border-radius: 4px; }
+  .md blockquote { border-left: 3px solid rgba(109,141,255,.5); padding: 2px 12px; margin: 8px 0; color: var(--muted); }
+  .md hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
+
+  /* 人物卡 */
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .pcard { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 14px; padding: 15px 16px; }
+  .pcard .phead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .pcard .phead b { font-size: 15px; }
+  .pcard .role { font-size: 12px; color: var(--muted); }
+  .pcard .desc { font-size: 12.5px; color: #b9c1d4; line-height: 1.7; margin-top: 8px; }
+  .ocean { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 10px; }
+  .ocean .ax { text-align: center; }
+  .ocean .ax .t { height: 44px; display: flex; align-items: flex-end; justify-content: center; }
+  .ocean .ax .t i { width: 12px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--accent2), var(--accent1)); }
+  .ocean .ax .l { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .ocean .ax .n { font-size: 10px; color: #aab3c9; font-family: var(--mono); }
+  .dna { margin-top: 8px; font-size: 11.5px; }
+  .dna .row { display: flex; gap: 6px; margin: 3px 0; align-items: baseline; }
+  .dna .lab { flex: none; width: 34px; font-size: 10.5px; color: var(--muted); }
+  .statebox { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .statebox .kv { margin: 3px 0; font-size: 12px; }
+  .statebox .kv .k { min-width: 62px; }
   .log .hl { color: #ffb4c0; }
   .loading { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
   a { color: var(--accent1); }
@@ -352,6 +385,33 @@ async function refresh() {
   $("#tick").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 
+/* ---------- Markdown 渲染（轻量：标题/列表/粗体/代码/引用/分隔线） ---------- */
+function mdToHtml(src) {
+  const lines = esc(src || "").split("\n");
+  const out = [];
+  let list = null; // "ul" | "ol"
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const inline = s => s
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    if (h) { closeList(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
+    if (/^(---+|\*\*\*+)$/.test(line.trim())) { closeList(); out.push("<hr>"); continue; }
+    const q = line.match(/^>\s?(.*)/);
+    if (q) { closeList(); out.push(`<blockquote>${inline(q[1])}</blockquote>`); continue; }
+    const ul = line.match(/^\s*[-*]\s+(.*)/);
+    if (ul) { if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; } out.push(`<li>${inline(ul[1])}</li>`); continue; }
+    const ol = line.match(/^\s*\d+[.、]\s+(.*)/);
+    if (ol) { if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; } out.push(`<li>${inline(ol[1])}</li>`); continue; }
+    closeList();
+    if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  closeList();
+  return out.join("\n");
+}
+
 /* ---------- 页签渲染 ---------- */
 const verdictTag = v => v === "accept" ? '<span class="tag accept">通过</span>'
   : v ? `<span class="tag rewrite">${esc(v)}</span>` : '<span class="tag pending">待审</span>';
@@ -415,14 +475,22 @@ function renderSetting(s) {
     clockHTML(f.name + (f.stance ? `（${f.stance}）` : ""), f.clock || {},
       f.goal ? `<div style="font-size:11.5px;color:#b9c1d4;margin-top:3px">目标：${esc(f.goal)}</div>` : "")).join("");
   const cal = s.story_calendar || {};
+  const tl = (s.timeline || []).map(t => `<tr>
+    <td>第 ${t.chapter ?? "?"} 章</td><td>${esc(t.time)}</td>
+    <td style="color:#c6cddc">${esc(t.event)}</td>
+    <td style="color:var(--muted)">${(t.characters || []).map(esc).join("、")}</td></tr>`).join("");
   return `
-    <div class="sec"><h3>项目背景（premise）</h3><div class="panel prose">${esc(s.premise) || "（暂无）"}</div></div>
-    <div class="sec"><h3>世界 · ${esc(s.world_name) || "—"}</h3>
+    <div class="sec"><h3>项目背景（premise.md）</h3><div class="panel md">${mdToHtml(s.premise) || "（暂无）"}</div></div>
+    <div class="sec"><h3>世界背景 · ${esc(s.world_name) || "—"}（book_world.md）</h3>
       <div class="panel">
-        <div class="prose" style="margin-bottom:10px">${esc(s.world_summary)}</div>
-        <div class="kv"><span class="k">故事日历</span><span>${cal.era ? esc(cal.era) + " · " : ""}${cal.start_date ? esc(cal.start_date) + " 起 · " : ""}一章 ≈ ${cal.days_per_chapter ?? "?"} 天</span></div>
-        <div class="kv"><span class="k">地点</span><span class="placechips">${(s.places || []).map(p => `<span>${esc(p)}</span>`).join("") || "—"}</span></div>
+        <div class="kv" style="margin-bottom:8px"><span class="k">故事日历</span><span>${cal.era ? esc(cal.era) + " · " : ""}${cal.start_date ? esc(cal.start_date) + " 起 · " : ""}一章 ≈ ${cal.days_per_chapter ?? "?"} 天</span></div>
+        <div class="kv" style="margin-bottom:8px"><span class="k">地点速览</span><span class="placechips">${(s.places || []).map(p => `<span>${esc(p)}</span>`).join("") || "—"}</span></div>
+        <div class="md">${mdToHtml(s.world_md) || esc(s.world_summary) || "（暂无）"}</div>
       </div>
+    </div>
+    <div class="sec"><h3>背景时间线（${(s.timeline || []).length} 条）</h3>
+      ${tl ? `<table><thead><tr><th>章</th><th>故事内时间</th><th>事件</th><th>人物</th></tr></thead><tbody>${tl}</tbody></table>`
+           : '<div class="loading">时间线尚未生成——首章 commit 后由时间线账本累积。</div>'}
     </div>
     <div class="sec"><h3>势力与进度钟（${(s.factions || []).length}）</h3><div class="panel">${factions || '<span style="color:var(--muted);font-size:13px">暂无势力。</span>'}</div></div>
     <div class="sec"><h3>世界规则（${(s.world_rules || []).length} 条）</h3>
@@ -431,20 +499,74 @@ function renderSetting(s) {
     ${(s.physics_axioms || []).length ? `<div class="sec"><h3>物理公理</h3><div class="panel prose">${s.physics_axioms.map(esc).join("\n")}</div></div>` : ""}`;
 }
 
+const OCEAN_AXES = [["openness", "开放"], ["conscientiousness", "尽责"], ["extraversion", "外向"], ["agreeableness", "宜人"], ["neuroticism", "神经质"]];
+const TIER_LABEL = { core: "核心", important: "重要", secondary: "次要", protagonist: "主角", supporting: "配角", background: "背景" };
+
+function oceanHTML(bf) {
+  if (!bf || !Object.keys(bf).length) return "";
+  return `<div class="ocean">${OCEAN_AXES.map(([k, l]) => {
+    const v = bf[k];
+    if (v == null) return "";
+    return `<div class="ax"><div class="t"><i style="height:${Math.max(8, Math.round(v * 100))}%"></i></div><div class="l">${l}</div><div class="n">${(v * 100).toFixed(0)}</div></div>`;
+  }).join("")}</div>`;
+}
+
+function dnaHTML(dna) {
+  if (!dna) return "";
+  const row = (lab, arr, cls) => (arr && arr.length)
+    ? `<div class="row"><span class="lab">${lab}</span><span>${arr.map(x => `<span class="tag ${cls}" style="margin:1px" title="${esc(x)}">${esc(x)}</span>`).join(" ")}</span></div>` : "";
+  const html = row("显性", dna.exposed, "blue") + row("隐性", dna.hidden, "pending") + row("突变", dna.latent, "purple");
+  return html ? `<div class="dna">${html}</div>` : "";
+}
+
+function personCard(x) {
+  const st = x.state || {}, emo = x.emotion || {};
+  const hasState = st.goal || st.pressure || st.likely_action;
+  const hasEmo = emo.visible || emo.suppressed || emo.coping;
+  return `<div class="pcard">
+    <div class="phead"><b>${esc(x.name)}</b>
+      ${x.tier ? `<span class="tag ${x.group === "core" ? "now" : x.group === "important" ? "blue" : "pending"}">${TIER_LABEL[x.tier] || esc(x.tier)}</span>` : ""}
+      ${x.attachment ? `<span class="tag purple" title="依恋类型">${esc(x.attachment)}</span>` : ""}
+      <span class="role">${esc(x.role)}</span></div>
+    ${(x.traits || []).length ? `<div style="margin-top:6px">${x.traits.map(t => `<span class="tag pending" style="margin:1px">${esc(t)}</span>`).join(" ")}</div>` : ""}
+    <div class="desc">${esc(x.description)}</div>
+    ${oceanHTML(x.big_five)}
+    ${dnaHTML(x.dna)}
+    ${hasState || hasEmo ? `<div class="statebox">
+      ${st.goal ? `<div class="kv"><span class="k">当前目标</span><span>${esc(st.goal)}</span></div>` : ""}
+      ${st.pressure ? `<div class="kv"><span class="k">当前压力</span><span>${esc(st.pressure)}</span></div>` : ""}
+      ${hasEmo ? `<div class="kv"><span class="k">情绪评价</span><span>${[emo.visible && "可见：" + emo.visible, emo.suppressed && "压抑：" + emo.suppressed, emo.coping && "应对：" + emo.coping].filter(Boolean).map(esc).join("<br>")}</span></div>` : ""}
+      ${st.likely_action ? `<div class="kv"><span class="k">可能行动</span><span>${esc(st.likely_action)}</span></div>` : ""}
+      ${st.competence ? `<div class="kv"><span class="k">能力阶段</span><span>${esc(st.competence)}</span></div>` : ""}
+      ${st.want ? `<div class="kv"><span class="k">欲望弧线</span><span>${esc(st.want)}</span></div>` : ""}
+      ${st.known || st.unknown ? `<div class="kv"><span class="k">知识账本</span><span>已知 ${st.known} 条 · 未知 ${st.unknown} 条</span></div>` : ""}
+    </div>` : ""}
+    ${x.arc ? `<div class="kv" style="margin-top:8px"><span class="k">弧线</span><span style="color:var(--muted)">${esc(x.arc)}</span></div>` : ""}
+  </div>`;
+}
+
 function renderCast(c) {
-  const chars = (c.characters || []).map(x => `<tr>
-    <td><b>${esc(x.name)}</b>${x.tier ? `<br><span class="tag ${x.tier === "protagonist" ? "now" : "pending"}">${esc(x.tier)}</span>` : ""}</td>
-    <td>${esc(x.role)}</td>
-    <td>${(x.traits || []).map(t => `<span class="tag purple" style="margin:1px">${esc(t)}</span>`).join(" ")}</td>
-    <td style="color:#c6cddc">${esc(x.description)}${x.arc ? `<br><small style="color:var(--muted)">弧线：${esc(x.arc)}</small>` : ""}</td></tr>`).join("");
+  const all = c.characters || [];
+  const groups = [["core", "核心人物"], ["important", "重要人物"], ["minor", "次要人物"]];
+  const sections = groups.map(([g, label]) => {
+    const list = all.filter(x => x.group === g);
+    if (!list.length) return "";
+    return `<div class="sec"><h3>${label}（${list.length}）</h3><div class="pgrid">${list.map(personCard).join("")}</div></div>`;
+  }).join("");
+  const crowd = (c.crowd || []).map(x => `<tr>
+    <td><b>${esc(x.name)}</b>${x.named ? ' <span class="tag blue" title="同时在角色档案中">在册</span>' : ""}</td>
+    <td style="color:#c6cddc">${esc(x.note) || "—"}</td>
+    <td><span class="tag pending">${x.source === "crowd_life" ? "群体状态机" : "配角名册"}</span></td></tr>`).join("");
   const rels = (c.relations || []).map(r => `<tr>
     <td>${esc(r.owner) || "—"} → <b>${esc(r.counterpart)}</b></td>
     <td>${r.trust ?? "—"}</td>
     <td>${esc(r.alliance)}</td>
     <td style="color:#c6cddc">${[r.promise && "承诺：" + r.promise, r.debt && "债：" + r.debt, r.leverage && "筹码：" + r.leverage].filter(Boolean).map(esc).join("；") || "—"}</td></tr>`).join("");
   return `
-    <div class="sec"><h3>角色（${(c.characters || []).length}）</h3>
-      ${chars ? `<table><thead><tr><th>姓名</th><th>角色</th><th>特质</th><th>简介 / 弧线</th></tr></thead><tbody>${chars}</tbody></table>` : '<div class="loading">暂无角色档案。</div>'}
+    ${sections || '<div class="loading">暂无角色档案。</div>'}
+    <div class="sec"><h3>群众 / 背景 NPC（${(c.crowd || []).length}）</h3>
+      ${crowd ? `<table><thead><tr><th>名字</th><th>当前目标 / 备注</th><th>来源</th></tr></thead><tbody>${crowd}</tbody></table>`
+              : '<div class="loading">暂无群众名册——crowd_life 与配角名册会随写作累积。</div>'}
     </div>
     <div class="sec"><h3>人物关系契约（${(c.relations || []).length}${c.relationship_scope ? " · " + esc(c.relationship_scope) : ""}${c.relationship_chapter ? " · 截至第 " + c.relationship_chapter + " 章" : ""}）</h3>
       ${rels ? `<table><thead><tr><th>关系</th><th>信任</th><th>同盟状态</th><th>承诺 / 债 / 筹码</th></tr></thead><tbody>${rels}</tbody></table>` : '<div class="loading">暂无关系数据。</div>'}
