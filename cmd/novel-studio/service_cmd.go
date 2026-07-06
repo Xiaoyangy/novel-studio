@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -229,7 +228,7 @@ func startServiceBackground(flags serviceFlags, novelDir string) error {
 	cmd.Stdin = nil
 	cmd.Dir = root
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = detachSysProcAttr()
 	if novelDir != "" {
 		if abs, err := filepath.Abs(novelDir); err == nil {
 			cmd.Env = append(cmd.Env, "NOVEL_STUDIO_NOVEL_DIR="+abs)
