@@ -178,7 +178,7 @@ func serviceURL(flags serviceFlags) string {
 }
 
 func serviceNovelURL(flags serviceFlags) string {
-	return serviceURL(flags) + "/novel.html"
+	return serviceURL(flags) + "/"
 }
 
 func ensureDashboardServiceForRun(outputDir string) {
@@ -270,7 +270,7 @@ func stopIncompatibleDashboard(flags serviceFlags) error {
 	stopped := 0
 	for _, pid := range pids {
 		cmdline, _ := processCommandLine(pid)
-		if !strings.Contains(cmdline, "services/short-story-dashboard/server.py") {
+		if !strings.Contains(cmdline, "services/dashboard/server.py") {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -322,7 +322,7 @@ func processCommandLine(pid int) (string, error) {
 
 func findShortStoryServiceScript() (string, error) {
 	relCandidates := []string{
-		filepath.Join("services", "short-story-dashboard", "server.py"),
+		filepath.Join("services", "dashboard", "server.py"),
 	}
 	roots := []string{"."}
 	if exe, err := os.Executable(); err == nil {
@@ -344,7 +344,7 @@ func findShortStoryServiceScript() (string, error) {
 			return abs, nil
 		}
 	}
-	return "", fmt.Errorf("services/short-story-dashboard/server.py not found; run from the novel-studio project root")
+	return "", fmt.Errorf("services/dashboard/server.py not found; run from the novel-studio project root")
 }
 
 func findProjectRootFrom(path string) string {
@@ -370,8 +370,8 @@ func printServiceUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio service open [--host 127.0.0.1] [--port 8765]")
 	fmt.Fprintln(w, "  novel-studio service url [--host 127.0.0.1] [--port 8765]")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Service: %s\n", filepath.Join("services", "short-story-dashboard"))
-	fmt.Fprintf(w, "Novel board: %s\n", "/novel.html")
+	fmt.Fprintf(w, "Service: %s\n", filepath.Join("services", "dashboard"))
+	fmt.Fprintf(w, "Novel board: %s\n", "/")
 	fmt.Fprintf(w, "Short-story data root: %s\n", filepath.Join("data", "generated-output", "short_story_service", "projects"))
 	fmt.Fprintf(w, "Audit scripts: %s\n", filepath.Join("quality", "audit", "scripts"))
 }

@@ -61,7 +61,7 @@ skill 可用 `novel-studio skills context <name>` 展开压缩恢复读取清单
 - **豆瓣原创长篇**：`novel-check` → `novel-douban-write`（准备豆瓣专项 prompt）→ `novel-pipeline --prompt-file ./豆瓣长篇需求.md`
 - **需求模糊先聊清楚**：`novel-cocreate`（定稿创作指令）→ `novel-pipeline --stages cocreate,write,review,rewrite,deliver`
 - **随时**：`novel-diag` 诊断、`novel-steer` 排队下一轮修改意见
-- **短篇看板**：`novel-studio service start` → 浏览器打开 `http://127.0.0.1:8765`
+- **进度看板**：`novel-studio service start` → 浏览器打开 `http://127.0.0.1:8765`，实时查看 `data/runs/` 下全部书目进度
 - **本地审核**：`python3 quality/audit/scripts/aigc_value.py <正文路径> --target 5` → `python3 quality/audit/scripts/text_signals.py <正文路径>` → `python3 quality/audit/scripts/paragraph_dup.py <正文路径>`
 
 ## 长期资产

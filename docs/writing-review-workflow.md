@@ -25,7 +25,7 @@
 
 ## 看板服务策略
 
-HTML 看板由 `services/short-story-dashboard/` 提供，入口命令是：
+HTML 看板由 `services/dashboard/` 提供（统一读取 `data/runs/`），入口命令是：
 
 ```bash
 go run ./cmd/novel-studio service status

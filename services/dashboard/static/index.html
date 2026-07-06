@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>novel-studio · 创作进度看板</title>
+<style>
+  :root {
+    --bg: #0a0c12;
+    --panel: rgba(255,255,255,.045);
+    --panel-hi: rgba(255,255,255,.08);
+    --line: rgba(255,255,255,.09);
+    --text: #e8ebf4;
+    --muted: #8b93a7;
+    --accent1: #6d8dff;
+    --accent2: #b06dff;
+    --ok: #3ddc97;
+    --warn: #f5b14c;
+    --bad: #ff6b81;
+    --info: #58a6ff;
+    --cyan: #38d0e0;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1100px 500px at 85% -10%, rgba(109,141,255,.14), transparent 60%),
+      radial-gradient(900px 480px at -10% 110%, rgba(176,109,255,.10), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100%;
+  }
+  ::selection { background: rgba(109,141,255,.35); }
+
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 14px;
+    padding: 16px 28px;
+    background: rgba(10,12,18,.72);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    box-shadow: 0 0 14px rgba(109,141,255,.8);
+    animation: breathe 2.6s ease-in-out infinite;
+  }
+  @keyframes breathe { 50% { transform: scale(.78); opacity: .7; } }
+  h1 { font-size: 17px; font-weight: 700; letter-spacing: .4px; }
+  h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent1), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .head-meta { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 12px; color: var(--muted); }
+  .head-meta code { font-family: var(--mono); font-size: 11px; color: #aab3c9; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: breathe 1.6s infinite; }
+  .dot.err  { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+
+  main { max-width: 1240px; margin: 0 auto; padding: 30px 28px 80px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 22px; }
+
+  .card {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 22px 22px 18px;
+    cursor: pointer;
+    transition: transform .25s ease, border-color .25s ease, background .25s ease;
+    overflow: hidden;
+  }
+  .card:hover { transform: translateY(-3px); border-color: rgba(109,141,255,.45); background: var(--panel-hi); }
+  .card.active-run::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
+    background: linear-gradient(var(--accent1), var(--accent2));
+  }
+  .card h2 { font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); animation: breathe 1.4s infinite; flex: none; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .pill {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); letter-spacing: .3px;
+  }
+  .pill.phase-writing  { color: var(--warn); border-color: rgba(245,177,76,.4); background: rgba(245,177,76,.08); }
+  .pill.phase-complete { color: var(--ok);   border-color: rgba(61,220,151,.4); background: rgba(61,220,151,.08); }
+  .pill.phase-init     { color: var(--muted); }
+  .pill.phase-premise  { color: var(--info); border-color: rgba(88,166,255,.4); background: rgba(88,166,255,.08); }
+  .pill.phase-outline  { color: var(--cyan); border-color: rgba(56,208,224,.4); background: rgba(56,208,224,.08); }
+  .pill.gen { color: #c9a7ff; border-color: rgba(176,109,255,.35); background: rgba(176,109,255,.07); }
+
+  .prog { margin-top: 16px; }
+  .prog .nums { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .prog .nums b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 6px; background: rgba(255,255,255,.07); overflow: hidden; }
+  .bar i {
+    display: block; height: 100%; border-radius: 6px;
+    background: linear-gradient(90deg, var(--accent1), var(--accent2));
+    box-shadow: 0 0 12px rgba(109,141,255,.5);
+    transition: width .8s cubic-bezier(.22,1,.36,1);
+  }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 16px; }
+  .stat { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.05); border-radius: 10px; padding: 8px 10px; }
+  .stat .k { font-size: 10px; color: var(--muted); letter-spacing: .5px; }
+  .stat .v { font-size: 14px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 34px; margin-top: 14px; }
+  .spark i { flex: 1; min-width: 3px; max-width: 14px; border-radius: 2px 2px 0 0; background: linear-gradient(180deg, rgba(109,141,255,.9), rgba(109,141,255,.25)); transition: height .6s ease; }
+
+  .chips { display: flex; gap: 6px; margin-top: 14px; }
+  .chip { flex: 1; text-align: center; font-size: 11px; padding: 5px 0; border-radius: 8px; border: 1px dashed var(--line); color: var(--muted); }
+  .chip.done { border-style: solid; color: var(--ok); border-color: rgba(61,220,151,.4); background: rgba(61,220,151,.07); }
+  .chip.now  { border-style: solid; color: var(--warn); border-color: rgba(245,177,76,.5); background: rgba(245,177,76,.08); animation: chipglow 2s infinite; }
+  @keyframes chipglow { 50% { box-shadow: 0 0 12px rgba(245,177,76,.25); } }
+
+  .foot { display: flex; justify-content: space-between; margin-top: 14px; font-size: 11px; color: var(--muted); }
+
+  .empty { text-align: center; padding: 90px 0; color: var(--muted); }
+  .empty b { display: block; font-size: 18px; color: var(--text); margin-bottom: 8px; }
+  .empty code { font-family: var(--mono); color: #aab3c9; }
+
+  /* ---- 详情抽屉 ---- */
+  .overlay { position: fixed; inset: 0; background: rgba(4,6,10,.55); backdrop-filter: blur(3px); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 30; }
+  .overlay.show { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 94vw); z-index: 40;
+    background: #0d1019; border-left: 1px solid var(--line);
+    transform: translateX(102%); transition: transform .32s cubic-bezier(.22,1,.36,1);
+    display: flex; flex-direction: column;
+  }
+  .drawer.show { transform: none; }
+  .drawer-head { padding: 20px 26px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+  .drawer-head h2 { font-size: 20px; }
+  .drawer-head .close { margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted); width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 15px; }
+  .drawer-head .close:hover { color: var(--text); border-color: var(--muted); }
+  .drawer-body { overflow-y: auto; padding: 20px 26px 40px; flex: 1; }
+  .sec { margin-bottom: 26px; }
+  .sec h3 { font-size: 13px; color: var(--muted); letter-spacing: 1px; margin-bottom: 10px; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .5px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.045); font-variant-numeric: tabular-nums; }
+  tr:hover td { background: rgba(255,255,255,.025); }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; }
+  .tag.accept { color: var(--ok); background: rgba(61,220,151,.1); }
+  .tag.rewrite, .tag.fail { color: var(--bad); background: rgba(255,107,129,.1); }
+  .tag.pass { color: var(--info); background: rgba(88,166,255,.1); }
+  .tag.pending { color: var(--muted); background: rgba(255,255,255,.05); }
+
+  .log {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    background: #070910; border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    color: #9aa5bd;
+  }
+  .log .hl { color: #d7deee; }
+  a { color: var(--accent1); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"></div>
+  <h1><em>novel-studio</em>&nbsp;· 创作进度看板</h1>
+  <div class="head-meta">
+    <span id="conn"><span class="dot live"></span><span id="conn-text">已连接</span></span>
+    <span>数据源 <code id="runs-dir">data/runs/</code></span>
+    <span id="tick">—</span>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">
+    <b>还没有书目工程</b>
+    在 <code>data/runs/&lt;书名&gt;/</code> 下用 <code>novel-studio --pipeline</code> 开一本书，这里会自动出现它的进度。
+  </div>
+</main>
+
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <h2 id="d-title">—</h2>
+    <span class="pill" id="d-phase"></span>
+    <button class="close" id="d-close">✕</button>
+  </div>
+  <div class="drawer-body" id="d-body"></div>
+</aside>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const grid = $("#grid"), empty = $("#empty");
+const overlay = $("#overlay"), drawer = $("#drawer");
+let currentDetail = null;   // 打开的书目 dir
+let lastData = [];
+
+const fmtNum = n => (n >= 10000 ? (n / 10000).toFixed(1) + " 万" : String(n ?? 0));
+const fmtMoney = n => "$" + (n ?? 0).toFixed(2);
+const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
+const ago = ts => {
+  if (!ts) return "—";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return Math.floor(s) + " 秒前";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  return Math.floor(s / 86400) + " 天前";
+};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function pipelineChips(b) {
+  const done = new Set(b.pipeline_completed || []);
+  const stages = (b.pipeline_stages && b.pipeline_stages.length) ? b.pipeline_stages : ["write", "review", "rewrite", "deliver"];
+  let nowMarked = false;
+  return stages.map(s => {
+    let cls = "";
+    if (done.has(s)) cls = "done";
+    else if (!nowMarked) { cls = b.active ? "now" : ""; nowMarked = true; }
+    return `<span class="chip ${cls}">${esc(s)}</span>`;
+  }).join("");
+}
+
+function sparkline(b) {
+  const entries = Object.entries(b.chapter_words || {});
+  if (!entries.length) return "";
+  const max = Math.max(...entries.map(([, v]) => v), 1);
+  const bars = entries.slice(-24).map(([k, v]) =>
+    `<i style="height:${Math.max(8, Math.round(v / max * 100))}%" title="第${k}章 ${v}字"></i>`).join("");
+  return `<div class="spark">${bars}</div>`;
+}
+
+function card(b) {
+  const pct = b.chapters_total ? Math.min(100, Math.round(b.chapters_completed / b.chapters_total * 100)) : 0;
+  return `<div class="card ${b.active ? "active-run" : ""}" data-dir="${esc(b.dir)}">
+    <h2>${b.active ? '<span class="pulse"></span>' : ""}${esc(b.name)}</h2>
+    <div class="badges">
+      <span class="pill phase-${esc(b.phase)}">${phaseName[b.phase] || esc(b.phase)}</span>
+      ${b.flow && b.flow !== b.phase ? `<span class="pill">${esc(b.flow)}</span>` : ""}
+      ${b.generation_mode ? `<span class="pill gen">推演线 ${esc(b.generation_mode.replace(/_/g, " "))}</span>` : ""}
+    </div>
+    <div class="prog">
+      <div class="nums"><span><b>${b.chapters_completed}</b> / ${b.chapters_total || "?"} 章</span><span>${pct}%</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">总字数</div><div class="v">${fmtNum(b.words_total)}</div></div>
+      <div class="stat"><div class="k">成本</div><div class="v">${fmtMoney(b.cost_usd)}</div></div>
+      <div class="stat"><div class="k">卷 · 弧</div><div class="v">${b.volume || "-"} · ${b.arc || "-"}</div></div>
+      <div class="stat"><div class="k">当前章</div><div class="v">第 ${b.current_chapter || "-"} 章</div></div>
+    </div>
+    ${sparkline(b)}
+    <div class="chips">${pipelineChips(b)}</div>
+    <div class="foot">
+      <span>评审通过 ${b.reviews_accepted} · 门禁通过 ${b.gate_passed}</span>
+      <span>更新于 ${ago(b.updated_at)}</span>
+    </div>
+  </div>`;
+}
+
+function render(novels) {
+  lastData = novels;
+  empty.style.display = novels.length ? "none" : "";
+  grid.innerHTML = novels.map(card).join("");
+  grid.querySelectorAll(".card").forEach(el =>
+    el.addEventListener("click", () => openDetail(el.dataset.dir)));
+  const running = novels.filter(n => n.active).length;
+  document.title = (running ? `▶ ${running} 本在写 · ` : "") + "novel-studio · 创作进度看板";
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/novels", { cache: "no-store" });
+    const data = await res.json();
+    $("#runs-dir").textContent = data.runs_dir || "data/runs/";
+    render(data.novels || []);
+    $("#conn").innerHTML = '<span class="dot live"></span>实时刷新';
+  } catch {
+    $("#conn").innerHTML = '<span class="dot err"></span>连接断开，重试中…';
+  }
+  $("#tick").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/* ---- 详情抽屉 ---- */
+function detailHTML(d) {
+  const chapterRows = (d.chapters || []).map(c => `<tr>
+    <td>第 ${c.n} 章</td>
+    <td>${esc(c.title) || '<span style="color:var(--muted)">—</span>'}</td>
+    <td>${c.words ? c.words + " 字" : "—"}</td>
+    <td>${c.verdict ? `<span class="tag ${esc(c.verdict)}">${c.verdict === "accept" ? "通过" : esc(c.verdict)}</span>` : '<span class="tag pending">待审</span>'}</td>
+    <td>${c.gate ? `<span class="tag ${esc(c.gate)}">${c.gate === "pass" ? "门禁 ✓" : "门禁 ✗"}${c.gate_warnings ? ` · ${c.gate_warnings} 警告` : ""}</span>` : "—"}</td>
+  </tr>`).join("");
+  const agentRows = (d.per_agent || []).map(a => `<tr>
+    <td>${esc(a.agent)}</td><td>${fmtNum(a.input)}</td><td>${fmtNum(a.output)}</td><td>${fmtMoney(a.cost_usd)}</td>
+  </tr>`).join("");
+  const logLines = (d.log || []).map(l =>
+    `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
+  return `
+    <div class="sec">
+      <h3>章节（磁盘 ${d.chapters_on_disk} 篇 · 交付沉淀 ${d.deliveries} 次）</h3>
+      ${chapterRows ? `<table><thead><tr><th>章</th><th>标题</th><th>字数</th><th>评审</th><th>AI 门禁</th></tr></thead><tbody>${chapterRows}</tbody></table>`
+                    : '<div style="color:var(--muted);font-size:13px">还没有落盘章节。</div>'}
+    </div>
+    <div class="sec">
+      <h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
+      ${agentRows ? `<table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table>`
+                  : '<div style="color:var(--muted);font-size:13px">暂无用量数据。</div>'}
+    </div>
+    <div class="sec">
+      <h3>运行日志（末尾 ${d.log ? d.log.length : 0} 行，自动刷新）</h3>
+      <div class="log" id="d-log">${logLines || "（暂无日志）"}</div>
+    </div>`;
+}
+
+async function loadDetail(dir, keepScroll) {
+  const res = await fetch("/api/novels/" + encodeURIComponent(dir), { cache: "no-store" });
+  if (!res.ok) return;
+  const d = await res.json();
+  $("#d-title").textContent = d.name;
+  const ph = $("#d-phase");
+  ph.textContent = phaseName[d.phase] || d.phase;
+  ph.className = "pill phase-" + d.phase;
+  const body = $("#d-body");
+  const prevLog = $("#d-log");
+  const stick = !keepScroll || !prevLog || (prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 20);
+  body.innerHTML = detailHTML(d);
+  const log = $("#d-log");
+  if (log && stick) log.scrollTop = log.scrollHeight;
+}
+
+let detailTimer = null;
+function openDetail(dir) {
+  currentDetail = dir;
+  overlay.classList.add("show");
+  drawer.classList.add("show");
+  loadDetail(dir, false);
+  clearInterval(detailTimer);
+  detailTimer = setInterval(() => currentDetail && loadDetail(currentDetail, true), 4000);
+}
+function closeDetail() {
+  currentDetail = null;
+  clearInterval(detailTimer);
+  overlay.classList.remove("show");
+  drawer.classList.remove("show");
+}
+overlay.addEventListener("click", closeDetail);
+$("#d-close").addEventListener("click", closeDetail);
+document.addEventListener("keydown", e => e.key === "Escape" && closeDetail());
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

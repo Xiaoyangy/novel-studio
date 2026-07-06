@@ -149,7 +149,7 @@ def write_inventory() -> None:
         "",
         "## 工程能力总览",
         "",
-        "- `services/short-story-dashboard/`：短篇项目服务与 HTML 进度看板；使用 `novel-studio service start` 启动。",
+        "- `services/dashboard/`：统一进度看板（数据源 `data/runs/`）；使用 `novel-studio service start` 启动。",
         "- `data/generated-output/`：历史短篇正文、服务项目、工作流状态、配图方案和审核报告。",
         "- `data/reference-library/`：题材参考库、写作技巧源材料和拆书样本。",
         "- `quality/audit/`：本地 AIGC / AI 味 / 重复 / 内容逻辑 / 错别字审核脚本与参考。",

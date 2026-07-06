@@ -29,7 +29,7 @@ python3 quality/audit/scripts/register_external_detection.py --project <output/n
 
 ## 服务集成
 
-`services/short-story-dashboard/server.py` 默认从本目录导入审核脚本。可用环境变量覆盖：
+进度看板（`services/dashboard/`）为只读服务，不再导入审核脚本；本目录脚本直接命令行调用。环境变量覆盖：
 
 - `NOVEL_STUDIO_AUDIT_SCRIPTS`
 - `NOVEL_STUDIO_OUTPUT_ROOT`

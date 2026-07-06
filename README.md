@@ -194,7 +194,7 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 - **可观测 / 可诊断** —— 全量工具调用日志、LLM 调用级 trace（对齐 OTel gen_ai.* 语义约定）、`--diag` 规则化诊断与脱敏导出、`eval` 评测 harness 与 prompt A/B
 - **Prompt 运行时覆盖** —— `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链，指纹落 manifest，改 prompt 实验不必重编译
 - **写法资产** —— `--writing-assets` 查看 / 启停 / 组合 / 绑定 / 试写本书写法特征池，`seed-defaults` 注入人工感与去 AI 味基线
-- **进度看板** —— `service start` 起浏览器看板，展示创作进度与全部产物资料
+- **进度看板** —— `service start` 起浏览器实时看板：统一读取 `data/runs/` 下全部书目，动态展示各书阶段、章节进度、评审与门禁状态、用量成本和运行日志
 - **功能 skill 化** —— 每个功能一份 SKILL.md，外部 agent（Claude Code / Codex / OpenCode / OpenClaw）读后直接拼命令行调用，`skills export` 一键部署
 - **多 LLM 支持** —— 11 类 provider + 任意自定义代理，角色级模型覆盖 + 请求级 failover
 - **发行与更新** —— 全平台 Release 二进制、一键安装脚本、`update` 原地自更新、Docker 镜像

@@ -10,7 +10,7 @@
 | `internal/` | Go 运行时、代理、规则、存储、诊断和工具实现。 |
 | `assets/` | 编译进二进制的 prompts、references 和样式资源。 |
 | `skills/` | 给外部 agent 读取和 CLI 导出的唯一 skill 源目录；包含原生 CLI skill、story 工具箱和旧工作流兼容 skill。 |
-| `services/short-story-dashboard/` | 浏览器进度看板服务；`/novel.html` 展示长篇 `output/novel` 进度和全部产物资料，`/index.html` 保留短篇项目服务。 |
+| `services/dashboard/` | 浏览器进度看板：统一读取 `data/runs/` 下全部书目工程，实时展示各书进度、章节审核、用量与运行日志（只读）。 |
 | `quality/audit/` | 本地 AIGC、AI 味、重复、内容逻辑和错别字审核聚合入口。 |
 | `data/generated-output/` | 历史短篇产出、服务项目、工作流状态、审核报告和图片方案。 |
 | `data/reference-library/` | 历史参考库、题材样本、拆书材料和写作技巧源材料。 |
