@@ -150,6 +150,55 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 
 **创作与发布形态** —— 长篇连载与短篇双模式：≤3 万字走短篇压缩粒度（1 卷 1 弧、全文终审），长篇走分层滚动规划（上下文治理支撑 500+ 章）。针对国内网文平台内置六档**节奏契约预设**（起点玄幻 / 起点都市 / 晋江 / 豆瓣 / 出版 / 短篇：章末钩子要求、大钩子间隔、单章字数区间逐档不同），配套番茄 / 起点 / 知乎盐言的平台审稿 rubric 与豆瓣阅读原创长篇专项入口；产物为带完整审核证据链的章节 Markdown 工程，可直接用于各平台投稿与申诉举证。
 
+## 功能全景
+
+**创作引擎**
+
+- **多智能体协作** —— Coordinator 在一次长循环中调度 Architect / Writer / Editor 三个子代理，自主决策创作流程
+- **LLM 驱动长循环** —— 一次 Prompt 写完整本书，Host 不介入调度；越简单越稳定，拒绝复杂编排
+- **卷弧双层滚动规划** —— 初始只规划前 2 卷弧骨架 + 第 1 弧详细章节，后续弧 / 卷在写作推进到时再由 Architect 展开，远期规划不空洞
+- **相关章节智能推荐** —— 每章写作时从伏笔、角色出场、状态变化、关系四个维度自动推荐相关历史章节，配合下一章预告，支撑 500+ 章连续性
+- **自适应上下文策略** —— 根据总章节数自动切换全量 / 滑窗 / 分层摘要，四级压缩管线支撑 500+ 章长篇
+- **Lost-in-the-Middle 治理** —— novel_context 注入按"关键信息在头尾、参考资料居中"有序序列化，附阅读指引，对抗长上下文 U 形注意力衰退
+- **工具参数容错解析** —— LLM 工具参数经代理 / 弱模型出现围栏包裹、尾逗号、字符串化 JSON 时自动修复（纯 Go、零依赖），修复失败返回结构化错误交 LLM 自主重试
+
+**世界与角色建模**
+
+- **世界模拟（离屏推演）** —— 零章推演 + 弧边界世界 tick + 信息地平线，详见开篇「[动态推演](#动态推演镜头外的世界不等主角)」
+- **世界建模纵深** —— 势力矛盾网（立场 / 内部张力 / 冲突类型与烈度）、显规则 / 潜规则 / 隐秘规则三层可见性、物理一致性公理、宇宙观公理、道德天花板、仪式日历、NPC 生态、文化脚注、信息差图等可选工件，写前注入预防设定崩塌
+- **角色动态档案** —— 角色不是静态人设标签，而是包含知识账本、决策框架、关系契约、情绪评价、长期弧线的变化决策系统
+- **定量心理画像** —— 角色可选配大五人格（OCEAN）、依恋类型、Schwartz 价值观、道德基础（MFT）、认知偏差、能力偏科矩阵和显性 / 隐性 / 突变三维 DNA 分组；画像注入写作上下文并附行为化指引，commit 时与 Writer 自报表现做确定性一致性提醒
+- **本书世界资产** —— `book_world` 保存地图、地点、路线和势力图谱，章节上下文按本章相关性裁剪注入
+
+**质量与审核**
+
+- **八维质量评审** —— 设定一致性、角色行为、节奏、叙事连贯、伏笔、钩子、审美品质、AI 腔检测；审美维度必须引用原文举证，AI 腔检测给出比喻密度、对话占比、格言命中、章末钩子等量化结论
+- **机械门禁 + 用户规则** —— 内置去 AI 味基线（套句 / 疲劳词黑名单 + 语义判据），用户用大白话写偏好即自动归一化为本书规则快照，commit 时机械自检
+- **叙事量化 lint** —— 每章可选自报场景动力四参数（冲突引擎 / 压力 / 信息释放 / 熵变）与 POV，配合六档体裁节奏契约做跨章确定性趋势检测：连续低压、信息过载、缺喘息、钩子超期、POV 越界轮换全部产出 warning 级事实透传 Editor
+- **异族裁判（reviewer 角色）** —— LLM judge 对同族输出有 75-84% 自我偏好：可配独立 reviewer 角色用于三采样 pairwise 终选与 AI 味盲测，推荐与 writer 用不同模型家族
+- **AI 味防线（写前-写中-写后闭环）** —— slop 词表语料化（内置 embed + 项目级覆盖 + `lexicon_version` 入门禁报告，以人类拆文语料为基线再生成）；写前规避清单注入、返工时注入命中明细；not-x-but-y 等句式按语义变体族合并计数防换皮；书级同质度统计；外部检测器（朱雀）人工抽检登记与本地分相关性校准
+- **审核闭环强化** —— 审核历史零丢失归档，复审自动注入上一轮 issues 做回归验证（防"修了 A 换挑 B"），第 3 轮循环刹车；锚定 rubric（四档描述符 + 证据先于评分）修复分数聚簇
+
+**记忆与检索**
+
+- **本地 RAG + Qdrant 召回** —— 构造与使用详见「[RAG](#rag构造与使用)」一节；foundation、章节、评审、返工持续增量沉淀
+- **交付沉淀** —— accept 后 `deliver` 阶段刷新推进台账、事实 chunk 入库、落交付快照与 delivery_log
+- **仿写画像** —— `--simulate` 分析 `simulate/` 目录参考语料合成画像，注入四个 Agent 借鉴结构 / 节奏 / 钩子；`--import-sim` 按语料指纹增量合并
+
+**运行时与运维**
+
+- **Step 级断点恢复** —— 每个工具执行成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename 原子操作
+- **实时干预（Steer）** —— `--steer "<指令>"` 排队干预，下次启动注入 Coordinator，由其评估影响范围决定改设定 / 重写 / 后续调整
+- **成本与预算** —— token / 费用按角色、按模型累计，OpenRouter 价格自动拉取，`budget.book_usd` 越线告警 / 熔断
+- **无人值守告警** —— 完成 / 空转 / 预算事件推送 macOS / Linux 桌面通知，或经自定义命令推手机（Bark / ntfy）
+- **可观测 / 可诊断** —— 全量工具调用日志、LLM 调用级 trace（对齐 OTel gen_ai.* 语义约定）、`--diag` 规则化诊断与脱敏导出、`eval` 评测 harness 与 prompt A/B
+- **Prompt 运行时覆盖** —— `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链，指纹落 manifest，改 prompt 实验不必重编译
+- **写法资产** —— `--writing-assets` 查看 / 启停 / 组合 / 绑定 / 试写本书写法特征池，`seed-defaults` 注入人工感与去 AI 味基线
+- **进度看板** —— `service start` 起浏览器看板，展示创作进度与全部产物资料
+- **功能 skill 化** —— 每个功能一份 SKILL.md，外部 agent（Claude Code / Codex / OpenCode / OpenClaw）读后直接拼命令行调用，`skills export` 一键部署
+- **多 LLM 支持** —— 11 类 provider + 任意自定义代理，角色级模型覆盖 + 请求级 failover
+- **发行与更新** —— 全平台 Release 二进制、一键安装脚本、`update` 原地自更新、Docker 镜像
+
 ## 快速开始
 
 ```bash
@@ -319,6 +368,12 @@ meta/              # progress / pipeline / checkpoints / usage / delivery_log
 - **[agentcore](https://github.com/voocel/agentcore)** —— 极简 Agent 内核（tool-calling + streaming + StopGuard/ToolGate）
 - **[litellm](https://github.com/voocel/litellm)** —— 统一 LLM 接口适配（经 `third_party/litellm` 仓内 fork 引入，修复空参 tool_use 回放丢 input 字段的问题）
 - **Qdrant + llama.cpp** —— 本地向量检索与 embedding 推理，全链路可离线
+
+## 联系方式
+
+问题反馈优先走 [Issues](https://github.com/Xiaoyangy/novel-studio/issues)；交流合作可加微信：
+
+<img src="docs/assets/wechat-qr.jpg" alt="微信二维码" width="220">
 
 ## License
 
