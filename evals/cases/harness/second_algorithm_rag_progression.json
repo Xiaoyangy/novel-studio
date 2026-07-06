@@ -1,0 +1,73 @@
+{
+  "id": "second_algorithm_rag_progression",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查她的第二算法项目的 pipeline 产物、RAG/Qdrant 向量沉淀与章节推进台账是否完整，防止鬼城或参考库串入。",
+  "prompt": "inspect existing second algorithm pipeline output",
+  "artifact_dir": "data/runs/她的第二算法/output/novel",
+  "expect": {
+    "phase": "writing",
+    "min_completed_chapters": 10,
+    "required_checkpoints": ["chapter:1:commit", "chapter:10:commit", "chapter:10:review"],
+    "no_pending": ["pending_commit", "pending_steer"],
+    "required_files": [
+      "meta/progress.json",
+      "meta/checkpoints.jsonl",
+      "meta/chapter_progress.json",
+      "meta/chapter_progress.md",
+      "meta/character_continuity.json",
+      "meta/character_continuity.md",
+      "meta/project_progress.json",
+      "meta/project_progress.md",
+      "meta/evolution_report.json",
+      "meta/evolution_report.md",
+      "meta/resource_ledger.json",
+      "meta/resource_ledger.md",
+      "meta/state_changes.json",
+      "meta/writing_assets.json",
+      "meta/writing_assets.md",
+      "meta/rag/index_state.json",
+      "meta/rag/vector_store.json",
+      "timeline.json",
+      "relationship_state.json",
+      "foreshadow_ledger.json",
+      "world_rules.json",
+      "layered_outline.json",
+      "summaries/01.json",
+      "reviews/10.json",
+      "chapters/10.md"
+    ],
+    "min_rag_chunks": 700,
+    "required_rag_facets": ["character", "craft", "evidence", "plot", "project", "world"],
+    "required_rag_source_kinds": ["chapter_summary_facts", "note"],
+    "required_rag_sources": [
+      "data/runs/她的第二算法/output/novel/meta/chapter_progress.md",
+      "data/runs/她的第二算法/output/novel/meta/character_continuity.md",
+      "data/runs/她的第二算法/output/novel/meta/project_progress.md",
+      "data/runs/她的第二算法/output/novel/meta/resource_ledger.md",
+      "data/runs/她的第二算法/output/novel/meta/writing_assets.md",
+      "data/runs/她的第二算法/output/novel/layered_outline.md",
+      "data/runs/她的第二算法/output/novel/timeline.md",
+      "data/runs/她的第二算法/output/novel/world_rules.md",
+      "summaries/01.json"
+    ],
+    "forbidden_rag_sources": [
+      "data/runs/鬼城",
+      "source_project",
+      "拆文库",
+      "deconstruction-library",
+      "对标",
+      "reference-library",
+      "reference_library"
+    ],
+    "vector_store": "qdrant",
+    "embedding_provider": "local",
+    "embedding_model": "local-hash-384",
+    "min_vector_points": 700,
+    "require_qdrant": true,
+    "min_qdrant_points": 700
+  },
+  "gate": {
+    "max_severity": "warning"
+  }
+}

@@ -1,0 +1,155 @@
+{
+ "_note": "deconstruction-library人类基线章节清单（Task 060/082）：只记路径+hash，不复制原文；离线统计专用，禁入 RAG",
+ "samples": [
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/001_第1章.txt",
+   "sha256": "9f425f26bac82338",
+   "bytes": 11292
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/002_第2章.txt",
+   "sha256": "8100c3bc2c9f054c",
+   "bytes": 10018
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/003_第3章.txt",
+   "sha256": "b4ab3276d75554eb",
+   "bytes": 10931
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/004_第4章.txt",
+   "sha256": "0ecec6e6b1a9386e",
+   "bytes": 11310
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/005_第5章.txt",
+   "sha256": "dc5ef07a1928a5f3",
+   "bytes": 9581
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/006_第6章.txt",
+   "sha256": "6d85d61b56a3f138",
+   "bytes": 14187
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/007_第7章.txt",
+   "sha256": "0ad662af76809b35",
+   "bytes": 11761
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/008_第8章.txt",
+   "sha256": "c24578674353d24b",
+   "bytes": 15235
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/009_第9章.txt",
+   "sha256": "4b9884213e67062e",
+   "bytes": 10333
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/010_第10章.txt",
+   "sha256": "6601347ff3903b61",
+   "bytes": 9449
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/011_第11章.txt",
+   "sha256": "9f375dd34983b243",
+   "bytes": 10192
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/012_第12章.txt",
+   "sha256": "658030fbea35e034",
+   "bytes": 10866
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/013_第13章.txt",
+   "sha256": "be3760c8da4b9431",
+   "bytes": 9939
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/014_第14章.txt",
+   "sha256": "3c37c5f821068890",
+   "bytes": 10548
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/015_第15章.txt",
+   "sha256": "7bc96d1dc811a083",
+   "bytes": 9250
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/016_第16章.txt",
+   "sha256": "09688217c7d5a422",
+   "bytes": 9683
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/017_第17章.txt",
+   "sha256": "2cd795e8c30b8a3a",
+   "bytes": 7636
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/018_第18章.txt",
+   "sha256": "c2e19c3ee2f3f936",
+   "bytes": 7978
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/95美国贵族高中模拟/019_第19章.txt",
+   "sha256": "eb5c2f282806b6e7",
+   "bytes": 8303
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/001_第1章.txt",
+   "sha256": "9d7e20e4c7de1dd5",
+   "bytes": 9321
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/002_第2章.txt",
+   "sha256": "930366e9d1448107",
+   "bytes": 9950
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/003_第3章.txt",
+   "sha256": "d36a7443bf978e2a",
+   "bytes": 9395
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/004_第4章.txt",
+   "sha256": "f9ad4b7091657488",
+   "bytes": 9711
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/005_第5章.txt",
+   "sha256": "0489079c7c6dcab9",
+   "bytes": 10395
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/006_第6章.txt",
+   "sha256": "498044dce0adbb55",
+   "bytes": 6385
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/007_第7章.txt",
+   "sha256": "6e904e3f0cd1eec1",
+   "bytes": 6943
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/008_第8章.txt",
+   "sha256": "e3ec9cafc5f99831",
+   "bytes": 9722
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/009_第9章.txt",
+   "sha256": "f92bd95ca3fdc35a",
+   "bytes": 9377
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/010_第10章.txt",
+   "sha256": "795a615c6c5e2c93",
+   "bytes": 10322
+  },
+  {
+   "path": "deconstruction-library/哥伦布计划_西方短篇参考_20260701/参考/世界上最后一只吸血鬼/011_第11章.txt",
+   "sha256": "85e4693fcdb314f6",
+   "bytes": 3262
+  }
+ ]
+}

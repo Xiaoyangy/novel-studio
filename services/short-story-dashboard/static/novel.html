@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>novel-studio 小说项目进度看板</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="novel-dashboard">
+  <header class="novel-shell-head">
+    <div class="brand-block">
+      <span class="brand-mark">NS</span>
+      <div>
+        <p class="eyebrow">Novel Studio Control Room</p>
+        <h1>小说项目进度看板</h1>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <a class="button-link" href="/index.html">短篇看板</a>
+      <button id="refreshBtn" type="button">刷新</button>
+    </div>
+  </header>
+
+  <main class="novel-shell">
+    <aside class="novel-sidebar">
+      <div class="sidebar-title">
+        <div>
+          <p class="eyebrow">Library</p>
+          <h2>小说项目</h2>
+        </div>
+        <span id="novelCount">0</span>
+      </div>
+      <div id="novelList" class="project-list"></div>
+    </aside>
+
+    <section class="novel-main">
+      <div id="emptyState" class="empty" hidden>
+        暂无小说项目。运行创作后，或把产物放到 output/novel，即可在这里查看。
+      </div>
+
+      <div id="novelDetail" hidden>
+        <section class="story-hero">
+          <div class="story-title-block">
+            <p class="eyebrow">Current Project</p>
+            <h2 id="detailTitle"></h2>
+            <p id="detailMeta"></p>
+          </div>
+          <div class="story-progress-card">
+            <span id="novelProgressText">0%</span>
+            <small>写作进度</small>
+            <div class="progress-track">
+              <div id="novelProgress" class="progress-fill"></div>
+            </div>
+          </div>
+        </section>
+
+        <div id="metricsGrid" class="metrics-grid"></div>
+
+        <nav class="section-tabs" aria-label="小说资料视图">
+          <a href="#overviewSection">整体资料</a>
+          <a href="#chapterSection">章节沉淀</a>
+          <a href="#materialSection">全部产物</a>
+          <a href="#fileSection">文件预览</a>
+        </nav>
+
+        <section id="overviewSection" class="studio-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Overview</p>
+              <h3>小说整体资料</h3>
+            </div>
+            <span id="overviewSummary">等待项目</span>
+          </div>
+
+          <div class="insight-grid">
+            <article class="insight-card span-2">
+              <div class="section-kicker">大纲进度</div>
+              <div id="outlineProgressList" class="progress-list"></div>
+            </article>
+            <article class="insight-card">
+              <div class="section-kicker">规划进度</div>
+              <div id="planningProgress" class="stack-list"></div>
+            </article>
+            <article class="insight-card">
+              <div class="section-kicker">世界线</div>
+              <div id="worldLine" class="stack-list"></div>
+            </article>
+            <article class="insight-card span-2">
+              <div class="section-kicker">人物发展线</div>
+              <div id="characterArcs" class="character-list"></div>
+            </article>
+            <article class="insight-card span-2">
+              <div class="section-kicker">关键资料文件</div>
+              <div id="overviewFiles" class="quick-file-grid"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="chapterSection" class="studio-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Chapter Production</p>
+              <h3>章节状态与单章沉淀</h3>
+            </div>
+            <span id="chapterSummary">等待项目</span>
+          </div>
+          <div id="chapterGrid" class="novel-chapter-grid"></div>
+        </section>
+
+        <section id="chapterDetailSection" class="studio-section" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Selected Chapter</p>
+              <h3 id="chapterDetailTitle">单章生产沉淀</h3>
+            </div>
+            <span id="chapterDetailMeta">未选择章节</span>
+          </div>
+          <div id="chapterDetailBody" class="chapter-detail-body"></div>
+          <div class="section-head compact-title">
+            <h3>本章产物链路</h3>
+            <span id="chapterArtifactSummary">0 个文件</span>
+          </div>
+          <div id="chapterArtifactList" class="artifact-list"></div>
+        </section>
+
+        <section id="materialSection" class="studio-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Output Assets</p>
+              <h3>书籍全部产出资料</h3>
+            </div>
+            <span id="materialSummary">等待项目</span>
+          </div>
+          <div class="material-toolbar">
+            <input id="materialFilter" type="search" placeholder="搜索章节、草稿、审核、meta、导出文件">
+            <select id="groupFilter"></select>
+          </div>
+          <div id="materialTable" class="material-table"></div>
+        </section>
+
+        <section id="fileSection" class="studio-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">File Preview</p>
+              <h3 id="viewerTitle">文件内容</h3>
+            </div>
+            <span id="viewerMeta">未选择文件</span>
+          </div>
+          <pre id="fileViewer" class="file-viewer">点击上方产物文件查看内容。</pre>
+        </section>
+      </div>
+    </section>
+
+    <aside class="novel-context">
+      <section class="relationship-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Relationship Graph</p>
+            <h3>人物关系网络</h3>
+          </div>
+          <button id="graphResetBtn" type="button">重排</button>
+        </div>
+        <div class="relationship-toolbar">
+          <select id="relationshipFilter" aria-label="人物筛选">
+            <option value="all">全部人物</option>
+          </select>
+          <span id="relationshipStats">等待项目</span>
+        </div>
+        <div id="relationshipGraph" class="relationship-graph" role="img" aria-label="动态人物关系图"></div>
+        <div id="relationshipInspector" class="relationship-inspector">
+          选择人物或关系线，查看对应关系文案。
+        </div>
+        <div id="relationshipList" class="relationship-list"></div>
+      </section>
+      <section class="relationship-panel world-rule-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">World Rules</p>
+            <h3>世界规则</h3>
+          </div>
+        </div>
+        <div id="worldRuleList" class="world-rule-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="lastUpdated" class="floating-status">等待刷新</div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/novel_app.js"></script>
+</body>
+</html>

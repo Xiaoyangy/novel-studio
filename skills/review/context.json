@@ -1,0 +1,37 @@
+{
+  "skill": "review",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [],
+  "conditional_files": [
+    {
+      "when": "需要审核脚本或 AI 味信号参考时读取唯一源目录。",
+      "paths": [
+        "../../quality/audit/README.md",
+        "../../quality/audit/references/aigc-detection-current-notes.md",
+        "../../quality/audit/references/signals-zh.md",
+        "../../quality/audit/references/signals-en.md",
+        "../../quality/audit/scripts/aigc_value.py",
+        "../../quality/audit/scripts/text_signals.py",
+        "../../quality/audit/scripts/paragraph_dup.py",
+        "../../quality/audit/scripts/content_lint.py",
+        "../../quality/audit/scripts/typo_scan.py"
+      ]
+    }
+  ],
+  "state_files": [
+    ".skill-context/review.md"
+  ],
+  "output_contract": [
+    "审核报告必须包含概率性结论、证据、脚本结果和可靠性说明。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/review.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "second_algorithm_sessions",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查她的第二算法项目的会话与推进台账可观测性：Coordinator 会话日志、用量累计、章级/项目级台账必须齐全。",
+  "prompt": "inspect existing second algorithm session observability artifacts",
+  "artifact_dir": "data/runs/她的第二算法/output/novel",
+  "expect": {
+    "required_files": [
+      "meta/sessions/coordinator.jsonl",
+      "meta/usage.json",
+      "meta/chapter_progress.json",
+      "meta/evolution_report.json",
+      "meta/checkpoints.jsonl"
+    ]
+  },
+  "gate": { "max_severity": "warning" }
+}

@@ -1,0 +1,1296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>novel-studio · 长篇小说创作引擎 · 端到端架构</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1014;
+    --bg-soft: #14181f;
+    --surface: #1a1f27;
+    --surface-2: #20262f;
+    --border: #2a313c;
+    --border-soft: #232932;
+    --text: #e8ebf0;
+    --text-muted: #9aa3b2;
+    --text-dim: #6b7383;
+    --primary: #10b981;
+    --primary-soft: rgba(16,185,129,0.12);
+    --primary-border: rgba(16,185,129,0.32);
+    --accent: #f59e0b;
+    --accent-soft: rgba(245,158,11,0.12);
+    --accent-border: rgba(245,158,11,0.32);
+    --rose: #f43f5e;
+    --rose-soft: rgba(244,63,94,0.10);
+    --indigo: #818cf8;
+    --indigo-soft: rgba(129,140,248,0.12);
+    --indigo-border: rgba(129,140,248,0.32);
+    --sky: #38bdf8;
+    --sky-soft: rgba(56,189,248,0.12);
+    --slate: #94a3b8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Outfit', -apple-system, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  a { color: inherit; text-decoration: none; }
+
+  /* Layout */
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 32px; }
+  @media (max-width: 768px) { .wrap { padding: 0 20px; } }
+
+  /* Top nav */
+  .topnav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(13,16,20,0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .topnav-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 56px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+  .brand-mark {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--primary), #059669);
+    display: grid; place-items: center; color: #052e1f;
+  }
+  .brand-mark svg { width: 14px; height: 14px; }
+  .topnav-links { display: flex; gap: 4px; overflow-x: auto; }
+  .topnav-links a {
+    font-size: 12.5px; color: var(--text-muted); padding: 6px 10px;
+    border-radius: 6px; white-space: nowrap;
+    transition: color 0.15s, background 0.15s;
+  }
+  .topnav-links a:hover { color: var(--text); background: var(--surface); }
+  @media (max-width: 768px) { .topnav-links { display: none; } }
+
+  /* Hero */
+  .hero {
+    padding: 80px 0 56px;
+    border-bottom: 1px solid var(--border-soft);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 20% 30%, var(--primary-soft), transparent 40%),
+      radial-gradient(circle at 80% 70%, var(--indigo-soft), transparent 40%);
+    pointer-events: none;
+  }
+  .hero-inner { position: relative; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11.5px; font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+  .hero h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(34px, 5vw, 52px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    font-weight: 400;
+    max-width: 18ch;
+    margin-bottom: 20px;
+  }
+  .hero h1 em { font-style: italic; color: var(--primary); }
+  .hero-sub {
+    font-size: 16px; color: var(--text-muted); max-width: 60ch;
+    margin-bottom: 36px;
+  }
+  .hero-meta {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .hero-meta .cell { background: var(--bg-soft); padding: 18px 20px; }
+  .hero-meta .k { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .hero-meta .v { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 500; color: var(--text); }
+  .hero-meta .v .small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+  @media (max-width: 768px) { .hero-meta { grid-template-columns: repeat(2, 1fr); } }
+
+  /* Sections */
+  section { padding: 72px 0; border-bottom: 1px solid var(--border-soft); }
+  section:last-child { border-bottom: none; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 32px; }
+  .sec-num {
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    color: var(--text-dim); letter-spacing: 0.04em;
+  }
+  .sec-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 30px; line-height: 1.15; font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+  .sec-sub { font-size: 14px; color: var(--text-muted); margin-top: 6px; margin-bottom: 32px; max-width: 72ch; }
+
+  /* Card */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--primary-border); box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
+  .card-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .card-desc { color: var(--text-muted); font-size: 13px; }
+
+  /* Grid helpers */
+  .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .g4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .g2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .g5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  @media (max-width: 900px) { .g3, .g4, .g5 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .g3, .g4, .g2, .g5 { grid-template-columns: 1fr; } }
+
+  /* Tag chip */
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .tag.primary { background: var(--primary-soft); border-color: var(--primary-border); color: var(--primary); }
+  .tag.accent { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); }
+  .tag.indigo { background: var(--indigo-soft); border-color: var(--indigo-border); color: var(--indigo); }
+  .tag.rose { background: var(--rose-soft); border-color: rgba(244,63,94,0.32); color: var(--rose); }
+
+  /* Code block */
+  pre, code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+  }
+  pre {
+    background: #0a0d12;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  pre .c-key { color: #a78bfa; }
+  pre .c-str { color: #fbbf24; }
+  pre .c-cmt { color: var(--text-dim); }
+  pre .c-fn { color: var(--primary); }
+  pre .c-num { color: #fb7185; }
+
+  /* Mermaid container */
+  .mermaid-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 24px;
+    overflow-x: auto;
+  }
+  .mermaid { background: transparent !important; }
+
+  /* Foundation table */
+  table.fnd {
+    width: 100%; border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  table.fnd th, table.fnd td {
+    text-align: left; padding: 14px 18px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 13px;
+  }
+  table.fnd th {
+    background: var(--bg-soft);
+    font-weight: 500;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  table.fnd tr:last-child td { border-bottom: none; }
+  table.fnd td .mono { color: var(--primary); font-size: 12.5px; }
+  table.fnd td .desc { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
+
+  /* Pipeline stage nodes */
+  .pipeline-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+    position: relative;
+  }
+  .pipeline-track::before {
+    content: ""; position: absolute;
+    top: 22px; left: 6%; right: 6%; height: 2px;
+    background: linear-gradient(90deg, var(--primary), var(--indigo), var(--accent), var(--rose), var(--primary));
+    opacity: 0.25; z-index: 0;
+  }
+  .p-node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    position: relative; z-index: 1;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .p-node:hover { transform: translateY(-2px); border-color: var(--primary-border); }
+  .p-num {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--primary);
+    color: var(--primary);
+    display: grid; place-items: center;
+    font-family: 'JetBrains Mono', monospace; font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .p-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .p-en { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+  .p-desc { font-size: 12.5px; color: var(--text-muted); }
+  @media (max-width: 900px) { .pipeline-track { grid-template-columns: 1fr; } .pipeline-track::before { display: none; } }
+
+  /* Agent card */
+  .agent {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .agent-head { display: flex; align-items: center; gap: 10px; }
+  .agent-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: grid; place-items: center;
+    background: var(--primary-soft);
+    color: var(--primary);
+  }
+  .agent-icon.indigo { background: var(--indigo-soft); color: var(--indigo); }
+  .agent-icon.accent { background: var(--accent-soft); color: var(--accent); }
+  .agent-icon.rose { background: var(--rose-soft); color: var(--rose); }
+  .agent-icon.sky { background: var(--sky-soft); color: var(--sky); }
+  .agent-role { font-weight: 600; font-size: 14px; }
+  .agent-task { font-size: 12.5px; color: var(--text-muted); }
+  .agent-stats { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* RAG diagram */
+  .rag-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+  }
+  .rag-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 14px; align-items: stretch;
+  }
+  @media (max-width: 900px) { .rag-row { grid-template-columns: 1fr; } .rag-row .arrow { display: none; } }
+  .rag-box {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .rag-box h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .rag-box .sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  .rag-box ul { list-style: none; padding: 0; }
+  .rag-box li { font-size: 12px; color: var(--text-muted); padding: 3px 0; padding-left: 14px; position: relative; }
+  .rag-box li::before { content: "·"; color: var(--primary); position: absolute; left: 4px; top: 0; font-weight: 700; }
+  .arrow {
+    align-self: center;
+    color: var(--text-dim);
+  }
+
+  /* KV mini */
+  .kv-mini { display: grid; grid-template-columns: 110px 1fr; row-gap: 6px; column-gap: 12px; font-size: 12.5px; }
+  .kv-mini dt { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
+  .kv-mini dd { color: var(--text); }
+
+  /* Write loop */
+  .write-loop {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .loop-step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    position: relative;
+  }
+  .loop-step .step-num {
+    position: absolute; top: 14px; right: 16px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-dim);
+  }
+  .loop-step h4 { font-size: 13.5px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+  .loop-step .tool { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--primary); margin-bottom: 8px; }
+  .loop-step p { font-size: 12.5px; color: var(--text-muted); }
+  @media (max-width: 900px) { .write-loop { grid-template-columns: 1fr 1fr; } }
+
+  /* Footer */
+  footer { padding: 48px 0 64px; color: var(--text-dim); font-size: 12.5px; text-align: center; border-top: 1px solid var(--border-soft); }
+  footer .meta { font-family: 'JetBrains Mono', monospace; }
+
+  /* Misc helpers */
+  .cluster {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+  }
+  .cluster-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .cluster-title { font-weight: 600; font-size: 14px; }
+
+  .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  .example-card {
+    background: linear-gradient(135deg, var(--surface) 0%, var(--bg-soft) 100%);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 28px;
+  }
+  @media (max-width: 768px) { .example-card { grid-template-columns: 1fr; } }
+  .example-card h3 { font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 26px; margin-bottom: 8px; }
+  .example-card .lead { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+  .example-card .stat-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 16px; }
+  .example-card .stat-row .k { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .example-card .stat-row .v { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text); }
+
+  /* Helper text */
+  .hint { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+
+</style>
+</head>
+<body>
+
+<!-- ============ TOP NAV ============ -->
+<nav class="topnav">
+  <div class="wrap topnav-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+      </div>
+      novel-studio · 架构总览
+    </div>
+    <div class="topnav-links">
+      <a href="#sec-entry">入口</a>
+      <a href="#sec-pipeline">流水线</a>
+      <a href="#sec-foundation">Foundation</a>
+      <a href="#sec-write">写作循环</a>
+      <a href="#sec-agents">Agents</a>
+      <a href="#sec-rag">RAG</a>
+      <a href="#sec-zero">零章</a>
+      <a href="#sec-side">辅助</a>
+      <a href="#sec-export">导出</a>
+      <a href="#sec-example">示例</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div class="eyebrow"><span class="dot"></span>END-TO-END PIPELINE · v2026.07</div>
+    <h1>从一句话指令<br/>到 <em>100 章完整长篇</em> 的全链路</h1>
+    <p class="hero-sub">
+      novel-studio 是一个 Go + LLM 长篇小说创作引擎。它把「前提 → 大纲 → 人物 → 世界规则 → 第一章 → 第 N 章 → 全文导出」拆成可断点续跑的流水线，让多个 AI Agent 分工协作，并通过本地 RAG（千问 Embedding + Qdrant）保持长程一致性。
+    </p>
+    <div class="hero-meta">
+      <div class="cell">
+        <div class="k">Agent 角色</div>
+        <div class="v">5 <span class="small">coordinator / architect / writer / editor / reviewer</span></div>
+      </div>
+      <div class="cell">
+        <div class="k">save_foundation type</div>
+        <div class="v">9 <span class="small">含 expand_arc / append_volume</span></div>
+      </div>
+      <div class="cell">
+        <div class="k">零章产物</div>
+        <div class="v">11 <span class="small">class</span></div>
+      </div>
+      <div class="cell">
+        <div class="k">当前示例</div>
+        <div class="v">鬼城 <span class="small">100 章 · simulation</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ SECTION 1: ENTRY POINTS ============ -->
+<section id="sec-entry">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">01 / ENTRY</span>
+      <h2 class="sec-title">三种入口</h2>
+    </div>
+    <p class="sec-sub">novel-studio 提供了三种主入口，覆盖「从零起手」「复用旧稿」「逐步澄清」三种场景。</p>
+
+    <div class="g3">
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M12 5v14M5 12h14"/></svg>
+          Pipeline 流水线
+          <span class="tag primary">主路径</span>
+        </div>
+        <div class="card-desc">
+          最常用。从 prompt.md / inline prompt 启动，自动跑完整条 write→review→rewrite→export 链路。状态写到 <code>meta/pipeline.json</code>，可断点续跑。
+        </div>
+        <pre style="margin-top:14px"><span class="c-cmt"># 写法 A：inline prompt</span>
+./novel-studio <span class="c-key">--pipeline</span> <span class="c-key">--prompt</span> <span class="c-str">"写一部诡异末日..."</span>
+
+<span class="c-cmt"># 写法 B：从 prompt 文件</span>
+./novel-studio <span class="c-key">--pipeline</span> <span class="c-key">--prompt-file</span> prompt.md
+
+<span class="c-cmt"># 写完第 10 章后停</span>
+./novel-studio <span class="c-key">--pipeline</span> <span class="c-key">--prompt-file</span> prompt.md \
+  <span class="c-key">--stages</span> write,review,rewrite <span class="c-key">--write-to</span> <span class="c-num">10</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          Import 导入
+          <span class="tag indigo">复用旧稿</span>
+        </div>
+        <div class="card-desc">
+          已有 Markdown 小说，想用工程续写。两个子模式：<code>--import</code> 走 LLM 反推 foundation；<code>--import-fast</code> 走本地确定性导入。
+        </div>
+        <pre style="margin-top:14px"><span class="c-cmt"># LLM 反推 + 评审 + diag</span>
+./novel-studio <span class="c-key">--import</span> 旧稿.md
+
+<span class="c-cmt"># 本地确定性导入</span>
+./novel-studio <span class="c-key">--import-fast</span> 旧稿.md
+
+<span class="c-cmt"># 不评审 / 不写 diag</span>
+./novel-studio <span class="c-key">--import-fast</span> 旧稿.md \
+  <span class="c-key">--no-review</span> <span class="c-key">--no-diag</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Cocreate 多轮澄清
+          <span class="tag accent">可选</span>
+        </div>
+        <div class="card-desc">
+          不直接写正文，先多轮对话把创作意图聊清楚，定稿 prompt 后再进入 pipeline。需要 TTY。
+        </div>
+        <pre style="margin-top:14px"><span class="c-cmt"># 多轮澄清需求</span>
+./novel-studio <span class="c-key">--cocreate</span>
+
+<span class="c-cmt"># 等价写法：显式列出 cocreate 阶段</span>
+./novel-studio <span class="c-key">--pipeline</span> <span class="c-key">--stages</span> cocreate,write,...</pre>
+        <div class="hint">通常用 <code>--pipeline</code> 入口，<code>--cocreate</code> 是 TTY 下的快捷方式。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 2: PIPELINE STAGES ============ -->
+<section id="sec-pipeline">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">02 / PIPELINE</span>
+      <h2 class="sec-title">五阶段流水线</h2>
+    </div>
+    <p class="sec-sub">默认阶段 <code>write → review → rewrite → export</code>，可选前置 <code>cocreate</code>。每个阶段写盘到 <code>meta/</code>，可断点续跑；阶段内部还有更细的按章恢复（两层恢复叠加）。</p>
+
+    <div class="pipeline-track">
+      <div class="p-node">
+        <div class="p-num">0</div>
+        <div class="p-name">Cocreate</div>
+        <div class="p-en">cocreate</div>
+        <div class="p-desc">多轮澄清创作意图，定稿 <code>--prompt</code>。</div>
+      </div>
+      <div class="p-node">
+        <div class="p-num">1</div>
+        <div class="p-name">Write</div>
+        <div class="p-en">write</div>
+        <div class="p-desc">plan → draft → check → commit，循环跑完所有章节。</div>
+      </div>
+      <div class="p-node">
+        <div class="p-num">2</div>
+        <div class="p-name">Review</div>
+        <div class="p-en">review</div>
+        <div class="p-desc">Editor / Reviewer 评审每章，输出红旗 / 黄旗。</div>
+      </div>
+      <div class="p-node">
+        <div class="p-num">3</div>
+        <div class="p-name">Rewrite</div>
+        <div class="p-en">rewrite</div>
+        <div class="p-desc">按 review 反馈重写，最多 3 轮红旗闭环。</div>
+      </div>
+      <div class="p-node">
+        <div class="p-num">4</div>
+        <div class="p-name">Export</div>
+        <div class="p-en">export</div>
+        <div class="p-desc">合并已完成章节，输出 <code>.txt</code> / <code>.epub</code>。</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 28px;">
+      <div class="mermaid-wrap">
+        <div class="mermaid">
+flowchart LR
+    A["./novel-studio --pipeline"] --> B{"FoundationMissing?"}
+    B -- yes --> C["dispatch architect"]
+    C --> D["save_foundation × N"]
+    D --> E[Phase=Writing]
+    B -- no --> E
+    E --> F[write 阶段<br/>plan→draft→check→commit]
+    F --> G[review 阶段<br/>Editor/Reviewer 评审]
+    G --> H{红旗?}
+    H -- yes --> I[rewrite 阶段<br/>Writer 重写]
+    I --> H
+    H -- no --> J[export 阶段<br/>合并导出]
+    I --> K{--write-to<br/>到达?}
+    K -- no --> F
+    K -- yes --> L[停止]
+    J --> L
+
+    classDef phase fill:#14181f,stroke:#10b981,color:#e8ebf0
+    classDef gate fill:#1a1f27,stroke:#f59e0b,color:#e8ebf0
+    classDef stop fill:#1a1f27,stroke:#f43f5e,color:#e8ebf0
+
+    class C,F,G,I,J phase
+    class B,H,K gate
+    class L stop
+        </div>
+      </div>
+      <div class="hint" style="text-align:center; margin-top: 12px;">
+        <code>meta/pipeline.json</code> 持久化每个阶段的完成证据；阶段失败不标记完成，下次重跑 <code>--pipeline</code> 自动从这里继续。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 3: FOUNDATION ============ -->
+<section id="sec-foundation">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">03 / FOUNDATION</span>
+      <h2 class="sec-title">Foundation 五件套</h2>
+    </div>
+    <p class="sec-sub">所有产出的根基。由 Architect agent 通过 <code>save_foundation</code> 工具落盘，是写作阶段的硬前置。foundation 缺失时 <code>--zero-init</code> 和 pipeline 都会拒绝继续。</p>
+
+    <div class="g5">
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          Premise
+        </div>
+        <div class="card-desc">故事前提（一段话 / Markdown）</div>
+        <div class="hint mono" style="margin-top:10px">premise.md</div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          Outline
+        </div>
+        <div class="card-desc">单层大纲（章列表）或分层大纲（卷/弧/章骨架）</div>
+        <div class="hint mono" style="margin-top:10px">outline.md · layered_outline.md</div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Characters
+        </div>
+        <div class="card-desc">人物系统（每项可带 big_five / 价值观 / 能力等心理画像）</div>
+        <div class="hint mono" style="margin-top:10px">characters.md</div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          World Rules
+        </div>
+        <div class="card-desc">世界规则（可标 visibility: formal/informal/secret，source: 朝廷/江湖/...）</div>
+        <div class="hint mono" style="margin-top:10px">world_rules.md</div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          Book World
+        </div>
+        <div class="card-desc">本书世界（地图、地点、势力图谱、protagonist_position）</div>
+        <div class="hint mono" style="margin-top:10px">book_world.md</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 36px;">
+      <div class="cluster">
+        <div class="cluster-head">
+          <div class="cluster-title">save_foundation 工具 · 9 种 type</div>
+          <span class="tag">Architect 专用</span>
+        </div>
+        <table class="fnd">
+          <thead>
+            <tr>
+              <th style="width: 200px;">type</th>
+              <th>写入文件</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="mono">premise</span></td>
+              <td><code>premise.md</code> / <code>premise.json</code></td>
+              <td>故事前提（一段 Markdown）。自动从内容里抽书名</td>
+            </tr>
+            <tr>
+              <td><span class="mono">outline</span></td>
+              <td><code>outline.md</code> / <code>outline.json</code></td>
+              <td>单层大纲（章列表）。写作阶段禁用，只能用 expand_arc 增量</td>
+            </tr>
+            <tr>
+              <td><span class="mono">layered_outline</span></td>
+              <td><code>layered_outline.md</code> / <code>.json</code></td>
+              <td>分层大纲（卷 → 弧 → 章节骨架）</td>
+            </tr>
+            <tr>
+              <td><span class="mono">characters</span></td>
+              <td><code>characters.md</code> / <code>.json</code></td>
+              <td>人物。每项可带 big_five 五维 / 依恋类型 / 认知偏差</td>
+            </tr>
+            <tr>
+              <td><span class="mono">world_rules</span></td>
+              <td><code>world_rules.md</code> / <code>.json</code></td>
+              <td>规则。每条带 visibility（formal/informal/secret）和 source</td>
+            </tr>
+            <tr>
+              <td><span class="mono">book_world</span></td>
+              <td><code>book_world.md</code> / <code>.json</code></td>
+              <td>本书世界。faction 可带 stance/internal_tension，relation 可带 conflict_type</td>
+            </tr>
+            <tr>
+              <td><span class="mono">expand_arc</span></td>
+              <td>细化某卷某弧</td>
+              <td>写作阶段增量展开骨架弧，需要 <code>volume</code> + <code>arc</code> 参数</td>
+            </tr>
+            <tr>
+              <td><span class="mono">append_volume</span></td>
+              <td>追加新卷并展开</td>
+              <td>写作阶段追加下一卷（content 传完整 VolumeOutline JSON）</td>
+            </tr>
+            <tr>
+              <td><span class="mono">complete_book</span></td>
+              <td>Phase=Complete</td>
+              <td>宣告全书完结。必须通过终卷判定清单 + 无返工队列</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="hint" style="margin-top:14px;">
+          <code>subagent_guards.go:85</code> 强制要求：architect 本轮必须落盘至少一次 save_foundation，否则不允许结束。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 4: WRITE LOOP ============ -->
+<section id="sec-write">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">04 / WRITE LOOP</span>
+      <h2 class="sec-title">章节写作四步循环</h2>
+    </div>
+    <p class="sec-sub">write 阶段不是一次性产出，而是按章循环跑四步，每章产物落到 <code>chapters/NN.md</code> + 检查点写到 <code>meta/checkpoints.jsonl</code>。</p>
+
+    <div class="write-loop">
+      <div class="loop-step">
+        <span class="step-num">01</span>
+        <h4>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          Plan
+        </h4>
+        <div class="tool">plan_chapter</div>
+        <p>基于当前进度台账、人物续用参考、零章资产，生成下一章的 chapter_plan。</p>
+      </div>
+      <div class="loop-step">
+        <span class="step-num">02</span>
+        <h4>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/></svg>
+          Draft
+        </h4>
+        <div class="tool">draft_chapter</div>
+        <p>调 Writer agent，按 plan 产出正文 draft。RAG 检索相关素材喂进上下文。</p>
+      </div>
+      <div class="loop-step">
+        <span class="step-num">03</span>
+        <h4>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          Check
+        </h4>
+        <div class="tool">check_consistency</div>
+        <p>一致性 lint（methodology_lints / consistency_lints / chapter_guard）。</p>
+      </div>
+      <div class="loop-step">
+        <span class="step-num">04</span>
+        <h4>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M20 6L9 17l-5-5"/></svg>
+          Commit
+        </h4>
+        <div class="tool">commit_chapter</div>
+        <p>落盘 <code>chapters/NN.md</code>、追加检查点、增量沉淀 RAG、推进 progress。</p>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 28px;">
+      <div class="cluster-head">
+        <div class="cluster-title">commit_chapter 副作用链</div>
+        <span class="tag primary">关键路径</span>
+      </div>
+      <div class="g2">
+        <div>
+          <div class="kv-mini" style="margin-bottom: 14px;">
+            <dt>主线</dt><dd>写 chapters/NN.md → 追加 meta/checkpoints.jsonl → 推进 progress.json</dd>
+            <dt>rewrite</dt><dd>先把旧版备份成 chapters/NN.md.pre-rewrite.md</dd>
+            <dt>RAG</dt><dd>增量沉淀本章节入 embedding + Qdrant</dd>
+            <dt>下一章</dt><dd>生成 next_chapter_plan（人物续用 / 伏笔 / 资源账本）</dd>
+          </div>
+        </div>
+        <div>
+          <div class="hint" style="margin-bottom:8px;">⚠️ 工程设计意图与实现的已知差异：</div>
+          <div style="font-size: 12.5px; color: var(--text-muted); line-height: 1.7;">
+            <code>chapter_metrics / chapter_world_deltas / character_stage</code> 三类元数据只在 rewrite 路径写盘，normal commit 路径会漏接——这是工程里的设计意图与 code 行为不一致点（详见 <code>commit_chapter.go</code>）。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 5: AGENTS ============ -->
+<section id="sec-agents">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">05 / AGENTS</span>
+      <h2 class="sec-title">多 Agent 分工</h2>
+    </div>
+    <p class="sec-sub">五个 Agent 角色按职责分离，每个角色独立配置 provider / model / reasoning_effort，并支持角色级 <code>fallbacks</code> 故障转移（主路挂掉自动切兜底，恢复后自动回主）。</p>
+
+    <div class="g5">
+      <div class="agent">
+        <div class="agent-head">
+          <div class="agent-icon indigo">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          </div>
+          <div>
+            <div class="agent-role">coordinator</div>
+            <div class="agent-task">调度 / 路由 / 阶段切换</div>
+          </div>
+        </div>
+        <div class="agent-stats">
+          <span class="tag">effort: medium</span>
+        </div>
+      </div>
+
+      <div class="agent">
+        <div class="agent-head">
+          <div class="agent-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          </div>
+          <div>
+            <div class="agent-role">architect</div>
+            <div class="agent-task">设计 / save_foundation / expand_arc</div>
+          </div>
+        </div>
+        <div class="agent-stats">
+          <span class="tag">effort: high</span>
+          <span class="tag primary">唯一调 save_foundation</span>
+        </div>
+      </div>
+
+      <div class="agent">
+        <div class="agent-head">
+          <div class="agent-icon accent">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+          </div>
+          <div>
+            <div class="agent-role">writer</div>
+            <div class="agent-task">正文 / 重写正文</div>
+          </div>
+        </div>
+        <div class="agent-stats">
+          <span class="tag">effort: high</span>
+          <span class="tag accent">章节主产能</span>
+        </div>
+      </div>
+
+      <div class="agent">
+        <div class="agent-head">
+          <div class="agent-icon sky">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </div>
+          <div>
+            <div class="agent-role">editor</div>
+            <div class="agent-task">单章评审 / 反馈</div>
+          </div>
+        </div>
+        <div class="agent-stats">
+          <span class="tag">effort: medium</span>
+        </div>
+      </div>
+
+      <div class="agent">
+        <div class="agent-head">
+          <div class="agent-icon rose">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </div>
+          <div>
+            <div class="agent-role">reviewer</div>
+            <div class="agent-task">盲测 / pairwise / ai_voice</div>
+          </div>
+        </div>
+        <div class="agent-stats">
+          <span class="tag">effort: max</span>
+          <span class="tag rose">异族裁判</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 28px;">
+      <div class="cluster-head">
+        <div class="cluster-title">角色级 Failover 范式</div>
+        <span class="tag primary">Task 065 异族裁判</span>
+      </div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+        LLM judge 对同族输出有 75–84% 自我偏好——writer 与 reviewer 建议用不同模型家族。请求级 failover：主 provider 失败（宕机 / 限流 / 余额不足）自动切兜底，恢复后自动回主。
+      </p>
+      <pre><span class="c-cmt">// ~/.ainovel/config.json</span>
+{
+  <span class="c-key">"roles"</span>: {
+    <span class="c-key">"writer"</span>: {
+      <span class="c-key">"provider"</span>: <span class="c-str">"anthropic"</span>,
+      <span class="c-key">"model"</span>: <span class="c-str">"claude-opus-4-8"</span>,
+      <span class="c-key">"reasoning_effort"</span>: <span class="c-str">"high"</span>,
+      <span class="c-key">"fallbacks"</span>: [
+        { <span class="c-key">"provider"</span>: <span class="c-str">"cc-codex-proxy"</span>, <span class="c-key">"model"</span>: <span class="c-str">"gpt-5.5"</span> },
+        { <span class="c-key">"provider"</span>: <span class="c-str">"minimax"</span>, <span class="c-key">"model"</span>: <span class="c-str">"MiniMax-M3[1M]"</span> }
+      ]
+    },
+    <span class="c-key">"reviewer"</span>: {
+      <span class="c-key">"provider"</span>: <span class="c-str">"minimax"</span>,
+      <span class="c-key">"model"</span>: <span class="c-str">"MiniMax-M3[1M]"</span>,
+      <span class="c-key">"reasoning_effort"</span>: <span class="c-str">"max"</span>
+    }
+  }
+}</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 6: RAG ============ -->
+<section id="sec-rag">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">06 / RAG</span>
+      <h2 class="sec-title">本地 RAG 子系统</h2>
+    </div>
+    <p class="sec-sub">长篇小说动辄 100 章，单次上下文塞不下所有素材。RAG 把 foundation、零章资产、已写章节按需召回喂给 Writer，保证 100 章后风格 / 设定不漂移。</p>
+
+    <div class="rag-diagram">
+      <div class="rag-row">
+        <div class="rag-box">
+          <h4>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            源材料
+          </h4>
+          <div class="sub">sources</div>
+          <ul>
+            <li>foundation 五件套</li>
+            <li>零章 11 类资产</li>
+            <li>已写章节 + 元数据</li>
+            <li>reviews / drafts</li>
+            <li>拆文库 / 对标库</li>
+          </ul>
+        </div>
+
+        <div class="arrow">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </div>
+
+        <div class="rag-box">
+          <h4>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+            Embedding
+          </h4>
+          <div class="sub">llama-server :18434</div>
+          <ul>
+            <li><code>Qwen3-Embedding-0.6B-Q8_0.gguf</code></li>
+            <li>1024 维 · 8K 上下文</li>
+            <li>本地自动拉起 + 健康等待</li>
+            <li>OpenAI 兼容 <code>/v1/embeddings</code></li>
+          </ul>
+        </div>
+
+        <div class="arrow">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </div>
+
+        <div class="rag-box">
+          <h4>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            检索
+          </h4>
+          <div class="sub">keyword + embedding</div>
+          <ul>
+            <li>本地 Qdrant :6333</li>
+            <li>collection per project</li>
+            <li>双路召回：BM25 + 向量</li>
+            <li>facets: world / character / evidence / plot / project / craft</li>
+          </ul>
+        </div>
+      </div>
+
+      <div style="margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--border);">
+        <div class="g2">
+          <div>
+            <div style="font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">全量构建</div>
+            <pre><span class="c-cmt"># 手动构建 / 更新 RAG</span>
+./novel-studio <span class="c-key">--build-rag</span> \
+  <span class="c-key">--dir</span> data/runs/鬼城/output/novel</pre>
+          </div>
+          <div>
+            <div style="font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">增量沉淀</div>
+            <div style="font-size: 13px; color: var(--text-muted); line-height: 1.7;">
+              <strong style="color:var(--text)">commit_chapter</strong> · <strong style="color:var(--text)">review</strong> · <strong style="color:var(--text)">rewrite</strong> 三个动作都会触发增量沉淀。新章节写完自动入向量库，下一章写作时召回相关素材。<br/>
+              <span style="color: var(--text-dim);">⚠️ zero_init 阶段会重建 RAG 白名单索引（只索引本项目设定 + 零章资产，不索引旧正文/审稿/备份）。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 7: ZERO INIT ============ -->
+<section id="sec-zero">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">07 / ZERO INIT</span>
+      <h2 class="sec-title">零章写前推演</h2>
+    </div>
+    <p class="sec-sub"><code>--zero-init</code> 是 foundation 之后的第二个固定动作。它基于已有的 premise / outline / characters / world_rules / book_world，推演出写作前需要的全部元数据资产。</p>
+
+    <div class="cluster">
+      <div class="cluster-head">
+        <div class="cluster-title">11 类零章产物</div>
+        <span class="tag primary">下游：plan_chapter / draft_chapter</span>
+      </div>
+      <table class="fnd">
+        <thead>
+          <tr>
+            <th style="width: 280px;">产物</th>
+            <th>作用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="mono">book_world.json/.md</span></td><td>完整本书世界（若 foundation 缺）</td></tr>
+          <tr><td><span class="mono">meta/world_foundation.json/.md</span></td><td>铁律 + 开局时间 + 过去时间线（角色未获得改变规则能力前不得突破）</td></tr>
+          <tr><td><span class="mono">meta/characters/&lt;角色&gt;/dossier.{json,md}</span></td><td>每角色独立档案（主角未通信/未见证/无证据时不能知道）</td></tr>
+          <tr><td><span class="mono">meta/initial_character_dynamics.{json,md}</span></td><td>初始人物动态（含 voice_logic）</td></tr>
+          <tr><td><span class="mono">meta/initial_resource_ledger.{json,md}</span></td><td>初始资源账本（已入账 vs 待确认提案）</td></tr>
+          <tr><td><span class="mono">relationship_state.initial.{json,md}</span></td><td>初始人物关系契约</td></tr>
+          <tr><td><span class="mono">foreshadow_ledger.initial.{json,md}</span></td><td>初始伏笔账本（出现章 / 误导方向 / 回收方式 / 风险等级）</td></tr>
+          <tr><td><span class="mono">meta/prewrite_storycraft_plan.{json,md}</span></td><td>写法工艺（arc tests / dialogue blueprints / voice cards / reader reward）</td></tr>
+          <tr><td><span class="mono">meta/world_background_plan.{json,md}</span></td><td>世界背景层次 + 隐藏规则压力 + 仪式日历</td></tr>
+          <tr><td><span class="mono">meta/crowd_role_policy.{json,md}</span></td><td>捧场/凑数角色策略（默认不入关键台账）</td></tr>
+          <tr><td><span class="mono">meta/character_return_plan.{json,md}</span></td><td>人物回归与续用规划</td></tr>
+          <tr><td><span class="mono">drafts/01.zero_init.plan.json</span> + <span class="mono">meta/ch01_zero_init_plan.md</span></td><td>第一章推演草案</td></tr>
+          <tr><td><span class="mono">meta/zero_chapter_context_manifest.{json,md}</span></td><td>零章上下文清单（含 RAG 来源白名单/黑名单）</td></tr>
+          <tr><td><span class="mono">meta/initial_review_lessons.md</span></td><td>初始评审教训沉淀</td></tr>
+          <tr><td><span class="mono">meta/simulation_restart_policy.{json,md}</span></td><td>推演重启策略（旧章节仅作种子，新事实必须本轮推演）</td></tr>
+        </tbody>
+      </table>
+      <pre style="margin-top: 18px;"><span class="c-cmt"># 跑一次零章（foundation 缺失会拒绝继续）</span>
+./novel-studio <span class="c-key">--zero-init</span> \
+  <span class="c-key">--dir</span> data/runs/鬼城/output/novel
+
+<span class="c-cmt"># 只检查不写盘</span>
+./novel-studio <span class="c-key">--zero-init</span> <span class="c-key">--check</span>
+
+<span class="c-cmt"># 切到新 generation_id（旧章当种子，新事实重推）</span>
+./novel-studio <span class="c-key">--zero-init</span> \
+  <span class="c-key">--reset-simulation-state</span> <span class="c-key">--generation-id</span> sim-20260706-001</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 8: SIDE SYSTEMS ============ -->
+<section id="sec-side">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">08 / SIDE SYSTEMS</span>
+      <h2 class="sec-title">辅助子系统</h2>
+    </div>
+    <p class="sec-sub">除了主链路，工程还配了一组「让你不用蹲在终端」的辅助能力。</p>
+
+    <div class="g4">
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sky)"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          Dashboard 浏览器看板
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">本地起一个 HTTP 服务，浏览器里看项目进度 / 章节 / 评审 / 元数据。</div>
+        <pre><span class="c-fn">novel-studio</span> service start
+<span class="c-fn">novel-studio</span> service open
+<span class="c-fn">novel-studio</span> service status</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          Notify 通知
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">完成后推送到桌面 / 手机。事件过滤：<code>run_end / repeat / budget</code>。</div>
+        <pre><span class="c-cmt">// Bark (iOS)</span>
+<span class="c-str">"command"</span>: <span class="c-str">"curl ... https://api.day.app/&lt;key&gt;"</span>
+
+<span class="c-cmt">// ntfy (iOS/Android)</span>
+<span class="c-str">"command"</span>: <span class="c-str">"curl ... ntfy.sh/&lt;topic&gt;"</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--rose)"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Budget 预算熔断
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">累计花费达到 <code>warn_ratio</code> 告警，100% 优雅停机。挂机保险丝。</div>
+        <pre>{
+  <span class="c-key">"budget"</span>: {
+    <span class="c-key">"book_usd"</span>: <span class="c-num">50</span>,
+    <span class="c-key">"warn_ratio"</span>: <span class="c-num">0.8</span>,
+    <span class="c-key">"hard_stop"</span>: <span class="c-num">false</span>
+  }
+}</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+          Steer 干预指令
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">不打断当前 run，排队一条指令，下次启动生效。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--steer</span> <span class="c-str">"第 5 章加一个反转"</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Cocreate 多轮澄清
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">先聊清楚再开写。需要 TTY，CI / 远程场景走 <code>--pipeline</code>。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--cocreate</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          Context 压缩
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">按窗口大小自动触发压缩；<code>context_window</code> 可把名义 1M 钉到 300k 提前压。</div>
+        <pre>{
+  <span class="c-key">"context_window"</span>: <span class="c-num">300000</span>
+}</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Check LLM 连通
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">正式跑前先确认 provider 能用。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--check</span>
+<span class="c-fn">novel-studio</span> <span class="c-key">--check</span> <span class="c-key">--role</span> writer</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--rose)"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          Skills / 拆文库
+        </div>
+        <div class="card-desc" style="margin-bottom:10px;">内置 story / fanqie skills + 工程内 <code>拆文库/</code> 参考素材，可导入 RAG。</div>
+        <pre><span class="c-fn">novel-studio</span> skills list
+<span class="c-fn">novel-studio</span> skills export <span class="c-key">--to</span> ./skills</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 9: EXPORT ============ -->
+<section id="sec-export">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">09 / EXPORT</span>
+      <h2 class="sec-title">最终导出</h2>
+    </div>
+    <p class="sec-sub">export 阶段把 <code>chapters/*.md</code> 里已 commit 的章节合并成可分发的电子书。后缀决定格式。</p>
+
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          TXT 纯文本
+        </div>
+        <div class="card-desc" style="margin-bottom: 12px;">纯章节合并，便于后续人工编辑 / 投稿。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
+  <span class="c-key">--export-out</span> 鬼城.txt</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted)"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          EPUB 电子书
+        </div>
+        <div class="card-desc" style="margin-bottom: 12px;">带目录和元数据的电子书，可直接发到阅读器。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
+  <span class="c-key">--export-out</span> 鬼城.epub
+
+<span class="c-cmt"># 已存在则覆盖</span>
+<span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
+  <span class="c-key">--export-out</span> 鬼城.epub <span class="c-key">--overwrite</span></pre>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 24px;">
+      <div class="cluster-head">
+        <div class="cluster-title">完整端到端命令</div>
+        <span class="tag primary">一行</span>
+      </div>
+      <pre><span class="c-cmt"># 从 prompt 启动流水线，写 1-10 章就停，跑完整 5 阶段（含 export）</span>
+cd /Users/chenhongyang/Desktop/book/novel-studio
+./novel-studio <span class="c-key">--pipeline</span> \
+  <span class="c-key">--dir</span> data/runs/鬼城/output/novel \
+  <span class="c-key">--prompt-file</span> data/runs/鬼城/prompt.md \
+  <span class="c-key">--stages</span> write,review,rewrite,export \
+  <span class="c-key">--write-to</span> <span class="c-num">10</span> \
+  <span class="c-key">--export-out</span> data/runs/鬼城/鬼城.epub</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 10: EXAMPLE ============ -->
+<section id="sec-example">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">10 / EXAMPLE</span>
+      <h2 class="sec-title">真实项目 · 鬼城</h2>
+    </div>
+    <p class="sec-sub">当前 active run。所有状态都从代码 + 磁盘实证，不是示意。</p>
+
+    <div class="example-card">
+      <div>
+        <h3>诡异末日：开局万亿冥钞，我买下整座鬼城</h3>
+        <p class="lead">男频诡异末日 + 神豪资源经营 + 鬼城资产扩张。江烬从被冥钞账单拖入鬼城规则，到把凶宅、便利店、公寓、医院、鬼市、商会逐步纳入资产链。</p>
+        <div class="pill-row">
+          <span class="tag primary">Phase: writing</span>
+          <span class="tag accent">Flow: writing</span>
+          <span class="tag">simulation_restart_from_seed</span>
+        </div>
+      </div>
+      <div>
+        <div class="stat-row">
+          <div class="k">总章节</div><div class="v">100</div>
+          <div class="k">当前章节</div><div class="v">1</div>
+          <div class="k">已完成</div><div class="v">0 / 100</div>
+          <div class="k">RAG chunks</div><div class="v">770</div>
+          <div class="k">Qdrant collection</div><div class="v">novel_studio_3cfd597a1235</div>
+          <div class="k">Embedding</div><div class="v">Qwen3-Embedding-0.6B-Q8_0 (1024d)</div>
+          <div class="k">主对话模型</div><div class="v">MiniMax-M3[1M]</div>
+          <div class="k">generation_id</div><div class="v" style="word-break:break-all">simulation-20260705-071820-0800</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="g3" style="margin-top: 24px;">
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          foundation 已就绪
+        </div>
+        <div class="card-desc">
+          premise / outline / characters / world_rules / book_world 五件套全在；零章 11 类产物已生成；RAG 770 chunks 已嵌入 Qdrant。
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          第一章 · 待重写
+        </div>
+        <div class="card-desc">
+          旧 baseline（baseline-7-05，134 行）已被 quarantine。审阅判定：「章末黑卡爽点没打出去，留白偏多，钩子略弱」。当前 <code>progress.json.completed_chapters</code> 为空，等 pipeline 按 prompt 重写。
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          下一步
+        </div>
+        <div class="card-desc">
+          <code style="font-size:11.5px;">--pipeline --prompt-file prompt.md --write-to 10</code> 直接进 1-10 章正文生产。完成后停。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="meta">novel-studio · Go + LLM · local-first long-form novel engine</div>
+    <div style="margin-top:8px;">端到端架构总览 · 内容来源于代码实证（commit_chapter.go · zero_init_cmd.go · save_foundation.go · pipeline_cmd.go · config.example.jsonc）</div>
+  </div>
+</footer>
+
+<script>
+  // Mermaid init
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#1a1f27',
+      primaryTextColor: '#e8ebf0',
+      primaryBorderColor: '#2a313c',
+      lineColor: '#10b981',
+      secondaryColor: '#20262f',
+      tertiaryColor: '#14181f',
+      fontFamily: 'Outfit, sans-serif',
+      fontSize: '13px',
+      noteBkgColor: '#14181f',
+      noteTextColor: '#9aa3b2',
+      noteBorderColor: '#2a313c',
+      clusterBkgColor: '#14181f',
+      clusterBorderColor: '#2a313c'
+    },
+    flowchart: { curve: 'basis', padding: 12 },
+    securityLevel: 'loose'
+  });
+</script>
+
+</body>
+</html>

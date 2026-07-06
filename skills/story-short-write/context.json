@@ -1,0 +1,61 @@
+{
+  "skill": "story-short-write",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [],
+  "conditional_files": [
+    {
+      "when": "需要该 skill 的方法论、模板、rubric、平台规则或阶段细节时读取。",
+      "paths": [
+        "references/banned-words.md",
+        "references/cross-book-recall.md",
+        "references/dialogue-mastery.md",
+        "references/emotional-methods.md",
+        "references/genre-styles/复仇打脸.md",
+        "references/genre-styles/宅斗宫斗.md",
+        "references/genre-styles/总裁豪门.md",
+        "references/genre-styles/追妻火葬场.md",
+        "references/genre-writing-formulas.md",
+        "references/genre-writing-techniques.md",
+        "references/hooks-chapter.md",
+        "references/hooks-paragraph.md",
+        "references/hooks-suspense.md",
+        "references/human-feel-craft.md",
+        "references/output-contract.md",
+        "references/quality-checklist.md",
+        "references/refer-writing-techniques-digest.md",
+        "references/reversal-toolkit.md",
+        "references/short-craft.md",
+        "references/short-deslop.md",
+        "references/short-format.md",
+        "references/villain-and-reveal.md",
+        "references/writing-workflow.md"
+      ]
+    },
+    {
+      "when": "需要运行、检查或说明该 skill 的本地脚本时读取。",
+      "paths": [
+        "scripts/check-ai-patterns.js",
+        "scripts/check-degeneration.js",
+        "scripts/normalize-punctuation.js"
+      ]
+    }
+  ],
+  "state_files": [
+    "<短篇标题>/第01章_正文.md",
+    "<短篇标题>/对标/",
+    ".skill-context/story-short-write.md"
+  ],
+  "output_contract": [
+    "按该 skill 的 SKILL.md 和 references 中声明的项目文件落盘，不把长正文只留在对话中。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/story-short-write.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+ "_note": "冻结样本待用户从已定稿章节挑选后填入（一个明确 accept、一个明确 polish、一个明确 rewrite）",
+ "samples": [
+  {
+   "id": "golden-accept",
+   "path": "data/runs/鬼城/output/novel/chapters/01.md",
+   "expected_verdict": "accept",
+   "expected_score_band": [
+    78,
+    95
+   ],
+   "review_ref": "data/runs/鬼城/output/novel/reviews/01.json",
+   "note": "旧世代已定稿 accept 章（均分86）；仅作背景种子世代的评分基线"
+  },
+  {
+   "id": "golden-polish",
+   "path": "",
+   "expected_verdict": "polish",
+   "expected_score_band": [
+    60,
+    77
+   ],
+   "note": "暂无历史样本：归档机制（reviews/NN.history.jsonl）已上线，首个 polish/rewrite 评审出现后从归档填充"
+  },
+  {
+   "id": "golden-rewrite",
+   "path": "",
+   "expected_verdict": "rewrite",
+   "expected_score_band": [
+    30,
+    59
+   ],
+   "note": "暂无历史样本：归档机制（reviews/NN.history.jsonl）已上线，首个 polish/rewrite 评审出现后从归档填充"
+  }
+ ],
+ "drift_rule": "verdict 翻转或均分偏移>10 → diag warning + evolution proposed"
+}

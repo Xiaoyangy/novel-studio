@@ -1,0 +1,4 @@
+interface:
+  display_name: "番茄百合短篇"
+  short_description: "Fanqie GL short-novel workflow with final AI taste under 5%"
+  default_prompt: "Use $fanqie-baihe-short to draft and finalize a Fanqie GL short novel with AI taste under 5%."

@@ -1,0 +1,31 @@
+{
+  "skill": "story-long-analyze",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [
+    "references/deconstruction-notes.md",
+    "references/material-decomposition.md",
+    "references/output-templates.md",
+    "references/pipeline-ops.md",
+    "references/style-profile-generator.md",
+    "references/style-profile-protocol.md"
+  ],
+  "conditional_files": [],
+  "state_files": [
+    "<项目目录>/追踪/上下文.md",
+    "<项目目录>/_progress.md",
+    ".skill-context/story-long-analyze.md"
+  ],
+  "output_contract": [
+    "deconstruction-library/{书名}/ 下的 _progress.md、章节摘要、剧情/、设定/、角色/、拆文报告.md、文风.md。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/story-long-analyze.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

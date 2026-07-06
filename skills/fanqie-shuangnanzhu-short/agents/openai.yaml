@@ -1,0 +1,4 @@
+interface:
+  display_name: "番茄双男主短篇"
+  short_description: "Fanqie dual-male-lead workflow with final AI taste under 5%"
+  default_prompt: "Use $fanqie-shuangnanzhu-short to draft and finalize a Fanqie dual-male-lead short novel with AI taste under 5%."

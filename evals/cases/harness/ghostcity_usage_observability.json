@@ -1,0 +1,17 @@
+{
+  "id": "ghostcity_usage_observability",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查鬼城项目的成本可观测性产物：token/费用累计、Coordinator 与子代理会话日志必须齐全，防止计费盲区与行为不可追溯。",
+  "prompt": "inspect existing ghostcity usage and session observability artifacts",
+  "artifact_dir": "data/runs/鬼城/output/novel",
+  "expect": {
+    "required_files": [
+      "meta/usage.json",
+      "meta/sessions/coordinator.jsonl",
+      "meta/checkpoints.jsonl",
+      "meta/progress.json"
+    ]
+  },
+  "gate": { "max_severity": "warning" }
+}

@@ -1,0 +1,570 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/store"
+)
+
+func TestSaveFoundationPersistsPlanningTier(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(store)
+	args, err := json.Marshal(map[string]any{
+		"type":    "premise",
+		"content": "# 测试书名\n\n## 题材和基调\n测试",
+		"scale":   "long",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	meta, err := store.RunMeta.Load()
+	if err != nil {
+		t.Fatalf("LoadRunMeta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected run meta to exist")
+	}
+	if meta.PlanningTier != domain.PlanningTierLong {
+		t.Fatalf("expected planning tier %q, got %q", domain.PlanningTierLong, meta.PlanningTier)
+	}
+}
+
+func TestSaveFoundationPremiseSetsNovelName(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Progress.Init("novel", 0); err != nil {
+		t.Fatalf("Init progress: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(store)
+	args, err := json.Marshal(map[string]any{
+		"type": "premise",
+		"content": `# 长夜燃灯
+
+## 题材和基调
+东方玄幻，冷硬求生。`,
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	progress, err := store.Progress.Load()
+	if err != nil {
+		t.Fatalf("LoadProgress: %v", err)
+	}
+	if progress == nil {
+		t.Fatal("expected progress")
+	}
+	if progress.NovelName != "长夜燃灯" {
+		t.Fatalf("expected novel name set, got %q", progress.NovelName)
+	}
+}
+
+func TestSaveFoundationOutlineClearsLayeredStateWhenDowngrading(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(store)
+
+	layeredArgs, err := json.Marshal(map[string]any{
+		"type":    "layered_outline",
+		"content": `[{"index":1,"title":"第一卷","theme":"主题","arcs":[{"index":1,"title":"第一弧","goal":"目标","chapters":[{"chapter":1,"title":"第一章","core_event":"开局","hook":"继续"}]}]}]`,
+		"scale":   "long",
+	})
+	if err != nil {
+		t.Fatalf("Marshal layered args: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), layeredArgs); err != nil {
+		t.Fatalf("Execute layered outline: %v", err)
+	}
+
+	outlineArgs, err := json.Marshal(map[string]any{
+		"type":    "outline",
+		"content": `[{"chapter":1,"title":"第一章","core_event":"改为中篇","hook":"继续"}]`,
+		"scale":   "mid",
+	})
+	if err != nil {
+		t.Fatalf("Marshal outline args: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), outlineArgs); err != nil {
+		t.Fatalf("Execute outline: %v", err)
+	}
+
+	progress, err := store.Progress.Load()
+	if err != nil {
+		t.Fatalf("LoadProgress: %v", err)
+	}
+	if progress == nil {
+		t.Fatal("expected progress to exist")
+	}
+	if progress.Layered {
+		t.Fatal("expected layered mode to be disabled")
+	}
+	if progress.CurrentVolume != 0 || progress.CurrentArc != 0 {
+		t.Fatalf("expected volume/arc reset, got volume=%d arc=%d", progress.CurrentVolume, progress.CurrentArc)
+	}
+
+	volumes, err := store.Outline.LoadLayeredOutline()
+	if err != nil {
+		t.Fatalf("LoadLayeredOutline: %v", err)
+	}
+	if len(volumes) != 0 {
+		t.Fatalf("expected layered outline cleared, got %d volumes", len(volumes))
+	}
+
+	meta, err := store.RunMeta.Load()
+	if err != nil {
+		t.Fatalf("LoadRunMeta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected run meta to exist")
+	}
+	if meta.PlanningTier != domain.PlanningTierMid {
+		t.Fatalf("expected planning tier %q, got %q", domain.PlanningTierMid, meta.PlanningTier)
+	}
+}
+
+func TestSaveFoundationAppendVolume(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+
+	// 先创建初始 layered_outline（卷1）
+	layeredArgs, _ := json.Marshal(map[string]any{
+		"type": "layered_outline",
+		"content": []map[string]any{{
+			"index": 1, "title": "第一卷", "theme": "起步",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "首弧", "goal": "目标",
+				"chapters": []map[string]any{{"title": "第一章", "core_event": "开局", "hook": "继续"}},
+			}},
+		}},
+		"scale": "long",
+	})
+	if _, err := tool.Execute(context.Background(), layeredArgs); err != nil {
+		t.Fatalf("Execute layered: %v", err)
+	}
+
+	// append_volume：追加卷2
+	appendArgs, _ := json.Marshal(map[string]any{
+		"type": "append_volume",
+		"content": map[string]any{
+			"index": 2, "title": "第二卷", "theme": "升级",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "弧一", "goal": "目标",
+				"chapters": []map[string]any{{"title": "新章", "core_event": "推进", "hook": "钩子"}},
+			}},
+		},
+	})
+	res, err := tool.Execute(context.Background(), appendArgs)
+	if err != nil {
+		t.Fatalf("Execute append_volume: %v", err)
+	}
+	var result map[string]any
+	json.Unmarshal(res, &result)
+	if result["volume"] != float64(2) {
+		t.Fatalf("expected volume=2, got %v", result["volume"])
+	}
+
+	// 验证大纲有 2 卷
+	volumes, _ := s.Outline.LoadLayeredOutline()
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+	if volumes[1].Title != "第二卷" {
+		t.Fatalf("expected title '第二卷', got %q", volumes[1].Title)
+	}
+}
+
+func TestSaveFoundationAppendVolumeValidation(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+
+	// 初始卷
+	layeredArgs, _ := json.Marshal(map[string]any{
+		"type": "layered_outline",
+		"content": []map[string]any{{
+			"index": 1, "title": "第一卷", "theme": "起步",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "首弧", "goal": "目标",
+				"chapters": []map[string]any{{"title": "第一章", "core_event": "开局", "hook": "继续"}},
+			}},
+		}},
+		"scale": "long",
+	})
+	tool.Execute(context.Background(), layeredArgs)
+
+	// Index 不递增 → 应失败（结构性校验）
+	appendArgs, _ := json.Marshal(map[string]any{
+		"type": "append_volume",
+		"content": map[string]any{
+			"index": 1, "title": "重复 Index", "theme": "x",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "弧一", "goal": "目标",
+				"chapters": []map[string]any{{"title": "章", "core_event": "事件", "hook": "钩子"}},
+			}},
+		},
+	})
+	_, err := tool.Execute(context.Background(), appendArgs)
+	if err == nil {
+		t.Fatal("expected error when appending volume with non-increasing index")
+	}
+}
+
+// TestSaveFoundationAppendVolumeRejectsAfterComplete 验证 Phase=Complete 后不允许 append_volume。
+// 取代旧的"Final 卷拒绝追加"语义（Final 字段已删除）。
+func TestSaveFoundationAppendVolumeRejectsAfterComplete(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	if err := s.Progress.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	appendArgs, _ := json.Marshal(map[string]any{
+		"type": "append_volume",
+		"content": map[string]any{
+			"index": 1, "title": "尝试续写", "theme": "x",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "弧", "goal": "g",
+				"chapters": []map[string]any{{"title": "章", "core_event": "e", "hook": "h"}},
+			}},
+		},
+	})
+	if _, err := tool.Execute(context.Background(), appendArgs); err == nil {
+		t.Fatal("expected error when appending after Phase=Complete")
+	}
+}
+
+func TestSaveFoundationUpdateCompass(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "update_compass",
+		"content": map[string]any{
+			"ending_direction": "主角面对最终抉择",
+			"open_threads":     []string{"线索A", "关系B"},
+			"estimated_scale":  "预计 4-6 卷",
+		},
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute update_compass: %v", err)
+	}
+
+	compass, err := s.Outline.LoadCompass()
+	if err != nil {
+		t.Fatalf("LoadCompass: %v", err)
+	}
+	if compass == nil || compass.EndingDirection != "主角面对最终抉择" {
+		t.Fatalf("unexpected compass: %+v", compass)
+	}
+	if len(compass.OpenThreads) != 2 {
+		t.Fatalf("expected 2 open threads, got %d", len(compass.OpenThreads))
+	}
+}
+
+func TestSaveFoundationUpdateCompassOverridesLastUpdated(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Save(&domain.Progress{
+		NovelName:         "光斑",
+		Phase:             domain.PhaseWriting,
+		CompletedChapters: []int{1, 2, 3, 5, 4}, // 乱序，验证取 max 而非 len
+	}); err != nil {
+		t.Fatalf("Save progress: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "update_compass",
+		"content": map[string]any{
+			"ending_direction": "主角面对最终抉择",
+			"open_threads":     []string{"线索A"},
+			"last_updated":     0, // LLM 通常忘填或留 0
+		},
+	})
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute update_compass: %v", err)
+	}
+
+	compass, err := s.Outline.LoadCompass()
+	if err != nil {
+		t.Fatalf("LoadCompass: %v", err)
+	}
+	if compass.LastUpdated != 5 {
+		t.Fatalf("expected LastUpdated=5 (max of CompletedChapters), got %d", compass.LastUpdated)
+	}
+}
+
+func TestSaveFoundationUpdateCompassRequiresDirection(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type":    "update_compass",
+		"content": map[string]any{"estimated_scale": "3 卷"},
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error when ending_direction is empty")
+	}
+}
+
+func TestSaveFoundationAcceptsDirectJSONArrayContent(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(store)
+	args, err := json.Marshal(map[string]any{
+		"type": "outline",
+		"content": []map[string]any{
+			{
+				"chapter":    1,
+				"title":      "第一章",
+				"core_event": "主角登场",
+				"hook":       "继续",
+				"scenes":     []string{"场景一", "场景二"},
+			},
+		},
+		"scale": "short",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	outline, err := store.Outline.LoadOutline()
+	if err != nil {
+		t.Fatalf("LoadOutline: %v", err)
+	}
+	if len(outline) != 1 || outline[0].Title != "第一章" {
+		t.Fatalf("unexpected outline: %+v", outline)
+	}
+}
+
+func TestSaveFoundationBookWorld(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "book_world",
+		"content": map[string]any{
+			"name":     "灰雾城",
+			"summary":  "鬼市、便利店与医院构成前期地图。",
+			"places":   []map[string]any{{"id": "store", "name": "鬼便利店", "kind": "shop"}},
+			"factions": []map[string]any{{"id": "bank", "name": "阴司银行", "goal": "回收欠账"}},
+		},
+	})
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute book_world: %v", err)
+	}
+	world, err := s.World.LoadBookWorld()
+	if err != nil {
+		t.Fatalf("LoadBookWorld: %v", err)
+	}
+	if world == nil || len(world.Places) != 1 || len(world.Factions) != 1 {
+		t.Fatalf("unexpected book_world: %+v", world)
+	}
+}
+
+// completeBookSetup 建一份处于 writing 阶段的最小 Store，用于 complete_book 系列测试。
+// complete_book 不校验 layered_outline 章节齐全（判定责任在 LLM 的"完结判定清单"），
+// 工具层只校验 PendingRewrites 为空、progress 已初始化。
+func completeBookSetup(t *testing.T) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	_ = s.Progress.UpdatePhase(domain.PhaseWriting)
+	return s
+}
+
+func TestSaveFoundationCompleteBookPushesPhaseComplete(t *testing.T) {
+	s := completeBookSetup(t)
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+	})
+	res, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute complete_book: %v", err)
+	}
+	var result map[string]any
+	_ = json.Unmarshal(res, &result)
+	if result["book_complete"] != true {
+		t.Fatalf("expected book_complete=true, got %+v", result)
+	}
+	if result["phase"] != string(domain.PhaseComplete) {
+		t.Fatalf("expected phase=complete, got %v", result["phase"])
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase != domain.PhaseComplete {
+		t.Fatalf("expected progress.Phase=complete, got %s", progress.Phase)
+	}
+}
+
+func TestSaveFoundationCompleteBookRejectsBeforeWriting(t *testing.T) {
+	// 规划阶段误调 complete_book 必须被拒，否则会直接跳过整本写作。
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 0); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	_ = s.Progress.UpdatePhase(domain.PhasePremise)
+	_ = s.Progress.UpdatePhase(domain.PhaseOutline)
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+	})
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("expected error when phase != writing")
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase != domain.PhaseOutline {
+		t.Fatalf("phase should remain outline, got %s", progress.Phase)
+	}
+}
+
+func TestSaveFoundationCompleteBookRejectsWithPendingRewrites(t *testing.T) {
+	s := completeBookSetup(t)
+	if err := s.Progress.MarkChapterComplete(2, 3000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if err := s.Progress.SetPendingRewrites([]int{2}, "尾章节奏过快"); err != nil {
+		t.Fatalf("SetPendingRewrites: %v", err)
+	}
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+	})
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("expected error when PendingRewrites non-empty")
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase == domain.PhaseComplete {
+		t.Fatalf("phase should not be Complete with PendingRewrites: %s", progress.Phase)
+	}
+}
+
+func TestSaveFoundationCompleteBookRejectsUnreviewedChapter(t *testing.T) {
+	s := completeBookSetup(t)
+	if err := s.Progress.MarkChapterComplete(1, 3000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+	})
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("expected error when completed chapter lacks accepted review")
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase == domain.PhaseComplete {
+		t.Fatalf("phase should not be Complete with unreviewed chapter: %s", progress.Phase)
+	}
+}
+
+func TestSaveFoundationCompleteBookRejectsShortWithoutGlobalReview(t *testing.T) {
+	s := completeBookSetup(t)
+	if err := s.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
+		t.Fatalf("SetPlanningTier: %v", err)
+	}
+	if err := s.Progress.SetTotalChapters(1); err != nil {
+		t.Fatalf("SetTotalChapters: %v", err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, 3000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if err := s.World.SaveReview(domain.ReviewEntry{Chapter: 1, Scope: "chapter", Verdict: "accept"}); err != nil {
+		t.Fatalf("SaveReview chapter: %v", err)
+	}
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+	})
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("expected error when short project lacks global final review")
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase == domain.PhaseComplete {
+		t.Fatalf("phase should not be Complete without global review: %s", progress.Phase)
+	}
+}

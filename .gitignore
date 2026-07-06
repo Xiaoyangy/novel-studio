@@ -1,0 +1,66 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# 项目级配置 dotdir（镜像 ~/.ainovel/）：config.json 含密钥，rules/ 为本地写作偏好
+.ainovel/
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# GoReleaser artifacts
+dist/
+release-notes.md
+/novel-studio
+
+tasks
+refer/
+output*
+workspace/
+
+# 长篇拆文工作区：保留说明和模板，忽略真实原文与拆解产物
+
+# 拆解库内容不入库(仅保留结构说明与模板,见 deconstruction-library/README.md 的提交规则)
+deconstruction-library/*
+!deconstruction-library/README.md
+!deconstruction-library/_templates/
+!deconstruction-library/_templates/**
+
+# 数据集(参考库/生成产物/运行工作区)不入库
+data/
+
+# 本地 embedding 模型权重(>100MB,下载方式见 models/embedding/README.md)
+models/embedding/*.gguf
+
+# Claude Code 本地会话配置
+.claude/settings.local.json
+
+# Python 缓存
+__pycache__/
+*.pyc

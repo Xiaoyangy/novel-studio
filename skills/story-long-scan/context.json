@@ -1,0 +1,46 @@
+{
+  "skill": "story-long-scan",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [],
+  "conditional_files": [
+    {
+      "when": "需要该 skill 的方法论、模板、rubric、平台规则或阶段细节时读取。",
+      "paths": [
+        "references/genre-trends.md",
+        "references/publishing-guide.md",
+        "references/reader-profiling.md",
+        "references/scan-output-format.md",
+        "references/topic-decision.md"
+      ]
+    },
+    {
+      "when": "需要运行、检查或说明该 skill 的本地脚本时读取。",
+      "paths": [
+        "scripts/cdp-utils.js",
+        "scripts/ciweimao-rank-scraper.js",
+        "scripts/fanqie-rank-scraper.js",
+        "scripts/jjwxc-rank-scraper.js",
+        "scripts/qidian-rank-scraper.js",
+        "scripts/qimao-rank-scraper.js"
+      ]
+    }
+  ],
+  "state_files": [
+    "<项目目录>/追踪/上下文.md",
+    "<项目目录>/_progress.md",
+    ".skill-context/story-long-scan.md"
+  ],
+  "output_contract": [
+    "按该 skill 的 SKILL.md 和 references 中声明的项目文件落盘，不把长正文只留在对话中。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/story-long-scan.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

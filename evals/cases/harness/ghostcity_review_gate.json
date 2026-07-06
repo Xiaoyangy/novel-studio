@@ -1,0 +1,23 @@
+{
+  "id": "ghostcity_review_gate",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查鬼城项目前 5 章的审核门禁完整性：每章必须有统一审核报告 + AI 门禁事实文件，未过门禁不允许续写的约定必须有落盘证据。",
+  "prompt": "inspect existing ghostcity review gate artifacts",
+  "artifact_dir": "data/runs/鬼城/output/novel",
+  "expect": {
+    "required_files": [
+      "reviews/01.md",
+      "reviews/01_ai_gate.json",
+      "reviews/02.md",
+      "reviews/02_ai_gate.json",
+      "reviews/03.md",
+      "reviews/03_ai_gate.json",
+      "reviews/04.md",
+      "reviews/04_ai_gate.json",
+      "reviews/05.md",
+      "reviews/05_ai_gate.json"
+    ]
+  },
+  "gate": { "max_severity": "warning" }
+}

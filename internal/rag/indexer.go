@@ -1,0 +1,460 @@
+package rag
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/chenhongyang/novel-studio/internal/domain"
+)
+
+// Embedder 负责把 chunk 文本转成向量。
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// VectorWriter 负责把向量写入后端。真实实现可对接 Qdrant。
+type VectorWriter interface {
+	Write(ctx context.Context, point VectorPoint) error
+}
+
+type VectorPoint struct {
+	ID      string
+	Vector  []float32
+	Payload map[string]any
+	Chunk   domain.RAGChunk
+}
+
+type IndexResult struct {
+	State      domain.RAGIndexState
+	Embedded   int
+	Written    int
+	SkippedDup int
+}
+
+// BuildIndex 流式并行完成 chunk 去重、Embedding 和向量写入。
+func BuildIndex(
+	ctx context.Context,
+	chunks []domain.RAGChunk,
+	existingHashes []string,
+	cfg domain.RAGIndexConfig,
+	embedder Embedder,
+	writer VectorWriter,
+) (IndexResult, error) {
+	if embedder == nil {
+		return IndexResult{}, ErrNilBackend("embedding")
+	}
+	if writer == nil {
+		return IndexResult{}, ErrNilBackend("vector_writer")
+	}
+	if cfg.EmbeddingConcurrency <= 0 {
+		cfg.EmbeddingConcurrency = 2
+	}
+	if cfg.QdrantWriteConcurrency <= 0 {
+		cfg.QdrantWriteConcurrency = 2
+	}
+	known := make(map[string]struct{}, len(existingHashes)+len(chunks))
+	for _, h := range existingHashes {
+		if h != "" {
+			known[h] = struct{}{}
+		}
+	}
+
+	type embedJob struct {
+		chunk domain.RAGChunk
+	}
+	type writeJob struct {
+		chunk  domain.RAGChunk
+		vector []float32
+	}
+
+	embedJobs := make(chan embedJob)
+	writeJobs := make(chan writeJob)
+	errCh := make(chan error, 1)
+	var embeddedMu sync.Mutex
+	var embedded int
+	var writtenMu sync.Mutex
+	var written int
+
+	sendErr := func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
+	var embedWG sync.WaitGroup
+	for i := 0; i < cfg.EmbeddingConcurrency; i++ {
+		embedWG.Add(1)
+		go func() {
+			defer embedWG.Done()
+			for job := range embedJobs {
+				vec, err := embedder.Embed(ctx, EmbeddingText(job.chunk))
+				if err != nil {
+					sendErr(err)
+					continue
+				}
+				embeddedMu.Lock()
+				embedded++
+				embeddedMu.Unlock()
+				select {
+				case writeJobs <- writeJob{chunk: job.chunk, vector: vec}:
+				case <-ctx.Done():
+					sendErr(ctx.Err())
+					return
+				}
+			}
+		}()
+	}
+
+	var writeWG sync.WaitGroup
+	for i := 0; i < cfg.QdrantWriteConcurrency; i++ {
+		writeWG.Add(1)
+		go func() {
+			defer writeWG.Done()
+			for job := range writeJobs {
+				point := VectorPoint{
+					ID:      job.chunk.ID,
+					Vector:  job.vector,
+					Chunk:   job.chunk,
+					Payload: chunkPayload(job.chunk),
+				}
+				if err := writer.Write(ctx, point); err != nil {
+					sendErr(err)
+					continue
+				}
+				writtenMu.Lock()
+				written++
+				writtenMu.Unlock()
+			}
+		}()
+	}
+
+	var accepted []domain.RAGChunk
+	skippedDup := 0
+	for _, chunk := range chunks {
+		chunk = NormalizeChunk(chunk)
+		if chunk.Hash == "" {
+			continue
+		}
+		if _, ok := known[chunk.Hash]; ok {
+			skippedDup++
+			continue
+		}
+		known[chunk.Hash] = struct{}{}
+		accepted = append(accepted, chunk)
+		select {
+		case embedJobs <- embedJob{chunk: chunk}:
+		case <-ctx.Done():
+			close(embedJobs)
+			embedWG.Wait()
+			close(writeJobs)
+			writeWG.Wait()
+			return IndexResult{}, ctx.Err()
+		}
+	}
+	close(embedJobs)
+	embedWG.Wait()
+	close(writeJobs)
+	writeWG.Wait()
+
+	select {
+	case err := <-errCh:
+		return IndexResult{}, err
+	default:
+	}
+
+	hashes := make([]string, 0, len(known))
+	for h := range known {
+		hashes = append(hashes, h)
+	}
+	slices.Sort(hashes)
+	return IndexResult{
+		State: domain.RAGIndexState{
+			Config:      cfg,
+			Chunks:      accepted,
+			ChunkHashes: hashes,
+			UpdatedAt:   time.Now().Format(time.RFC3339),
+		},
+		Embedded:   embedded,
+		Written:    written,
+		SkippedDup: skippedDup,
+	}, nil
+}
+
+func NormalizeChunk(chunk domain.RAGChunk) domain.RAGChunk {
+	chunk.Text = strings.TrimSpace(chunk.Text)
+	chunk.Summary = strings.TrimSpace(chunk.Summary)
+	chunk.Context = strings.TrimSpace(chunk.Context)
+	if chunk.SourceKind == "" {
+		chunk.SourceKind = "knowledge"
+	}
+	if chunk.Context == "" {
+		chunk.Context = deriveChunkContext(chunk)
+	}
+	chunk.Keywords = normalizeKeywords(chunk.Keywords)
+	if len(chunk.Keywords) == 0 {
+		chunk.Keywords = deriveChunkKeywords(chunk)
+	}
+	if chunk.Hash == "" {
+		sum := sha256.Sum256([]byte(strings.Join([]string{
+			chunk.SourcePath,
+			chunk.SourceKind,
+			chunk.Facet,
+			chunk.ParentID,
+			chunk.Context,
+			chunk.Text,
+		}, "\x00")))
+		chunk.Hash = hex.EncodeToString(sum[:])
+	}
+	if chunk.ID == "" {
+		chunk.ID = "chunk:" + chunk.Hash[:16]
+	}
+	return chunk
+}
+
+func chunkPayload(chunk domain.RAGChunk) map[string]any {
+	payload := map[string]any{
+		"source_path": chunk.SourcePath,
+		"source_kind": chunk.SourceKind,
+		"facet":       chunk.Facet,
+		"hash":        chunk.Hash,
+	}
+	if chunk.ParentID != "" {
+		payload["parent_id"] = chunk.ParentID
+	}
+	if chunk.Context != "" {
+		payload["context"] = chunk.Context
+	}
+	if chunk.Summary != "" {
+		payload["summary"] = chunk.Summary
+	}
+	if len(chunk.Keywords) > 0 {
+		payload["keywords"] = chunk.Keywords
+	}
+	for k, v := range chunk.Metadata {
+		payload[k] = v
+	}
+	return payload
+}
+
+// EmbeddingText returns the enriched text used for semantic indexing.
+// The raw chunk stays intact for audit; the embedding input carries local context so
+// short chunks do not lose the book/section/technique they came from.
+func EmbeddingText(chunk domain.RAGChunk) string {
+	chunk = NormalizeChunk(chunk)
+	var parts []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, label+": "+value)
+		}
+	}
+	add("context", chunk.Context)
+	add("facet", chunk.Facet)
+	add("summary", chunk.Summary)
+	if len(chunk.Keywords) > 0 {
+		add("keywords", strings.Join(chunk.Keywords, " "))
+	}
+	add("text", chunk.Text)
+	return strings.Join(parts, "\n")
+}
+
+// SearchText returns the local lexical retrieval surface. It intentionally includes
+// metadata and contextual headers, mirroring contextual BM25 without requiring a
+// separate search backend.
+func SearchText(chunk domain.RAGChunk) string {
+	chunk = NormalizeChunk(chunk)
+	var parts []string
+	for _, part := range []string{
+		chunk.SourceKind,
+		chunk.Facet,
+		chunk.SourcePath,
+		chunk.ParentID,
+		chunk.Context,
+		chunk.Summary,
+		strings.Join(chunk.Keywords, " "),
+		chunk.Text,
+	} {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(chunk.Metadata) > 0 {
+		keys := make([]string, 0, len(chunk.Metadata))
+		for k := range chunk.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if v := metadataValueString(chunk.Metadata[k]); v != "" {
+				parts = append(parts, k, v)
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// QueryTerms extracts a small deterministic set of lexical hints from Chinese or
+// mixed-language query text. It is not a tokenizer; it gives local RAG enough
+// short overlap terms to avoid exact-long-phrase misses.
+func QueryTerms(parts ...string) []string {
+	seen := map[string]struct{}{}
+	var terms []string
+	add := func(term string) {
+		term = cleanTerm(term)
+		runeLen := len([]rune(term))
+		if runeLen < 2 || runeLen > 32 {
+			return
+		}
+		if _, ok := seen[term]; ok {
+			return
+		}
+		seen[term] = struct{}{}
+		terms = append(terms, term)
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		normalized := normalizeSeparators(part)
+		for _, field := range strings.Fields(normalized) {
+			add(field)
+			runes := []rune(cleanTerm(field))
+			if len(runes) < 4 || len(runes) > 80 {
+				continue
+			}
+			for n := 4; n >= 2; n-- {
+				for i := 0; i+n <= len(runes); i++ {
+					add(string(runes[i : i+n]))
+					if len(terms) >= 80 {
+						return terms
+					}
+				}
+			}
+		}
+		if len(terms) >= 80 {
+			return terms
+		}
+	}
+	return terms
+}
+
+func deriveChunkContext(chunk domain.RAGChunk) string {
+	var parts []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, label+"="+value)
+		}
+	}
+	add("source_kind", chunk.SourceKind)
+	add("facet", chunk.Facet)
+	if chunk.SourcePath != "" {
+		add("source", filepath.Base(chunk.SourcePath))
+	}
+	for _, key := range []string{
+		"project", "book", "title", "source_title", "section", "heading",
+		"volume", "arc", "chapter", "genre", "tags",
+	} {
+		add(key, metadataValueString(chunk.Metadata[key]))
+	}
+	return truncateRunes(strings.Join(parts, " | "), 240)
+}
+
+func deriveChunkKeywords(chunk domain.RAGChunk) []string {
+	var parts []string
+	parts = append(parts, chunk.SourceKind, chunk.Facet, chunk.Context, chunk.Summary)
+	if chunk.SourcePath != "" {
+		parts = append(parts, strings.ReplaceAll(chunk.SourcePath, "/", " "))
+	}
+	for _, key := range []string{"title", "section", "heading", "genre", "tags"} {
+		parts = append(parts, metadataValueString(chunk.Metadata[key]))
+	}
+	return normalizeKeywords(QueryTerms(parts...))
+}
+
+func normalizeKeywords(items []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = cleanTerm(item)
+		if len([]rune(item)) < 2 || len([]rune(item)) > 24 {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+		if len(out) >= 24 {
+			break
+		}
+	}
+	return out
+}
+
+func metadataValueString(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(x)
+	case []string:
+		return strings.Join(x, " ")
+	case []any:
+		var parts []string
+		for _, item := range x {
+			if s := metadataValueString(item); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, " ")
+	default:
+		return strings.TrimSpace(fmt.Sprint(x))
+	}
+}
+
+func normalizeSeparators(text string) string {
+	replacer := strings.NewReplacer(
+		"\n", " ", "\t", " ", "\r", " ",
+		"，", " ", "。", " ", "、", " ", "；", " ", "：", " ",
+		"！", " ", "？", " ", "（", " ", "）", " ", "《", " ", "》", " ",
+		"“", " ", "”", " ", "\"", " ", "'", " ", "·", " ",
+		",", " ", ".", " ", ";", " ", ":", " ", "!", " ", "?", " ",
+		"(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ",
+		"/", " ", "\\", " ", "|", " ", "-", " ", "_", " ",
+	)
+	return replacer.Replace(text)
+}
+
+func cleanTerm(term string) string {
+	return strings.Trim(strings.TrimSpace(term), " \t\r\n,.;:!?，。；：、！？（）()[]{}《》“”\"'`")
+}
+
+func truncateRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit])
+}
+
+func ErrNilBackend(name string) error {
+	return fmt.Errorf("rag %s backend is nil", name)
+}

@@ -1,0 +1,22 @@
+{
+  "id": "second_algorithm_foundation",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查她的第二算法项目设计期交付物同构约定：premise/characters/world_rules/大纲/时间线/关系/伏笔/指南针必须齐全（长短篇同名同构口径）。",
+  "prompt": "inspect existing second algorithm foundation artifacts",
+  "artifact_dir": "data/runs/她的第二算法/output/novel",
+  "expect": {
+    "required_files": [
+      "premise.md",
+      "characters.json",
+      "world_rules.json",
+      "outline.json",
+      "layered_outline.json",
+      "timeline.json",
+      "relationship_state.json",
+      "foreshadow_ledger.json",
+      "meta/compass.json"
+    ]
+  },
+  "gate": { "max_severity": "warning" }
+}

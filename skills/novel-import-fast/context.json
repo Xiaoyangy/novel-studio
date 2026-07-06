@@ -1,0 +1,22 @@
+{
+  "skill": "novel-import-fast",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [],
+  "conditional_files": [],
+  "state_files": [
+    ".skill-context/novel-import-fast.md"
+  ],
+  "output_contract": [
+    "通过 novel-studio CLI 子命令读取或写入 output/novel/。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/novel-import-fast.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

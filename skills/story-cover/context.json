@@ -1,0 +1,24 @@
+{
+  "skill": "story-cover",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [
+    "references/cover-styles.md"
+  ],
+  "conditional_files": [],
+  "state_files": [
+    ".skill-context/story-cover.md"
+  ],
+  "output_contract": [
+    "按该 skill 的 SKILL.md 和 references 中声明的项目文件落盘，不把长正文只留在对话中。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/story-cover.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

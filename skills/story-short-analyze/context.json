@@ -1,0 +1,50 @@
+{
+  "skill": "story-short-analyze",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [],
+  "conditional_files": [
+    {
+      "when": "需要该 skill 的方法论、模板、rubric、平台规则或阶段细节时读取。",
+      "paths": [
+        "references/anti-ai-writing.md",
+        "references/banned-words.md",
+        "references/character-basics.md",
+        "references/character-design-methods.md",
+        "references/character-relations.md",
+        "references/deconstruction-examples.md",
+        "references/genre-catalog.md",
+        "references/genre-core-mechanics.md",
+        "references/genre-readers.md",
+        "references/genre-writing-formulas.md",
+        "references/genre-writing-techniques.md",
+        "references/hooks-chapter.md",
+        "references/hooks-paragraph.md",
+        "references/hooks-suspense.md",
+        "references/material-decomposition.md",
+        "references/output-contract.md",
+        "references/output-templates.md",
+        "references/quality-checklist.md",
+        "references/real-market-data.md",
+        "references/zhihu-style.md"
+      ]
+    }
+  ],
+  "state_files": [
+    "<短篇标题>/第01章_正文.md",
+    "<短篇标题>/对标/",
+    ".skill-context/story-short-analyze.md"
+  ],
+  "output_contract": [
+    "deconstruction-library/{书名}/ 下的短篇拆文报告、结构文件、_meta.json 和下游消费契约。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/story-short-analyze.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

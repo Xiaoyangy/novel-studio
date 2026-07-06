@@ -1,0 +1,22 @@
+{
+  "id": "ghostcity_rag_progression",
+  "category": "harness",
+  "role": "pipeline",
+  "description": "检查鬼城项目（2026-07-05 simulation_restart_from_seed 世代重置后）的基线完整性：进度/检查点/RAG 索引存在、向量沉淀非空、防串库与参考库污染。旧世代的 phase/章数/千级 chunk 断言已随重置失效并移除；新世代推进后可按新推演方案的产出再收紧断言。",
+  "prompt": "inspect ghostcity baseline after generation restart",
+  "artifact_dir": "data/runs/鬼城/output/novel",
+  "expect": {
+    "required_files": [
+      "meta/progress.json",
+      "meta/checkpoints.jsonl",
+      "meta/rag/index_state.json",
+      "meta/rag/vector_store.json"
+    ],
+    "min_rag_chunks": 300,
+    "forbidden_rag_sources": [
+      "data/reference-library",
+      "她的第二算法"
+    ]
+  },
+  "gate": { "max_severity": "warning" }
+}

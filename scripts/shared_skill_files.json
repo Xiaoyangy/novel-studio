@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "note": "Shared skill assets are real files, not symlinks. validate_skill_context.py compares every path in a group byte-for-byte against the canonical copy.",
+  "groups": [
+    {
+      "name": "anti-ai-writing",
+      "canonical": "skills/story-setup/references/agent-references/anti-ai-writing.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/anti-ai-writing.md",
+        "skills/story-deslop/references/anti-ai-writing.md",
+        "skills/story-long-write/references/anti-ai-writing.md",
+        "skills/story-review/references/anti-ai-writing.md",
+        "skills/story-short-analyze/references/anti-ai-writing.md"
+      ]
+    },
+    {
+      "name": "banned-words",
+      "canonical": "skills/story-setup/references/agent-references/banned-words.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/banned-words.md",
+        "skills/story-deslop/references/banned-words.md",
+        "skills/story-long-write/references/banned-words.md",
+        "skills/story-review/references/banned-words.md",
+        "skills/story-short-analyze/references/banned-words.md",
+        "skills/story-short-write/references/banned-words.md"
+      ]
+    },
+    {
+      "name": "character-basics",
+      "canonical": "skills/story-setup/references/agent-references/character-basics.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/character-basics.md",
+        "skills/story-long-write/references/character-basics.md"
+      ]
+    },
+    {
+      "name": "character-design-methods",
+      "canonical": "skills/story-setup/references/agent-references/character-design-methods.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/character-design-methods.md",
+        "skills/story-long-write/references/character-design-methods.md"
+      ]
+    },
+    {
+      "name": "character-relations",
+      "canonical": "skills/story-setup/references/agent-references/character-relations.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/character-relations.md",
+        "skills/story-long-write/references/character-relations.md",
+        "skills/story-review/references/character-relations.md"
+      ]
+    },
+    {
+      "name": "check-ai-patterns",
+      "canonical": "skills/story-long-write/scripts/check-ai-patterns.js",
+      "paths": [
+        "skills/story-long-write/scripts/check-ai-patterns.js",
+        "skills/story-deslop/scripts/check-ai-patterns.js",
+        "skills/story-review/scripts/check-ai-patterns.js",
+        "skills/story-short-write/scripts/check-ai-patterns.js"
+      ]
+    },
+    {
+      "name": "check-degeneration",
+      "canonical": "skills/story-long-write/scripts/check-degeneration.js",
+      "paths": [
+        "skills/story-long-write/scripts/check-degeneration.js",
+        "skills/story-deslop/scripts/check-degeneration.js",
+        "skills/story-review/scripts/check-degeneration.js",
+        "skills/story-short-write/scripts/check-degeneration.js"
+      ]
+    },
+    {
+      "name": "cross-book-recall",
+      "canonical": "skills/story-long-write/references/cross-book-recall.md",
+      "paths": [
+        "skills/story-long-write/references/cross-book-recall.md",
+        "skills/story-short-write/references/cross-book-recall.md"
+      ]
+    },
+    {
+      "name": "dialogue-mastery",
+      "canonical": "skills/story-setup/references/agent-references/dialogue-mastery.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/dialogue-mastery.md",
+        "skills/story-long-write/references/dialogue-mastery.md",
+        "skills/story-review/references/dialogue-mastery.md",
+        "skills/story-short-write/references/dialogue-mastery.md"
+      ]
+    },
+    {
+      "name": "emotional-arc-design",
+      "canonical": "skills/story-setup/references/agent-references/emotional-arc-design.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/emotional-arc-design.md",
+        "skills/story-long-write/references/emotional-arc-design.md"
+      ]
+    },
+    {
+      "name": "emotional-methods",
+      "canonical": "skills/story-setup/references/agent-references/emotional-methods.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/emotional-methods.md",
+        "skills/story-long-write/references/emotional-methods.md",
+        "skills/story-short-write/references/emotional-methods.md"
+      ]
+    },
+    {
+      "name": "format-and-structure",
+      "canonical": "skills/story-setup/references/agent-references/format-and-structure.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/format-and-structure.md",
+        "skills/story-import/references/format-and-structure.md",
+        "skills/story-long-write/references/format-and-structure.md"
+      ]
+    },
+    {
+      "name": "genre-catalog",
+      "canonical": "skills/story-setup/references/agent-references/genre-catalog.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/genre-catalog.md",
+        "skills/story-long-write/references/genre-catalog.md"
+      ]
+    },
+    {
+      "name": "genre-core-mechanics",
+      "canonical": "skills/story-setup/references/agent-references/genre-core-mechanics.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/genre-core-mechanics.md",
+        "skills/story-long-write/references/genre-core-mechanics.md"
+      ]
+    },
+    {
+      "name": "genre-readers",
+      "canonical": "skills/story-setup/references/agent-references/genre-readers.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/genre-readers.md",
+        "skills/story-long-write/references/genre-readers.md"
+      ]
+    },
+    {
+      "name": "genre-writing-formulas",
+      "canonical": "skills/story-setup/references/agent-references/genre-writing-formulas.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/genre-writing-formulas.md",
+        "skills/story-long-write/references/genre-writing-formulas.md",
+        "skills/story-short-write/references/genre-writing-formulas.md"
+      ]
+    },
+    {
+      "name": "hooks-chapter",
+      "canonical": "skills/story-setup/references/agent-references/hooks-chapter.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/hooks-chapter.md",
+        "skills/story-long-write/references/hooks-chapter.md",
+        "skills/story-short-analyze/references/hooks-chapter.md",
+        "skills/story-short-write/references/hooks-chapter.md"
+      ]
+    },
+    {
+      "name": "hooks-paragraph",
+      "canonical": "skills/story-long-write/references/hooks-paragraph.md",
+      "paths": [
+        "skills/story-long-write/references/hooks-paragraph.md",
+        "skills/story-short-analyze/references/hooks-paragraph.md",
+        "skills/story-short-write/references/hooks-paragraph.md"
+      ]
+    },
+    {
+      "name": "hooks-suspense",
+      "canonical": "skills/story-setup/references/agent-references/hooks-suspense.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/hooks-suspense.md",
+        "skills/story-long-write/references/hooks-suspense.md",
+        "skills/story-short-analyze/references/hooks-suspense.md",
+        "skills/story-short-write/references/hooks-suspense.md"
+      ]
+    },
+    {
+      "name": "normalize-punctuation",
+      "canonical": "skills/story-long-write/scripts/normalize-punctuation.js",
+      "paths": [
+        "skills/story-long-write/scripts/normalize-punctuation.js",
+        "skills/story-deslop/scripts/normalize-punctuation.js",
+        "skills/story-review/scripts/normalize-punctuation.js",
+        "skills/story-short-write/scripts/normalize-punctuation.js"
+      ]
+    },
+    {
+      "name": "opening-design",
+      "canonical": "skills/story-setup/references/agent-references/opening-design.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/opening-design.md",
+        "skills/story-long-write/references/opening-design.md"
+      ]
+    },
+    {
+      "name": "outline-conflict",
+      "canonical": "skills/story-setup/references/agent-references/outline-conflict.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/outline-conflict.md",
+        "skills/story-long-write/references/outline-conflict.md"
+      ]
+    },
+    {
+      "name": "outline-methods",
+      "canonical": "skills/story-setup/references/agent-references/outline-methods.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/outline-methods.md",
+        "skills/story-long-write/references/outline-methods.md"
+      ]
+    },
+    {
+      "name": "outline-rhythm",
+      "canonical": "skills/story-setup/references/agent-references/outline-rhythm.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/outline-rhythm.md",
+        "skills/story-long-write/references/outline-rhythm.md"
+      ]
+    },
+    {
+      "name": "output-contract-short",
+      "canonical": "skills/story-short-analyze/references/output-contract.md",
+      "paths": [
+        "skills/story-short-analyze/references/output-contract.md",
+        "skills/story-short-write/references/output-contract.md"
+      ]
+    },
+    {
+      "name": "plot-core-methods",
+      "canonical": "skills/story-setup/references/agent-references/plot-core-methods.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/plot-core-methods.md",
+        "skills/story-long-write/references/plot-core-methods.md",
+        "skills/story-review/references/plot-core-methods.md"
+      ]
+    },
+    {
+      "name": "quality-checklist",
+      "canonical": "skills/story-setup/references/agent-references/quality-checklist.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/quality-checklist.md",
+        "skills/story-long-write/references/quality-checklist.md"
+      ]
+    },
+    {
+      "name": "real-market-data",
+      "canonical": "skills/story-short-analyze/references/real-market-data.md",
+      "paths": [
+        "skills/story-short-analyze/references/real-market-data.md",
+        "skills/story-short-scan/references/real-market-data.md"
+      ]
+    },
+    {
+      "name": "reversal-toolkit",
+      "canonical": "skills/story-setup/references/agent-references/reversal-toolkit.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/reversal-toolkit.md",
+        "skills/story-long-write/references/reversal-toolkit.md",
+        "skills/story-short-write/references/reversal-toolkit.md"
+      ]
+    },
+    {
+      "name": "scan-cdp-utils",
+      "canonical": "skills/story-long-scan/scripts/cdp-utils.js",
+      "paths": [
+        "skills/story-long-scan/scripts/cdp-utils.js",
+        "skills/story-short-scan/scripts/cdp-utils.js"
+      ]
+    },
+    {
+      "name": "state-tracking",
+      "canonical": "skills/story-long-write/references/state-tracking.md",
+      "paths": [
+        "skills/story-long-write/references/state-tracking.md",
+        "skills/story-import/references/state-tracking.md"
+      ]
+    },
+    {
+      "name": "style-combat-face",
+      "canonical": "skills/story-setup/references/agent-references/style-combat-face.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/style-combat-face.md",
+        "skills/story-long-write/references/style-combat-face.md"
+      ]
+    },
+    {
+      "name": "style-genre-modules",
+      "canonical": "skills/story-setup/references/agent-references/style-genre-modules.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/style-genre-modules.md",
+        "skills/story-long-write/references/style-genre-modules.md"
+      ]
+    },
+    {
+      "name": "writing-craft",
+      "canonical": "skills/story-setup/references/agent-references/writing-craft.md",
+      "paths": [
+        "skills/story-setup/references/agent-references/writing-craft.md",
+        "skills/story-long-write/references/writing-craft.md"
+      ]
+    }
+  ]
+}

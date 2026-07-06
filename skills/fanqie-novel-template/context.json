@@ -1,0 +1,28 @@
+{
+  "skill": "fanqie-novel-template",
+  "entrypoint": "SKILL.md",
+  "always_read": [
+    "SKILL.md",
+    "CONTEXT.md",
+    "context.json"
+  ],
+  "required_files": [
+    "references/fanqie-short-workflow.md",
+    "references/genre-skill-blueprint.md",
+    "references/story-bible-template.md",
+    "references/work-tag-catalog.md",
+    "agents/openai.yaml"
+  ],
+  "conditional_files": [],
+  "state_files": [
+    ".skill-context/fanqie-novel-template.md"
+  ],
+  "output_contract": [
+    "按番茄短篇三件套交付：单章文件、故事圣经、审核报告、图片生成方案。"
+  ],
+  "compaction_resume": [
+    "压缩或恢复后先读本文件夹的 CONTEXT.md，再读执行目录中的 .skill-context/fanqie-novel-template.md（若存在）。",
+    "确认已读文件清单、当前阶段、输入/输出路径、硬约束和下一步后再继续。",
+    "不要把长正文、完整参考库或多本书设定塞进主会话；这些内容必须落盘并按需读取。"
+  ]
+}

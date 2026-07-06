@@ -1,0 +1,21 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+
+  novel-studio:
+    image: ghcr.io/chenhongyang/novel-studio:latest
+    build:
+      context: .
+    volumes:
+      - ./config:/root/.ainovel
+      - ./workspace:/workspace
+    stdin_open: true
+    tty: true
+
+volumes:
+  qdrant-storage:

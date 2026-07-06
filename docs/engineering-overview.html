@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>novel-studio · 开发者视角 · 工程全景</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d11;
+    --bg-soft: #11151b;
+    --surface: #161b23;
+    --surface-2: #1d2330;
+    --border: #252c39;
+    --border-soft: #1c2230;
+    --text: #e6eaf0;
+    --text-muted: #9aa3b2;
+    --text-dim: #6b7383;
+    --primary: #10b981;
+    --primary-soft: rgba(16,185,129,0.10);
+    --primary-border: rgba(16,185,129,0.32);
+    --accent: #f59e0b;
+    --accent-soft: rgba(245,158,11,0.10);
+    --accent-border: rgba(245,158,11,0.30);
+    --indigo: #818cf8;
+    --indigo-soft: rgba(129,140,248,0.10);
+    --indigo-border: rgba(129,140,248,0.30);
+    --rose: #f43f5e;
+    --rose-soft: rgba(244,63,94,0.10);
+    --sky: #38bdf8;
+    --sky-soft: rgba(56,189,248,0.10);
+    --amber: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Outfit', -apple-system, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: 'JetBrains Mono', monospace; font-size: 0.88em; color: var(--primary); }
+
+  /* Layout */
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 0 32px; }
+  @media (max-width: 768px) { .wrap { padding: 0 20px; } }
+
+  /* Top nav */
+  .topnav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11,13,17,0.88);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .topnav-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 56px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+  .brand-mark {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    display: grid; place-items: center; color: var(--primary);
+  }
+  .brand-mark svg { width: 14px; height: 14px; }
+  .topnav-links { display: flex; gap: 4px; overflow-x: auto; }
+  .topnav-links a {
+    font-size: 12.5px; color: var(--text-muted); padding: 6px 10px;
+    border-radius: 6px; white-space: nowrap;
+    transition: color 0.15s, background 0.15s;
+  }
+  .topnav-links a:hover { color: var(--text); background: var(--surface); }
+  @media (max-width: 768px) { .topnav-links { display: none; } }
+
+  /* Hero */
+  .hero {
+    padding: 80px 0 56px;
+    border-bottom: 1px solid var(--border-soft);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 15% 20%, var(--primary-soft), transparent 35%),
+      radial-gradient(circle at 85% 80%, var(--indigo-soft), transparent 35%);
+    pointer-events: none;
+  }
+  .hero-inner { position: relative; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11.5px; font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+  .hero h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(34px, 5vw, 50px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    font-weight: 400;
+    max-width: 22ch;
+    margin-bottom: 20px;
+  }
+  .hero h1 em { font-style: italic; color: var(--primary); }
+  .hero-sub {
+    font-size: 15px; color: var(--text-muted); max-width: 70ch;
+    margin-bottom: 36px;
+  }
+  .hero-meta {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px;
+    background: var(--border); border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .hero-meta .cell { background: var(--bg-soft); padding: 16px 18px; }
+  .hero-meta .k { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; font-family: 'JetBrains Mono', monospace; }
+  .hero-meta .v { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 600; color: var(--text); }
+  .hero-meta .v .small { font-size: 10.5px; color: var(--text-dim); font-weight: 400; }
+  @media (max-width: 900px) { .hero-meta { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 540px) { .hero-meta { grid-template-columns: repeat(2, 1fr); } }
+
+  /* Sections */
+  section { padding: 64px 0; border-bottom: 1px solid var(--border-soft); }
+  section:last-child { border-bottom: none; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+  .sec-num {
+    font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+    color: var(--text-dim); letter-spacing: 0.05em;
+  }
+  .sec-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 28px; line-height: 1.15; font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+  .sec-sub { font-size: 13.5px; color: var(--text-muted); margin-top: 8px; margin-bottom: 32px; max-width: 78ch; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: var(--primary-border); }
+  .card-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .card-desc { color: var(--text-muted); font-size: 12.5px; }
+  .card .path { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-dim); margin-top: 10px; }
+
+  /* Grids */
+  .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .g4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .g2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .g6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+  @media (max-width: 1000px) { .g6 { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 900px) { .g3, .g4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .g3, .g4, .g2, .g6 { grid-template-columns: 1fr; } }
+
+  /* Tags */
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 4px;
+    font-size: 10.5px; font-family: 'JetBrains Mono', monospace;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .tag.primary { background: var(--primary-soft); border-color: var(--primary-border); color: var(--primary); }
+  .tag.accent { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); }
+  .tag.indigo { background: var(--indigo-soft); border-color: var(--indigo-border); color: var(--indigo); }
+  .tag.rose { background: var(--rose-soft); border-color: rgba(244,63,94,0.30); color: var(--rose); }
+  .tag.sky { background: var(--sky-soft); border-color: rgba(56,189,248,0.30); color: var(--sky); }
+
+  /* Code block */
+  pre, code { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  pre {
+    background: #06090d;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  pre .c-key { color: #a78bfa; }
+  pre .c-str { color: #fbbf24; }
+  pre .c-cmt { color: var(--text-dim); }
+  pre .c-fn { color: var(--primary); }
+  pre .c-num { color: #fb7185; }
+  pre .c-typ { color: var(--sky); }
+
+  /* Mermaid */
+  .mermaid-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 20px;
+    overflow-x: auto;
+  }
+
+  /* Layer card */
+  .layer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+  }
+  .layer-num {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--primary); margin-bottom: 4px;
+  }
+  .layer-name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  .layer-en { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  .layer-desc { font-size: 12.5px; color: var(--text-muted); margin-bottom: 14px; }
+  .layer .pkgs { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--primary); }
+  .layer .pkgs .p { color: var(--text); padding: 1px 4px; background: var(--bg); border-radius: 3px; margin-right: 4px; display: inline-block; margin-bottom: 4px; }
+
+  /* Tool table */
+  table.tools {
+    width: 100%; border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  table.tools th, table.tools td {
+    text-align: left; padding: 11px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 12.5px;
+  }
+  table.tools th {
+    background: var(--bg-soft);
+    font-weight: 500;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  table.tools tr:last-child td { border-bottom: none; }
+  table.tools td .name { font-family: 'JetBrains Mono', monospace; color: var(--primary); font-size: 12px; }
+  table.tools td .file { font-family: 'JetBrains Mono', monospace; color: var(--text-dim); font-size: 11px; }
+  table.tools td .desc { color: var(--text-muted); font-size: 12px; }
+
+  /* Directory tree */
+  .tree {
+    background: #06090d;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+  .tree .dir { color: var(--sky); font-weight: 600; }
+  .tree .file { color: var(--text); }
+  .tree .comment { color: var(--text-dim); }
+  .tree .accent { color: var(--primary); }
+
+  /* Decision card */
+  .decision {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: 0 10px 10px 0;
+    padding: 16px 18px;
+  }
+  .decision.accent { border-left-color: var(--accent); }
+  .decision.indigo { border-left-color: var(--indigo); }
+  .decision.rose { border-left-color: var(--rose); }
+  .decision-title { font-weight: 600; font-size: 13.5px; margin-bottom: 4px; }
+  .decision-body { font-size: 12.5px; color: var(--text-muted); line-height: 1.65; }
+
+  /* KV */
+  .kv-mini { display: grid; grid-template-columns: 140px 1fr; row-gap: 6px; column-gap: 14px; font-size: 12.5px; }
+  .kv-mini dt { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
+  .kv-mini dd { color: var(--text); }
+
+  /* Footer */
+  footer { padding: 40px 0 56px; color: var(--text-dim); font-size: 12px; text-align: center; border-top: 1px solid var(--border-soft); }
+  footer .meta { font-family: 'JetBrains Mono', monospace; }
+
+  .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .hint { font-size: 11.5px; color: var(--text-dim); margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ============ TOP NAV ============ -->
+<nav class="topnav">
+  <div class="wrap topnav-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      </div>
+      novel-studio · 工程全景
+    </div>
+    <div class="topnav-links">
+      <a href="#sec-stack">技术栈</a>
+      <a href="#sec-layers">分层</a>
+      <a href="#sec-tools">工具集</a>
+      <a href="#sec-state">状态机</a>
+      <a href="#sec-store">存储契约</a>
+      <a href="#sec-rag">RAG 实现</a>
+      <a href="#sec-llm">LLM 适配</a>
+      <a href="#sec-obs">可观测性</a>
+      <a href="#sec-build">构建发布</a>
+      <a href="#sec-decisions">设计决策</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div class="eyebrow"><span class="dot"></span>ENGINEERING OVERVIEW · DEVELOPER VIEW · Go 1.25.5</div>
+    <h1>novel-studio 工程能力<em>全景</em></h1>
+    <p class="hero-sub">
+      上一张图讲了「这个工具能写什么小说」。这一张讲「这个工程本身是怎么搭起来的」——技术栈、24 个 internal 子包、40 个 Agent 工具、Phase 状态机、存储契约、RAG 子系统实现、构建发布矩阵、关键设计决策与已知缺陷。
+    </p>
+    <div class="hero-meta">
+      <div class="cell">
+        <div class="k">go.mod</div>
+        <div class="v">Go 1.25.5</div>
+      </div>
+      <div class="cell">
+        <div class="k">直接依赖</div>
+        <div class="v">2 <span class="small">agentcore + x/text</span></div>
+      </div>
+      <div class="cell">
+        <div class="k">internal 包</div>
+        <div class="v">24</div>
+      </div>
+      <div class="cell">
+        <div class="k">Agent 工具</div>
+        <div class="v">40</div>
+      </div>
+      <div class="cell">
+        <div class="k">domain 类型</div>
+        <div class="v">55+</div>
+      </div>
+      <div class="cell">
+        <div class="k">build 矩阵</div>
+        <div class="v">6 <span class="small">linux/darwin/win × amd64/arm64</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ SECTION 1: TECH STACK ============ -->
+<section id="sec-stack">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">01 / TECH STACK</span>
+      <h2 class="sec-title">技术栈</h2>
+    </div>
+    <p class="sec-sub">整个工程只依赖两个直接第三方包：voocel/agentcore（Agent 框架）和 voocel/litellm（间接，LLM 适配）。其余全部自研。</p>
+
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          go.mod · 直接依赖
+        </div>
+        <pre><span class="c-key">module</span> github.com/chenhongyang/novel-studio
+
+<span class="c-key">go</span> <span class="c-num">1.25</span>.5
+
+<span class="c-key">require</span> (
+    github.com/voocel/agentcore <span class="c-num">v1.7</span>.7
+    golang.org/x/text <span class="c-num">v0.38</span>.0
+)
+
+<span class="c-cmt">// indirect</span>
+github.com/voocel/litellm <span class="c-num">v1.8</span>.3
+golang.org/x/image <span class="c-num">v0.43</span>.0</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/></svg>
+          运行时特征
+        </div>
+        <div class="kv-mini" style="margin-top: 4px;">
+          <dt>CGO</dt><dd><code>CGO_ENABLED=0</code> · 纯静态二进制</dd>
+          <dt>二进制</dt><dd>20.9 MB（darwin arm64）</dd>
+          <dt>压缩</dt><dd><code>ldflags: -s -w</code></dd>
+          <dt>版本注入</dt><dd><code>-X main.version/commit/date</code></dd>
+          <dt>CLI 框架</dt><dd>自研 flag 包，无 cobra 依赖</dd>
+          <dt>持久化</dt><dd>纯文件系统 + JSON，无 SQLite/Postgres</dd>
+          <dt>外部进程</dt><dd>llama-server（:18434）+ Qdrant（:6333）</dd>
+          <dt>Agent 框架</dt><dd>voocel/agentcore（tool-call + streaming）</dd>
+        </div>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 24px;">
+      <div class="cluster-head">
+        <div class="cluster-title">goreleaser 构建矩阵</div>
+        <span class="tag primary">.goreleaser.yml</span>
+      </div>
+      <pre><span class="c-key">goos</span>:    linux, darwin, windows
+<span class="c-key">goarch</span>:  amd64, arm64
+<span class="c-key">formats</span>: tar.gz (linux/darwin) · zip (windows)
+<span class="c-key">archive</span>: novel-studio_{version}_{OS}_{ARCH}</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 2: LAYERS ============ -->
+<section id="sec-layers">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">02 / ARCHITECTURE LAYERS</span>
+      <h2 class="sec-title">七层架构</h2>
+    </div>
+    <p class="sec-sub">24 个 internal 子包按职责归到七层。单向依赖：上层 → 下层，工具包被任意层调用，领域类型是「公共词汇表」。</p>
+
+    <div class="mermaid-wrap" style="margin-bottom: 32px;">
+      <div class="mermaid">
+flowchart TB
+    L1["<b>CLI 入口层</b><br/>cmd/novel-studio/<br/>main.go · pipeline_cmd · zero_init_cmd · ..."]
+    L2["<b>编排层</b><br/>internal/host/<br/>flow · imp · sim · observer · reminder"]
+    L3["<b>Agent 调度层</b><br/>internal/agents/<br/>build.go · context_manager · ctxpack"]
+    L4["<b>工具实现层</b><br/>internal/tools/<br/>40 tools (save_foundation · commit_chapter · plan_chapter · ...)"]
+    L5["<b>存储层</b><br/>internal/store/<br/>50+ files · 文件系统 + JSON"]
+    L6["<b>领域类型层</b><br/>internal/domain/<br/>55+ types · Progress · Phase · Chapter"]
+    L7["<b>基础设施层</b><br/>bootstrap · errs · logger · notify · rag · models · utils"]
+
+    L1 --> L2 --> L3 --> L4
+    L4 --> L5
+    L4 --> L6
+    L3 --> L7
+    L5 --> L6
+    L5 --> L7
+    L7 --> L6
+
+    classDef cli fill:#1d2330,stroke:#10b981,color:#e6eaf0
+    classDef orch fill:#1d2330,stroke:#f59e0b,color:#e6eaf0
+    classDef agent fill:#1d2330,stroke:#818cf8,color:#e6eaf0
+    classDef tools fill:#1d2330,stroke:#38bdf8,color:#e6eaf0
+    classDef store fill:#1d2330,stroke:#f43f5e,color:#e6eaf0
+    classDef domain fill:#1d2330,stroke:#fbbf24,color:#e6eaf0
+    classDef infra fill:#1d2330,stroke:#94a3b8,color:#e6eaf0
+
+    class L1 cli
+    class L2 orch
+    class L3 agent
+    class L4 tools
+    class L5 store
+    class L6 domain
+    class L7 infra
+      </div>
+    </div>
+
+    <div class="g3">
+      <div class="layer">
+        <div class="layer-num">L1 · CLI</div>
+        <div class="layer-name">命令入口</div>
+        <div class="layer-en">cmd/novel-studio/</div>
+        <div class="layer-desc">单二进制入口；main.go 解析顶层 flag 后路由到各子命令。</div>
+        <div class="pkgs">
+          <span class="p">main.go</span>
+          <span class="p">pipeline_cmd</span>
+          <span class="p">zero_init_cmd</span>
+          <span class="p">import_cmd</span>
+          <span class="p">rag_cmd</span>
+          <span class="p">service</span>
+          <span class="p">+15 cmd files</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L2 · Orchestration</div>
+        <div class="layer-name">编排与状态机</div>
+        <div class="layer-en">internal/host/</div>
+        <div class="layer-desc">流程控制：flow/ 状态机、imp/ 导入、sim/ 仿真、observer 工具调用观测、reminder 子代理守卫。</div>
+        <div class="pkgs">
+          <span class="p">flow/</span>
+          <span class="p">imp/</span>
+          <span class="p">sim/</span>
+          <span class="p">exp/</span>
+          <span class="p">reminder/</span>
+          <span class="p">observer*.go</span>
+          <span class="p">budget.go</span>
+          <span class="p">cocreate*.go</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L3 · Agents</div>
+        <div class="layer-name">Agent 构建</div>
+        <div class="layer-en">internal/agents/</div>
+        <div class="layer-desc">5 个 Agent 的 factory + 上下文压缩。context_manager.go + ctxpack/ 是 token 经济核心。</div>
+        <div class="pkgs">
+          <span class="p">build.go</span>
+          <span class="p">context_manager.go</span>
+          <span class="p">ctxpack/</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L4 · Tools</div>
+        <div class="layer-name">工具实现</div>
+        <div class="layer-en">internal/tools/</div>
+        <div class="layer-desc">Agent 实际调用的 40 个工具；每个 tool 实现 agentcore.Tool 接口（Name/Description/Schema/Execute）。</div>
+        <div class="pkgs">
+          <span class="p">save_*</span>
+          <span class="p">plan_/draft_/edit_/commit_chapter</span>
+          <span class="p">*_lints</span>
+          <span class="p">novel_context</span>
+          <span class="p">rag_sink</span>
+          <span class="p">ask_user</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L5 · Storage</div>
+        <div class="layer-name">文件存储</div>
+        <div class="layer-en">internal/store/</div>
+        <div class="layer-desc">JSON 落盘到 <code>output/novel/</code>；按数据域分文件（outline / characters / rag / runtime / usage …）。</div>
+        <div class="pkgs">
+          <span class="p">store.go</span>
+          <span class="p">outline / characters / world</span>
+          <span class="p">checkpoints / runtime / usage</span>
+          <span class="p">rag / simulation</span>
+          <span class="p">+40 files</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L6 · Domain</div>
+        <div class="layer-name">领域类型</div>
+        <div class="layer-en">internal/domain/</div>
+        <div class="layer-desc">纯数据结构 + 枚举 + 编解码。Phase / Progress / Chapter / Character / WorldRule … 无副作用。</div>
+        <div class="pkgs">
+          <span class="p">progression.go</span>
+          <span class="p">chapter.go</span>
+          <span class="p">pipeline.go</span>
+          <span class="p">simulation.go</span>
+          <span class="p">psych_profile.go</span>
+          <span class="p">+50 files</span>
+        </div>
+      </div>
+
+      <div class="layer">
+        <div class="layer-num">L7 · Infra</div>
+        <div class="layer-name">基础设施</div>
+        <div class="layer-en">bootstrap · errs · logger · notify · rag · models · utils · version</div>
+        <div class="layer-desc">横切关注点：配置加载、错误码体系、日志、桌面/手机通知、向量检索、模型注册表。</div>
+        <div class="pkgs">
+          <span class="p">bootstrap/config</span>
+          <span class="p">errs</span>
+          <span class="p">logger</span>
+          <span class="p">notify</span>
+          <span class="p">rag/</span>
+          <span class="p">models/</span>
+          <span class="p">utils</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 3: TOOL CATALOG ============ -->
+<section id="sec-tools">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">03 / TOOL CATALOG</span>
+      <h2 class="sec-title">40 个 Agent 工具</h2>
+    </div>
+    <p class="sec-sub">每个工具实现 agentcore.Tool 接口（<code>Name / Description / Schema / Execute</code>），是 Agent 与世界交互的唯一通道。Schema 直接驱动 LLM 的 tool-call 决策。</p>
+
+    <div class="cluster" style="margin-bottom: 24px;">
+      <div class="cluster-head">
+        <div class="cluster-title">工具接口契约</div>
+        <span class="tag">agentcore.Tool</span>
+      </div>
+      <pre><span class="c-key">type</span> <span class="c-typ">Tool</span> <span class="c-key">interface</span> {
+    <span class="c-fn">Name</span>() string                         <span class="c-cmt">// e.g. "save_foundation"</span>
+    <span class="c-fn">Description</span>() string                   <span class="c-cmt">// 注入到 LLM system prompt</span>
+    <span class="c-fn">Label</span>() string
+    <span class="c-fn">Schema</span>() map[<span class="c-typ">any</span>]<span class="c-typ">any</span>                  <span class="c-cmt">// JSON Schema for tool-call args</span>
+    <span class="c-fn">ReadOnly</span>(args <span class="c-typ">json</span>.RawMessage) <span class="c-typ">bool</span>   <span class="c-cmt">// 并发安全判定</span>
+    <span class="c-fn">ConcurrencySafe</span>(args) <span class="c-typ">bool</span>
+    <span class="c-fn">Execute</span>(ctx, args) (RawMessage, <span class="c-typ">error</span>)
+}</pre>
+    </div>
+
+    <table class="tools">
+      <thead>
+        <tr>
+          <th style="width: 200px;">工具</th>
+          <th style="width: 220px;">文件</th>
+          <th>用途</th>
+          <th style="width: 130px;">主调 Agent</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="name">save_foundation</span></td><td><span class="file">save_foundation.go</span></td><td><span class="desc">落盘 premise / outline / characters / world_rules / book_world（9 种 type）</span></td><td><span class="tag primary">architect</span></td></tr>
+        <tr><td><span class="name">save_user_rules</span></td><td><span class="file">save_user_rules.go</span></td><td><span class="desc">落盘用户自定义规则</span></td><td><span class="tag primary">architect</span></td></tr>
+        <tr><td><span class="name">save_world_tick</span></td><td><span class="file">save_world_tick.go</span></td><td><span class="desc">推进世界时间线 tick</span></td><td><span class="tag primary">architect</span></td></tr>
+        <tr><td><span class="name">save_arc_summary</span></td><td><span class="file">save_arc_summary.go</span></td><td><span class="desc">写弧级摘要</span></td><td><span class="tag primary">architect</span></td></tr>
+        <tr><td><span class="name">save_volume_summary</span></td><td><span class="file">save_volume_summary.go</span></td><td><span class="desc">写卷级摘要</span></td><td><span class="tag primary">architect</span></td></tr>
+
+        <tr><td><span class="name">plan_chapter</span></td><td><span class="file">plan_chapter.go</span></td><td><span class="desc">生成下一章 chapter_plan（含人物续用参考 / 伏笔 / 资源账本）</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">draft_chapter</span></td><td><span class="file">draft_chapter.go</span></td><td><span class="desc">按 plan 产出正文 draft，RAG 检索注入上下文</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">edit_chapter</span></td><td><span class="file">edit_chapter.go</span></td><td><span class="desc">修改已写章节正文</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">commit_chapter</span></td><td><span class="file">commit_chapter.go</span></td><td><span class="desc">落盘 chapters/NN.md + 检查点 + RAG 沉淀 + 推进 progress</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">reopen_book</span></td><td><span class="file">reopen_book.go</span></td><td><span class="desc">回滚 commit（出错恢复）</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">read_chapter</span></td><td><span class="file">read_chapter.go</span></td><td><span class="desc">读已 commit 章节（给后续章节参考）</span></td><td><span class="tag accent">writer</span></td></tr>
+        <tr><td><span class="name">read_draft</span></td><td><span class="file">read_draft.go</span></td><td><span class="desc">读未 commit 的草稿</span></td><td><span class="tag accent">writer</span></td></tr>
+
+        <tr><td><span class="name">check_consistency</span></td><td><span class="file">check_consistency.go</span></td><td><span class="desc">综合 lint（methodology + consistency + chapter_guard + character_coverage）</span></td><td><span class="tag sky">editor</span></td></tr>
+        <tr><td><span class="name">save_review</span></td><td><span class="file">save_review.go</span></td><td><span class="desc">写评审结果（红旗 / 黄旗 / verdict）</span></td><td><span class="tag sky">editor</span></td></tr>
+        <tr><td><span class="name">consistency_lints</span></td><td><span class="file">consistency_lints.go</span></td><td><span class="desc">单类 lint：设定一致性</span></td><td><span class="tag sky">editor</span></td></tr>
+        <tr><td><span class="name">methodology_lints</span></td><td><span class="file">methodology_lints.go</span></td><td><span class="desc">单类 lint：写法规范</span></td><td><span class="tag sky">editor</span></td></tr>
+        <tr><td><span class="name">chapter_guard</span></td><td><span class="file">chapter_guard.go</span></td><td><span class="desc">章节前置守卫（在分层大纲范围内才允许写）</span></td><td><span class="tag sky">editor</span></td></tr>
+        <tr><td><span class="name">character_coverage</span></td><td><span class="file">character_coverage.go</span></td><td><span class="desc">人物覆盖度检查（登场 vs 大纲）</span></td><td><span class="tag sky">editor</span></td></tr>
+
+        <tr><td><span class="name">novel_context</span></td><td><span class="file">novel_context.go</span></td><td><span class="desc">读全量项目上下文（premise/characters/outline/foundation/dynamics …）</span></td><td><span class="tag indigo">all</span></td></tr>
+        <tr><td><span class="name">context_architect</span></td><td><span class="file">context_architect.go</span></td><td><span class="desc">为 architect 构造专用上下文切片</span></td><td><span class="tag indigo">architect</span></td></tr>
+        <tr><td><span class="name">context_order</span></td><td><span class="file">context_order.go</span></td><td><span class="desc">上下文排序规则（注入顺序）</span></td><td><span class="tag indigo">all</span></td></tr>
+        <tr><td><span class="name">novel_context_builders</span></td><td><span class="file">novel_context_builders.go</span></td><td><span class="desc">novel_context 的多 view builder</span></td><td><span class="tag indigo">all</span></td></tr>
+
+        <tr><td><span class="name">premise_structure</span></td><td><span class="file">premise_structure.go</span></td><td><span class="desc">premise 结构校验 / 字段提取</span></td><td><span class="tag primary">architect</span></td></tr>
+        <tr><td><span class="name">rag_sink</span></td><td><span class="file">rag_sink.go</span></td><td><span class="desc">手动触发 RAG 增量沉淀</span></td><td><span class="tag indigo">all</span></td></tr>
+        <tr><td><span class="name">project_memory_rag</span></td><td><span class="file">project_memory_rag.go</span></td><td><span class="desc">项目级 RAG 记忆（跨章节）</span></td><td><span class="tag indigo">all</span></td></tr>
+        <tr><td><span class="name">ask_user</span></td><td><span class="file">ask_user.go</span></td><td><span class="desc">向用户提问（多轮澄清 / cocreate）</span></td><td><span class="tag">cocreate</span></td></tr>
+        <tr><td><span class="name">args_unmarshal</span></td><td><span class="file">args_unmarshal.go</span></td><td><span class="desc">工具参数解析 helper（非 agent 工具）</span></td><td><span class="tag dim">infra</span></td></tr>
+      </tbody>
+    </table>
+    <div class="hint" style="margin-top: 14px;">
+      详细文件清单可在 <code>internal/tools/</code> 查看；同名 <code>*_test.go</code> 提供测试覆盖（commit / draft / plan / edit / save_* / consistency / methodology / save_review / save_foundation / save_user_rules / save_world_tick / read_draft / reopen_book / novel_context / rag_sink / premise_structure）。
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 4: STATE MACHINE ============ -->
+<section id="sec-state">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">04 / STATE MACHINE</span>
+      <h2 class="sec-title">Phase 状态机</h2>
+    </div>
+    <p class="sec-sub">整个项目的状态机有两套：长程 Phase（Premise → Outline → Writing → Complete）和流水线 Stage（write / review / rewrite / export）。generation_id 隔离推演线。</p>
+
+    <div class="mermaid-wrap" style="margin-bottom: 28px;">
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> PhasePremise: save_foundation type=premise
+    PhasePremise --> PhaseOutline: save_foundation type=outline
+    PhaseOutline --> PhaseWriting: save_foundation 完整<br/>FoundationMissing() == []
+    PhaseWriting --> PhaseComplete: save_foundation type=complete_book
+    PhaseComplete --> [*]: 终卷判定清单通过
+
+    note right of PhaseWriting
+      writing 阶段禁止
+      全量覆盖 outline
+      只能用 expand_arc
+      或 append_volume
+    end note
+
+    note right of PhaseComplete
+      拒绝 append_volume
+      拒绝 save_foundation 重写
+      必须无返工队列
+    end note
+      </div>
+    <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
+        <span class="tag primary">save_foundation.isWriting() 守门</span>
+        <span class="tag accent">commit_chapter 推进 chapter_progress</span>
+        <span class="tag indigo">store.Progress.UpdatePhase() 写盘</span>
+      </div>
+    </div>
+
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">progress.json 关键字段</div>
+        <pre>{
+  <span class="c-key">"novel_name"</span>: <span class="c-str">"鬼城"</span>,
+  <span class="c-key">"phase"</span>: <span class="c-str">"writing"</span>,
+  <span class="c-key">"current_chapter"</span>: <span class="c-num">1</span>,
+  <span class="c-key">"total_chapters"</span>: <span class="c-num">100</span>,
+  <span class="c-key">"completed_chapters"</span>: [],
+  <span class="c-key">"flow"</span>: <span class="c-str">"writing"</span>,
+  <span class="c-key">"current_volume"</span>: <span class="c-num">1</span>,
+  <span class="c-key">"current_arc"</span>: <span class="c-num">1</span>,
+  <span class="c-key">"layered"</span>: <span class="c-num">true</span>,
+  <span class="c-key">"generation_id"</span>: <span class="c-str">"simulation-20260705-071820-0800"</span>,
+  <span class="c-key">"generation_mode"</span>: <span class="c-str">"simulation_restart_from_seed"</span>
+}</pre>
+      </div>
+      <div class="card">
+        <div class="card-title">Flow vs Phase</div>
+        <div style="font-size: 13px; color: var(--text-muted); line-height: 1.7;">
+          <strong style="color:var(--text)">phase</strong> — 长程阶段，由 save_foundation 触发跃迁。<br/><br/>
+          <strong style="color:var(--text)">flow</strong> — 流水线阶段，写章节流时通常是 <code>writing</code>；仿真重启时是 <code>simulation</code>。<br/><br/>
+          <strong style="color:var(--text)">generation_id</strong> — 推演线 ID，<code>simulation_restart_from_seed</code> 模式下旧章当背景种子，新事实必须本轮推演。<br/><br/>
+          <strong style="color:var(--text)">PendingRewrites</strong> — 返工队列，rewrite path 才走完整 Save* 三连。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 5: STORAGE CONTRACT ============ -->
+<section id="sec-store">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">05 / STORAGE CONTRACT</span>
+      <h2 class="sec-title">存储契约</h2>
+    </div>
+    <p class="sec-sub">output/novel/ 是工程的 source of truth。store 包按数据域分文件，所有原子写入都先 <code>tmp → fsync → rename</code> 防止半写。</p>
+
+    <div class="tree">
+<span class="dir">output/novel/</span>
+├── <span class="file">premise.md / .json</span>              <span class="comment"># 前提</span>
+├── <span class="file">outline.md / .json</span>               <span class="comment"># 单层大纲</span>
+├── <span class="file">layered_outline.md / .json</span>       <span class="comment"># 分层大纲（卷/弧/章）</span>
+├── <span class="file">characters.md / .json</span>           <span class="comment"># 人物</span>
+├── <span class="file">world_rules.md / .json</span>          <span class="comment"># 世界规则</span>
+├── <span class="file">book_world.md / .json</span>           <span class="comment"># 本书世界</span>
+├── <span class="file">relationship_state.{initial,}.md</span><span class="comment"># 人物关系</span>
+├── <span class="file">foreshadow_ledger.{initial,}.md</span> <span class="comment"># 伏笔账本</span>
+├── <span class="file">timeline.md / .json</span>
+├── <span class="file">compass.md / .json</span>
+├── <span class="file">*.md</span>                            <span class="comment"># foundation 八件套</span>
+│
+├── <span class="dir">chapters/</span>                        <span class="comment"># 正文 source of truth</span>
+│   ├── <span class="file accent">01.md</span>  <span class="file">02.md</span>  ...            <span class="comment"># 已 commit 章节</span>
+│   └── <span class="file">01.md.pre-rewrite.md</span>           <span class="comment"># rewrite 前的备份</span>
+│
+├── <span class="dir">drafts/</span>                          <span class="comment"># 草稿 / 章节 plan</span>
+│   ├── <span class="file">01.zero_init.plan.json</span>
+│   └── <span class="file">NN.plan.json</span>
+│
+├── <span class="dir">summaries/</span>                       <span class="comment"># 弧/卷摘要</span>
+│
+├── <span class="dir">reviews/</span>                         <span class="comment"># 评审结果</span>
+│
+├── <span class="dir">meta/</span>                            <span class="comment"># 元数据（meta 中心）</span>
+│   ├── <span class="file">progress.json</span>                  <span class="comment"># Phase / Flow / current_chapter</span>
+│   ├── <span class="file">pipeline.json</span>                  <span class="comment"># 流水线断点</span>
+│   ├── <span class="file">checkpoints.jsonl</span>              <span class="comment"># 章节级 checkpoint（追加写）</span>
+│   ├── <span class="file">usage.json / .jsonl</span>            <span class="comment"># token 用量与费用</span>
+│   ├── <span class="file">runtime/</span>                      <span class="comment"># LLM 调用原始记录</span>
+│   ├── <span class="file">sessions/</span>                     <span class="comment"># agent 会话</span>
+│   ├── <span class="file">snapshots/</span>                    <span class="comment"># 关键节点快照</span>
+│   ├── <span class="file">rag/</span>                          <span class="comment"># RAG index state + vector_store</span>
+│   ├── <span class="file">chapter_metrics/</span>              <span class="comment"># 章节 AI 味指标</span>
+│   ├── <span class="file">chapter_world_deltas/</span>         <span class="comment"># 章节世界变更</span>
+│   ├── <span class="file">character_stage/</span>              <span class="comment"># 角色阶段记录</span>
+│   ├── <span class="file">characters/</span>                   <span class="comment"># 角色 dossier</span>
+│   ├── <span class="file">state_changes.jsonl</span>           <span class="comment"># 状态变更流</span>
+│   ├── <span class="file">simulation_restart_policy.*</span>
+│   └── <span class="file">+30 个 meta/</span>                  <span class="comment"># zero-init / prewrite 产物</span>
+│
+└── <span class="file">项目级 md 资产</span>                  <span class="comment"># 大纲 / 主题 / 角色 / 情节</span>
+    </div>
+
+    <div class="g3" style="margin-top: 24px;">
+      <div class="decision">
+        <div class="decision-title">Why 文件系统而不是 SQLite？</div>
+        <div class="decision-body">
+          可读 / 可 diff / 可手动修复 / 与 git 友好 / 跨进程安全（rename 原子）。代价是查询要走 grep，无索引能力。但工程规模 100~1000 个 JSON 文件，全文 grep 仍 < 100ms。
+        </div>
+      </div>
+      <div class="decision accent">
+        <div class="decision-title">Why 分这么多小文件？</div>
+        <div class="decision-body">
+          按数据域拆分让 store 包一个 file 对应一个语义边界。FoundationMissing() / character_coverage() 等检查逻辑只需 import 对应 store 文件，不需要拉一个 god store。
+        </div>
+      </div>
+      <div class="decision indigo">
+        <div class="decision-title">Why 不用 ORM？</div>
+        <div class="decision-body">
+          domain 类型即 JSON Schema；store 直接 unmarshal 到 struct，零反射。schema 漂移靠 runtime 校验（store 写入失败立即报错，pipeline 中断）。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 6: RAG IMPLEMENTATION ============ -->
+<section id="sec-rag">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">06 / RAG IMPLEMENTATION</span>
+      <h2 class="sec-title">RAG 子系统实现</h2>
+    </div>
+    <p class="sec-sub">双路召回（BM25 + Embedding）+ 跨平台 Qdrant 进程管理 + OpenAI 兼容 embedding 接口 + 白名单策略。</p>
+
+    <div class="g2" style="margin-bottom: 28px;">
+      <div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">internal/rag/</div>
+        <table class="tools">
+          <tbody>
+            <tr><td><span class="name">local_embedder.go</span></td><td><span class="desc">本地哈希伪向量（离线兜底）</span></td></tr>
+            <tr><td><span class="name">openai_embedder.go</span></td><td><span class="desc">OpenAI 兼容 /v1/embeddings 客户端</span></td></tr>
+            <tr><td><span class="name">local_gguf.go</span></td><td><span class="desc">GGUF 模型 + llama-server 自动拉起 + 健康等待</span></td></tr>
+            <tr><td><span class="name">qdrant.go</span></td><td><span class="desc">Qdrant HTTP client（collection / upsert / search）</span></td></tr>
+            <tr><td><span class="name">qdrant_service.go</span></td><td><span class="desc">Qdrant 二进制拉起 + 健康检查</span></td></tr>
+            <tr><td><span class="name">qdrant_service_unix.go</span></td><td><span class="desc">Unix 平台特定路径</span></td></tr>
+            <tr><td><span class="name">qdrant_service_windows.go</span></td><td><span class="desc">Windows 平台特定路径</span></td></tr>
+            <tr><td><span class="name">indexer.go</span></td><td><span class="desc">文件 → chunk → embedding → vector 编排</span></td></tr>
+            <tr><td><span class="name">vector_store.go</span></td><td><span class="desc">vector_store.json 落盘（fallback / 离线）</span></td></tr>
+            <tr><td><span class="name">policy.go</span></td><td><span class="desc">白名单 / 黑名单策略（零章用）</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">数据流</div>
+        <div class="mermaid-wrap" style="padding: 18px;">
+          <div class="mermaid">
+flowchart LR
+    A[源文件<br/>foundation / drafts / chapters]
+    B[indexer.go<br/>chunk → embed input]
+    C{Config 检测}
+    D[local_embedder<br/>哈希伪向量<br/>离线兜底]
+    E[openai_embedder<br/>llama-server<br/>或远程 endpoint]
+    F[Qdrant upsert<br/>本地 :6333]
+    G[vector_store.json<br/>fallback 落盘]
+    H[meta/rag/index_state.json]
+
+    A --> B --> C
+    C -- 离线 --> D --> H
+    C -- 在线 --> E --> F
+    F --> H
+    C --> G
+
+    classDef src fill:#1d2330,stroke:#10b981,color:#e6eaf0
+    classDef proc fill:#1d2330,stroke:#38bdf8,color:#e6eaf0
+    classDef store fill:#1d2330,stroke:#f43f5e,color:#e6eaf0
+    class A src
+    class B,C,D,E proc
+    class F,G,H store
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="g3">
+      <div class="decision">
+        <div class="decision-title">Embedder 双实现</div>
+        <div class="decision-body">
+          <code>openai_embedder.go</code> 走 OpenAI 兼容 HTTP 协议，<strong>兼容 llama-server / Ollama / 第三方代理</strong>。模型可以是 GGUF 也可以是远程 embedding API。
+        </div>
+      </div>
+      <div class="decision accent">
+        <div class="decision-title">本地兜底哈希</div>
+        <div class="decision-body">
+          <code>local_embedder.go</code> 用 hash 当伪向量，保证长程语义召回在 <strong>断网时仍能跑通</strong>（只是召回质量退化）。
+        </div>
+      </div>
+      <div class="decision indigo">
+        <div class="decision-title">policy.go 白名单</div>
+        <div class="decision-body">
+          零章阶段只索引本项目设定 + 零章资产，<strong>禁止索引旧正文 / 审稿 / 备份 / 拆文库</strong>——避免把上轮推演当成新事实。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 7: LLM ADAPTER ============ -->
+<section id="sec-llm">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">07 / LLM ADAPTER</span>
+      <h2 class="sec-title">LLM 适配层（bootstrap）</h2>
+    </div>
+    <p class="sec-sub">所有 LLM 调用经过 bootstrap 统一封装：模型注册表 + provider 凭证 + reasoning_effort + 角色级 failover + 透传 extra_body / extra headers。</p>
+
+    <div class="g2">
+      <div class="cluster">
+        <div class="cluster-head">
+          <div class="cluster-title">Provider 配置范式</div>
+          <span class="tag primary">~/.ainovel/config.json</span>
+        </div>
+        <pre>{
+  <span class="c-key">"provider"</span>: <span class="c-str">"minimax"</span>,
+  <span class="c-key">"model"</span>: <span class="c-str">"MiniMax-M3[1M]"</span>,
+  <span class="c-key">"reasoning_effort"</span>: <span class="c-str">"medium"</span>,
+
+  <span class="c-key">"providers"</span>: {
+    <span class="c-key">"anthropic"</span>: {
+      <span class="c-key">"api_key"</span>: <span class="c-str">"sk-ant-..."</span>,
+      <span class="c-key">"models"</span>: [<span class="c-str">"claude-opus-4-8"</span>, ...]
+    },
+    <span class="c-key">"ollama"</span>: {
+      <span class="c-key">"base_url"</span>: <span class="c-str">"http://localhost:11434/v1"</span>,
+      <span class="c-key">"models"</span>: [<span class="c-str">"qwen3:14b"</span>]
+    },
+    <span class="c-key">"codex-proxy"</span>: {
+      <span class="c-key">"type"</span>: <span class="c-str">"openai"</span>,
+      <span class="c-key">"api"</span>: <span class="c-str">"responses"</span>,
+      <span class="c-key">"extra"</span>: { <span class="c-key">"user_agent"</span>: ..., <span class="c-key">"headers"</span>: ... }
+    }
+  },
+
+  <span class="c-key">"roles"</span>: {
+    <span class="c-key">"writer"</span>: {
+      <span class="c-key">"provider"</span>: <span class="c-str">"anthropic"</span>,
+      <span class="c-key">"model"</span>: <span class="c-str">"claude-opus-4-8"</span>,
+      <span class="c-key">"reasoning_effort"</span>: <span class="c-str">"high"</span>,
+      <span class="c-key">"fallbacks"</span>: [
+        { <span class="c-key">"provider"</span>: <span class="c-str">"minimax"</span>, <span class="c-key">"model"</span>: <span class="c-str">"MiniMax-M3[1M]"</span> }
+      ]
+    }
+  }
+}</pre>
+      </div>
+
+      <div>
+        <div class="g2" style="gap: 12px;">
+          <div class="card">
+            <div class="card-title">Provider 协议</div>
+            <div class="card-desc">type 字段声明协议。openai / anthropic 用官方实现；自定义代理必须显式声明。</div>
+            <div class="pill-row" style="margin-top: 8px;">
+              <span class="tag">openai</span>
+              <span class="tag">anthropic</span>
+              <span class="tag indigo">openai-compatible</span>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">Extra 透传</div>
+            <div class="card-desc"><code>extra_body</code> 进请求体；<code>extra</code>（user_agent / headers）进 HTTP 层；用于 Codex / Claude Code 代理识别。</div>
+          </div>
+          <div class="card">
+            <div class="card-title">Reasoning Effort</div>
+            <div class="card-desc">off / low / medium / high / xhigh / max。角色级覆盖。空字符串 = 沿用模型默认。</div>
+          </div>
+          <div class="card">
+            <div class="card-title">Fallbacks 数组</div>
+            <div class="card-desc">请求级 failover：主 provider 失败（宕机 / 限流 / 余额不足）按序尝试 fallback，恢复后自动回主路。</div>
+          </div>
+          <div class="card">
+            <div class="card-title">Context Window</div>
+            <div class="card-desc">未指定时按 registry 模型名解析；显式指定可把名义 1M 钉到 300k 提前触发压缩。</div>
+          </div>
+          <div class="card">
+            <div class="card-title">Setup 引导</div>
+            <div class="card-desc">首次启动走 <code>bootstrap/setup.go</code> 引导：选 Provider → 填 Key → 填 Base URL → 填模型。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 8: OBSERVABILITY ============ -->
+<section id="sec-obs">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">08 / OBSERVABILITY</span>
+      <h2 class="sec-title">可观测性</h2>
+    </div>
+    <p class="sec-sub">三层可观测：业务进度（meta/）+ 工具调用观测（observer）+ 浏览器看板（service start）。</p>
+
+    <div class="g3">
+      <div class="card">
+        <div class="card-title">
+          <span class="tag primary">L1</span>
+          业务进度
+        </div>
+        <div class="kv-mini" style="margin-top: 4px;">
+          <dt>progress.json</dt><dd>Phase / Flow / current_chapter</dd>
+          <dt>pipeline.json</dt><dd>阶段断点 + 完成证据</dd>
+          <dt>checkpoints.jsonl</dt><dd>章节级 checkpoint（追加）</dd>
+          <dt>state_changes.jsonl</dt><dd>状态变更流</dd>
+          <dt>delivery_log.jsonl</dt><dd>章节交付记录</dd>
+          <dt>usage.json</dt><dd>token 用量与费用</dd>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span class="tag accent">L2</span>
+          工具调用观测
+        </div>
+        <div class="kv-mini" style="margin-top: 4px;">
+          <dt>observer.go</dt><dd>子代理 tool-call 流</dd>
+          <dt>observer_events.go</dt><dd>事件抽取</dd>
+          <dt>observer_stream.go</dt><dd>stream 观测</dd>
+          <dt>observer_tools.go</dt><dd>工具 delta 解析</dd>
+          <dt>stream_extract.go</dt><dd>LLM 输出 → 结构化字段</dd>
+          <dt>usage_replay.go</dt><dd>usage 回放</dd>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span class="tag sky">L3</span>
+          浏览器看板
+        </div>
+        <div class="card-desc" style="margin-top: 8px;">
+          <code>novel-studio service start</code> 起本地 HTTP，<code>service open</code> 打开看板。可视化进度 / 章节 / 评审。
+        </div>
+        <pre><span class="c-fn">novel-studio</span> service start
+<span class="c-fn">novel-studio</span> service open
+<span class="c-fn">novel-studio</span> service status
+<span class="c-cmt"># 健康端点</span>
+curl http://localhost:&lt;port&gt;/api/health</pre>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 24px;">
+      <div class="cluster-head">
+        <div class="cluster-title">Checkpoint · 两层恢复</div>
+        <span class="tag primary">断点续跑</span>
+      </div>
+      <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.7;">
+        恢复策略是两层叠加。失败发生在哪个层，下次重跑 <code>--pipeline</code> 就从哪层继续。
+      </div>
+      <pre><span class="c-key">Layer 1</span> · pipeline.json    <span class="c-cmt">// 阶段级：write / review / rewrite / export 哪个已完成</span>
+  <span class="c-key">└─&gt;</span> 已完成阶段自动跳过；未完成从第一个未完成阶段开始
+
+<span class="c-key">Layer 2</span> · checkpoints.jsonl <span class="c-cmt">// 章节级：write 内部每章一个 checkpoint</span>
+  <span class="c-key">└─&gt;</span> 写第 N 章失败时，从第 N 章 plan 重跑；前 N-1 章 plan/draft/commit 跳过
+
+<span class="c-cmt">// 阶段失败不标记完成 → 下次从该阶段继续</span>
+<span class="c-cmt">// 完成证据失效（stale）→ 自动重跑该阶段</span>
+<span class="c-cmt">// 两层叠加 = 任意时刻断电，重启能从中断点继续</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 9: BUILD & RELEASE ============ -->
+<section id="sec-build">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">09 / BUILD & RELEASE</span>
+      <h2 class="sec-title">构建与发布</h2>
+    </div>
+    <p class="sec-sub">纯 Go 静态二进制 + Docker + 自更新命令；goreleaser 全平台矩阵。</p>
+
+    <div class="g4">
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary)"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/></svg>
+          本地编译
+        </div>
+        <pre><span class="c-cmt"># 工程根目录</span>
+<span class="c-key">go</span> build -ldflags <span class="c-str">"-s -w"</span> \
+  -o novel-studio \
+  ./cmd/novel-studio
+
+<span class="c-cmt"># 当前二进制 20.9 MB (darwin arm64)</span></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+          Goreleaser
+        </div>
+        <pre><span class="c-cmt"># 6 平台：linux/darwin/win × amd64/arm64</span>
+goreleaser release <span class="c-key">--clean</span>
+
+<span class="c-cmt"># 输出：</span>
+novel-studio_{ver}_Linux_x86_64.tar.gz
+novel-studio_{ver}_Linux_arm64.tar.gz
+novel-studio_{ver}_Darwin_x86_64.tar.gz
+novel-studio_{ver}_Darwin_arm64.tar.gz
+novel-studio_{ver}_Windows_x86_64.zip
+novel-studio_{ver}_Windows_arm64.zip</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sky)"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          Docker
+        </div>
+        <pre><span class="c-cmt"># Dockerfile + docker-compose.yml</span>
+<span class="c-cmt"># docker-compose 起 Qdrant sidecar</span>
+docker compose up -d
+
+<span class="c-cmt"># 检查 qdrant 在跑</span>
+curl http://127.0.0.1:6333/collections</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          自更新
+        </div>
+        <pre><span class="c-cmt"># CLI 内置自更新</span>
+<span class="c-fn">novel-studio</span> update              <span class="c-cmt"># 升到 latest</span>
+<span class="c-fn">novel-studio</span> update <span class="c-num">v1.2</span>.3       <span class="c-cmt"># 升到指定版本</span></pre>
+      </div>
+    </div>
+
+    <div class="cluster" style="margin-top: 24px;">
+      <div class="cluster-head">
+        <div class="cluster-title">发布工作流</div>
+        <span class="tag">CI-friendly</span>
+      </div>
+      <pre>git tag v1.2.3
+git push origin v1.2.3
+  <span class="c-key">└─&gt;</span> goreleaser 自动跑 6 平台构建
+      <span class="c-key">└─&gt;</span> 生成 tar.gz / zip + sha256 checksums
+          <span class="c-key">└─&gt;</span> 推到 GitHub Releases
+              <span class="c-key">└─&gt;</span> novel-studio update 命令可拉取
+
+<span class="c-cmt">// .goreleaser.yml · commitizen 风格 changelog</span>
+changelog:
+  groups:
+    - <span class="c-key">title</span>: <span class="c-str">"New Features"</span>, <span class="c-key">regexp</span>: <span class="c-str">'^feat'</span>
+    - <span class="c-key">title</span>: <span class="c-str">"Bug Fixes"</span>,   <span class="c-key">regexp</span>: <span class="c-str">'^fix'</span>
+    - <span class="c-key">title</span>: <span class="c-str">"Performance"</span>, <span class="c-key">regexp</span>: <span class="c-str">'^perf'</span>
+    - <span class="c-key">title</span>: <span class="c-str">"Refactor"</span>,    <span class="c-key">regexp</span>: <span class="c-str">'^refactor'</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECTION 10: KEY DECISIONS ============ -->
+<section id="sec-decisions">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">10 / KEY DECISIONS & KNOWN GAPS</span>
+      <h2 class="sec-title">关键设计决策与已知缺陷</h2>
+    </div>
+    <p class="sec-sub">为什么这么搭、哪些已经踩过坑。从代码实证里抽出来，不是设计文档里抄的。</p>
+
+    <div class="g2" style="gap: 18px;">
+      <div class="decision">
+        <div class="decision-title">断点续跑 · 两层叠加</div>
+        <div class="decision-body">
+          阶段级（pipeline.json）+ 章节级（checkpoints.jsonl）两层恢复。任意时刻断电，重启能从中断点继续，而不是从头重跑。100 章项目断在中段不会丢失前面 60 章。
+        </div>
+      </div>
+
+      <div class="decision accent">
+        <div class="decision-title">角色级 Failover</div>
+        <div class="decision-body">
+          writer / architect / editor / reviewer 各自有独立 provider + model + fallbacks 数组。主 provider 失败按序切兜底，恢复后自动回主路。比全局 failover 更精准——reviewer 可以独立于 writer。
+        </div>
+      </div>
+
+      <div class="decision indigo">
+        <div class="decision-title">异族裁判（Task 065）</div>
+        <div class="decision-body">
+          LLM judge 对同族输出有 75–84% 自我偏好。writer 与 reviewer 必须用不同模型家族，否则评审就是自我背书。配置范式：writer 用 Claude 系，reviewer 用 minimax M3。
+        </div>
+      </div>
+
+      <div class="decision rose">
+        <div class="decision-title">RAG 双路召回</div>
+        <div class="decision-body">
+          keyword (BM25) + embedding 双路召回，不只信向量检索。原因是人名 / 地名 / 数字这类离散信号，embedding 召回偏弱，BM25 反而准。融合打分后入 top-k。
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="decision-title">本地 GGUF Embedding</div>
+        <div class="decision-body">
+          默认用项目内 <code>Qwen3-Embedding-0.6B-Q8_0.gguf</code>（1024 维 / 8K 窗），llama-server 自动拉起 + 健康等待。离线可用，断网仍能跑（退化到哈希伪向量）。
+        </div>
+      </div>
+
+      <div class="decision accent">
+        <div class="decision-title">Simulation Restart</div>
+        <div class="decision-body">
+          <code>simulation_restart_from_seed</code> 模式下，旧章节只作 background seed，新事实必须本轮推演重生成、入账、审核。解决「重写时把旧章当事实直接抄」的常见 bug。
+        </div>
+      </div>
+
+      <div class="decision indigo">
+        <div class="decision-title">CGO_ENABLED=0 纯静态</div>
+        <div class="decision-body">
+          无 C 依赖 → 单文件二进制 → 跨发行版直接跑 → Docker 镜像 < 30MB。代价是没有 cgo 优化，但 Go 1.25 的纯 Go 性能对 CLI 工具完全够用。
+        </div>
+      </div>
+
+      <div class="decision rose">
+        <div class="decision-title">未自研 LLM SDK</div>
+        <div class="decision-body">
+          走 voocel/litellm（间接依赖）。避免每个 provider 写一份 adapter。代价是多一层抽象，但 4 行 extra 配置就能接 Codex / Claude Code / 自定义代理。
+        </div>
+      </div>
+
+      <div class="decision rose">
+        <div class="decision-title">⚠️ commit_chapter normal path 漏接产物</div>
+        <div class="decision-body">
+          设计意图：每次 commit 都应沉淀 <code>chapter_metrics / chapter_world_deltas / character_stage</code>。<br/>
+          实际行为：仅 <strong>rewrite path</strong>（章节进 <code>PendingRewrites</code>）才走完整 Save* 三连；normal commit path 漏接这三类元数据。<br/>
+          <code>commit_chapter.go:211 / 900 / 1097</code>。修复候选：normal path 也接 Save* 三连，或 rewrite 触发频率提高，或 backfill tool 一次性补齐。
+        </div>
+      </div>
+
+      <div class="decision accent">
+        <div class="decision-title">⚠️ quarantine 状态恢复无命令</div>
+        <div class="decision-body">
+          <code>meta/quarantine_*/</code> 目录是手工 / LLM 判 invalid 的章节归档。但工程没有 <code>--restore-from-quarantine</code> 子命令——只能手动把文件搬回 chapters/ 再走 pipeline。鬼城项目当前就是这个状态。
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="decision-title">⚠️ agents/ 包单文件偏厚</div>
+        <div class="decision-body">
+          <code>build.go</code> 一个文件注册 5 个 Agent；<code>context_manager.go</code> 承担 token 经济的核心逻辑。如果 Agent 数量继续增加，建议按 Agent 拆子包（coordinator/、architect/、writer/…）。
+        </div>
+      </div>
+
+      <div class="decision indigo">
+        <div class="decision-title">⚠️ host/ 子包命名拥挤</div>
+        <div class="decision-body">
+          host/ 下同时有 flow/、imp/、sim/、exp/、reminder/ 五个子目录 + 7 个独立 .go 文件（host.go、observer.go、cocreate.go、budget.go、events.go…）。observer 系列可以独立成 <code>internal/observe/</code>。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="meta">novel-studio · ENGINEERING OVERVIEW · Go 1.25.5 · 24 packages · 40 tools · 6 platforms</div>
+    <div style="margin-top:8px;">事实来源：<code>go.mod</code> · <code>.goreleaser.yml</code> · <code>internal/**</code> · <code>commit_chapter.go</code> · <code>save_foundation.go</code> · <code>zero_init_cmd.go</code></div>
+  </div>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#1d2330',
+      primaryTextColor: '#e6eaf0',
+      primaryBorderColor: '#252c39',
+      lineColor: '#10b981',
+      secondaryColor: '#161b23',
+      tertiaryColor: '#11151b',
+      fontFamily: 'Outfit, sans-serif',
+      fontSize: '13px',
+      noteBkgColor: '#11151b',
+      noteTextColor: '#9aa3b2',
+      noteBorderColor: '#252c39',
+      clusterBkgColor: '#11151b',
+      clusterBorderColor: '#252c39',
+      classTextColor: '#e6eaf0'
+    },
+    flowchart: { curve: 'basis', padding: 14 },
+    stateDiagram: { padding: 14 },
+    securityLevel: 'loose'
+  });
+</script>
+
+</body>
+</html>

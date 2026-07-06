@@ -1,0 +1,4 @@
+interface:
+  display_name: "番茄写作执行流"
+  short_description: "Fanqie writing flow orchestrator with explicit spawn N agents scheduling"
+  default_prompt: "Use $fanqie-writing-flow to turn my premise into complete Fanqie short novels. For multiple books, explicitly say spawn N agents / split across N agents, up to 5 parallel writing agents, with resumable stages and final AI taste under 5%."
