@@ -281,7 +281,7 @@ docker run --rm \
 
 ## RAG：构造与使用
 
-要 RAG 化的语料统一放在 **`deconstruction-library/`**（长篇拆解固定工作区：每本书一个目录，保存黄金三章、逐章摘要、角色 / 剧情 / 设定 / 文风和拆文报告）。RAG 分两条互相隔离的通道：**本书事实层**（写作中途召回）与**设计时刻双库**（只服务设计，不进章节召回）。
+要 RAG 化的语料统一放在 **`deconstruction-library/`**（写作方法与拆解成品语料库：craft / benchmark 双库 + 每本书一目录的拆解成品文档，长文拆解在工程外完成后放入）。RAG 分两条互相隔离的通道：**本书事实层**（写作中途召回）与**设计时刻双库**（只服务设计，不进章节召回）。
 
 ```mermaid
 flowchart TD
@@ -291,7 +291,7 @@ flowchart TD
         S3["benchmark_library 对标素材库<br/>deconstruction-library/novel_all（11 类归并）"]
         S4["章节事实（accept 后）<br/>summaries 提炼，不沉正文"]
     end
-    S1 -->|"--build-rag / --zero-init 白名单<br/>准入策略拒绝散源对标素材"| IDX["索引构建<br/>切块 → chunk hash 去重 → facet 标注"]
+    S1 -->|"--build-rag / --zero-init 白名单<br/>准入策略拒绝散源与拆解成品"| IDX["索引构建<br/>切块 → chunk hash 去重 → facet 标注"]
     S2 -->|"source_kind=craft_technique"| IDX
     S3 -->|"source_kind=benchmark_reference<br/>确定性类目标注"| IDX
     S4 -->|"deliver 阶段入库<br/>草稿一律不准入"| IDX

@@ -24,7 +24,6 @@ description: "网络小说工具箱主入口。根据用户需求自动路由到
 | 豆瓣原创长篇 | 豆瓣长篇、豆瓣阅读、豆瓣写作、15W-30W 原创长篇 | `novel-douban-write` / `novel-pipeline` |
 | 写长篇 | 开书、写大纲、长篇、连载、日更、续写、继续生成 | `novel-write` / `novel-pipeline` |
 | 写短篇 | 短篇、盐言、一万字、故事成稿 | `novel-write` / `novel-pipeline` |
-| 长篇拆文 | 拆文、分析这本书、黄金三章 | `/story-long-analyze` |
 | 短篇拆文 | 拆短篇、分析这个故事 | `/story-short-analyze` |
 | 去 AI 味 | 去 AI 味、太 AI、去味 | `/story-deslop` |
 | 环境部署 | 准备写书、搭环境、初始化 | `/story-setup` |

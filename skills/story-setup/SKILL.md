@@ -70,7 +70,7 @@ description: "网文写作工具集基础设施部署。将 hooks/rules/agents/C
 | `skills/story-setup/references/codex/hooks/story_codex_hook.py` | `.codex/hooks/story_codex_hook.py` | story-setup managed | replace | Python syntax valid | target_cli 含 codex |
 | `skills/story-setup/references/agent-references/` | `.codex/skills/story-setup/references/agent-references/` | story-setup managed | replace | every reference resolves | target_cli 含 codex |
 | `skills/story-setup/references/openclaw/AGENTS.md.tmpl` | `AGENTS.md` | user+managed | marker/section merge | contains OpenClaw story skill routing sections | target_cli 含 openclaw |
-| repository `skills/story*/` | `skills/story*/` | story-setup managed for known skill names | replace known skill dirs only | 9 `SKILL.md` files exist; OpenClaw-compatible frontmatter | target_cli 含 openclaw |
+| repository `skills/story*/` | `skills/story*/` | story-setup managed for known skill names | replace known skill dirs only | 8 `SKILL.md` files exist; OpenClaw-compatible frontmatter | target_cli 含 openclaw |
 | `skills/story-setup/references/agent-references/` | `skills/story-setup/references/agent-references/` | story-setup managed | replace via full skill copy | every reference resolves | target_cli 含 openclaw |
 
 ### opencode.json 合并算法
@@ -125,7 +125,7 @@ description: "网文写作工具集基础设施部署。将 hooks/rules/agents/C
 - 读取 `skills/story-setup/references/codex/agents/` 下所有 `.toml` 文件，复制到用户项目 `.codex/agents/`
 - Agent 文件属于 story-setup 管理文件，可安全覆盖；生成源由 `scripts/generate-codex-agents.py` 从 Claude agent 模板确定性生成
 - 校验每个 TOML 都能解析，且包含 Codex 必需字段：`name`、`description`、`developer_instructions`
-- 只读职责 agent（`chapter-extractor`、`consistency-checker`、`story-explorer`）必须保留 `sandbox_mode = "read-only"`
+- 只读职责 agent（`consistency-checker`、`story-explorer`）必须保留 `sandbox_mode = "read-only"`
 - **部署后必须 trust + 新开 Codex 会话**：Codex custom agents 位于 `.codex/agents/*.toml`，项目 `.codex/` 配置层需要被 trust；部署后需要新会话/刷新后才可能稳定暴露给 spawn。若运行时返回 `unknown agent_type`，调用方必须降级 solo/direct 并报告 fallback。
 - 将 `skills/story-setup/references/agent-references/` 同步复制到 `.codex/skills/story-setup/references/agent-references/`，作为 Codex agent 的项目内参考资料主路径
 
@@ -153,7 +153,7 @@ OpenCode agents 部署是 `replace`，会覆盖上次写入的 `model:`。所以
 
 | 等级 | 匹配关键词 | 对应 Agent |
 |------|-----------|-----------|
-| 低端 | `haiku`, `flash`, `mini`, `nano`, `lite` | chapter-extractor, consistency-checker, story-explorer |
+| 低端 | `haiku`, `flash`, `mini`, `nano`, `lite` | consistency-checker, story-explorer |
 | 中端 | `sonnet`, `plus` | story-researcher, narrative-writer, character-designer |
 | 高端 | `opus`, `pro`, `ultra`, `max` | story-architect |
 
@@ -168,7 +168,7 @@ OpenCode agents 部署是 `replace`，会覆盖上次写入的 `model:`。所以
 **低端选项结构：**
 
 ```
-问题："为低成本 Agent（chapter-extractor, consistency-checker, story-explorer）选择模型："
+问题："为低成本 Agent（consistency-checker, story-explorer）选择模型："
 选项：
   - provider/model-id
   - provider/model-id
@@ -258,7 +258,7 @@ Codex 项目 hooks 部署到 `.codex/hooks.json`，hook 脚本部署到 `.codex/
 
 OpenClaw Phase 1 只部署 skills，不部署 OpenClaw agents/hooks/plugin。
 
-1. 读取仓库当前 `skills/` 下所有包含 `SKILL.md` 的 story skill 目录（9 个：`story*`）。
+1. 读取仓库当前 `skills/` 下所有包含 `SKILL.md` 的 story skill 目录（8 个：`story*`）。
 2. 写入目标项目 `skills/{skill-name}/`，仅替换这些 story-setup 管理的已知 skill 目录；保留用户在 `skills/` 下的其他目录。
 3. 每个 `SKILL.md` 必须满足 OpenClaw frontmatter 约束：`name` / `description` 是单行键值，`metadata` 是单行 JSON 对象且含 `metadata.openclaw`。
 4. 复制 `skills/story-setup/references/openclaw/AGENTS.md.tmpl` 到项目 `AGENTS.md`，按「AGENTS.md 合并策略」合并。
@@ -309,14 +309,12 @@ OpenClaw Phase 1 只部署 skills，不部署 OpenClaw agents/hooks/plugin。
         narrative-writer         → <中端模型>（provider/model-id）
         character-designer       → <中端模型>（provider/model-id）
         story-researcher         → <中端模型>（provider/model-id）
-        chapter-extractor        → <低端模型>（provider/model-id）
         consistency-checker      → <低端模型>（provider/model-id）
         story-explorer           → <低端模型>（provider/model-id）
       ```
     - 如果自动检测失败（`opencode models` 不可用），输出手动配置指南：
       ```
       无法自动检测模型列表。以下 Agent 未配置模型，将使用主模型，成本可能较高：
-        - chapter-extractor（建议使用低成本模型）
         - consistency-checker（建议使用低成本模型）
         - story-explorer（建议使用低成本模型）
 
@@ -329,7 +327,7 @@ OpenClaw Phase 1 只部署 skills，不部署 OpenClaw agents/hooks/plugin。
 7. 验证 opencode 部署（仅当 target_cli 含 opencode 时）：
     - 检查 `.opencode/agents/` 下的 7 个 agent 定义文件是否存在，且 frontmatter 包含 `mode: subagent` 和 `permission` 字段
     - 检查 `.opencode/plugins/story-hooks.ts` 是否存在
-     - 检查 `.opencode/commands/` 下的 8 个 command 文件是否存在
+     - 检查 `.opencode/commands/` 下的 7 个 command 文件是否存在
     - 检查 `skills/story-setup/references/agent-references/` 下 reference 文件完整且数量与源目录一致
     - 检查 `opencode.json` 的 `plugin` 数组是否包含 story-hooks 条目
     - 检查 `.git/hooks/pre-commit` 是否存在且有执行权限（Windows 上跳过执行权限检查）
@@ -343,7 +341,7 @@ OpenClaw Phase 1 只部署 skills，不部署 OpenClaw agents/hooks/plugin。
     - 安装报告必须提示：Codex 需要 trust 项目 `.codex/` 配置层，并在 `/hooks` review/trust 非 managed hooks；部署后新开 Codex 会话让 custom agents 生效；若当前运行时仍返回 `unknown agent_type`，按各 skill 的 fallback 规则降级 solo/direct
 9. 验证 OpenClaw 部署（仅当 target_cli 含 openclaw 时）：
     - 检查 `AGENTS.md` 含 OpenClaw story skill routing sections
-    - 检查 `skills/` 下 9 个 story skill 目录存在，且每个 `SKILL.md` 包含单行 `name`、单行 `description`、单行 JSON `metadata.openclaw`
+    - 检查 `skills/` 下 8 个 story skill 目录存在，且每个 `SKILL.md` 包含单行 `name`、单行 `description`、单行 JSON `metadata.openclaw`
     - 检查 `skills/story-setup/references/agent-references/` 下 reference 文件完整且数量与源目录一致
     - 安装报告必须提示：OpenClaw Phase 1 是 skills-only；未部署 OpenClaw agents/hooks，运行时硬拦截不可用；部署后新开 OpenClaw session 或等待 watcher 刷新
 
@@ -405,7 +403,7 @@ hooks 注册合并按 command 字段去重：
 | references/templates/CLAUDE.md.tmpl | 项目根 CLAUDE.md 模板 |
 | references/templates/hooks/ | 8 个 hook 脚本模板 + `lib/common.sh`/`lib/sentinel.sh`（正文兜底 `check-prose-after-write.sh` 限 PostToolUse Write/Edit；`cat>`/`tee` 等 Bash 写正文由 Codex Stop 回合末 git 扫描兜，Claude/OpenCode 的 Bash 仅 pre-guard） |
 | references/templates/rules/ | 4 条 path-scoped 规则模板 |
-| references/templates/agents/ | 7 个 agent 定义模板（story-architect, character-designer, narrative-writer, consistency-checker, story-researcher, story-explorer, chapter-extractor） |
+| references/templates/agents/ | 6 个 agent 定义模板（story-architect, character-designer, narrative-writer, consistency-checker, story-researcher, story-explorer） |
 | references/agent-references/ | Agent 模板自带的参考资料副本；部署到 `.claude/skills/story-setup/references/agent-references/`，避免跨 skill references |
 | references/templates/settings-hooks.json | hooks 注册 JSON 片段 |
 | references/templates/上下文.md.tmpl | 写作上下文模板 |

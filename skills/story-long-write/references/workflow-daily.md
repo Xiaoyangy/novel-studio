@@ -14,9 +14,9 @@
 >
 > **自定义文风（`设定/文风.md`，优先级最高）**：主会话每章写作前直接读 `设定/文风.md`（不经 story-explorer——它只看 `对标/文风.md`）。存在且含实质内容（去空白 ≥200 字，或含「句长 / 标点 / 对话 / 锚点 / 笔调」风格小节且小节内有可执行约束：比例 / 例句 / 禁止或偏好描述）即进入「自定义文风模式」：它是本书既定笔调的**权威**风格基，narrative-writer 的句长带 / 标点节奏 / 对话潜台词 / 情绪交替以它为准；对标 / 拆文 `文风.md` 降级为「**参考**」——只供原文锚点范例与句长分布数值兜底，不再是被遵循的最终文风。空 / 仅空白 / 仅标题 / 占位 stub（待办 / 待补充 / ___）视为不存在。仅接管风格，**不覆盖** `剧情/情绪模块.md` / `剧情/节奏.md` 的情绪与节奏意图（同下「冲突规则」）。**硬门禁不让位**：`设定/文风.md` 里命中硬安全线的写法（`……`、破折号 `——`/`—`、段间空行、三五字碎句）仍按 narrative-writer 归一为句号 / 逗号 / 动作 beat / 单 `\n`；自定义文风只接管句长 / 软标点节奏 / 潜台词 / 情绪交替（要让这些标记原样进正文须放宽题材硬门禁，本期不做）。
 >
-> **文风缺失**：**未进入自定义文风模式**时，对标书缺 `文风.md` 则停止本章写作、不 inline 生成，报错：「对标书 X 缺少 文风.md。请用 `/story-long-analyze` 跑 Stage 6 生成文风，再同步到项目 `对标/` 目录。」**已进入自定义文风模式则不 fail-fast**，用 `设定/文风.md` 继续。
+> **文风缺失**：**未进入自定义文风模式**时，对标书缺 `文风.md` 则停止本章写作、不 inline 生成，报错：「对标书 X 缺少 文风.md。长文拆解在工程外完成：把 `文风.md` 放入 `deconstruction-library/{书名}/` 或项目 `对标/{书名}/`。」**已进入自定义文风模式则不 fail-fast**，用 `设定/文风.md` 继续。
 >
-> **模块/节奏缺失**：v12 新契约对标书缺 `剧情/情绪模块.md` 或 `剧情/节奏.md` 时停止本章准备，提示重跑 `/story-long-analyze` Stage 3+；只有 pre-v12 legacy deconstruction-library可继续写作，story-explorer 必须在 `gaps.legacy_deconstruction` + `gaps.module_missing` / `gaps.rhythm_missing` 记录，依次低置信回退到 `拆文报告.md`、`文风.md` 可借鉴技巧、匹配章摘要 / `剧情/故事线.md`。
+> **模块/节奏缺失**：v12 新契约对标书缺 `剧情/情绪模块.md` 或 `剧情/节奏.md` 时停止本章准备，提示在工程外补齐拆解产物（`剧情/情绪模块.md`、`剧情/节奏.md`）放入 `deconstruction-library/{书名}/`；只有 pre-v12 legacy deconstruction-library可继续写作，story-explorer 必须在 `gaps.legacy_deconstruction` + `gaps.module_missing` / `gaps.rhythm_missing` 记录，依次低置信回退到 `拆文报告.md`、`文风.md` 可借鉴技巧、匹配章摘要 / `剧情/故事线.md`。
 >
 > **冲突规则**：`剧情/情绪模块.md` 与 `剧情/节奏.md` 是情绪和节奏的 canonical / 权威来源；`拆文报告.md`、`剧情/故事线.md` 是投影摘要；`文风.md` 只管风格。若摘要或文风与权威模块/节奏冲突，保留 `gaps.conflict`，正文意图跟随权威文件。
 >
@@ -104,7 +104,7 @@
      - 调 story-explorer 的 `benchmark_style_load` query_type（输入：项目目录 + 本章目标情绪 + 本章爽点类型 + 本章目标字数）一次性拿到：`{style_profile_path, style_profile_summary, selected_emotion_module, rhythm_reference, module_source_path, rhythm_source_path, matched_chapter_K, matched_chapter_techniques, anchor_excerpts, gaps}`
      - **自定义文风覆盖（先于下列 gaps 判定）**：主会话直接读 `设定/文风.md`（不经 explorer），含实质内容（去空白 ≥200 字，或含 句长 / 标点 / 对话 / 锚点 / 笔调 小节且小节内有可执行约束：比例 / 例句 / 禁止或偏好描述）则置 `custom_style=true`——它作权威风格基**取代** `style_profile_path` 喂给 narrative-writer（句长 / 标点 / 潜台词 / 情绪交替），对标 / 拆文 `style_profile_path` 降级为参考（原文锚点 + 句长分布数值兜底）。空 / 仅空白 / 仅标题 / 占位 stub（待办 / 待补充 / ___）视为不存在。仅接管风格，**不豁免情绪 / 节奏轴**。
      - 若 `gaps.no_benchmark: true` → `custom_style` 为真则进入「自定义文风模式」（用 `设定/文风.md` 写作；无对标可召回，情绪 / 节奏目标改从本书细纲「目标情绪」、卷纲、`设定/题材定位.md` 等内部材料取，`selected_emotion_module` / `rhythm_reference` 记为「无」，不声称从对标召回）；否则跳过文风召回，在 2.4 意图确认标记"无对标参考"
-     - 若 `gaps.missing_primary_contract: true` → 停止本章准备，按 `repair_action` 提示重跑 `/story-long-analyze` Stage 3+；不得进入 narrative-writer（情绪 / 节奏轴独立于文风轴，**自定义文风模式不豁免此停止**——补 `剧情/情绪模块.md` / `剧情/节奏.md`，而非写 `设定/文风.md`）
+     - 若 `gaps.missing_primary_contract: true` → 停止本章准备，按 `repair_action` 提示在工程外补齐拆解产物（`剧情/情绪模块.md`、`剧情/节奏.md`）放入 `deconstruction-library/{书名}/`；不得进入 narrative-writer（情绪 / 节奏轴独立于文风轴，**自定义文风模式不豁免此停止**——补 `剧情/情绪模块.md` / `剧情/节奏.md`，而非写 `设定/文风.md`）
      - 若 legacy 的 `gaps.module_missing: true` → 继续写作；`selected_emotion_module` 使用 `拆文报告.md` 读者需求 / 情绪引擎、`文风.md` 可借鉴技巧或匹配章摘要的回退摘要；仍无则写“无”
      - 若 legacy 的 `gaps.rhythm_missing: true` → 继续写作；`rhythm_reference` 使用 `拆文报告.md` 节奏与情绪触动点、匹配章摘要或 `剧情/故事线.md` 的回退摘要；仍无则写“无”
      - 若 `gaps.conflict` 或 `gaps.module_rhythm_conflict: true` → 意图确认必须说明冲突并按 `剧情/情绪模块.md` / `剧情/节奏.md` 的权威优先级执行；不得让 `文风.md` 覆盖情绪/节奏目标

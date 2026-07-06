@@ -49,8 +49,6 @@ workspace/
 # 拆解库内容不入库(仅保留结构说明与模板,见 deconstruction-library/README.md 的提交规则)
 deconstruction-library/*
 !deconstruction-library/README.md
-!deconstruction-library/_templates/
-!deconstruction-library/_templates/**
 
 # 数据集(参考库/生成产物/运行工作区)不入库
 data/

@@ -15,7 +15,7 @@ import (
 	auditassets "github.com/chenhongyang/novel-studio/quality/audit"
 )
 
-//go:embed CONTEXT_PROTOCOL.md novel-check novel-cocreate novel-diag novel-douban-write novel-pipeline novel-review novel-rewrite novel-simulate novel-steer novel-write novel-writing-assets review story story-deslop story-douban-long-write story-long-analyze story-long-write story-review story-setup story-short-analyze story-short-write
+//go:embed CONTEXT_PROTOCOL.md novel-check novel-cocreate novel-diag novel-douban-write novel-pipeline novel-review novel-rewrite novel-simulate novel-steer novel-write novel-writing-assets review story story-deslop story-douban-long-write story-long-write story-review story-setup story-short-analyze story-short-write
 var skillFS embed.FS
 
 const skillRoot = "."

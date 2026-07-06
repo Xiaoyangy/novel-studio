@@ -104,15 +104,6 @@ if [ -n "$BOOK_DIR" ] && [ -f "$BOOK_DIR/追踪/上下文.md" ]; then
   HAS_CONTENT=true
 fi
 
-# 未完成拆文（阈值 > 0 才报告）
-if [ -d "$ROOT/deconstruction-library" ]; then
-  PROGRESS_COUNT=$(find "$ROOT/deconstruction-library" -name "_progress.md" 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$PROGRESS_COUNT" -gt 0 ]; then
-    OUTPUT+="[INFO] deconstruction-library/ 中有 $PROGRESS_COUNT 个未完成拆文。运行 /story-long-analyze 或 /story-short-analyze。\n"
-    HAS_CONTENT=true
-  fi
-fi
-
 # 仅在有实际内容时输出，否则完全静默
 if [ "$HAS_CONTENT" = true ]; then
   printf '%b' "$OUTPUT"
