@@ -207,13 +207,45 @@ docker run --rm \
 
 配置查找顺序（后者覆盖前者）：`~/.novel-studio/config.json` → `./.novel-studio/config.json`（项目级，含密钥已默认 gitignore）→ `--config <path>`。`providers` / `roles` 按 key 合并；`provider` 的值是 `providers` 里的 key 名（指针），角色可配 `fallbacks` 做请求级故障切换。支持 OpenRouter / Anthropic / Gemini / OpenAI / DeepSeek / Qwen / GLM / Grok / MiniMax / Ollama / Bedrock 及任意自定义代理（`type` + `extra` 透传 UA / headers）。
 
-## RAG 与数据流
+## RAG：构造与使用
 
-要 RAG 化的语料统一放在 **`deconstruction-library/`**（长篇拆解固定工作区：每本书一个目录，保存黄金三章、逐章摘要、角色 / 剧情 / 设定 / 文风和拆文报告）：
+要 RAG 化的语料统一放在 **`deconstruction-library/`**（长篇拆解固定工作区：每本书一个目录，保存黄金三章、逐章摘要、角色 / 剧情 / 设定 / 文风和拆文报告）。RAG 分两条互相隔离的通道：**本书事实层**（写作中途召回）与**设计时刻双库**（只服务设计，不进章节召回）。
 
-- **craft_library**（写作手法库）与 **benchmark_library**（对标素材库）走设计时刻通道：`--build-rag` / `--zero-init` 重建索引时自动附带，只服务设计时刻的 craft_recall 检索，不进常规章节召回；对标素材只可迁移手法 / 结构，不照抄正文；
-- **项目事实**：零章推演资产走白名单索引；章节事实只在 accept 后经 `deliver` 入库；
-- 检索链路 keyword + embedding（本地 Qwen3-Embedding GGUF，llama-server 自动拉起）+ Qdrant，召回命中原因记录在 `meta/rag/retrieval_trace.jsonl`，可审计。
+```mermaid
+flowchart TD
+    subgraph SRC["语料来源"]
+        S1["本书项目事实<br/>prompt / input / 设定 / 账本 / 零章资产"]
+        S2["craft_library 写作手法库<br/>deconstruction-library/writing-techniques"]
+        S3["benchmark_library 对标素材库<br/>deconstruction-library/novel_all（11 类归并）"]
+        S4["章节事实（accept 后）<br/>summaries 提炼，不沉正文"]
+    end
+    S1 -->|"--build-rag / --zero-init 白名单<br/>准入策略拒绝散源对标素材"| IDX["索引构建<br/>切块 → chunk hash 去重 → facet 标注"]
+    S2 -->|"source_kind=craft_technique"| IDX
+    S3 -->|"source_kind=benchmark_reference<br/>确定性类目标注"| IDX
+    S4 -->|"deliver 阶段入库<br/>草稿一律不准入"| IDX
+    IDX --> STO["三层存储<br/>index_state.json（keyword/BM25）<br/>Qdrant collection（向量）<br/>vector_store.json（本地兜底）"]
+    STO --> Q1["常规章节召回 rag_recall<br/>只查本书事实层，设计库硬性排除"]
+    STO --> Q2["设计时刻召回 craft_recall<br/>类目 filter 集合运算 + BM25 排序"]
+    Q1 -->|"novel_context 注入"| WR2["Writer 写作 / 返工"]
+    Q2 -->|"检索结果实例化为本书事实<br/>dossier · props · world_codex"| AR2["Architect 零章推演 / 章计划"]
+    Q1 --> TR["meta/rag/retrieval_trace.jsonl<br/>每次召回的命中原因可审计"]
+    Q2 --> TR
+```
+
+### 构造：什么能进索引，什么时候进
+
+- **`--build-rag`** 构建本书主索引：默认只扫当前项目的 `prompt.md`、`input/*.md` 与 `output/novel` 关键设定 / 账本文件，写入 `meta/rag/index_state.json/md`。**准入策略是代码级的**：拆解库散源（novel_sucai 等）、外部参考库一律拒绝进入写作 RAG，仅 `writing-techniques`（纯手法，无情节事实）与 `novel_all`（归并对标库）豁免、且分别打上 `craft_technique` / `benchmark_reference` 的 source_kind 标记供后续路由隔离；
+- **`--zero-init`** 附带白名单索引：只索引当前项目设定与零章推演资产，防止旧代次数据污染新推演线；
+- **持续沉淀**：写作过程中 `save_foundation` / `commit_chapter` / `save_review` 挂了 RAG sink，foundation、章节、评审、返工产生的事实增量 upsert；章级事实 chunk 以 accept 后的 `deliver` 阶段为准入口（来源是章节摘要提炼的事实，`uses_body=false` 不沉正文），草稿不入库；
+- **三层存储**：keyword/BM25 索引（`index_state.json`）始终可用；配置 embedding 后（本地 Qwen3-Embedding GGUF，llama-server 自动拉起）向量写 Qdrant collection，同时落 `vector_store.json` 本地兜底；chunk 按内容 hash 去重，重建幂等；
+- pipeline 进入 `write` 前自动检查 / 刷新索引并确保本机 Qdrant 可用（`--pipeline` / rewrite 共用同一就绪检查）。
+
+### 使用：两条召回通道，路由隔离
+
+- **常规章节召回（`rag_recall`）** —— Writer 写每章时，`novel_context` 从本章推进焦点（伏笔 / 角色 / 状态变化 / 关系）提取查询词与 facet 提示，对**本书事实层**做混合检索：BM25 关键词 + 向量语义加性混合；`craft_technique` / `benchmark_reference` 两类设计库 chunk 被**硬性排除**——写作中途的一致性只信本书事实，不信参考素材；
+- **设计时刻召回（`craft_recall`）** —— 只在零章初始化、新角色 / 新武器 / 新能力首次出场的章计划时刻走设计双库：每个设计字段绑定固定类目 filter（集合运算，命中与否确定），BM25 只在命中子集内排序，查不到返回显式 `no_material` 而不是静默降级；检索结果**立刻实例化为本书事实**（人物 dossier、道具、视觉设计、world_codex），此后写作只引用实例化产物——对标素材只可迁移手法 / 结构 / 节奏，情节、人名与专有设定禁止照搬；
+- **降级链**：Qdrant 不可用 → 读 `vector_store.json` 本地向量兜底；未启用 embedding → 纯 BM25 / 关键词策略，链路永不因向量服务缺席而中断；
+- **可审计**：每次召回追加一条 `meta/rag/retrieval_trace.jsonl`（query、策略、每条命中的 chunk / 得分 / 命中原因 / facet / source_kind）；`--build-rag --probe-chapter N` 可离线探测某章的召回结果。
 
 ## 质量门禁与用户规则
 
