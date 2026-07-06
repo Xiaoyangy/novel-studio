@@ -1,12 +1,10 @@
 package host
 
 import (
-	"context"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
-	"github.com/chenhongyang/novel-studio/internal/host/imp"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -122,16 +120,13 @@ func TestGuardExclusive(t *testing.T) {
 }
 
 // TestStageCoCreate_OccupancyBlocksConcurrentEntries 验证共创窗口内独占性入口全部被堵：
-// import/start/resume/continue 在 cocreating 期间都应被拒，补上 paused 期只查 ==running 的缺口。
+// start/resume/continue 在 cocreating 期间都应被拒，补上 paused 期只查 ==running 的缺口。
 func TestStageCoCreate_OccupancyBlocksConcurrentEntries(t *testing.T) {
 	h := newFlagTestHost(lifecycleIdle, false)
 	if !h.PauseForCoCreate() {
 		t.Fatal("进入阶段共创失败")
 	}
 
-	if _, err := h.ImportFrom(context.Background(), imp.Options{}); err == nil {
-		t.Error("共创窗口内 ImportFrom 应被拒")
-	}
 	if err := h.StartPrepared("写个新故事"); err == nil {
 		t.Error("共创窗口内 StartPrepared 应被拒")
 	}

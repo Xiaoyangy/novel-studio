@@ -6,7 +6,7 @@ go.work
 go.work.sum
 .DS_Store
 .env
-.ainovel
+.novel-studio
 config
 workspace
 dist

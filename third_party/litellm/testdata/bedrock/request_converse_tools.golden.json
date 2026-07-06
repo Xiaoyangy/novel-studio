@@ -1,0 +1,98 @@
+{
+  "additionalModelRequestFields": {
+    "thinking": {
+      "budget_tokens": 2048,
+      "type": "enabled"
+    }
+  },
+  "inferenceConfig": {
+    "maxTokens": 4096,
+    "temperature": 1
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "use tool"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "toolUse": {
+            "input": {
+              "q": "x"
+            },
+            "name": "lookup",
+            "toolUseId": "toolu_1"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "result"
+              }
+            ],
+            "toolUseId": "toolu_1"
+          }
+        },
+        {
+          "cachePoint": {
+            "ttl": "1h",
+            "type": "default"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "system": [
+    {
+      "text": "be concise"
+    },
+    {
+      "cachePoint": {
+        "ttl": "1h",
+        "type": "default"
+      }
+    }
+  ],
+  "toolConfig": {
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Lookup data.",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup",
+          "strict": true
+        }
+      },
+      {
+        "cachePoint": {
+          "ttl": "1h",
+          "type": "default"
+        }
+      }
+    ]
+  }
+}

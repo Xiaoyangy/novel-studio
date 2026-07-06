@@ -1,0 +1,12 @@
+{
+  "enable_thinking": true,
+  "max_completion_tokens": 8192,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "qwen3.7-plus",
+  "thinking_budget": 4096
+}

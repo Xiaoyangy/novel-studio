@@ -21,7 +21,7 @@ func writeGlobal(t *testing.T, content string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".ainovel")
+	dir := filepath.Join(home, ".novel-studio")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -33,19 +33,19 @@ func writeGlobal(t *testing.T, content string) string {
 	return home
 }
 
-// writeProjectConfig 在当前工作目录的 ./.ainovel/ 下写入项目级配置。
+// writeProjectConfig 在当前工作目录的 ./.novel-studio/ 下写入项目级配置。
 // 调用前需先 t.Chdir 到目标目录。
 func writeProjectConfig(t *testing.T, content string) {
 	t.Helper()
-	if err := os.MkdirAll(".ainovel", 0o755); err != nil {
-		t.Fatalf("mkdir .ainovel: %v", err)
+	if err := os.MkdirAll(".novel-studio", 0o755); err != nil {
+		t.Fatalf("mkdir .novel-studio: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(".ainovel", "config.json"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(".novel-studio", "config.json"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write project: %v", err)
 	}
 }
 
-// 根因 3：项目级 ./.ainovel/config.json 存在但是坏 JSON，必须报错，不能静默吞掉退回全局。
+// 根因 3：项目级 ./.novel-studio/config.json 存在但是坏 JSON，必须报错，不能静默吞掉退回全局。
 func TestLoadConfig_CorruptProjectFailsLoud(t *testing.T) {
 	writeGlobal(t, validGlobal)
 	proj := t.TempDir()
@@ -54,7 +54,7 @@ func TestLoadConfig_CorruptProjectFailsLoud(t *testing.T) {
 	writeProjectConfig(t, `{ "model": "x", }`)
 
 	if _, err := LoadConfig(""); err == nil {
-		t.Fatal("坏的 ./.ainovel/config.json 应当报错，却被静默忽略了")
+		t.Fatal("坏的 ./.novel-studio/config.json 应当报错，却被静默忽略了")
 	}
 }
 
@@ -81,8 +81,8 @@ func TestLoadConfig_CorruptGlobalDoesNotBlockOverride(t *testing.T) {
 // 文件不存在是正常情况（便携/首次），不能报错。
 func TestLoadConfig_MissingFilesNoError(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home) // ~/.ainovel/config.json 不存在
-	t.Chdir(t.TempDir())   // 也没有 ./.ainovel/config.json
+	t.Setenv("HOME", home) // ~/.novel-studio/config.json 不存在
+	t.Chdir(t.TempDir())   // 也没有 ./.novel-studio/config.json
 
 	if _, err := LoadConfig(""); err != nil {
 		t.Fatalf("缺失配置文件不应报错，得到: %v", err)
@@ -152,7 +152,7 @@ func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 				Extra: map[string]any{
 					"user_agent": "override-client/1.0",
 					"headers": map[string]any{
-						"X-Custom-Client": "ainovel",
+						"X-Custom-Client": "novel-studio",
 					},
 				},
 			},
@@ -183,8 +183,8 @@ func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("Extra[headers] missing or invalid: %#v", pc.Extra["headers"])
 	}
-	if got := headers["X-Custom-Client"]; got != "ainovel" {
-		t.Fatalf("Extra.headers[X-Custom-Client] = %#v, want ainovel", got)
+	if got := headers["X-Custom-Client"]; got != "novel-studio" {
+		t.Fatalf("Extra.headers[X-Custom-Client] = %#v, want novel-studio", got)
 	}
 }
 

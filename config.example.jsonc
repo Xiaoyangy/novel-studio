@@ -2,101 +2,95 @@
   // 默认使用的 provider、model 和推理强度。
   // ★ provider 的值是下面 providers 里的一个 key 名（一根“指针”），不是协议名——
   //   改 provider 必须保证 providers 里有同名条目，否则启动会报“未配置凭证”。
-  //   运行时用 /model 面板切换会写回全局配置 ~/.ainovel/config.json。
-  "provider": "openrouter",
-  "model": "google/gemini-2.5-flash",
+  //   全局配置在 ~/.novel-studio/config.json，项目内可用 ./.novel-studio/config.json 覆盖。
+  "provider": "minimax",
+  "model": "MiniMax-M3[1M]",
   // 可选。默认推理强度：off / low / medium / high / xhigh / max。
   // 省略或空字符串 = 不覆盖，沿用模型/provider 默认。
   "reasoning_effort": "medium",
 
   // Provider 凭证库。key 自定义，用作上面 provider 字段引用的目标。
-  // 已知 provider（openai/anthropic/gemini/openrouter/deepseek/qwen/glm/grok/mimo/ollama/bedrock）
+  // 已知 provider（openai/anthropic/gemini/openrouter/deepseek/qwen/glm/grok/mimo/ollama/bedrock/minimax）
   // 可省略 type；自定义代理必须显式声明 type 指明 API 协议。
   "providers": {
+    "minimax": {
+      "api_key": "sk-xxx",
+      // [1M] 后缀是长上下文变体的约定写法；具体以 provider 的模型清单为准。
+      "models": ["MiniMax-M3[1M]", "MiniMax-M3"]
+    },
     "openrouter": {
       "api_key": "sk-or-v1-xxx",
       "base_url": "https://openrouter.ai/api/v1",
-      // 可选。声明 /model 面板候选；省略时回退到配置中已出现过的同 provider 模型。
       "models": ["google/gemini-3.0-flash", "google/gemini-3.1-pro"],
       // 可选。透传给该 provider 每次请求的额外参数（采样参数如 temperature/top_p/
-      // min_p，或厂商特有键如 nvidia 开 think 的 chat_template_kwargs），逐字并入请求体。
-      // 仅对 OpenAI 兼容类 provider 生效（openrouter/deepseek/qwen/glm/grok/ollama…）；
-      // type:"openai" 会按官方参数白名单过滤。值由用户自负其责。
-      "extra_body": { "temperature": 0.8, "min_p": 0.05 },
-      // 可选。provider 级配置，透传给 HTTP 客户端层（不是请求体），用于需要
-      // 自定义 User-Agent / headers / anthropic_beta 的代理。
-      "extra": {
-        "user_agent": "my-client/1.0",
-        "headers": { "X-Custom-Client": "my-client" }
-      }
+      // min_p），逐字并入请求体。仅对 OpenAI 兼容类 provider 生效。
+      "extra_body": { "temperature": 0.8, "min_p": 0.05 }
     },
     "anthropic": {
       "api_key": "sk-ant-xxx",
-      "models": ["claude-sonnet-4", "claude-opus-4"]
+      "models": ["claude-sonnet-5", "claude-opus-4-8"]
     },
     "ollama": {
       // ollama / bedrock / 显式 type 的自定义代理可以省略 api_key
       // base_url 需带 /v1（ollama 的 OpenAI 兼容端点在 /v1 下）
       "base_url": "http://localhost:11434/v1",
       "models": ["qwen3:14b"]
-    },
-    "claude-code-proxy": {
-      // 自定义 Anthropic 代理。如果上游限制只能由 Claude Code 客户端访问，
-      // 用 extra 透传 user_agent / anthropic_beta / headers。
-      // base_url 不需要带 /v1。
-      "type": "anthropic",
-      "api_key": "sk-xxx",
-      "base_url": "https://proxy.example.com",
-      "models": ["claude-sonnet-4-6"],
-      "extra": {
-        "user_agent": "claude-code/2.1.183",
-        "anthropic_beta": "claude-code-20250219",
-        "headers": {
-          "X-Stainless-Lang": "js",
-          "X-Stainless-Package-Version": "0.94.0",
-          "X-Stainless-Runtime": "node"
-        }
-      }
-    },
-    "codex-proxy": {
-      // 自定义 OpenAI/NewAPI 代理。如果上游限制只能由 Codex 客户端访问，
-      // 用 extra 覆盖 User-Agent，并透传 Codex 识别头。
-      // base_url 按代理实际地址填写；OpenAI 协议通常需要 /v1。
-      "type": "openai",
-      "api_key": "sk-xxx",
-      "base_url": "https://proxy.example.com/v1",
-      "models": ["gpt-5.4", "gpt-5.4-mini", "MiniMax-M3"],
-      // 可选。OpenAI 协议 endpoint：chat（默认 /v1/chat/completions）/
-      // responses（/v1/responses）。Codex 类代理通常需要 responses。
-      "api": "responses",
-      "extra": {
-        "user_agent": "codex-tui/0.142.3 (Mac OS 26.5.1; arm64) Apple_Terminal/470.2 (codex-tui; 0.142.3)",
-        "headers": {
-          "Originator": "codex-tui",
-          "Session_id": "replace-with-random-session-id",
-          "X-Codex-Turn-Metadata": "replace-with-random-turn-metadata"
-        }
-      }
     }
   },
 
-  // 可选。按角色覆盖默认模型；未配的角色使用上面的 model。
+  // 按角色覆盖默认模型；未配的角色使用上面的 model。
   // reasoning_effort 也可按角色覆盖；未配时继承顶层 reasoning_effort。
-  // 角色：coordinator / architect / writer / editor。fallbacks 在主模型失败时按序尝试。
-  // 注意：这里的 provider 同样是“指针”，必须指向 providers 里存在的 key。
+  // 角色：coordinator / architect / writer / editor / reviewer。
+  // fallbacks 在主模型失败（宕机/限流/余额不足）时按序尝试，恢复后自动回主路。
+  // reviewer 用于三采样 pairwise 终选与 AI 味盲测判别；LLM judge 对同族输出有
+  // 75-84% 自我偏好，writer 与 reviewer 建议用不同模型家族；未配置自动回落 editor。
   // max_turns：该角色单次 subagent 运行的回合上限；0/缺省=内置默认
-  // （writer=300，architect=15/20，editor=20）。writer 靠 commit_chapter 硬停 + StopGuard
-  // + 预算护栏收敛，回合数只是最后的安全网。
-  // "roles": {
-  //   "writer": {
-  //     "provider": "anthropic",
-  //     "model": "claude-sonnet-4",
-  //     "reasoning_effort": "high",
-  //     "max_turns": 300,
-  //     "fallbacks": [{ "provider": "openrouter", "model": "google/gemini-3.0-pro" }]
-  //   },
-  //   "architect": { "provider": "openrouter", "model": "google/gemini-3.1-pro" }
-  // },
+  // （writer=300，architect=15/20，editor=20）。
+  "roles": {
+    "coordinator": { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "medium",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
+    "architect":   { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
+    "writer":      { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
+    "editor":      { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "medium",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
+    "reviewer":    { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "max",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] }
+  },
+
+  // 本地 RAG：写作规则、世界创造规则等设计资料统一走 RAG 召回，
+  // 语料源集中放在 deconstruction-library/（拆文工作区即 RAG 数据源）。
+  // pipeline 启动会检查/启动本机 Qdrant，写作前构建 keyword + embedding + Qdrant collection；
+  // 章节提交、评审、返工会增量沉淀。
+  "rag": {
+    "embedding": {
+      "enabled": true,
+      // 项目内本地 embedding（Qwen3-Embedding-0.6B：1024 维、8k 窗、中文强），llama-server 自动拉起。
+      "local_gguf": "models/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "local_port": 18434,
+      "model": "qwen3-embedding-0.6b",
+      "build_concurrency": 4,
+      "timeout_seconds": 60
+      // 备选 bge-m3（ollama）："provider":"ollama","model":"bge-m3","base_url":"http://localhost:11434/v1"
+      // 离线兜底哈希伪向量（长程语义召回弱，仅应急）："model":"local-hash-384"
+    },
+    "qdrant": {
+      "enabled": true,
+      "url": "http://127.0.0.1:6333",
+      // binary_path 留空 = 从 PATH 查 qdrant，找不到再回退 docker（container_name/docker_image）。
+      // storage_dir 留空 = 默认 ~/.novel-studio/qdrant。需要自定义时写绝对路径（不支持 ~ 展开）。
+      // "binary_path": "/Users/you/.novel-studio/bin/qdrant",
+      // "storage_dir": "/Users/you/.novel-studio/qdrant",
+      "container_name": "novel-studio-qdrant",
+      "timeout_seconds": 45
+    },
+    // 写作手法库 + 对标素材库（设计时刻通道）：--build-rag / --zero-init 重建索引时自动附带
+    // （craft_technique / benchmark_reference），只服务设计时刻的 craft_recall 检索，
+    // 不进常规章节召回；对标素材只可迁移手法/结构，不照抄正文。
+    "craft_library": "deconstruction-library/writing-techniques",
+    "benchmark_library": "deconstruction-library/novel_all"
+  },
 
   // 写作风格：default / suspense / fantasy / romance。
   "style": "default"
@@ -106,25 +100,6 @@
   // 查不到的自定义模型指定真实窗口，也能把名义 1M 窗口钉在 300k 提前触发压缩，
   // 避免在注意力衰退区才压缩。仅影响压缩阈值，不改变 API 实际请求长度。
   // "context_window": 300000
-
-  // 可选。本地 RAG 向量检索。启用后 pipeline 启动会检查/启动本机 Qdrant，
-  // 写作前构建 keyword + embedding + Qdrant collection；章节提交、评审、返工会增量沉淀。
-  // embedding 使用 OpenAI 兼容接口；本地 Ollama/NewAPI 可不填 api_key。
-  // "rag": {
-  //   "embedding": {
-  //     "enabled": true,
-  //     "provider": "ollama",
-  //     "model": "nomic-embed-text",
-  //     "base_url": "http://localhost:11434/v1",
-  //     "build_concurrency": 2
-  //   },
-  //   "qdrant": {
-  //     "url": "http://127.0.0.1:6333",
-  //     "auto_start": true,
-  //     "container_name": "novel-studio-qdrant",
-  //     "docker_image": "qdrant/qdrant:latest"
-  //   }
-  // },
 
   // 可选。单本书（output 目录）的成本预算，挂机保险丝。book_usd > 0 才启用。
   // 累计花费达到 warn_ratio 时告警不停机；达到 100% 在当前子代理任务结束后
@@ -148,41 +123,3 @@
   //   "events": ["run_end", "repeat", "budget"]
   // }
 }
-
-// ── 异族裁判（Task 065）────────────────────────────────────────────
-// LLM judge 对同族输出有 75-84% 自我偏好：writer 与 reviewer 建议用不同模型家族。
-// reviewer 用于三采样 pairwise 终选与 ai_voice 盲测判别；未配置时自动回落 editor（零影响）。
-// 示例：writer 用 Claude 系，reviewer 用 MiniMax M3（思考=max，1M 上下文变体）：
-// "roles": {
-//   "writer":   { "provider": "cc-codex-proxy", "model": "claude-opus-4-8[1M]" },
-//   "reviewer": { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "max" }
-// }
-
-// ── 写作手法库 + 对标素材库（设计时刻通道）──────────────────────
-// 配置后 --build-rag / --zero-init 重建索引时自动附带（craft_technique / benchmark_reference），
-// 只服务设计时刻的 craft_recall 检索，不进常规章节召回；对标素材只可迁移手法/结构：
-// "rag": {
-//   "craft_library": "deconstruction-library/writing-techniques",
-//   "benchmark_library": "deconstruction-library/novel_all"
-// }
-
-// ── 真语义 RAG embedding（Task 071）───────────────────────────────
-// 默认推荐：项目内 Qwen3-Embedding-0.6B（1024 维、8k 窗、中文强），llama-server 自动拉起：
-// "rag": { "embedding": {
-//   "enabled": true,
-//   "local_gguf": "models/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf",
-//   "local_port": 18434, "model": "qwen3-embedding-0.6b"
-// } }
-// 备选 bge-m3（ollama，1024 维）："provider":"ollama","model":"bge-m3","base_url":"http://localhost:11434/v1"
-// 离线兜底哈希伪向量（长程语义召回弱，仅应急）："model":"local-hash-384"
-// 维度变更：--build-rag 全量构建会重建 collection 与 vector_store.json，探针行打印 embedder+dims。
-
-// ── Claude 直连优先 + 代理兜底（推荐写作配置）──────────────────
-// 请求级 failover：主 provider 失败（宕机/限流/余额不足）自动切兜底，恢复后自动回主路。
-// "roles": {
-//   "writer":      { "provider": "anthropic", "model": "claude-opus-4-8", "reasoning_effort": "high",
-//                    "fallbacks": [{ "provider": "cc-codex-proxy", "model": "gpt-5.5" },
-//                                  { "provider": "minimax", "model": "MiniMax-M3[1M]" }] },
-//   "architect":   { "provider": "anthropic", "model": "claude-sonnet-5", "fallbacks": [ ... ] }
-// }
-// 注意：[1M] 括号是 Claude Code/代理的约定，Anthropic 直连用裸模型名（claude-opus-4-8 / claude-sonnet-5）。

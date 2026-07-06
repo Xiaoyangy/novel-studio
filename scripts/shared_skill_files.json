@@ -110,7 +110,6 @@
       "canonical": "skills/story-setup/references/agent-references/format-and-structure.md",
       "paths": [
         "skills/story-setup/references/agent-references/format-and-structure.md",
-        "skills/story-import/references/format-and-structure.md",
         "skills/story-long-write/references/format-and-structure.md"
       ]
     },
@@ -244,36 +243,12 @@
       ]
     },
     {
-      "name": "real-market-data",
-      "canonical": "skills/story-short-analyze/references/real-market-data.md",
-      "paths": [
-        "skills/story-short-analyze/references/real-market-data.md",
-        "skills/story-short-scan/references/real-market-data.md"
-      ]
-    },
-    {
       "name": "reversal-toolkit",
       "canonical": "skills/story-setup/references/agent-references/reversal-toolkit.md",
       "paths": [
         "skills/story-setup/references/agent-references/reversal-toolkit.md",
         "skills/story-long-write/references/reversal-toolkit.md",
         "skills/story-short-write/references/reversal-toolkit.md"
-      ]
-    },
-    {
-      "name": "scan-cdp-utils",
-      "canonical": "skills/story-long-scan/scripts/cdp-utils.js",
-      "paths": [
-        "skills/story-long-scan/scripts/cdp-utils.js",
-        "skills/story-short-scan/scripts/cdp-utils.js"
-      ]
-    },
-    {
-      "name": "state-tracking",
-      "canonical": "skills/story-long-write/references/state-tracking.md",
-      "paths": [
-        "skills/story-long-write/references/state-tracking.md",
-        "skills/story-import/references/state-tracking.md"
       ]
     },
     {

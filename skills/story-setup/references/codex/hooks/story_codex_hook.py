@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex hook adapter for oh-story writing projects.
+"""Codex hook adapter for story writing projects.
 
 This script intentionally has no third-party dependencies. It adapts the core
 story guardrails to Codex hook stdin/stdout JSON contracts.

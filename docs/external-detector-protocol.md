@@ -9,5 +9,5 @@
 4. 跑 `calibration_report.py --external-log <project>/meta/external_detection_log.jsonl` 看本地 blended 分与外部分相关性；相关性差 = 本地代理失真 → 提议复核词表/权重（proposed 语义）
 
 ## 平台口径提醒
-番茄 2026-02 专项整治（语言僵硬/内容空洞/同质化/批量占流量）：申诉只有一次复审机会、重证据——
-用 `--export --evidence-pack` 打包创作过程证据链（见 docs/platform-alignment.md）。
+平台专项整治（语言僵硬/内容空洞/同质化/批量占流量）：申诉只有一次复审机会、重证据——
+保留 reviews/（八维评审+机械门禁 ai_gate）、返工前后 diff、外部检测登记与 prompt_manifest 作为创作过程证据（见 docs/platform-alignment.md）。

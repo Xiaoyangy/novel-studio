@@ -1,7 +1,7 @@
 package main
 
-// 几个「对已有项目操作」的子命令（--export / --diag / --simulate / --import-sim /
-// --steer）共享同一套 host 装配：检查配置 → 加载 → 起 host → 接日志。抽到这里避免重复。
+// 几个「对已有项目操作」的子命令（--diag / --simulate / --import-sim / --steer）
+// 共享同一套 host 装配：检查配置 → 加载 → 起 host → 接日志。抽到这里避免重复。
 
 import (
 	"fmt"
@@ -33,7 +33,7 @@ func loadCfgBundle(opts cliOptions) (bootstrap.Config, assets.Bundle, error) {
 		return bootstrap.Config{}, assets.Bundle{}, err
 	}
 	rules.EnsureHomeRulesDir()
-	// prompt 覆盖链（~/.ainovel/prompts → ./.ainovel/prompts）+ 指纹 manifest，
+	// prompt 覆盖链（~/.novel-studio/prompts → ./.novel-studio/prompts）+ 指纹 manifest，
 	// 回答"这次 run 用的是哪版 prompt"。
 	bundle, provenance := assets.LoadWithOverrides(cfg.Style, assets.DefaultPromptOverrideDirs()...)
 	assets.WritePromptManifest(cfg.OutputDir, provenance)

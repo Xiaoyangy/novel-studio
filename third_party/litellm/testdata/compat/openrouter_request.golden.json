@@ -1,0 +1,25 @@
+{
+  "cache_control": {
+    "ttl": "1h",
+    "type": "ephemeral"
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "hi",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "anthropic/claude-sonnet-4",
+  "reasoning": {
+    "effort": "high"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "reasoning_effort": "max",
+  "thinking": {
+    "type": "enabled"
+  }
+}

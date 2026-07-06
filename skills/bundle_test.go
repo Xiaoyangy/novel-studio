@@ -11,8 +11,8 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(skills) < 35 {
-		t.Fatalf("expected at least 35 story/fanqie/novel skills, got %d", len(skills))
+	if len(skills) < 20 {
+		t.Fatalf("expected at least 20 story/novel skills, got %d", len(skills))
 	}
 	for _, skill := range skills {
 		if skill.Name == "" {
@@ -33,7 +33,7 @@ func TestExport(t *testing.T) {
 	if _, err := os.Stat(protocol); err != nil {
 		t.Fatalf("expected exported context protocol %s: %v", protocol, err)
 	}
-	for _, name := range []string{"story", "story-setup", "story-long-write", "story-douban-long-write", "story-short-write", "fanqie-writing-flow", "fanqie-novel-template", "review", "deal-paper-summry"} {
+	for _, name := range []string{"story", "story-setup", "story-long-write", "story-douban-long-write", "story-short-write", "novel-pipeline", "review"} {
 		path := filepath.Join(dir, name, "SKILL.md")
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected exported skill file %s: %v", path, err)
@@ -113,8 +113,8 @@ func TestReadPlans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadPlans() error = %v", err)
 	}
-	if len(plans) < 35 {
-		t.Fatalf("expected at least 35 context plans, got %d", len(plans))
+	if len(plans) < 20 {
+		t.Fatalf("expected at least 20 context plans, got %d", len(plans))
 	}
 	seen := make(map[string]bool, len(plans))
 	for _, plan := range plans {

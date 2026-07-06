@@ -1,4 +1,0 @@
-interface:
-  display_name: "番茄小说通用模板"
-  short_description: "Fanqie short-novel workflow with a final AI-taste gate"
-  default_prompt: "Use $fanqie-novel-template to build a Fanqie short-novel workflow with final AI taste under 5%."

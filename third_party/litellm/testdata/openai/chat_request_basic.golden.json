@@ -1,0 +1,73 @@
+{
+  "frequency_penalty": 0.4,
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "You are helpful.",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "describe",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "https://example.test/image.png"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"q\":\"x\"}",
+            "name": "lookup"
+          },
+          "id": "call_1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "result",
+      "role": "tool",
+      "tool_call_id": "call_1"
+    }
+  ],
+  "metadata": {
+    "tenant": "acme"
+  },
+  "modalities": [
+    "text"
+  ],
+  "model": "gpt-4.1",
+  "temperature": 0.2,
+  "tools": [
+    {
+      "function": {
+        "description": "Lookup data.",
+        "name": "lookup",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    }
+  ]
+}

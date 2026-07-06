@@ -142,7 +142,7 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		return fmt.Errorf("列章节失败: %w", err)
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("未在 %s 找到任何章节文件（*.md）。请先 --import-fast", chaptersDir)
+		return fmt.Errorf("未在 %s 找到任何章节文件（*.md）。请先跑 --pipeline 写作阶段产出章节", chaptersDir)
 	}
 
 	// 确定起止

@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "qwen3",
+  "reasoning_effort": "high"
+}

@@ -122,7 +122,7 @@ PYEOF
 
 按 [style-profile-protocol.md](style-profile-protocol.md) 模板填写 `deconstruction-library/{书名}/文风.md`：
 
-- **文风文件必须留在deconstruction-library**（`deconstruction-library/{书名}/文风.md`），**永不写入** `对标/` 或写作项目目录——deconstruction-library是 analyze 的数据源，写作项目的 `对标/{书名}/` 由 story-import 从deconstruction-library同步
+- **文风文件必须留在deconstruction-library**（`deconstruction-library/{书名}/文风.md`），**永不写入** `对标/` 或写作项目目录——deconstruction-library是 analyze 的数据源，写作项目的 `对标/{书名}/` 从deconstruction-library同步
 - 每段标 `confidence: high/med/low`（内部给写作 agent 判断强弱，普通用户可忽略）：
   - `high`：数据直接来自拆文产物（如「写法技巧」直接引用拆文报告）
   - `med`：从样本归纳且样本充足（如基调序列从 ≥10 章摘要统计）
@@ -148,7 +148,7 @@ PYEOF
 ## 与写作端的关系
 
 - analyze Stage 6 写 `deconstruction-library/{书名}/文风.md`
-- story-import 把整个 `deconstruction-library/{书名}/` 同步到项目 `{项目}/对标/{书名}/` 时**自动包含**文风（与拆文报告同等待遇）
+- 把整个 `deconstruction-library/{书名}/` 同步到项目 `{项目}/对标/{书名}/` 时**自动包含**文风（与拆文报告同等待遇）
 - 写作端（story-long-write）的日更循环读 `{项目}/对标/{书名}/文风.md`（按对标书路径查找规则，回退 `deconstruction-library/{书名}/`）
 
 ## 重生策略（旧deconstruction-library无文风）

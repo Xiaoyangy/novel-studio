@@ -12,7 +12,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/utils"
 )
 
-// exampleConfig 是引导后写入 ~/.ainovel/config.example.jsonc 的带注释模板。
+// exampleConfig 是引导后写入 ~/.novel-studio/config.example.jsonc 的带注释模板。
 // 嵌入文件必须与仓库根目录 config.example.jsonc 保持一致，测试会防止漂移。
 //
 //go:embed config.example.jsonc

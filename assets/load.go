@@ -30,8 +30,6 @@ type Prompts struct {
 	ArchitectLong    string
 	Writer           string
 	Editor           string
-	ImportFoundation string
-	ImportAnalyzer   string
 	SimulationSource string
 	SimulationMerge  string
 }
@@ -108,13 +106,13 @@ func LoadWithOverrides(style string, overrideDirs ...string) (Bundle, []PromptPr
 }
 
 // DefaultPromptOverrideDirs 返回默认覆盖链（优先级从低到高）：
-// ~/.ainovel/prompts → ./.ainovel/prompts。
+// ~/.novel-studio/prompts → ./.novel-studio/prompts。
 func DefaultPromptOverrideDirs() []string {
 	var dirs []string
 	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".ainovel", "prompts"))
+		dirs = append(dirs, filepath.Join(home, ".novel-studio", "prompts"))
 	}
-	dirs = append(dirs, filepath.Join(".ainovel", "prompts"))
+	dirs = append(dirs, filepath.Join(".novel-studio", "prompts"))
 	return dirs
 }
 
@@ -186,8 +184,6 @@ func loadPrompts() Prompts {
 		ArchitectLong:    WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
 		Writer:           WithSimulationGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
 		Editor:           WithSimulationGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
-		ImportFoundation: mustRead(promptsFS, "prompts/import-foundation.md"),
-		ImportAnalyzer:   mustRead(promptsFS, "prompts/import-chapter-analyzer.md"),
 		SimulationSource: mustRead(promptsFS, "prompts/simulation-source.md"),
 		SimulationMerge:  mustRead(promptsFS, "prompts/simulation-merge.md"),
 	}

@@ -12,7 +12,7 @@ services:
     build:
       context: .
     volumes:
-      - ./config:/root/.ainovel
+      - ./config:/root/.novel-studio
       - ./workspace:/workspace
     stdin_open: true
     tty: true

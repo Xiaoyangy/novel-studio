@@ -1,0 +1,14 @@
+{
+  "max_completion_tokens": 128,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "MiniMax-M3",
+  "reasoning_split": true,
+  "thinking": {
+    "type": "adaptive"
+  }
+}

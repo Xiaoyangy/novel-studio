@@ -24,13 +24,13 @@
 | `skills/` | 全部 skill 的唯一源目录，可导出给外部 agent | 已补齐上下文读取协议和共享副本防漂移。 |
 | `quality/audit/` | AIGC、AI 味、重复、内容逻辑、错别字审核入口 | 已是审核能力规范目录，和 `skills/review` 保持分工。 |
 | `assets/` | 编译进二进制的 prompts、references、styles | README 已说明新增内容归属和三处接线要求。 |
-| `docs/` | 架构、上下文、观测、结构、整合说明 | 已修正过期依赖口径，并新增本审计文件。 |
+| `docs/` | 架构、上下文、观测、结构、能力清单说明 | 已修正过期依赖口径，并新增本审计文件。 |
 | `scripts/` | 维护脚本与校验 | 已扩展为 skill 上下文、共享副本、文档漂移的统一校验入口。 |
 
 结构说明的权威文件：
 
 - `docs/project-structure.md`
-- `docs/integration-inventory.md`
+- `docs/capability-inventory.md`
 - `README.md`
 - `assets/README.md`
 - `skills/README.md`

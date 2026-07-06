@@ -11,6 +11,6 @@
 | 检测器判定（朱雀等） | 外部检测登记 + 校准相关性（Task 060/062） | ⚠️ 需人工抽检积累 |
 
 ## 人工创作证据链（申诉用）
-`novel-studio --export --evidence-pack`：打包 reviews/（八维评审+机械门禁 ai_gate）、
-返工前后 diff（.pre-rewrite 对照）、外部检测登记、prompt_manifest——对应平台"重证据、
-一次复审机会"的现实约束。
+项目目录自带完整证据：reviews/（八维评审+机械门禁 ai_gate）、返工前后 diff
+（.pre-rewrite 对照）、外部检测登记、prompt_manifest——对应平台"重证据、
+一次复审机会"的现实约束，直接从 output/novel/ 收集归档即可。

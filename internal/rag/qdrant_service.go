@@ -111,9 +111,9 @@ func defaultQdrantServiceConfig(cfg QdrantServiceConfig) QdrantServiceConfig {
 	}
 	if cfg.StorageDir == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			cfg.StorageDir = filepath.Join(home, ".ainovel", "qdrant")
+			cfg.StorageDir = filepath.Join(home, ".novel-studio", "qdrant")
 		} else {
-			cfg.StorageDir = filepath.Join(".ainovel", "qdrant")
+			cfg.StorageDir = filepath.Join(".novel-studio", "qdrant")
 		}
 	}
 	cfg.AutoStart = true

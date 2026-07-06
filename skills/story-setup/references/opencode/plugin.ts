@@ -195,7 +195,7 @@ function extractProseTargets(cmd: string): string[] {
 
 // 按目标文件判断是否拦截写正文，逐字对齐 Claude hook guard-outline-before-prose.sh：
 // 只拦「首次创建正文文件且缺对应大纲/细纲」，已存在正文（续写/改稿/去AI味）一律放行，
-// 解析不到、非正文目标、story-import 迁移一律放行（宁可漏拦不可误伤）。
+// 解析不到、非正文目标、拆文迁移一律放行（宁可漏拦不可误伤）。
 // 返回拦截原因；返回 null 表示放行。
 function proseBlockReason(root: string, abs: string): string | null {
   const base = path.basename(abs)
@@ -205,7 +205,7 @@ function proseBlockReason(root: string, abs: string): string | null {
   if (base === "正文.md") {
     if (fs.existsSync(abs)) return null // 已存在 → 续写/改稿放行
     const bookDir = path.dirname(abs)
-    // story-import 迁移：已有 拆文库/{书名}/ 分析源时，正文先于小节大纲迁移属正常流程
+    // 拆文迁移：已有 拆文库/{书名}/ 分析源时，正文先于小节大纲迁移属正常流程
     if (fs.existsSync(path.join(root, "拆文库", path.basename(bookDir)))) return null
     // 仅在确为短篇工程时拦截（有 设定.md 信号），避免误伤 docs/正文.md 等非作品文件
     if (!fs.existsSync(path.join(bookDir, "设定.md"))) return null
@@ -223,7 +223,7 @@ function proseBlockReason(root: string, abs: string): string | null {
   if (!m) return null
   const num = m[1]
   const bookDir = path.dirname(path.dirname(abs))
-  // story-import 迁移：已有 拆文库/{书名}/ 分析源时放行（细纲由章节摘要反推、晚于正文迁移）
+  // 拆文迁移：已有 拆文库/{书名}/ 分析源时放行（细纲由章节摘要反推、晚于正文迁移）
   if (fs.existsSync(path.join(root, "拆文库", path.basename(bookDir)))) return null
   // 容忍补零差异与标题后缀：按整数章号匹配 大纲/细纲_第*章*.md
   const outlineDir = path.join(bookDir, "大纲")

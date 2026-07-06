@@ -1,0 +1,26 @@
+{
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "deepseek-reasoner",
+  "reasoning_effort": "max",
+  "thinking": {
+    "type": "enabled"
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "Lookup.",
+        "name": "lookup",
+        "parameters": {
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    }
+  ]
+}

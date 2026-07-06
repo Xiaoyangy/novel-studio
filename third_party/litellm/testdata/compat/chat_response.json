@@ -1,0 +1,34 @@
+{
+  "model": "provider-model",
+  "choices": [
+    {
+      "message": {
+        "content": "hello",
+        "reasoning_details": [
+          {
+            "text": "think"
+          }
+        ],
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{\"q\":\"x\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 3,
+    "completion_tokens": 4,
+    "total_tokens": 7,
+    "completion_tokens_details": {
+      "reasoning_tokens": 2
+    }
+  }
+}

@@ -91,7 +91,7 @@ case "$BASE" in
     # 短篇单文件正文：已存在则放行（续写/改稿）
     [ -f "$ABS" ] && exit 0
     BOOK_DIR="$(dirname "$ABS")"
-    # story-import 迁移：已有 deconstruction-library/{书名}/ 分析源时，正文先于小节大纲迁移是正常流程（小节大纲由拆文反推），放行
+    # 拆文迁移：已有 deconstruction-library/{书名}/ 分析源时，正文先于小节大纲迁移是正常流程（小节大纲由拆文反推），放行
     [ -d "$ROOT/deconstruction-library/$(basename "$BOOK_DIR")" ] && exit 0
     # 仅在确为短篇工程时拦截（有 设定.md 信号——story-short-write/import 都先产 设定.md），
     # 避免误伤 docs/正文.md 等非作品文件
@@ -116,7 +116,7 @@ case "$BASE" in
     NUM="$(printf '%s' "$BASE" | sed -n 's/^第0*\([0-9][0-9]*\)章.*/\1/p')"
     [ -z "$NUM" ] && exit 0
     BOOK_DIR="$(dirname "$(dirname "$ABS")")"
-    # story-import 迁移：已有 deconstruction-library/{书名}/ 分析源时放行（细纲由章节摘要反推、晚于正文迁移）
+    # 拆文迁移：已有 deconstruction-library/{书名}/ 分析源时放行（细纲由章节摘要反推、晚于正文迁移）
     [ -d "$ROOT/deconstruction-library/$(basename "$BOOK_DIR")" ] && exit 0
     OUTLINE_DIR="$BOOK_DIR/大纲"
     FOUND=""

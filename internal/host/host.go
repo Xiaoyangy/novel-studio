@@ -16,9 +16,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/agents/ctxpack"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
-	"github.com/chenhongyang/novel-studio/internal/host/exp"
 	"github.com/chenhongyang/novel-studio/internal/host/flow"
-	"github.com/chenhongyang/novel-studio/internal/host/imp"
 	"github.com/chenhongyang/novel-studio/internal/host/sim"
 	modelreg "github.com/chenhongyang/novel-studio/internal/models"
 	"github.com/chenhongyang/novel-studio/internal/notify"
@@ -936,37 +934,6 @@ func truncate(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "..."
 }
 
-// ImportFrom 启动一次外部小说反推导入：切分 → 反推 foundation → 逐章分析落盘。
-// 与 Coordinator 互斥；导入完成后调用方可立即 Resume() 续写。
-// 返回的事件通道由 imp.Run 关闭，调用方负责消费（满则丢弃以防阻塞分析协程）。
-func (h *Host) ImportFrom(ctx context.Context, opts imp.Options) (<-chan imp.Event, error) {
-	if err := h.guardExclusive("导入"); err != nil {
-		return nil, err
-	}
-
-	commitTool := tools.NewCommitChapterTool(h.store)
-	if qdrantClient, enabled, err := bootstrap.NewRAGQdrantClient(h.cfg, false); err != nil {
-		slog.Warn("导入流程 Qdrant 初始化失败，将只写本地 RAG", "module", "rag", "err", err)
-	} else if enabled {
-		commitTool.WithRAGVectorWriter(qdrantClient)
-	}
-	if embedder, enabled, err := bootstrap.NewRAGEmbedder(h.cfg); err != nil {
-		slog.Warn("导入流程 RAG embedding 初始化失败，将只写关键词索引", "module", "rag", "err", err)
-	} else if enabled {
-		commitTool.WithRAGEmbedder(embedder)
-	}
-	deps := imp.Deps{
-		Store:      h.store,
-		CommitTool: commitTool,
-		LLM:        h.models.ForRole("architect"),
-		Prompts: imp.Prompts{
-			Foundation: h.bundle.Prompts.ImportFoundation,
-			Analyzer:   h.bundle.Prompts.ImportAnalyzer,
-		},
-	}
-	return imp.Run(ctx, deps, opts)
-}
-
 // Simulate 读取 simulate 目录并生成或增量更新仿写画像。
 func (h *Host) Simulate(ctx context.Context) (<-chan sim.Event, error) {
 	if err := h.guardExclusive("生成仿写画像"); err != nil {
@@ -997,7 +964,7 @@ func (h *Host) ImportSimulationProfile(ctx context.Context, path string) (<-chan
 }
 
 // guardExclusive 检查独占占用：coordinator 运行中或阶段共创窗口内时拒绝会改写状态的入口
-// （import/simulate）。补上 paused 期间只查 ==running 的并发缺口。
+// （simulate 等）。补上 paused 期间只查 ==running 的并发缺口。
 func (h *Host) guardExclusive(action string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1008,13 +975,4 @@ func (h *Host) guardExclusive(action string) error {
 		return fmt.Errorf("阶段共创进行中，请先结束共创后再%s", action)
 	}
 	return nil
-}
-
-// Export 导出已完成章节为外部文件（当前仅支持 TXT）。
-//
-// 与 ImportFrom 不同：导出是只读操作（不动 Progress / Checkpoint），
-// 因此**不要求 Coordinator 空闲**——写作中途也可以随时导出"现阶段成品"。
-// 只读到 Progress.CompletedChapters + 章节终稿 + 大纲 + premise 的一致快照。
-func (h *Host) Export(ctx context.Context, opts exp.Options) (*exp.Result, error) {
-	return exp.Run(ctx, exp.Deps{Store: h.store}, opts)
 }

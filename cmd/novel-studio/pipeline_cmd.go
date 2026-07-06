@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → export（默认不含 cocreate）。
+// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -24,19 +24,17 @@ import (
 )
 
 // defaultPipelineStages 不含 cocreate：默认假设已有创作指令（--prompt）。
-// 想要先共创澄清，显式 --stages cocreate,write,review,rewrite,export。
-var defaultPipelineStages = []string{"write", "review", "rewrite", "export"}
+// 想要先共创澄清，显式 --stages cocreate,write,review,rewrite,deliver。
+var defaultPipelineStages = []string{"write", "review", "rewrite", "deliver"}
 
 var knownPipelineStages = map[string]bool{
-	"cocreate": true, "write": true, "review": true, "rewrite": true, "export": true,
+	"cocreate": true, "write": true, "review": true, "rewrite": true, "deliver": true,
 }
 
 type pipelineFlags struct {
 	Stages           string
 	Prompt           string
 	PromptFile       string
-	ExportOut        string
-	Overwrite        bool
 	Restart          bool
 	Start            int
 	End              int
@@ -51,17 +49,15 @@ type pipelineFlags struct {
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs := flag.NewFlagSet("pipeline", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart] [--export-out <path>]\n\n")
+		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / write / review / rewrite / export（默认 %s）\n\n选项：\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / write / review / rewrite / deliver（默认 %s）\n\n选项：\n", strings.Join(defaultPipelineStages, ","))
 		fs.PrintDefaults()
 	}
 	var f pipelineFlags
 	fs.StringVar(&f.Stages, "stages", "", "逗号分隔的阶段列表，缺省 "+strings.Join(defaultPipelineStages, ","))
 	fs.StringVar(&f.Prompt, "prompt", "", "创作指令（write 阶段用）")
 	fs.StringVar(&f.PromptFile, "prompt-file", "", "从文件读创作指令，'-' 表示 stdin")
-	fs.StringVar(&f.ExportOut, "export-out", "", "export 阶段输出路径（后缀决定 TXT/EPUB）")
-	fs.BoolVar(&f.Overwrite, "overwrite", false, "export 阶段目标文件已存在时覆盖")
 	fs.BoolVar(&f.Restart, "restart", false, "清空已保存的流水线状态，从头重跑")
 	fs.IntVar(&f.Start, "from", 0, "review/rewrite 阶段起始章号（含），0 = 自动")
 	fs.IntVar(&f.End, "to", 0, "review/rewrite 阶段结束章号（含），0 = 自动")
@@ -259,10 +255,7 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		return reviewExistingPipeline(opts, stageArgs["review"])
 	case "rewrite":
 		return rewriteExistingPipeline(opts, stageArgs["rewrite"])
-	case "export":
-		if err := exportPipeline(opts, pipelineExportArgs(flags)); err != nil {
-			return err
-		}
+	case "deliver":
 		cfg, _, err := loadCfgBundle(opts)
 		if err != nil {
 			return err
@@ -271,17 +264,6 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 	default:
 		return fmt.Errorf("未知阶段：%s", stage)
 	}
-}
-
-func pipelineExportArgs(flags pipelineFlags) []string {
-	var exportArgs []string
-	if strings.TrimSpace(flags.ExportOut) != "" {
-		exportArgs = []string{"--out", flags.ExportOut}
-	}
-	if flags.Overwrite {
-		exportArgs = append(exportArgs, "--overwrite")
-	}
-	return exportArgs
 }
 
 // warnStaleZeroInitReadiness 写前检查零章就绪指纹（Task 052）：readiness 缺 schema_version

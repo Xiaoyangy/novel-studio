@@ -226,15 +226,8 @@ curl -s http://127.0.0.1:8765/api/projects
 1. 最后一章完成章级审核。
 2. 弧/卷摘要齐全。
 3. `progress.phase=complete`。
-4. 按需要导出 TXT/EPUB。
+4. 跑 `--pipeline --stages deliver` 做交付沉淀（推进台账 + RAG 事实 + 交付快照）。
 5. 保留 `reviews/`、`diag-export.md` 作为复盘证据。
-
-导出命令：
-
-```bash
-go run ./cmd/novel-studio --export
-go run ./cmd/novel-studio --export --out output/novel/<book>.txt
-```
 
 ## 后续执行口径
 

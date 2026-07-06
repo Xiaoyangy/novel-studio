@@ -400,13 +400,6 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 	}
 }
 
-func TestPipelineExportArgsPassesOverwrite(t *testing.T) {
-	flags := pipelineFlags{ExportOut: "/tmp/book.txt", Overwrite: true}
-	if got := strings.Join(pipelineExportArgs(flags), " "); got != "--out /tmp/book.txt --overwrite" {
-		t.Fatalf("export args = %q", got)
-	}
-}
-
 func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)

@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-const configDirName = ".ainovel"
+const configDirName = ".novel-studio"
 
-// DefaultConfigPath 返回全局配置文件路径 ~/.ainovel/config.json。
+// DefaultConfigPath 返回全局配置文件路径 ~/.novel-studio/config.json。
 func DefaultConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -21,7 +21,7 @@ func DefaultConfigPath() string {
 	return filepath.Join(home, configDirName, "config.json")
 }
 
-// DefaultConfigDir 返回 ~/.ainovel 目录路径；取不到家目录时返回空字符串。
+// DefaultConfigDir 返回 ~/.novel-studio 目录路径；取不到家目录时返回空字符串。
 // 仅用于读/写不强制存在的文件（如模型缓存），不会自动创建目录。
 func DefaultConfigDir() string {
 	home, err := os.UserHomeDir()
@@ -31,7 +31,7 @@ func DefaultConfigDir() string {
 	return filepath.Join(home, configDirName)
 }
 
-// configDir 返回 ~/.ainovel 目录路径，不存在时创建。
+// configDir 返回 ~/.novel-studio 目录路径，不存在时创建。
 func configDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -44,15 +44,15 @@ func configDir() (string, error) {
 	return dir, nil
 }
 
-// projectConfigPath 返回项目级配置文件的相对路径 ./.ainovel/config.json。
-// 项目级 dotdir 镜像全局 ~/.ainovel/，复用同一个 configDirName；相对 cwd 解析。
+// projectConfigPath 返回项目级配置文件的相对路径 ./.novel-studio/config.json。
+// 项目级 dotdir 镜像全局 ~/.novel-studio/，复用同一个 configDirName；相对 cwd 解析。
 func projectConfigPath() string {
 	return filepath.Join(configDirName, "config.json")
 }
 
 // LoadConfig 按优先级加载并合并配置：
-//  1. ~/.ainovel/config.json（全局）
-//  2. ./.ainovel/config.json（项目级覆盖）
+//  1. ~/.novel-studio/config.json（全局）
+//  2. ./.novel-studio/config.json（项目级覆盖）
 //  3. flagPath 指定的路径（最高优先级）
 func LoadConfig(flagPath string) (Config, error) {
 	var cfg Config
@@ -74,7 +74,7 @@ func LoadConfig(flagPath string) (Config, error) {
 	//    "配了不生效"无从排查（issue #37）。
 	project, found, err := loadOptionalJSON(projectConfigPath())
 	if err != nil {
-		return cfg, fmt.Errorf("项目级配置 ./.ainovel/config.json 解析失败（请检查 JSON 语法）: %w", err)
+		return cfg, fmt.Errorf("项目级配置 ./.novel-studio/config.json 解析失败（请检查 JSON 语法）: %w", err)
 	}
 	if found {
 		cfg = mergeConfig(cfg, project)
@@ -344,7 +344,7 @@ func stripJSONComments(data []byte) []byte {
 	return out
 }
 
-// WriteStartupError 把启动期致命错误追加写入 ~/.ainovel/last-error.log，并返回
+// WriteStartupError 把启动期致命错误追加写入 ~/.novel-studio/last-error.log，并返回
 // 该文件路径（best-effort，失败时返回空字符串）。双击启动时控制台窗口会随进程
 // 退出立即关闭、错误一闪而过，落盘是这类用户事后追溯的唯一途径。
 func WriteStartupError(msg string) string {

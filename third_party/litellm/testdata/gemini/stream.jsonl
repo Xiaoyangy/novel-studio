@@ -1,0 +1,7 @@
+data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true,"thoughtSignature":"sig-think"}]}}]}
+data: {"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}
+data: {"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-call","functionCall":{"id":"call_1","name":"lookup","args":{"q":"x"}}}]}}]}
+data: {"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":9,"cachedContentTokenCount":1}}
+data: {"candidates":[{"finishReason":"FUNCTION_CALLING"}]}
+data: [DONE]
+

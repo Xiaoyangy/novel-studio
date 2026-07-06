@@ -1,0 +1,7 @@
+data: {"model":"gpt-4.1","choices":[{"index":0,"delta":{"reasoning_content":"think "}}]}
+data: {"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hel"}}]}
+data: {"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}
+data: {"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]},"finish_reason":"tool_calls"}]}
+data: {"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}
+data: [DONE]
+

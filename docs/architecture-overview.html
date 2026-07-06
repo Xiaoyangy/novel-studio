@@ -473,26 +473,6 @@
 
       <div class="card">
         <div class="card-title">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--indigo)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-          Import 导入
-          <span class="tag indigo">复用旧稿</span>
-        </div>
-        <div class="card-desc">
-          已有 Markdown 小说，想用工程续写。两个子模式：<code>--import</code> 走 LLM 反推 foundation；<code>--import-fast</code> 走本地确定性导入。
-        </div>
-        <pre style="margin-top:14px"><span class="c-cmt"># LLM 反推 + 评审 + diag</span>
-./novel-studio <span class="c-key">--import</span> 旧稿.md
-
-<span class="c-cmt"># 本地确定性导入</span>
-./novel-studio <span class="c-key">--import-fast</span> 旧稿.md
-
-<span class="c-cmt"># 不评审 / 不写 diag</span>
-./novel-studio <span class="c-key">--import-fast</span> 旧稿.md \
-  <span class="c-key">--no-review</span> <span class="c-key">--no-diag</span></pre>
-      </div>
-
-      <div class="card">
-        <div class="card-title">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           Cocreate 多轮澄清
           <span class="tag accent">可选</span>
@@ -518,7 +498,7 @@
       <span class="sec-num">02 / PIPELINE</span>
       <h2 class="sec-title">五阶段流水线</h2>
     </div>
-    <p class="sec-sub">默认阶段 <code>write → review → rewrite → export</code>，可选前置 <code>cocreate</code>。每个阶段写盘到 <code>meta/</code>，可断点续跑；阶段内部还有更细的按章恢复（两层恢复叠加）。</p>
+    <p class="sec-sub">默认阶段 <code>write → review → rewrite → deliver</code>，可选前置 <code>cocreate</code>。每个阶段写盘到 <code>meta/</code>，可断点续跑；阶段内部还有更细的按章恢复（两层恢复叠加）。</p>
 
     <div class="pipeline-track">
       <div class="p-node">
@@ -567,7 +547,7 @@ flowchart LR
     G --> H{红旗?}
     H -- yes --> I[rewrite 阶段<br/>Writer 重写]
     I --> H
-    H -- no --> J[export 阶段<br/>合并导出]
+    H -- no --> J[deliver 阶段<br/>交付沉淀]
     I --> K{--write-to<br/>到达?}
     K -- no --> F
     K -- yes --> L[停止]
@@ -881,7 +861,7 @@ flowchart LR
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
         LLM judge 对同族输出有 75–84% 自我偏好——writer 与 reviewer 建议用不同模型家族。请求级 failover：主 provider 失败（宕机 / 限流 / 余额不足）自动切兜底，恢复后自动回主。
       </p>
-      <pre><span class="c-cmt">// ~/.ainovel/config.json</span>
+      <pre><span class="c-cmt">// ~/.novel-studio/config.json</span>
 {
   <span class="c-key">"roles"</span>: {
     <span class="c-key">"writer"</span>: {
@@ -1134,7 +1114,7 @@ flowchart LR
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--rose)"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
           Skills / 拆文库
         </div>
-        <div class="card-desc" style="margin-bottom:10px;">内置 story / fanqie skills + 工程内 <code>拆文库/</code> 参考素材，可导入 RAG。</div>
+        <div class="card-desc" style="margin-bottom:10px;">内置 story skills + 工程内 <code>拆文库/</code> 参考素材，可导入 RAG。</div>
         <pre><span class="c-fn">novel-studio</span> skills list
 <span class="c-fn">novel-studio</span> skills export <span class="c-key">--to</span> ./skills</pre>
       </div>
@@ -1147,33 +1127,19 @@ flowchart LR
   <div class="wrap">
     <div class="sec-head">
       <span class="sec-num">09 / EXPORT</span>
-      <h2 class="sec-title">最终导出</h2>
+      <h2 class="sec-title">交付沉淀</h2>
     </div>
-    <p class="sec-sub">export 阶段把 <code>chapters/*.md</code> 里已 commit 的章节合并成可分发的电子书。后缀决定格式。</p>
+    <p class="sec-sub">deliver 阶段对已 commit 的章节做交付沉淀：刷新章节/项目推进台账、把已接受章节的事实 chunk 沉入 RAG 索引、落交付快照与 <code>meta/delivery_log.md</code>。</p>
 
     <div class="g2">
       <div class="card">
         <div class="card-title">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted)"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-          TXT 纯文本
+          Deliver 交付
         </div>
-        <div class="card-desc" style="margin-bottom: 12px;">纯章节合并，便于后续人工编辑 / 投稿。</div>
-        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
-  <span class="c-key">--export-out</span> 鬼城.txt</pre>
-      </div>
-
-      <div class="card">
-        <div class="card-title">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted)"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          EPUB 电子书
-        </div>
-        <div class="card-desc" style="margin-bottom: 12px;">带目录和元数据的电子书，可直接发到阅读器。</div>
-        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
-  <span class="c-key">--export-out</span> 鬼城.epub
-
-<span class="c-cmt"># 已存在则覆盖</span>
-<span class="c-fn">novel-studio</span> <span class="c-key">--export</span> \
-  <span class="c-key">--export-out</span> 鬼城.epub <span class="c-key">--overwrite</span></pre>
+        <div class="card-desc" style="margin-bottom: 12px;">推进台账 + RAG 事实入库 + 交付快照，一次沉淀。</div>
+        <pre><span class="c-fn">novel-studio</span> <span class="c-key">--pipeline</span> \
+  <span class="c-key">--stages</span> deliver</pre>
       </div>
     </div>
 
@@ -1182,14 +1148,13 @@ flowchart LR
         <div class="cluster-title">完整端到端命令</div>
         <span class="tag primary">一行</span>
       </div>
-      <pre><span class="c-cmt"># 从 prompt 启动流水线，写 1-10 章就停，跑完整 5 阶段（含 export）</span>
+      <pre><span class="c-cmt"># 从 prompt 启动流水线，写 1-10 章就停，跑完整 5 阶段（含 deliver）</span>
 cd /Users/chenhongyang/Desktop/book/novel-studio
 ./novel-studio <span class="c-key">--pipeline</span> \
   <span class="c-key">--dir</span> data/runs/鬼城/output/novel \
   <span class="c-key">--prompt-file</span> data/runs/鬼城/prompt.md \
-  <span class="c-key">--stages</span> write,review,rewrite,export \
-  <span class="c-key">--write-to</span> <span class="c-num">10</span> \
-  <span class="c-key">--export-out</span> data/runs/鬼城/鬼城.epub</pre>
+  <span class="c-key">--stages</span> write,review,rewrite,deliver \
+  <span class="c-key">--write-to</span> <span class="c-num">10</span></pre>
     </div>
   </div>
 </section>

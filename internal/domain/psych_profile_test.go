@@ -212,3 +212,57 @@ func TestCharacterPsychProfileValidateAggregation(t *testing.T) {
 		t.Fatal("nil 画像应视为合法")
 	}
 }
+
+func TestCharacterPsychProfileUnmarshalTolerant(t *testing.T) {
+	t.Run("形状不符的子维度单独降级其余保留", func(t *testing.T) {
+		// values / moral_foundations 数组形状来自 MiniMax 实跑故障现场。
+		src := `{
+			"big_five": {"openness":0.6,"conscientiousness":0.9,"extraversion":0.3,"agreeableness":0.4,"neuroticism":0.5},
+			"values": ["安全","成就","权力"],
+			"moral_foundations": [{"name":"公平","score":0.8}]
+		}`
+		var p CharacterPsychProfile
+		if err := json.Unmarshal([]byte(src), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.BigFive == nil || p.BigFive.Conscientiousness != 0.9 {
+			t.Fatalf("big_five 应保留，got %+v", p.BigFive)
+		}
+		if p.Values != nil || p.MoralFoundations != nil {
+			t.Fatalf("形状不符的维度应为 nil，got values=%+v mf=%+v", p.Values, p.MoralFoundations)
+		}
+		if len(p.DegradedDims) != 2 || p.DegradedDims[0] != "values" || p.DegradedDims[1] != "moral_foundations" {
+			t.Fatalf("degraded_dims 应记录 [values moral_foundations]，got %v", p.DegradedDims)
+		}
+	})
+
+	t.Run("psych 本体非对象时整体降级不报错", func(t *testing.T) {
+		var p CharacterPsychProfile
+		if err := json.Unmarshal([]byte(`["果断","冷静"]`), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(p.DegradedDims) != 1 || p.DegradedDims[0] != "psych" {
+			t.Fatalf("整体降级应记录 psych，got %v", p.DegradedDims)
+		}
+	})
+
+	t.Run("null 与合法对象照常工作", func(t *testing.T) {
+		var p CharacterPsychProfile
+		if err := json.Unmarshal([]byte(`null`), &p); err != nil {
+			t.Fatalf("null: %v", err)
+		}
+		if len(p.DegradedDims) != 0 {
+			t.Fatalf("null 不应降级，got %v", p.DegradedDims)
+		}
+		src := `{"values":{"values":{"self_direction":0.7,"stimulation":0.2,"hedonism":0.1,"achievement":0.8,"power":0.6,"security":0.9,"tradition":0.3,"conformity":0.4,"benevolence":0.5,"universalism":0.2},"primary_driver":"security + achievement"}}`
+		if err := json.Unmarshal([]byte(src), &p); err != nil {
+			t.Fatalf("object: %v", err)
+		}
+		if p.Values == nil || p.Values.Values.Security != 0.9 {
+			t.Fatalf("合法 values 应解析，got %+v", p.Values)
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+	})
+}

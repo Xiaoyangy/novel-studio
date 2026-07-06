@@ -1,0 +1,86 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "weather?"
+        },
+        {
+          "fileData": {
+            "fileUri": "gs://bucket/image.png",
+            "mimeType": "image/png"
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Need weather.",
+          "thought": true,
+          "thoughtSignature": "sig-think"
+        },
+        {
+          "functionCall": {
+            "args": {
+              "city": "Paris"
+            },
+            "id": "call_weather",
+            "name": "get_weather"
+          },
+          "thoughtSignature": "sig-call"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call_weather",
+            "name": "get_weather",
+            "response": {
+              "temp": "15C"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingLevel": "low"
+    }
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "be concise"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Get weather.",
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

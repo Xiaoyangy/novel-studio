@@ -9,14 +9,14 @@
 
 ## 项目定位
 
-`novel-studio` 是从本地两个项目重构出的整合版：
+`novel-studio` 由两层能力组成：
 
-- `book_novel/ainovel-cli` 提供 Go CLI、headless 创作、导入、评审、重写和导出能力。
-- `oh-story-claudecode` 提供网文写作 skill 包，覆盖扫榜、拆文、长短篇写作、去 AI 味、审查、封面和浏览器采集。
+- Go CLI 主运行时，提供 headless 创作、评审、重写和交付沉淀能力。
+- 网文写作 skill 包，覆盖拆文、长短篇写作、去 AI 味和审查。
 
-整合后，Go CLI 仍是主运行时；全部 skill 归入 [`skills/`](skills/README.md) 单一源目录，可通过 `novel-studio skills` 子命令导出到 Claude Code / Codex / OpenCode / OpenClaw 能扫描的项目目录。
+全部 skill 归入 [`skills/`](skills/README.md) 单一源目录，可通过 `novel-studio skills` 子命令导出到 Claude Code / Codex / OpenCode / OpenClaw 能扫描的项目目录。
 
-本地旧工作流已继续归并进本工程：
+工程内其他工作区：
 
 - `services/short-story-dashboard/` — 浏览器进度看板：展示长篇 `output/novel` 创作进度和全部产物资料，也保留短篇项目服务能力。`novel-studio service start` 启动。
 - `data/generated-output/` — 历史短篇正文、短篇服务项目、工作流状态、审核报告和配图方案。
@@ -27,7 +27,7 @@
 
 统一规划口径：长篇和短篇只在写作前分流，设计阶段交付物同名同构（见 [`docs/design-stage-workflow.md`](docs/design-stage-workflow.md)）。两者都先落盘 `premise`、`characters`、`world_rules`、`book_world`、`outline`、`layered_outline`、`timeline`、`relationship_state`、`foreshadow_ledger`、`compass` 和 `故事圣经.md`。设计总字数 ≤ 30000 字走短篇压缩粒度（1 卷 1 弧、伏笔短链闭合、写完汇总 `正文.md` 并全文终审）；> 30000 字走长篇分层/滚动粒度。进入章节写作后，两者使用同一套逐章写作、机械审核、Editor 复审、返工和解锁逻辑：每章必须有 `reviews/NN_ai_gate.json` 与统一审核报告 `reviews/NN.md`，未过门禁不允许继续。
 
-目录分层说明见 [`docs/project-structure.md`](docs/project-structure.md)，写作审核一体化执行方案见 [`docs/writing-review-workflow.md`](docs/writing-review-workflow.md)，数据沉淀与推进机制见 [`docs/data-lifecycle-and-progression.md`](docs/data-lifecycle-and-progression.md)，整合清单见 [`docs/integration-inventory.md`](docs/integration-inventory.md)。
+目录分层说明见 [`docs/project-structure.md`](docs/project-structure.md)，写作审核一体化执行方案见 [`docs/writing-review-workflow.md`](docs/writing-review-workflow.md)，数据沉淀与推进机制见 [`docs/data-lifecycle-and-progression.md`](docs/data-lifecycle-and-progression.md)，工程能力清单见 [`docs/capability-inventory.md`](docs/capability-inventory.md)。
 
 ## 特性
 
@@ -48,10 +48,10 @@
 - **世界模拟（离屏推演）** — 镜头外的世界不等主角：Architect 在弧/卷边界以 Game Master 身份做世界推演（`save_world_tick`），推进离屏角色各自的日程（goal→steps）、拨动势力进度钟（Blades 式：每势力一个"目标+进度+走满后果"的时钟，走满必须转化为镜头外事件）、更新社会情绪；每条事件按故事日历（`story_calendar`，一章≈几天）与路线旅行天数推算"最早传到主角处的章号"，Writer 只看得见已越过地平线的事件——正文永远只写主角能感知的世界。LOD 三层控成本（主角圈全推演 / 配角弧级日程 / 背景群体状态机），离屏事件天然成为伏笔素材，diag 监控世界停摆；`--zero-init` 一次产出全部初始状态（分层名单/初始日程/日历骨架/tick 零点 + 信息差图/社会情绪/仪式日历/物理公理/道德天花板）
 - **异族裁判（reviewer 角色）** — LLM judge 对同族输出有 75-84% 自我偏好：可配独立 `reviewer` 角色（未配置自动回落 editor），用于三采样 pairwise 终选（随机换位正反两轮、不一致回退确定性分）与 AI 味判别，推荐与 writer 用不同模型家族
 - **AI 味防线（写前-写中-写后闭环）** — slop 词表语料化（embed 内置 + 项目级覆盖 + `lexicon_version` 入门禁报告，语料驱动再生成以deconstruction-library为人类基线）；Writer 生成时上下文即带规避清单、返工时再注入命中明细与规避策略；not-x-but-y 等句式按语义变体族合并计数防换皮；书级统计（跨章口头禅/开头结尾结构同质度）；外部检测器（朱雀）人工抽检登记与本地分相关性校准
-- **审核闭环强化** — 审核历史零丢失归档（`reviews/NN.history.jsonl`），Editor 复审自动注入上一轮 issues 做回归验证（防"修了 A 换挑 B"循环），`review_round` 轮次事实 + 第 3 轮循环刹车提示；锚定 rubric（四档描述符 + 证据先于评分）修复分数聚簇；`--export --evidence-pack` 打包人工创作过程证据链
+- **审核闭环强化** — 审核历史零丢失归档（`reviews/NN.history.jsonl`），Editor 复审自动注入上一轮 issues 做回归验证（防"修了 A 换挑 B"循环），`review_round` 轮次事实 + 第 3 轮循环刹车提示；锚定 rubric（四档描述符 + 证据先于评分）修复分数聚簇
 - **成本与预算** — token/费用按角色、按模型累计（`meta/usage.json`），OpenRouter 价格自动拉取，`budget.book_usd` 越线告警/熔断，无人值守告警可推到系统通知或自定义命令
 - **可观测 / 可诊断** — Coordinator 与每个子代理的完整工具调用日志（`meta/sessions/*.jsonl`）、LLM 调用级 trace（`meta/runtime/llm_calls.jsonl`，字段对齐 OTel gen_ai.* 语义约定）、规则化诊断（`--diag`）、脱敏导出（`diag-export.md`）、harness 评测（`eval inspect`）与 prompt A/B（`eval run --variant`）
-- **Prompt 运行时覆盖** — 核心提示词支持 `~/.ainovel/prompts/` → `./.ainovel/prompts/` 覆盖链（与 config/rules 同一分层惯例），每次运行落盘 `meta/prompt_manifest.json` 内容指纹，精确回答"这次 run 用的是哪版 prompt"
+- **Prompt 运行时覆盖** — 核心提示词支持 `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链（与 config/rules 同一分层惯例），每次运行落盘 `meta/prompt_manifest.json` 内容指纹，精确回答"这次 run 用的是哪版 prompt"
 - **工具参数容错解析** — LLM 工具参数经代理/弱模型出现围栏包裹、尾逗号、字符串化 JSON 时自动修复（纯 Go、零依赖），修复失败返回结构化错误交 LLM 自主重试
 - **pipeline / 子命令入口** — 无 TTY 的命令行入口：所有原生写作能力统一经 `--pipeline` 编排；`--headless --prompt`、`--review-existing`、`--rewrite-existing` 仅作兼容别名
 - **功能 skill 化** — 每个功能在 [`skills/`](skills/README.md) 下有一份入口 SKILL.md，外部 agent（Claude Code / Codex / OpenCode）读后直接拼命令行调用
@@ -219,7 +219,7 @@ novel-studio
 # 创作前自检 LLM 是否真的可用（代理未起 / key 失效在这里暴露）
 novel-studio --check
 
-# 一条龙：写作→评审→重写→导出，可断点续跑
+# 一条龙：写作→评审→重写→交付，可断点续跑
 novel-studio --pipeline --prompt "写一本东方玄幻长篇，主角从边陲小城起步"
 
 # 需求模糊？先多轮对话澄清，定稿创作指令
@@ -231,22 +231,19 @@ novel-studio --cocreate "我想写一个赛博朋克悬疑长篇"
 写作与规划：
 
 ```bash
-novel-studio --pipeline --prompt <text>      # 可恢复流水线：写作→评审→重写→导出
+novel-studio --pipeline --prompt <text>      # 可恢复流水线：写作→评审→重写→交付
 novel-studio --pipeline --prompt-file p.md   # 从文件读 prompt
 novel-studio --cocreate                      # 多轮对话澄清需求，--start 直接进创作
 novel-studio --zero-init [--dir d]           # 第一章前的角色/关系/资源推演资产 + 白名单 RAG
 novel-studio --steer "<指令>"                # 排队一条干预，下次启动生效
 ```
 
-已有作品处理：
+评审与重写：
 
 ```bash
-novel-studio --import <novel.md>             # LLM 反推导入 + 评审 + diag
-novel-studio --import-fast <chapters.md>     # 本地确定性导入，跳过 LLM 反推
 novel-studio --pipeline --stages review      # 逐章 Editor 评审（不改原文）
 novel-studio --pipeline --stages rewrite     # 按评审反馈逐章重写
-novel-studio --export [--out x.epub]         # 合并导出（TXT / EPUB，后缀决定格式）
-novel-studio --export --evidence-pack        # 同时打包人工创作证据链（平台申诉用）
+novel-studio --pipeline --stages deliver     # 交付沉淀：刷新推进台账 + RAG 事实入库 + 交付快照
 ```
 
 诊断与运维：
@@ -284,13 +281,13 @@ novel-studio skills export --to <dir>        # 导出 skills 到项目目录
 
 ### Docker
 
-Docker 镜像适合在服务器/NAS 上跑 headless 长任务。首次配置引导需要交互终端，建议在宿主机先生成好 `~/.ainovel/config.json` 再挂载进容器：
+Docker 镜像适合在服务器/NAS 上跑 headless 长任务。首次配置引导需要交互终端，建议在宿主机先生成好 `~/.novel-studio/config.json` 再挂载进容器：
 
 ```bash
 mkdir -p config workspace
 
 docker run --rm \
-  -v "$PWD/config:/root/.ainovel" \
+  -v "$PWD/config:/root/.novel-studio" \
   -v "$PWD/workspace:/workspace" \
   ghcr.io/chenhongyang/novel-studio:latest \
   --pipeline --prompt "写一本东方玄幻长篇，主角从边陲小城起步"
@@ -301,39 +298,45 @@ docker compose run --rm novel-studio --pipeline --prompt "写一本悬疑短篇"
 
 ### 管理多本小说
 
-每本小说绑定到启动目录，产物落在 `{cwd}/output/novel/`。换目录运行 = 换一本，`cd` 回去运行 = 自动从最近 checkpoint 恢复。配置 `~/.ainovel/config.json` 全局共享。
+每本小说绑定到启动目录，产物落在 `{cwd}/output/novel/`。换目录运行 = 换一本，`cd` 回去运行 = 自动从最近 checkpoint 恢复。配置 `~/.novel-studio/config.json` 全局共享。
 
 ## 配置
 
-首次运行自动引导生成 `~/.ainovel/config.json`，后续直接编辑。完整示例见仓库根目录 [`config.example.jsonc`](config.example.jsonc)（首次引导也会复制一份到 `~/.ainovel/`）。
+首次运行自动引导生成 `~/.novel-studio/config.json`，后续直接编辑。完整示例见仓库根目录 [`config.example.jsonc`](config.example.jsonc)（首次引导也会复制一份到 `~/.novel-studio/`）。
+
+> 从旧版（配置目录为 `~/.ainovel/`）迁移：`mv ~/.ainovel ~/.novel-studio`（项目内如有 `./.ainovel/` 同理改名），内容格式不变。
 
 ```jsonc
 {
-  "provider": "openrouter",
-  "model": "google/gemini-2.5-flash",
+  "provider": "minimax",
+  "model": "MiniMax-M3[1M]",
   "reasoning_effort": "medium",
   "providers": {
-    "openrouter": {
-      "api_key": "sk-or-v1-xxx",
-      "base_url": "https://openrouter.ai/api/v1",
-      "models": ["google/gemini-2.5-flash", "google/gemini-2.5-pro"]
+    "minimax": {
+      "api_key": "sk-xxx",
+      "models": ["MiniMax-M3[1M]", "MiniMax-M3"]
     }
   },
   "style": "default",
   "context_window": 0,                  // 0=按模型自动解析；可显式钉小值提前触发压缩
   "budget": { "book_usd": 20, "warn_ratio": 0.8, "hard_stop": false },
   "notify": { "enabled": true, "events": ["run_end", "repeat", "budget"] },
-  "rag": { "embedding": { "enabled": false } }
+  "rag": {
+    "embedding": { "enabled": true, "local_gguf": "models/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf", "local_port": 18434, "model": "qwen3-embedding-0.6b" },
+    "qdrant": { "enabled": true, "url": "http://127.0.0.1:6333" },
+    "craft_library": "deconstruction-library/writing-techniques",
+    "benchmark_library": "deconstruction-library/novel_all"
+  }
 }
 ```
 
 ### 配置查找顺序（后者覆盖前者）
 
-1. `~/.ainovel/config.json` — 全局配置
-2. `./.ainovel/config.json` — 项目级覆盖（可选）
+1. `~/.novel-studio/config.json` — 全局配置
+2. `./.novel-studio/config.json` — 项目级覆盖（可选）
 3. `--config path/to/config.json` — 命令行指定
 
-> 项目级 `.ainovel/` 是全局 `~/.ainovel/` 的镜像：配置放 `./.ainovel/config.json`，写作规则放 `./.ainovel/rules/*.md`。该目录含密钥，已默认加入 `.gitignore`。
+> 项目级 `.novel-studio/` 是全局 `~/.novel-studio/` 的镜像：配置放 `./.novel-studio/config.json`，写作规则放 `./.novel-studio/rules/*.md`。该目录含密钥，已默认加入 `.gitignore`。
 
 覆盖规则：标量字段按后者覆盖前者；`providers` 和 `roles` 按 key 合并，同名项内部按字段覆盖；未填写字段继承上层。**注意** `provider`（及 `roles.*.provider`）的值是 `providers` 里的 key 名——一根指针；项目级切到全局不存在的账号时必须同时补凭证。
 
@@ -467,7 +470,7 @@ docker compose run --rm novel-studio --pipeline --prompt "写一本悬疑短篇"
 
 内置去 AI 味基线（出厂默认）：机械黑名单（套句/疲劳词，`rules.SystemDefaults()`，commit 时确定性检查）+ 语义判据 `assets/references/anti-ai-tone.md`（注入 writer / editor 规避与举证）。
 
-叠加自己的偏好**无需改源码**：在 `~/.ainovel/rules/`（全局）或 `./.ainovel/rules/`（本书）放任意 `.md`，**用大白话写偏好**（「主角别写成圣母」「每章 3000 字左右」「不要出现『某种程度上』」）——零格式、零 YAML。系统用模型把自然语言归一化成本书规则快照（字数范围 / 禁用词 / 疲劳词阈值等结构化约束 + 风格偏好），写作时自动遵循、提交时机械自检。违规按固定映射分级：禁用字符/短语 → error，疲劳词超阈值 → warning，字数偏差 ≥20% → error。详见 [`docs/user-rules-runtime.md`](docs/user-rules-runtime.md)。
+叠加自己的偏好**无需改源码**：在 `~/.novel-studio/rules/`（全局）或 `./.novel-studio/rules/`（本书）放任意 `.md`，**用大白话写偏好**（「主角别写成圣母」「每章 3000 字左右」「不要出现『某种程度上』」）——零格式、零 YAML。系统用模型把自然语言归一化成本书规则快照（字数范围 / 禁用词 / 疲劳词阈值等结构化约束 + 风格偏好），写作时自动遵循、提交时机械自检。违规按固定映射分级：禁用字符/短语 → error，疲劳词超阈值 → warning，字数偏差 ≥20% → error。详见 [`docs/user-rules-runtime.md`](docs/user-rules-runtime.md)。
 
 ## 成本、预算与告警
 
@@ -492,23 +495,23 @@ novel-studio --check --provider minimax --model M3    # 只验证某个备用 pr
 `novel-studio --pipeline` 把各功能串成一条**可恢复的流水线**：按阶段顺序执行，状态存 `meta/pipeline.json`，已完成阶段重跑时先复核产物证据，再决定跳过或重跑。
 
 ```bash
-# 标准：写作 → 评审 → 重写 → 导出（中断后重跑同一命令即续跑）
+# 标准：写作 → 评审 → 重写 → 交付（中断后重跑同一命令即续跑）
 novel-studio --pipeline --prompt "写一本东方玄幻长篇，主角从边陲小城起步"
 
 # 先共创澄清再一条龙
-novel-studio --pipeline --stages cocreate,write,review,rewrite,export
+novel-studio --pipeline --stages cocreate,write,review,rewrite,deliver
 
-# 自定义阶段子集 + 导出格式；--restart 从头重跑
-novel-studio --pipeline --prompt "..." --stages write,export --export-out ~/book.epub
+# 自定义阶段子集；--restart 从头重跑
+novel-studio --pipeline --prompt "..." --stages write,deliver
 ```
 
-阶段：`cocreate`（可选）→ `write` → `review` → `rewrite` → `export`，默认 `write,review,rewrite,export`。流水线只做阶段编排，阶段内部各自还有更细的恢复（write 走 checkpoint、review/rewrite 按章号），两层恢复叠加。阶段标记完成前必须通过轻量证据校验；`--diag` 会只读报告流水线证据漂移。
+阶段：`cocreate`（可选）→ `write` → `review` → `rewrite` → `deliver`，默认 `write,review,rewrite,deliver`。`deliver` 做交付沉淀：刷新章节/项目推进台账、把已接受章节的事实 chunk 沉入 RAG 索引、落交付快照与 `meta/delivery_log.md`。流水线只做阶段编排，阶段内部各自还有更细的恢复（write 走 checkpoint、review/rewrite 按章号），两层恢复叠加。阶段标记完成前必须通过轻量证据校验；`--diag` 会只读报告流水线证据漂移。
 
 启动时按配置确保本机 Qdrant 可用；进入 `write` 前构建或刷新当前项目 RAG。详见 [`skills/novel-pipeline`](skills/novel-pipeline/SKILL.md)。
 
 ## 诊断与可观测性
 
-**诊断**（`--diag`，`--import` 流程末尾默认自动跑）对 output 产物做只读分析，覆盖四个维度：
+**诊断**（`--diag`）对 output 产物做只读分析，覆盖四个维度：
 
 - **流程** — 改写循环卡顿、未消费的转向指令、阶段/流程状态异常、章节跳号、流水线证据漂移
 - **质量** — 评审维度持续低分、合同履约率、改写率、章节字数异常
@@ -532,39 +535,6 @@ case 定义在 [`evals/cases/`](evals/cases/)，评测体系说明见 [`docs/eva
 把参考文章放到启动目录的 `simulate/` 文件夹，系统递归读取 `.txt`、`.md`、`.markdown`，用 architect 模型分析语料写入 `meta/simulation_profile.json`。合成按 `relative_path + sha256` 跳过未变化文件；已有画像时增量合成。也可用 `--import-sim` 导入之前生成的画像（按语料指纹合并、重复来源跳过）。
 
 画像以 compact 形式注入 `novel_context`，四个 Agent 都能读取；各 Agent 只借鉴结构、节奏、钩子和吸引读者手法，不复制原文表达或专有设定。详见 [`skills/novel-simulate`](skills/novel-simulate/SKILL.md)。
-
-## 导入
-
-`--import` 把已有小说反推导入：先按章切分，再用 LLM 反推前提 / 角色 / 世界观 / 分层大纲 / 指南针，逐章落盘，原文作为第一卷落成可续写的连载。`--import-fast` 是本地确定性导入，跳过 LLM 反推。
-
-```bash
-novel-studio --import ~/我的小说.txt
-novel-studio --import-fast ~/我的小说.txt
-novel-studio --import ~/我的小说.txt --no-review --no-diag  # 只导入
-```
-
-**章节切分规则**：自动识别行首标题（可带 `#`/`##` 前缀、`【】`/`〖〗` 包裹、全角空格，兼容 GBK/BOM）：
-
-- 中文编号：`第一章` `第3回` `第十话` `第二卷` `第五节` `第二幕`、独立 `卷一`，支持大写数字（`第壹章`）和副标题（`第三章：决战`）
-- 中文特殊单元：`序章` `楔子` `引子` `前言` `尾声` `终章` `后记` `番外` `外传`
-- 英文：`Chapter 1` `Chapter II`、`Prologue` `Epilogue`，可带副标题
-
-> 导入是确定性回放，不经过 Coordinator，适合"续写同一本书"。只想借鉴设定做全新创作时，请起一本新书并在需求里描述想要的风格设定。
-
-## 导出
-
-`--export` 把已完成章节合并输出，默认 TXT，格式由**输出路径后缀**决定（`.txt` / `.epub`）。导出是只读操作：
-
-```bash
-novel-studio --export                                # {novelDir}/{NovelName}.txt
-novel-studio --export --out ~/光斑.epub              # EPUB 3（Apple Books / 微信读书 / Kindle 可读）
-novel-studio --export --from 10 --to 30 --overwrite  # 章节区间 + 覆盖
-```
-
-- **TXT** — `《书名》` → 卷分隔 → 章节正文。premise（创作蓝图）和弧分隔（内部结构）不进导出；writer 自带的重复标题会被剥掉，导出器统一生成"第 N 章 标题"
-- **EPUB** — EPUB 3 标准容器，含封面页、目录、按章拆分的 XHTML，标识符基于内容稳定派生（重导出同一本书被阅读器识别为更新版本）
-
-范围内未完成的章节会跳过并显示在结果里，不算错误。
 
 ## 实时干预（Steer）
 
@@ -597,7 +567,6 @@ output/{novel_name}/
 ├── summaries/           # 章节摘要（JSON）
 ├── drafts/              # 章节草稿（含 01.zero_init.plan.json 零章推演草案）
 ├── reviews/             # 统一审核报告（NN.md + NN_ai_gate.json + NN.history.jsonl 复审历史）
-├── evidence-pack/       # --export --evidence-pack 产出的创作过程证据链索引
 ├── meta/
 │   ├── progress.json     # 进度状态（phase/flow/hook_history/strand_history）
 │   ├── pipeline.json     # --pipeline 阶段状态与证据
@@ -686,9 +655,9 @@ output/{novel_name}/
 
 ## 技术栈
 
-- **Go 1.25** — 主语言（~8 万行，290 个源文件）
+- **Go 1.25** — 主语言（~8.6 万行，350 个源文件）
 - **[agentcore](https://github.com/voocel/agentcore)** — 极简 Agent 内核（tool-calling + streaming + StopGuard/ToolGate）
-- **[litellm](https://github.com/voocel/litellm)** — 统一 LLM 接口适配
+- **[litellm](https://github.com/voocel/litellm)** — 统一 LLM 接口适配（经 `third_party/litellm` 仓内 fork 引入，修复空参 tool_use 回放丢 input 字段的问题）
 
 ## License
 

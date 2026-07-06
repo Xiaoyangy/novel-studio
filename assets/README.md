@@ -4,15 +4,14 @@
 
 | 目录 | 装什么 | 谁消费 | 接线方式 |
 |---|---|---|---|
-| `prompts/` | 常驻角色 system prompt（coordinator / writer / editor / architect×2）与一次性任务 prompt（import×2 / simulation×2） | `agents/build.go` 装配；imp / sim runner | `load.go` Prompts 字段。注意：simulation_guidance 由 `load.go` 加载时注入，md 文件里看不到 |
+| `prompts/` | 常驻角色 system prompt（coordinator / writer / editor / architect×2）与一次性任务 prompt（simulation×2） | `agents/build.go` 装配；sim runner | `load.go` Prompts 字段。注意：simulation_guidance 由 `load.go` 加载时注入，md 文件里看不到 |
 | `references/` | 题材无关的写作知识材料。不进 system prompt，由 novel_context 按角色 / 章节裁剪后注入 `reference_pack` | writer / editor / architect | **三处接线**：`tools.References` 加字段 + `load.go` loadReferences 读取 + `novel_context.go` writerReferences / architectReferences 注入。放进目录不会自动加载；项目级网络简报另走 `meta/web_reference_brief.md/json` 或 `references/web_reference_brief.md` |
 | `references/genres/<style>/` | 题材专属知识（style-references / arc-templates） | 同上，`style != default` 时加载 | `load.go` loadReferences |
-| `rules/` | 已废弃的旧内置规则目录；机械基线已迁到代码，用户规则来自 `~/.ainovel/rules/*.md` / `./.ainovel/rules/*.md` 的自然语言快照 | `userrules.Service` 归一化为 `meta/user_rules.json`；`novel_context` 注入；`commit_chapter` 检查 | 内置基线见 `internal/rules/snapshot.go` 的 `SystemDefaults()`；用户 `.md` 零格式、零 YAML，按自然语言归一化 |
 | `styles/<style>.md` | 题材写作风格指令 | 拼进 **writer** 的 system prompt（`agents/build.go`） | 文件名即 `config.style` 取值。与 `references/genres/<style>/` 是同一题材概念的两种载体：前者是风格指令，后者是知识材料 |
 
 补充两条接线事实：
 
-- **prompt 运行时覆盖链**：核心 prompt 支持 `~/.ainovel/prompts/<name>.md` → `./.ainovel/prompts/<name>.md` 覆盖（`assets.LoadWithOverrides`），指纹落 `meta/prompt_manifest.json`——改 prompt 实验不必重编译
+- **prompt 运行时覆盖链**：核心 prompt 支持 `~/.novel-studio/prompts/<name>.md` → `./.novel-studio/prompts/<name>.md` 覆盖（`assets.LoadWithOverrides`），指纹落 `meta/prompt_manifest.json`——改 prompt 实验不必重编译
 - **slop 词表**不在本目录：内置 embed 在 `internal/aigc/slop_lexicon.json`，项目级覆盖走 `meta/slop_lexicon.json`（`lexicon_version` 随 ai_gate 报告落盘）
 
 ## 新内容归属判断（五问）
@@ -20,7 +19,7 @@
 1. 这个流程必须被**保证**？→ 不写 prompt，写代码约束（StopAfterTools / 工具守卫 / Flow Router）
 2. 这是裁定判据（什么时候派谁）？→ `prompts/coordinator.md`
 3. 这是某个角色的审美 / 执行标准？→ `prompts/<role>.md`
-4. 这是可机械枚举的默认规则（禁词 / 字数 / 阈值）？→ `internal/rules/snapshot.go` 的 `SystemDefaults()`；用户自定义规则写进 `.ainovel/rules/*.md`，由归一化快照消费
+4. 这是可机械枚举的默认规则（禁词 / 字数 / 阈值）？→ `internal/rules/snapshot.go` 的 `SystemDefaults()`；用户自定义规则写进 `.novel-studio/rules/*.md`，由归一化快照消费
 5. 这是写作知识材料？→ `references/`（记得三处接线）
 
 ## 一致性保障

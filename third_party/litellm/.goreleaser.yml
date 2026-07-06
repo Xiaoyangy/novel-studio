@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+# This is a Go library — no binaries to build.
+builds:
+  - skip: true
+
+changelog:
+  sort: asc
+  groups:
+    - title: "New Features"
+      regexp: '^feat'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^fix'
+      order: 1
+    - title: "Performance"
+      regexp: '^perf'
+      order: 2
+    - title: "Refactor"
+      regexp: '^refactor'
+      order: 3
+    - title: "Others"
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^style:"
+
+release:
+  github:
+    owner: voocel
+    name: litellm

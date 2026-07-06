@@ -15,7 +15,7 @@
 ## 文件路径
 
 - **写**：`deconstruction-library/{书名}/文风.md`（analyze 独占）
-- **读**：story-import 同步到 `{项目}/对标/{书名}/文风.md`；story-long-write 读项目对标视图（回退deconstruction-library）
+- **读**：同步到 `{项目}/对标/{书名}/文风.md`；story-long-write 读项目对标视图（回退deconstruction-library）
 
 ## 字数预算
 

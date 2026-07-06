@@ -9,6 +9,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/host/flow"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
 )
 
@@ -32,6 +33,16 @@ func NewStopGuard(st *store.Store, onBlock func(reason string, consecutive int32
 	return func(_ context.Context, info agentcore.StopInfo) agentcore.StopDecision {
 		progress, _ := st.Progress.Load()
 		if progress != nil && progress.Phase == domain.PhaseComplete {
+			consecutive.Store(0)
+			lastBlockTurn.Store(-1)
+			return agentcore.StopDecision{Allow: true}
+		}
+		// 零章卡点场景放行：foundation 已齐但第 1 章的 zero-init 未就绪时，
+		// writer 派发会被 writerZeroInitGate 拒绝，Coordinator 在会话内没有合法下一步——
+		// 必须允许收工，交还宿主 pipeline 自动执行 --zero-init 后续跑。
+		if tools.FoundationCoreComplete(st.Dir()) && tools.EnsureZeroInitReadyForChapterOne(st) != nil {
+			slog.Info("stop_guard 放行 end_turn：等待宿主执行零章初始化",
+				"module", "host.reminder", "turn", info.TurnIndex)
 			consecutive.Store(0)
 			lastBlockTurn.Store(-1)
 			return agentcore.StopDecision{Allow: true}

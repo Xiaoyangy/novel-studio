@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "grok-4.3",
+  "reasoning_effort": "high"
+}

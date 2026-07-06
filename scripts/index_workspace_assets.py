@@ -142,38 +142,20 @@ def write_inventory() -> None:
     docs = ROOT / "docs"
     docs.mkdir(parents=True, exist_ok=True)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    skill_dirs = [
-        "deal-paper-summry",
-        "fanqie-writing-flow",
-        "fanqie-novel-template",
-        "fanqie-baihe-short",
-        "fanqie-shuangnanzhu-short",
-        "fanqie-shuangwen-short",
-        "fanqie-western-fantasy-short",
-        "review",
-        "fanqie-legacy-prompts",
-    ]
     lines = [
-        "# 工程能力整合清单",
+        "# 工程能力清单",
         "",
         f"生成时间：{now}",
         "",
-        "## 已纳入 novel-studio 的能力",
+        "## 工程能力总览",
         "",
         "- `services/short-story-dashboard/`：短篇项目服务与 HTML 进度看板；使用 `novel-studio service start` 启动。",
         "- `data/generated-output/`：历史短篇正文、服务项目、工作流状态、配图方案和审核报告。",
         "- `data/reference-library/`：题材参考库、写作技巧源材料和拆书样本。",
         "- `quality/audit/`：本地 AIGC / AI 味 / 重复 / 内容逻辑 / 错别字审核脚本与参考。",
-        "- `skills/`：novel-studio 原生命令、story 工具箱、番茄短篇、审核、拆书预处理等 skill 的唯一源目录，可通过 `novel-studio skills export --to <dir>` 导出。",
+        "- `skills/`：novel-studio 原生命令、story 工具箱、审核等 skill 的唯一源目录，可通过 `novel-studio skills export --to <dir>` 导出。",
         "- `assets/references/`：运行时通用写作技巧摘要、人工感标尺、生产链路、去 AI 味规则和通用规划资料。",
-        "",
-        "## 外层 skill 归并",
-        "",
     ]
-    for name in skill_dirs:
-        path = ROOT / "skills" / name / "SKILL.md"
-        marker = "ok" if path.exists() else "missing"
-        lines.append(f"- `{name}`: {marker}")
     lines.extend(
         [
             "",
@@ -200,14 +182,14 @@ def write_inventory() -> None:
             "",
         ]
     )
-    docs.joinpath("integration-inventory.md").write_text("\n".join(lines), encoding="utf-8")
+    docs.joinpath("capability-inventory.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> None:
     write_output_index()
     write_reference_index()
     write_inventory()
-    print("wrote data/generated-output/INDEX.md, data/reference-library/INDEX.md, docs/integration-inventory.md")
+    print("wrote data/generated-output/INDEX.md, data/reference-library/INDEX.md, docs/capability-inventory.md")
 
 
 if __name__ == "__main__":

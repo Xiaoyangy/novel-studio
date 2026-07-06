@@ -15,7 +15,7 @@ import (
 	auditassets "github.com/chenhongyang/novel-studio/quality/audit"
 )
 
-//go:embed CONTEXT_PROTOCOL.md browser-cdp deal-paper-summry fanqie-baihe-short fanqie-legacy-prompts fanqie-novel-template fanqie-shuangnanzhu-short fanqie-shuangwen-short fanqie-western-fantasy-short fanqie-writing-flow novel-check novel-cocreate novel-diag novel-douban-write novel-export novel-import novel-import-fast novel-pipeline novel-review novel-rewrite novel-simulate novel-steer novel-write novel-writing-assets review story story-cover story-deslop story-douban-long-write story-import story-long-analyze story-long-scan story-long-write story-review story-setup story-short-analyze story-short-scan story-short-write
+//go:embed CONTEXT_PROTOCOL.md novel-check novel-cocreate novel-diag novel-douban-write novel-pipeline novel-review novel-rewrite novel-simulate novel-steer novel-write novel-writing-assets review story story-deslop story-douban-long-write story-long-analyze story-long-write story-review story-setup story-short-analyze story-short-write
 var skillFS embed.FS
 
 const skillRoot = "."

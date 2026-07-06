@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → export（默认不含 cocreate）。
+// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -39,8 +39,8 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		return verifyPipelineReviewStage(outputDir, flags, evidence)
 	case "rewrite":
 		return verifyPipelineRewriteStage(outputDir, flags, evidence)
-	case "export":
-		return verifyPipelineExportStage(outputDir, flags, evidence)
+	case "deliver":
+		return verifyPipelineDeliverStage(outputDir, flags, evidence)
 	default:
 		return evidence, fmt.Errorf("未知阶段：%s", stage)
 	}
@@ -235,27 +235,19 @@ func filterChaptersForPipelineRange(chapters []int, flags pipelineFlags) []int {
 	return filtered
 }
 
-func verifyPipelineExportStage(outputDir string, flags pipelineFlags, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
-	var candidates []string
-	if strings.TrimSpace(flags.ExportOut) != "" {
-		candidates = append(candidates, flags.ExportOut)
-	} else {
-		for _, pattern := range []string{"*.txt", "*.epub"} {
-			matches, _ := filepath.Glob(filepath.Join(outputDir, pattern))
-			candidates = append(candidates, matches...)
+func verifyPipelineDeliverStage(outputDir string, flags pipelineFlags, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+	for _, rel := range []string{
+		filepath.Join("meta", "delivery_log.jsonl"),
+		filepath.Join("meta", "delivery_log.md"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, rel)) {
+			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+		} else {
+			evidence.Missing = append(evidence.Missing, filepath.ToSlash(rel))
 		}
 	}
-	for _, path := range candidates {
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(outputDir, path)
-		}
-		if nonEmptyFile(path) {
-			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(path))
-		}
-	}
-	if len(evidence.Artifacts) == 0 {
-		evidence.Missing = append(evidence.Missing, "export artifact (*.txt|*.epub)")
-		return evidence, fmt.Errorf("export 阶段未找到非空导出文件")
+	if len(evidence.Missing) > 0 {
+		return evidence, fmt.Errorf("deliver 阶段缺少交付沉淀产物: %s", strings.Join(evidence.Missing, ", "))
 	}
 	return evidence, nil
 }

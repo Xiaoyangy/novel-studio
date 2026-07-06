@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → export（默认不含 cocreate）。
+// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -22,6 +22,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/entry/headless"
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
@@ -448,7 +449,7 @@ func settlePipelineRAGFacts(st *store.Store, chapter int, deliveredAt string) (b
 		SourcePath: sourcePath,
 		SourceKind: "chapter",
 		Facet:      "plot",
-		Context:    fmt.Sprintf("第 %d 章交付确认 | pipeline export", chapter),
+		Context:    fmt.Sprintf("第 %d 章交付确认 | pipeline deliver", chapter),
 		Text:       text,
 		Summary:    truncateForContext(strings.TrimSpace(sum.Summary), 120),
 		Keywords:   append(append([]string{}, sum.Characters...), sum.KeyEvents...),
@@ -704,41 +705,100 @@ func nonEmptyFile(path string) bool {
 }
 
 // pipelineWrite 跑创作阶段：已完结则跳过；已有进度则恢复；全新项目用创作指令起新书。
+//
+// 工程卡点与自愈（用户不变量）：
+//  1. 第 1 章从未写完 && foundation 已齐 && 零章初始化未就绪 → 自动进程内执行
+//     --zero-init 并校验 readiness，通过才允许写第 1 章（writerZeroInitGate 双保险）。
+//  2. Coordinator 因瞬时错误/卡点停止而未达标时，在有界次数内自动续跑，
+//     不再阶段失败等人工重跑。
 func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
 	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
 	}
-	prog, _ := store.NewStore(cfg.OutputDir).Progress.Load()
-	if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
-		return err
-	}
-	if flags.WriteTo > 0 && prog != nil && !hasPendingRewriteAtOrBefore(prog, flags.WriteTo) {
-		for _, ch := range prog.CompletedChapters {
-			if ch == flags.WriteTo {
-				fmt.Fprintf(os.Stderr, "[pipeline:write] 已完成到 --write-to=%d，跳过创作\n", flags.WriteTo)
-				return nil
-			}
-		}
-	}
-	if prog != nil && prog.Phase == domain.PhaseComplete {
-		fmt.Fprintln(os.Stderr, "[pipeline:write] 本书已完结，跳过创作")
-		return nil
-	}
 	if err := ensurePipelineRAGReady(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "[pipeline:write] RAG 写作前检查失败：%v\n", err)
 		return err
 	}
-	hasProgress := prog != nil && (strings.TrimSpace(prog.NovelName) != "" || prog.CurrentChapter > 0 || len(prog.CompletedChapters) > 0)
-	if hasProgress {
-		fmt.Fprintln(os.Stderr, "[pipeline:write] 检测到已有进度，恢复创作")
-		return headless.Run(cfg, bundle, headless.Options{Prompt: "", StopAfterChapter: flags.WriteTo})
+	const maxWriteRuns = 4
+	for run := 1; run <= maxWriteRuns; run++ {
+		prog, _ := store.NewStore(cfg.OutputDir).Progress.Load()
+		if pipelineWriteGoalReached(prog, flags.WriteTo) {
+			return nil
+		}
+		if err := pipelineEnsureZeroInit(opts, cfg.OutputDir); err != nil {
+			return err
+		}
+		if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
+			return err
+		}
+		hasProgress := prog != nil && (strings.TrimSpace(prog.NovelName) != "" || prog.CurrentChapter > 0 || len(prog.CompletedChapters) > 0)
+		prompt := ""
+		if !hasProgress {
+			if strings.TrimSpace(state.Prompt) == "" {
+				return fmt.Errorf("write 阶段需要创作指令：用 --prompt/--prompt-file，或在 stages 前加 cocreate")
+			}
+			prompt = state.Prompt
+			fmt.Fprintln(os.Stderr, "[pipeline:write] 全新项目，按创作指令起新书")
+		} else if run == 1 {
+			fmt.Fprintln(os.Stderr, "[pipeline:write] 检测到已有进度，恢复创作")
+		}
+		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterChapter: flags.WriteTo}); err != nil {
+			return err
+		}
+		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+		if pipelineWriteGoalReached(prog, flags.WriteTo) {
+			return nil
+		}
+		// 未达标：可能是零章卡点收工（下轮循环顶部自动 zero-init），
+		// 也可能是 provider/工具瞬时错误——都走同一条自愈路径：续跑。
+		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
-	if strings.TrimSpace(state.Prompt) == "" {
-		return fmt.Errorf("write 阶段需要创作指令：用 --prompt/--prompt-file，或在 stages 前加 cocreate")
+	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+// pipelineWriteGoalReached 判定 write 阶段目标是否已达成。
+func pipelineWriteGoalReached(prog *domain.Progress, writeTo int) bool {
+	if prog == nil {
+		return false
 	}
-	fmt.Fprintln(os.Stderr, "[pipeline:write] 全新项目，按创作指令起新书")
-	return headless.Run(cfg, bundle, headless.Options{Prompt: state.Prompt, StopAfterChapter: flags.WriteTo})
+	if prog.Phase == domain.PhaseComplete {
+		fmt.Fprintln(os.Stderr, "[pipeline:write] 本书已完结")
+		return true
+	}
+	if writeTo > 0 && !hasPendingRewriteAtOrBefore(prog, writeTo) {
+		for _, ch := range prog.CompletedChapters {
+			if ch == writeTo {
+				fmt.Fprintf(os.Stderr, "[pipeline:write] 已完成到 --write-to=%d\n", writeTo)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pipelineEnsureZeroInit 第 1 章前的零章初始化自动编排：
+// foundation 未齐 → 放行（先让 Architect 干活）；readiness 就绪 → 放行；
+// 否则进程内执行 --zero-init（只补缺失 + 切换推演线，不 --overwrite 以免
+// 模板覆盖 Architect 特化资产），并要求 readiness 必须通过。
+func pipelineEnsureZeroInit(opts cliOptions, outputDir string) error {
+	st := store.NewStore(outputDir)
+	if !tools.ChapterOnePendingFirstWrite(st) || !tools.FoundationCoreComplete(outputDir) {
+		return nil
+	}
+	if ok, _ := tools.ZeroInitReadinessState(outputDir); ok {
+		return nil
+	}
+	_, reason := tools.ZeroInitReadinessState(outputDir)
+	fmt.Fprintf(os.Stderr, "[pipeline:write] 零章卡点：%s → 自动执行 --zero-init\n", reason)
+	if err := zeroInitPipeline(opts, []string{"--dir", outputDir, "--reset-simulation-state"}); err != nil {
+		return fmt.Errorf("自动 zero-init 失败（第 1 章前硬卡点）: %w", err)
+	}
+	if ok, why := tools.ZeroInitReadinessState(outputDir); !ok {
+		return fmt.Errorf("zero-init 后 readiness 仍未就绪：%s（处理后重跑 --pipeline 即从 write 阶段继续）", why)
+	}
+	fmt.Fprintln(os.Stderr, "[pipeline:write] 零章初始化就绪 ✓ 继续写第 1 章")
+	return nil
 }
 
 func ensurePipelineSimulationRestartReady(outputDir string, progress *domain.Progress) error {
@@ -771,7 +831,7 @@ func resolveStages(raw string) ([]string, error) {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / write / review / rewrite / export）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / write / review / rewrite / deliver）", s)
 		}
 		stages = append(stages, s)
 	}

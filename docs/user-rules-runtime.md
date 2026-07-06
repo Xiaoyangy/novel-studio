@@ -72,7 +72,7 @@ output/novel/meta/user_rules.json
   "preferences": "主角冷静克制；少解释，多用行动和对话。",
   "sources": [
     "startup_prompt",
-    ".ainovel/rules/style.md"
+    ".novel-studio/rules/style.md"
   ],
   "uncertain": [
     "少用比喻：没有明确阈值，按风格偏好处理"

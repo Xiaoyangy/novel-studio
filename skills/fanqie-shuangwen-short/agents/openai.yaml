@@ -1,4 +1,0 @@
-interface:
-  display_name: "番茄反转爽文短篇"
-  short_description: "Fanqie reversal workflow with final AI taste under 5%"
-  default_prompt: "Use $fanqie-shuangwen-short to draft and finalize a Fanqie reversal short story with AI taste under 5%."

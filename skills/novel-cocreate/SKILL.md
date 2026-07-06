@@ -36,4 +36,4 @@ novel-studio --cocreate "..." --start
 
 - 创作指令草稿：`output/novel/meta/cocreate-prompt.txt`
 - 不带 `--start` 时，可稍后用 `novel-studio --pipeline --prompt-file output/novel/meta/cocreate-prompt.txt` 创作
-- 也可作为 `--pipeline` 的首阶段：`novel-studio --pipeline --stages cocreate,write,review,rewrite,export`
+- 也可作为 `--pipeline` 的首阶段：`novel-studio --pipeline --stages cocreate,write,review,rewrite,deliver`

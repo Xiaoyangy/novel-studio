@@ -2,7 +2,6 @@
 name: story-short-write
 version: 1.0.0
 description: "短篇网文写作方法论与 novel-studio pipeline 适配器。用于把短篇、盐言故事、拆文续写等需求整理为 pipeline 输入；在 novel-studio 内禁止直接生成正文。触发方式：/story-short-write、/写短篇、「帮我写一篇短篇」「写个盐言故事」。"
-metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claudecode"}}
 ---
 # story-short-write：短篇网文写作
 
@@ -382,7 +381,6 @@ metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claud
 | 有参考小说想对标 | story-short-analyze | `/story-short-analyze` → 输出存入 `deconstruction-library/{书名}/` |
 | 写完，去 AI 味 | story-deslop | `/story-deslop` |
 | 想自检 | 本 skill 质量自检 | 用 Phase 4 自检流程 + `references/quality-checklist.md` 逐项核对 |
-| 需要市场方向 | story-short-scan | `/story-short-scan` |
 | 设定太大，适合长篇 | novel-pipeline / novel-write（story-long-write 只作方法参考） | `novel-studio --pipeline --prompt-file <需求文件>` |
 
 ---

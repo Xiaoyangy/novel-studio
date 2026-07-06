@@ -365,6 +365,7 @@ func BuildCoordinator(
 		agentcore.WithToolGate(combineToolGates(
 			completePhaseGate(store),
 			writerExpandedChapterGate(store),
+			writerZeroInitGate(store),
 		)),
 	)
 	// Coordinator 推理强度：无条件应用解析结果。未配置时为空（不发 thinking，用 provider
@@ -469,6 +470,41 @@ func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 			return &agentcore.GateDecision{
 				Allowed: false,
 				Reason:  err.Error() + "。请改派 architect_long，调用 save_foundation(type=expand_arc) 展开下一弧，或 type=append_volume 追加并展开下一卷后再派 writer。",
+			}, nil
+		}
+		return nil, nil
+	}
+}
+
+// writerZeroInitGate 第 1 章硬卡点：零章初始化（--zero-init）未就绪时拒绝派 writer 写第 1 章。
+// zero-init 是流水线级命令，Coordinator 会话内无法完成——拒绝理由里明确要求其收工，
+// 交还宿主 pipeline 自动执行 zero-init 后续跑（StopGuard 对该场景放行 end_turn）。
+// 排在 writerExpandedChapterGate 之后：大纲未展开时优先引导改派 architect。
+// HARNESS-METADATA: name=writer_zero_init_gate class=business_logic note=第1章前必须过零章初始化的业务不变量
+func writerZeroInitGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" {
+			return nil, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || args.Agent != "writer" {
+			return nil, nil
+		}
+		chapter := chapterFromTask(args.Task)
+		if chapter <= 0 {
+			chapter = writerFallbackChapter(st)
+		}
+		if chapter != 1 {
+			return nil, nil
+		}
+		if err := tools.EnsureZeroInitReadyForChapterOne(st); err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason: err.Error() + "。zero-init 是宿主流水线的命令行步骤，你在会话内无法执行：" +
+					"请立即结束本轮运行（不要重试派 writer，也不要改派其他代理补救），宿主会自动执行 zero-init 并继续写第 1 章。",
 			}, nil
 		}
 		return nil, nil

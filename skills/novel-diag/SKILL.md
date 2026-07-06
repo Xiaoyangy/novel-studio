@@ -35,5 +35,4 @@ novel-studio --diag
 `verified`、或证据指向的 artifact/checkpoint 已不存在，会在 Findings 中报告；它不会
 自动清除阶段标记或重跑流水线。
 
-> `--import` / `--import-fast` 流程末尾默认会自动跑一次 diag（除非 `--no-diag`）；本子命令用于
 > 随时对已有项目单独诊断。

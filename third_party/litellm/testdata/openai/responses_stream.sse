@@ -1,0 +1,27 @@
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_1"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","delta":"think ","sequence_number":2}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hel","sequence_number":3}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"lookup","call_id":"call_1"},"sequence_number":4}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"q\":","sequence_number":5}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"\"x\"}","sequence_number":6}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"name":"lookup","arguments":"{\"q\":\"x\"}","sequence_number":7}
+
+event: response.code_interpreter_call.in_progress
+data: {"type":"response.code_interpreter_call.in_progress","sequence_number":8,"item_id":"ci_1"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"model":"gpt-5.1","status":"completed","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"output_tokens_details":{"reasoning_tokens":1}}}}
+

@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -48,9 +50,13 @@ func (t *SaveFoundationTool) ConcurrencySafe(_ json.RawMessage) bool { return fa
 func (t *SaveFoundationTool) Schema() map[string]any {
 	return schema.Object(
 		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "book_world", "world_codex", "volume_codex", "expand_arc", "append_volume", "update_compass", "complete_book")).Required(),
+		// content 语义上必填，但不进 JSON-schema required：长内容被截断时
+		// 参数会整体失效为空，schema 层的 InputValidationError 只会说"缺参数"，
+		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
+		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 可带 stance（对主角立场）/ internal_tension（内部矛盾）/ core_values，relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
-		}).Required(),
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 可带 stance（对主角立场）/ internal_tension（内部矛盾）/ core_values，relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
+		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / volume_codex 时必传）")),
 		schema.Property("arc", schema.Int("目标弧序号（仅 expand_arc 时必传）")),
@@ -401,19 +407,120 @@ func foundationArtifact(t string) string {
 	}
 }
 
-// decodeFoundationJSON 解析 save_foundation 的 content 字段，失败时附上行列位置
-// 和最常见的修复提示，让 LLM 下一次重试能直接定位而不是盲猜。
+// decodeFoundationJSON 解析 save_foundation 的 content 字段。严格解析失败时
+// 先做一次确定性修复（尾逗号、字符串内裸控制字符——LLM 长 JSON 的高频失误）
+// 再试；仍失败才把行列位置和修复提示回给 LLM，让重试能直接定位而不是盲猜。
 func decodeFoundationJSON(typeName, content string, out any) error {
 	err := json.Unmarshal([]byte(content), out)
 	if err == nil {
 		return nil
+	}
+	if repaired, changed := repairLooseJSON(content); changed {
+		if json.Unmarshal([]byte(repaired), out) == nil {
+			return nil
+		}
 	}
 	hint := `常见原因：字符串值中的双引号未转义为 \", 换行未转义为 \n, 或对象字段间漏了逗号。请整段重新生成一次。`
 	if se, ok := err.(*json.SyntaxError); ok {
 		line, col := offsetToLineCol(content, int(se.Offset))
 		return fmt.Errorf("parse %s JSON (line %d col %d): %w — %s", typeName, line, col, err, hint)
 	}
+	// 类型不匹配单独给字段级提示：默认 hint 只讲转义/逗号，会把重试引向错误方向。
+	if te := (*json.UnmarshalTypeError)(nil); errors.As(err, &te) {
+		return fmt.Errorf("parse %s JSON: 字段 %q 期望 %s，实际收到 %s — 请只修正该字段的形状（其余保持不变）后整段重发",
+			typeName, te.Field, jsonShapeName(te.Type), te.Value)
+	}
 	return fmt.Errorf("parse %s JSON: %w — %s", typeName, err, hint)
+}
+
+// repairLooseJSON 对 LLM 产出 JSON 的两类高频语法失误做确定性修复：
+//  1. 尾逗号：`[..., ]` / `{..., }`（"invalid character ']' / '}' after ..." 的主因）；
+//  2. 字符串字面量内的裸控制字符（裸换行/裸 Tab 等，模型忘了转义）。
+//
+// 只做这两类无歧义修复，不猜缺失的逗号/引号/括号——修错比报错更糟。
+// 返回 (修复后文本, 是否有改动)。
+func repairLooseJSON(src string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(src))
+	changed := false
+	inString := false
+	escaped := false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+				b.WriteByte(c)
+			case c == '\\':
+				escaped = true
+				b.WriteByte(c)
+			case c == '"':
+				inString = false
+				b.WriteByte(c)
+			case c < 0x20:
+				changed = true
+				switch c {
+				case '\n':
+					b.WriteString(`\n`)
+				case '\r':
+					b.WriteString(`\r`)
+				case '\t':
+					b.WriteString(`\t`)
+				default:
+					fmt.Fprintf(&b, `\u%04x`, c)
+				}
+			default:
+				b.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+			b.WriteByte(c)
+		case ',':
+			// 向前看：逗号后只有空白且紧跟 ] 或 } → 尾逗号，丢弃。
+			j := i + 1
+			for j < len(src) && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r') {
+				j++
+			}
+			if j < len(src) && (src[j] == ']' || src[j] == '}') {
+				changed = true
+				continue
+			}
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), changed
+}
+
+// jsonShapeName 把 Go 目标类型翻译成 LLM 能照做的 JSON 形状说法。
+func jsonShapeName(t reflect.Type) string {
+	if t == nil {
+		return "合法 JSON 值"
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct, reflect.Map:
+		return "JSON 对象 {...}"
+	case reflect.Slice, reflect.Array:
+		return "JSON 数组 [...]"
+	case reflect.String:
+		return "字符串"
+	case reflect.Bool:
+		return "布尔值"
+	case reflect.Float32, reflect.Float64,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "数字"
+	default:
+		return t.String()
+	}
 }
 
 func offsetToLineCol(s string, offset int) (int, int) {
@@ -436,8 +543,9 @@ func offsetToLineCol(s string, offset int) (int, int) {
 }
 
 func normalizeFoundationContent(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 {
-		return "", fmt.Errorf("content is required: %w", errs.ErrToolArgs)
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == `""` {
+		return "", fmt.Errorf("content 缺失或为空。若上一次调用的参数因内容过长被截断丢弃，请压缩篇幅后重发完整 content"+
+			"（characters 可精简描述/psych 字段；不要分多次只发一部分——每次调用都会整体覆盖该类型的文件）: %w", errs.ErrToolArgs)
 	}
 
 	var text string

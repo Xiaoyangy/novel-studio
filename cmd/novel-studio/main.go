@@ -65,29 +65,9 @@ func main() {
 	}
 	headlessMode = opts.Headless
 
-	// --import 子流程：在解析 args 前优先识别，走无 TTY 的导入 + 评审 + diag 链路。
-	// 设计动机：自动化审核场景下，TUI + expect 驱动不稳；直接拿 host.New → ImportFrom →
-	// 评审预算循环 → diag.Export 端到端闭环，每一步都有 stderr 进度日志。
-	//
 	// 注意：纯路由 token（不期望值的）需要从 argv 中剥离，否则 Go flag 包会把
 	// 后面的 --from/--to/--budget 误当作该 string flag 的值（如 --review-existing
 	// 是 fs.StringVar 注册的，下一个 token --from 会被吞成它的字符串值）。
-	// 而 --import / --import-fast 在 flag 包里也是 StringVar，但因为它们本就
-	// 期望值（路径），让 flag 包自己消费即可。
-	if hasImportFlag(args) {
-		headlessMode = true
-		if err := runImportPipeline(opts, args); err != nil {
-			die("import: %v", err)
-		}
-		return
-	}
-	if hasFastImportFlag(args) {
-		headlessMode = true
-		if err := fastImportPipeline(opts, args); err != nil {
-			die("import-fast: %v", err)
-		}
-		return
-	}
 	if hasPipelineFlag(args) {
 		headlessMode = true
 		if err := pipelinePipeline(opts, stripRoutingTokens(args, "--pipeline")); err != nil {
@@ -134,13 +114,6 @@ func main() {
 		headlessMode = true
 		if err := checkPipeline(opts, stripRoutingTokens(args, "--check")); err != nil {
 			die("check: %v", err)
-		}
-		return
-	}
-	if hasExportFlag(args) {
-		headlessMode = true
-		if err := exportPipeline(opts, stripRoutingTokens(args, "--export")); err != nil {
-			die("export: %v", err)
 		}
 		return
 	}
@@ -224,7 +197,7 @@ func main() {
 	runWithConfig(cfg, opts, args)
 }
 
-// die 统一处理致命错误退出：打印到 stderr、落盘到 ~/.ainovel/last-error.log，
+// die 统一处理致命错误退出：打印到 stderr、落盘到 ~/.novel-studio/last-error.log，
 // 并在交互式终端（非 headless）下暂停等待回车——双击启动时控制台会随进程退出
 // 立即关闭，不暂停的话错误一闪而过，正是 issue #37 里用户无从排查的根因。
 func die(format string, args ...any) {
@@ -406,12 +379,12 @@ func loadPrompt(opts cliOptions) (string, error) {
 }
 
 // hasAnySubcommand 判断 argv 里是否含任一子命令入口 token。用于区分
-// 「单纯 --help 想要顶层 usage」与「--import-fast --help 要子命令 usage」。
+// 「单纯 --help 想要顶层 usage」与「--diag --help 要子命令 usage」。
 func hasAnySubcommand(argv []string) bool {
 	for _, a := range argv {
 		switch a {
-		case "service", "skills", "--import", "--import-fast", "--review-existing", "--rewrite-existing",
-			"--check", "--export", "--diag", "--simulate", "--import-sim", "--steer",
+		case "service", "skills", "--review-existing", "--rewrite-existing",
+			"--check", "--diag", "--simulate", "--import-sim", "--steer",
 			"--cocreate", "--pipeline", "--writing-assets", "--refresh-progress", "--build-rag", "--zero-init":
 			return true
 		}
@@ -436,8 +409,6 @@ func hasHelpToken(argv []string) bool {
 // 会被吞成它的字符串值，导致后续 --from/--to 等全部被当 positional args。
 // 在 main 路由到子命令之前先剥离路由 token，再交给 flag 包解析，flag 包
 // 就只看到真正想要值的 --from 等。
-//
-// --import / --import-fast 不需要剥：它们本就要吃一个路径值。
 func stripRoutingTokens(argv []string, tokens ...string) []string {
 	skip := make(map[string]bool, len(tokens))
 	for _, t := range tokens {
@@ -458,18 +429,15 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "novel-studio — AI 长篇小说创作引擎")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "用法:")
-	fmt.Fprintln(w, "  novel-studio --pipeline --prompt <text>     # 可恢复流水线：写作→评审→重写→导出")
+	fmt.Fprintln(w, "  novel-studio --pipeline --prompt <text>     # 可恢复流水线：写作→评审→重写→交付")
 	fmt.Fprintln(w, "  novel-studio --pipeline --prompt-file p.md  # 从文件读 prompt 后进入流水线")
 	fmt.Fprintln(w, "  novel-studio --cocreate                     # 多轮对话澄清需求，定稿创作指令")
 	fmt.Fprintln(w, "  novel-studio --headless --prompt <text>     # 兼容别名：内部转为 --pipeline")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "功能子命令（无 TTY、CI / 远程可用）:")
 	fmt.Fprintln(w, "  novel-studio --check                        # LLM 连通性自检（先确认能用再创作）")
-	fmt.Fprintln(w, "  novel-studio --import <novel.md>            # 完整 LLM 反推 + 评审 + diag")
-	fmt.Fprintln(w, "  novel-studio --import-fast <novel.md>       # 本地确定性导入（要 LLM 评审时仍走 LLM）")
 	fmt.Fprintln(w, "  novel-studio --pipeline --stages review     # 逐章 Editor 评审（不改原文）")
 	fmt.Fprintln(w, "  novel-studio --pipeline --stages rewrite    # 按评审反馈逐章 Writer 重写")
-	fmt.Fprintln(w, "  novel-studio --export [--out x.epub]        # 合并导出已完成章节（TXT / EPUB）")
 	fmt.Fprintln(w, "  novel-studio --diag                        # 诊断当前项目产物")
 	fmt.Fprintln(w, "  novel-studio --writing-assets list         # 查看/启停/组合/绑定/试写写法资产")
 	fmt.Fprintln(w, "  novel-studio --writing-assets seed-defaults # 初始化本书基础写法资产")
@@ -485,7 +453,7 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio service start                  # 启动浏览器进度看板（长篇 output/novel + 短篇服务）")
 	fmt.Fprintln(w, "  novel-studio service open                   # 手动打开小说项目进度看板")
 	fmt.Fprintln(w, "  novel-studio service status                 # 检查看板服务 /api/health")
-	fmt.Fprintln(w, "  novel-studio skills list                    # 列出内置 story/fanqie skills")
+	fmt.Fprintln(w, "  novel-studio skills list                    # 列出内置 skills")
 	fmt.Fprintln(w, "  novel-studio skills export --to <dir>       # 导出 skills 到项目目录")
 	fmt.Fprintln(w, "  novel-studio --version                      # 打印版本信息")
 	fmt.Fprintln(w, "  novel-studio update [version]               # 自我更新")
@@ -495,14 +463,12 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "每个子命令的专属选项：")
 	fmt.Fprintln(w, "  novel-studio service --help")
 	fmt.Fprintln(w, "  novel-studio --pipeline --help")
-	fmt.Fprintln(w, "  novel-studio --import --help")
-	fmt.Fprintln(w, "  novel-studio --import-fast --help")
 	fmt.Fprintln(w, "  novel-studio --review-existing --help      # 兼容别名")
 	fmt.Fprintln(w, "  novel-studio --rewrite-existing --help     # 兼容别名")
 	fmt.Fprintln(w, "  novel-studio skills --help")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "提示:")
-	fmt.Fprintln(w, "  · 配置默认读 ~/.ainovel/config.json（项目内可用 ./.ainovel/config.json 覆盖）")
+	fmt.Fprintln(w, "  · 配置默认读 ~/.novel-studio/config.json（项目内可用 ./.novel-studio/config.json 覆盖）")
 	fmt.Fprintln(w, "  · 首次启动会跑 setup 引导：选 Provider / 填 Key / 填 Base URL / 填模型")
 	fmt.Fprintln(w, "  · 章节输出在 output/novel/chapters/*.md（可在配置里改 OutputDir）")
 	fmt.Fprintln(w)

@@ -238,10 +238,10 @@ DESIGN_JSON_ARRAYS = {
 }
 
 DIRECTION_SKILLS = {
-    "shuangnanzhu": ["fanqie-novel-template", "fanqie-shuangnanzhu-short", "review"],
-    "baihe": ["fanqie-novel-template", "fanqie-baihe-short", "review"],
-    "shuangwen": ["fanqie-novel-template", "fanqie-shuangwen-short", "review"],
-    "custom": ["fanqie-novel-template", "review"],
+    "shuangnanzhu": ["review"],
+    "baihe": ["review"],
+    "shuangwen": ["review"],
+    "custom": ["review"],
 }
 
 DIRECTION_LABELS = {

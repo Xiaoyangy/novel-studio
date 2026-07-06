@@ -219,7 +219,7 @@ func refreshAutoRAGCollectionForOutputDir(cfg *bootstrap.Config, outputDir strin
 func hasConfiguredRAGQdrantCollection(opts cliOptions) bool {
 	paths := []string{
 		bootstrap.DefaultConfigPath(),
-		filepath.Join(".ainovel", "config.json"),
+		filepath.Join(".novel-studio", "config.json"),
 		opts.ConfigPath,
 	}
 	seen := make(map[string]bool, len(paths))
@@ -555,7 +555,7 @@ func collectRAGSourceFiles(outputDir string, rawSources []string, maxFiles int) 
 
 func shouldSkipRAGDir(path, name string) bool {
 	switch name {
-	case ".git", "node_modules", ".tmp", ".ainovel", "backups", "chapters", "drafts", "reviews", "reviews_ai", "sessions", "runtime", "rag", "skills", "source_project", "experiments", "拆文库", "deconstruction-library", "对标", "reference-library", "reference_library", "generated-output":
+	case ".git", "node_modules", ".tmp", ".novel-studio", "backups", "chapters", "drafts", "reviews", "reviews_ai", "sessions", "runtime", "rag", "skills", "source_project", "experiments", "拆文库", "deconstruction-library", "对标", "reference-library", "reference_library", "generated-output":
 		return true
 	}
 	clean := filepath.ToSlash(path)

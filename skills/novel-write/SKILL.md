@@ -33,7 +33,7 @@ echo "需求文本" | novel-studio --pipeline --prompt-file -
 |---|---|
 | `--prompt <text>` | 单句创作需求；与 `--prompt-file` 互斥 |
 | `--prompt-file <path>` | 从文件读需求，`-` 表示 stdin |
-| `--stages <list>` | 可选，默认 `write,review,rewrite,export` |
+| `--stages <list>` | 可选，默认 `write,review,rewrite,deliver` |
 | `--config <path>` | 可选，指定配置文件 |
 
 ## 产物
@@ -50,4 +50,4 @@ echo "需求文本" | novel-studio --pipeline --prompt-file -
 ## 失败排查
 
 - 报「首次启动需要先在交互终端运行一次 novel-studio 完成配置引导」→ 先在交互终端跑一次
-  `novel-studio` 完成 stdin 配置，或手写 `~/.ainovel/config.json`。
+  `novel-studio` 完成 stdin 配置，或手写 `~/.novel-studio/config.json`。

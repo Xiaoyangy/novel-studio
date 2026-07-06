@@ -1,7 +1,6 @@
 ---
 name: story
-description: "网络小说工具箱主入口。根据用户需求自动路由到对应 skill；当用户意图不明确时触发，由路由逻辑分发到具体的扫榜/拆文/写作/去AI味/封面/导入/审查 skill。触发方式：/story、$story、/网文、「我想写小说」「帮我写书」「写网文」「检查更新」「有新版本吗」。"
-metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claudecode"}}
+description: "网络小说工具箱主入口。根据用户需求自动路由到对应 skill；当用户意图不明确时触发，由路由逻辑分发到具体的拆文/写作/去AI味/审查 skill。触发方式：/story、$story、/网文、「我想写小说」「帮我写书」「写网文」。"
 ---
 # story：网文工具箱路由
 
@@ -12,9 +11,9 @@ metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claud
 当前仓库内存在 `cmd/novel-studio` 时，原生写作请求必须路由到 novel-studio pipeline：
 
 - 长篇 / 短篇 / 续写 / 重写 / 评审 / 完稿导出：必须路由到 `novel-pipeline`、`novel-write`、`novel-review`、`novel-rewrite` 或专项 `novel-douban-write`。
-- 即使用户显式点名 `story-long-write`、`story-short-write`、`fanqie-*` 或用“继续生成正文”等自然语言描述，也必须把这些 skill 当作方法论和 prompt 增强参考，最终执行 `novel-studio --pipeline`。
+- 即使用户显式点名 `story-long-write`、`story-short-write` 或用“继续生成正文”等自然语言描述，也必须把这些 skill 当作方法论和 prompt 增强参考，最终执行 `novel-studio --pipeline`。
 - 禁止直接生成、续写或改写正文；不要绕过 `novel-studio --pipeline` 直接手写章节文件。
-- 扫榜、拆文、去 AI 味、封面、导入、浏览器采集等非写作执行能力仍按下表路由。
+- 拆文、去 AI 味、审查等非写作执行能力仍按下表路由。
 
 ## 路由表
 
@@ -27,15 +26,8 @@ metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claud
 | 写短篇 | 短篇、盐言、一万字、故事成稿 | `novel-write` / `novel-pipeline` |
 | 长篇拆文 | 拆文、分析这本书、黄金三章 | `/story-long-analyze` |
 | 短篇拆文 | 拆短篇、分析这个故事 | `/story-short-analyze` |
-| 长篇扫榜 | 长篇排行、什么火、起点/番茄/晋江 | `/story-long-scan` |
-| 选题决策 | 写什么能爆、帮我选题、选题方向 | `/story-long-scan` |
-| 短篇扫榜 | 短篇排行、知乎盐言排行 | `/story-short-scan` |
 | 去 AI 味 | 去 AI 味、太 AI、去味 | `/story-deslop` |
-| 封面 | 封面、封面图 | `/story-cover` |
 | 环境部署 | 准备写书、搭环境、初始化 | `/story-setup` |
-| 浏览器操控 | 浏览器、抓取、登录态 | `/browser-cdp` |
-| 导入小说 | 导入、反向解析、导入小说、把我的书导进来 | `/story-import` |
-| 检查/更新版本 | 检查更新、有新版本吗、升级、更新工具箱 | 见下方「版本更新检查」 |
 | 切换/列出书目 | 切书、换书、列出我的书、我在写哪几本、切换项目 | 见下方「多书切换」 |
 | 查故事资料 | 查角色、查伏笔、查进度、查设定、什么状态、写到哪了 | spawn `story-explorer` agent（结构化 prompt：`项目目录：{dir}\n查询类型：{根据意图选择}\n查询参数：{用户查询}`）；agent 不可用时见下方「查询降级」 |
 | 查资料 | 查资料、帮我查资料、调研、搜索一下、搜一下 | spawn `story-researcher` agent；agent 不可用时见下方「查询降级」 |
@@ -53,7 +45,7 @@ metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claud
 「查故事资料」「查资料」走 agent 前先做轻量可用性检查（路由只做这一层，不承担全局部署策略）：当前不在子代理上下文、Agent/Task 工具可用、且 `.claude/agents/{story-explorer|story-researcher}.md`、`.opencode/agents/{story-explorer|story-researcher}.md` 或 `.codex/agents/{story-explorer|story-researcher}.toml` 存在 → 可尝试 spawn。任一不满足，或 Codex 运行时返回 `unknown agent_type` / 未暴露 custom-agent registry，则降级，不硬失败：
 
 - `story-explorer` 不可用 → 主线程直接用 Read/Grep 从项目文件检索（角色状态/伏笔/进度/设定），回答前标注 `Fallback: agent unavailable -> direct lookup`；项目尚未部署时提示先 `/story-setup`（Codex 中用 `$story-setup`）。
-- `story-researcher` 不可用 → 主线程用现有检索/回答能力完成，或提示用户改用 `/browser-cdp` 采集，同样标注 `Fallback: agent unavailable -> direct lookup`。
+- `story-researcher` 不可用 → 主线程用现有检索/回答能力完成，同样标注 `Fallback: agent unavailable -> direct lookup`。
 
 ## 项目状态感知
 
@@ -72,16 +64,3 @@ metadata: {"openclaw":{"source":"https://github.com/worldwonderer/oh-story-claud
 2. 列出书名，并标出当前 `.active-book` 指向的那本。
 3. 让用户选择，把所选书的相对路径写入项目根 `.active-book`（覆盖原内容）。
 4. 只发现一本时直接确认为活跃书，无需询问。
-
-## 版本更新检查
-
-用户问"有没有新版本""检查更新""升级"时执行。**只通知，更不更新由用户定，不自动安装。**
-
-1. **当前版本**：读本 skill 同目录的 `VERSION` 文件；缺失则视为未知。
-2. **最新版本**：优先 `gh release view --json tagName,name,url -R worldwonderer/oh-story-claudecode` 取 `tagName`；无 gh 用 `curl -fsS --max-time 5 https://api.github.com/repos/worldwonderer/oh-story-claudecode/releases/latest` 取 `.tag_name`（jq 或 grep）。查不到 → 告知"暂时拉不到最新版本，可手动看 [Releases](https://github.com/worldwonderer/oh-story-claudecode/releases)"，不报错。
-3. **比较**：去掉 `v` 前缀按语义版本比（major.minor.patch）。`gh release` 默认取 latest 稳定版，不含 pre-release。
-4. **告知**：
-   - 已最新 → 「已是最新版 vX.Y.Z」。
-   - 有新版 → 列出 当前 vA → 最新 vB + [Releases](https://github.com/worldwonderer/oh-story-claudecode/releases)/[CHANGELOG](https://github.com/worldwonderer/oh-story-claudecode/blob/main/CHANGELOG.md)（能拿到 release notes 就附本次要点），再用 AskUserQuestion 问「现在更新吗？」：
-     - 选更新 → 跑 `npx skills add worldwonderer/oh-story-claudecode -y -g`（`-g` 全局，去掉则只更当前目录）；完成后提示：已部署过的项目在项目根重跑 `/story-setup`（Codex 中用 `$story-setup`）同步 hooks/agents/references，并**新开一个会话**让 agents 重新注册。
-     - 选先不 → 不动，告知随时可再来。

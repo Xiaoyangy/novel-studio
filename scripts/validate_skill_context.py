@@ -43,11 +43,6 @@ PIPELINE_ADAPTER_GUARDS = {
         "禁止直接生成、续写或改写正文",
         "novel-studio --pipeline",
     ],
-    "skills/fanqie-writing-flow/SKILL.md": [
-        "最高优先级：novel-studio 强制 pipeline",
-        "禁止直接生成、续写或改写正文",
-        "novel-studio --pipeline",
-    ],
     "skills/story/SKILL.md": [
         "原生写作请求必须路由到 novel-studio pipeline",
         "即使用户显式点名",

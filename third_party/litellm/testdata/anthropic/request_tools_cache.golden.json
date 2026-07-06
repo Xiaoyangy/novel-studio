@@ -1,0 +1,88 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "Use the tool.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig-thinking",
+          "thinking": "I should call the tool.",
+          "type": "thinking"
+        },
+        {
+          "id": "toolu_1",
+          "input": {
+            "q": "x"
+          },
+          "name": "lookup",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "result text",
+              "type": "text"
+            },
+            {
+              "tool_name": "lookup",
+              "type": "tool_reference"
+            }
+          ],
+          "tool_use_id": "toolu_1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "done",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "model": "claude-sonnet-4-5",
+  "system": "You are helpful.",
+  "temperature": 1,
+  "thinking": {
+    "budget_tokens": 2048,
+    "type": "enabled"
+  },
+  "tools": [
+    {
+      "description": "Lookup data.",
+      "input_schema": {
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "name": "lookup"
+    }
+  ]
+}

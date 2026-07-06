@@ -1,0 +1,8 @@
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"reasoning_content":"a","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"a"}]}}]}
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"reasoning_content":"ab","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"ab"}]}}]}
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"content":"h"}}]}
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"content":"hi"}}]}
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}
+data: {"model":"minimax-text-01","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]},"finish_reason":"tool_calls"}]}
+data: {"model":"minimax-text-01","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
+data: [DONE]
