@@ -172,7 +172,7 @@ mkdir -p config workspace
 docker run --rm \
   -v "$PWD/config:/root/.novel-studio" \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/chenhongyang/novel-studio:latest \
+  ghcr.io/xiaoyangy/novel-studio:latest \
   --pipeline --prompt "写一本东方玄幻长篇"
 ```
 

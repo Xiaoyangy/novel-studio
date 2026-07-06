@@ -8,7 +8,7 @@ services:
       - qdrant-storage:/qdrant/storage
 
   novel-studio:
-    image: ghcr.io/chenhongyang/novel-studio:latest
+    image: ghcr.io/xiaoyangy/novel-studio:latest
     build:
       context: .
     volumes:

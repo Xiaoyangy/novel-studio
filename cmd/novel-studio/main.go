@@ -343,7 +343,7 @@ func versionInfo() buildversion.Info {
 func runSelfUpdate(target string) error {
 	info := versionInfo()
 	result, err := buildversion.Update(context.Background(), buildversion.UpdateOptions{
-		Repo:           "chenhongyang/novel-studio",
+		Repo:           "Xiaoyangy/novel-studio",
 		BinaryName:     "novel-studio",
 		TargetVersion:  target,
 		CurrentVersion: info.Version,

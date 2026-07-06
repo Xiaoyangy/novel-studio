@@ -1,14 +1,14 @@
 #!/bin/sh
 # novel-studio 一键安装脚本
 #
-#   curl -fsSL https://raw.githubusercontent.com/chenhongyang/novel-studio/main/scripts/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/chenhongyang/novel-studio/main/scripts/install.sh | sh -s -- v1.2.3
+#   curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh -s -- v1.2.3
 #
 # 自定义安装目录： NOVEL_STUDIO_INSTALL_DIR=~/.local/bin curl -fsSL ... | sh
 # 指定版本：NOVEL_STUDIO_VERSION=v1.2.3 curl -fsSL ... | sh
 set -e
 
-REPO="chenhongyang/novel-studio"
+REPO="Xiaoyangy/novel-studio"
 BIN="novel-studio"
 DEST="${NOVEL_STUDIO_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${NOVEL_STUDIO_VERSION:-${1:-latest}}"
