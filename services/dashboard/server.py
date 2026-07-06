@@ -124,12 +124,70 @@ def log_tail(nd: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
         return []
 
 
+CHAPTER_STEP_CHAIN = ["plan", "draft", "check", "commit", "review"]
+
+
+def checkpoint_tail(nd: Path, n: int = 60) -> list[dict]:
+    path = nd / "meta" / "checkpoints.jsonl"
+    out = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 32 * 1024))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()[-n:]
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(e, dict):
+                out.append(e)
+    except OSError:
+        pass
+    return out
+
+
+def working_state(nd: Path, prog: dict) -> dict:
+    """当前章进展：checkpoint 步骤链 + 草稿落盘事实 + 最近一次全局动作。"""
+    entries = checkpoint_tail(nd)
+    chapter_steps: dict[int, str] = {}
+    last = entries[-1] if entries else {}
+    for e in entries:
+        scope = e.get("scope") or {}
+        if scope.get("kind") == "chapter" and isinstance(scope.get("chapter"), int):
+            chapter_steps[scope["chapter"]] = str(e.get("step") or "")
+    cur = prog.get("current_chapter") or 0
+    if not cur and chapter_steps:
+        cur = max(chapter_steps)
+    if not cur:
+        cur = (len(prog.get("completed_chapters") or []) or 0) + 1
+    step = chapter_steps.get(cur, "")
+    if not step:
+        # checkpoint 还没到章级：看 drafts 目录里的最新事实
+        if (nd / "drafts" / f"{cur:02d}.md").exists():
+            step = "draft"
+        elif list((nd / "drafts").glob(f"{cur:02d}.plan*")) if (nd / "drafts").is_dir() else []:
+            step = "plan"
+    last_scope = last.get("scope") or {}
+    return {
+        "chapter": cur,
+        "step": step,
+        "chain": CHAPTER_STEP_CHAIN,
+        "chain_pos": CHAPTER_STEP_CHAIN.index(step) if step in CHAPTER_STEP_CHAIN else -1,
+        "last_step": str(last.get("step") or ""),
+        "last_kind": str(last_scope.get("kind") or ""),
+        "last_chapter": last_scope.get("chapter"),
+        "last_at": str(last.get("occurred_at") or ""),
+    }
+
+
 def summarize_run(run: Path) -> dict:
     nd = novel_dir(run)
     prog = read_json(nd / "meta" / "progress.json") or {}
     pipe = read_json(nd / "meta" / "pipeline.json") or {}
     usage = read_json(nd / "meta" / "usage.json") or {}
     overall = usage.get("overall") or {}
+    outline = read_json(nd / "outline.json") or []
 
     completed = prog.get("completed_chapters") or []
     if isinstance(completed, int):
@@ -166,8 +224,10 @@ def summarize_run(run: Path) -> dict:
         "arc": prog.get("current_arc") or 0,
         "current_chapter": prog.get("current_chapter") or 0,
         "chapters_total": prog.get("total_chapters") or 0,
+        "chapters_planned": len(outline) if isinstance(outline, list) else 0,
         "chapters_completed": completed_count,
         "chapters_on_disk": len(files),
+        "working": working_state(nd, prog),
         "words_total": prog.get("total_word_count") or 0,
         "chapter_words": {str(k): v for k, v in sorted(word_counts.items(), key=lambda kv: int(kv[0]))},
         "cost_usd": round(float(overall.get("cost_usd") or 0.0), 4),
@@ -215,13 +275,260 @@ def run_detail(run: Path) -> dict:
             deliveries = sum(1 for line in f if line.strip())
     except OSError:
         pass
+    planned = []
+    for ch in read_json(nd / "outline.json") or []:
+        if isinstance(ch, dict):
+            planned.append({
+                "chapter": ch.get("chapter"),
+                "title": ch.get("title") or "",
+                "core_event": clip(ch.get("core_event"), 140),
+            })
     base.update({
         "chapters": chapters,
+        "planned": planned,
         "per_agent": per_agent,
         "deliveries": deliveries,
         "log": log_tail(nd),
     })
     return base
+
+
+# ---------- 详情页签数据（设定 / 人物 / 计划 / 离屏世界） ----------
+
+def read_json_variants(nd: Path, *rels: str):
+    """按顺序读第一个存在的 JSON（如 relationship_state.json → .initial.json）。"""
+    for rel in rels:
+        data = read_json(nd / rel)
+        if data is not None:
+            return data
+    return None
+
+
+def text_head(path: Path, limit: int = 2000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text[:limit] + ("\n…（截断）" if len(text) > limit else "")
+
+
+def clip(s, n: int = 200) -> str:
+    s = str(s or "").strip()
+    return s[:n] + ("…" if len(s) > n else "")
+
+
+def setting_payload(run: Path) -> dict:
+    nd = novel_dir(run)
+    bw = read_json(nd / "book_world.json") or {}
+    factions = []
+    for f in bw.get("factions") or []:
+        if not isinstance(f, dict):
+            continue
+        factions.append({
+            "name": f.get("name") or f.get("id") or "",
+            "stance": f.get("stance") or "",
+            "goal": clip(f.get("goal"), 160),
+            "internal_tension": clip(f.get("internal_tension"), 140),
+            "clock": f.get("clock") or {},
+        })
+    rules = []
+    for r in read_json(nd / "world_rules.json") or []:
+        if isinstance(r, dict):
+            rules.append({
+                "category": r.get("category") or "",
+                "rule": clip(r.get("rule"), 220),
+                "boundary": clip(r.get("boundary"), 180),
+                "visibility": r.get("visibility") or "",
+            })
+    axioms = read_json(nd / "meta" / "physics_axioms.json") or {}
+    return {
+        "premise": text_head(nd / "premise.md"),
+        "prompt": text_head(run / "prompt.md", 1200),
+        "world_name": bw.get("name") or "",
+        "world_summary": clip(bw.get("summary"), 400),
+        "places": [clip((p or {}).get("name"), 30) for p in (bw.get("places") or []) if isinstance(p, dict)][:40],
+        "routes": len(bw.get("routes") or []),
+        "factions": factions,
+        "world_rules": rules,
+        "physics_axioms": [clip(n, 200) for n in (axioms.get("notes") or [])][:20],
+        "story_calendar": read_json(nd / "meta" / "story_calendar.json") or {},
+    }
+
+
+def cast_payload(run: Path) -> dict:
+    nd = novel_dir(run)
+    chars = []
+    for c in read_json(nd / "characters.json") or []:
+        if not isinstance(c, dict):
+            continue
+        chars.append({
+            "name": c.get("name") or "",
+            "role": c.get("role") or "",
+            "tier": c.get("tier") or "",
+            "traits": [clip(t, 20) for t in (c.get("traits") or [])][:6],
+            "description": clip(c.get("description"), 220),
+            "arc": clip(c.get("arc"), 160),
+        })
+    rs = read_json_variants(nd, "relationship_state.json", "relationship_state.initial.json") or {}
+    relations = []
+    if isinstance(rs, list):  # 旧版扁平形态：[{character_a, character_b, relation, chapter}]
+        for r in rs[:80]:
+            if isinstance(r, dict):
+                relations.append({
+                    "owner": r.get("character_a") or "",
+                    "counterpart": r.get("character_b") or "",
+                    "trust": None,
+                    "alliance": clip(r.get("relation"), 120),
+                    "promise": "", "debt": "",
+                    "leverage": f"第 {r.get('chapter')} 章" if r.get("chapter") else "",
+                })
+        return {"characters": chars, "relationship_scope": "", "relationship_chapter": None,
+                "relations": relations}
+    contracts = rs.get("contracts") or []
+    if isinstance(contracts, dict):  # {owner: [contract...]} 与 [contract...] 双形态兼容
+        pairs = [(owner, c) for owner, lst in contracts.items() for c in (lst or []) if isinstance(c, dict)]
+    else:
+        pairs = [(c.get("name") or c.get("owner") or "", c) for c in contracts if isinstance(c, dict)]
+    for owner, c in pairs[:80]:
+        relations.append({
+            "owner": owner,
+            "counterpart": c.get("counterpart") or "",
+            "trust": c.get("trust"),
+            "alliance": c.get("alliance_status") or "",
+            "promise": clip(c.get("promise"), 120),
+            "debt": clip(c.get("debt"), 120),
+            "leverage": clip(c.get("leverage"), 120),
+        })
+    return {
+        "characters": chars,
+        "relationship_scope": rs.get("scope") or "",
+        "relationship_chapter": rs.get("chapter"),
+        "relations": relations,
+    }
+
+
+def plan_payload(run: Path) -> dict:
+    nd = novel_dir(run)
+    volumes = []
+    for v in read_json(nd / "layered_outline.json") or []:
+        if not isinstance(v, dict):
+            continue
+        volumes.append({
+            "index": v.get("index"),
+            "title": v.get("title") or "",
+            "theme": clip(v.get("theme"), 160),
+            "arcs": [{
+                "index": a.get("index"),
+                "title": a.get("title") or "",
+                "goal": clip(a.get("goal"), 160),
+                "chapters": len(a.get("chapters") or []) if isinstance(a.get("chapters"), list) else a.get("chapters"),
+            } for a in (v.get("arcs") or []) if isinstance(a, dict)],
+        })
+    outline = []
+    for ch in read_json(nd / "outline.json") or []:
+        if isinstance(ch, dict):
+            outline.append({
+                "chapter": ch.get("chapter"),
+                "title": ch.get("title") or "",
+                "core_event": clip(ch.get("core_event"), 180),
+                "hook": clip(ch.get("hook"), 120),
+            })
+    ledger = read_json(nd / "meta" / "chapter_progress.json") or {}
+    np_raw = ledger.get("next_plan") or {}
+    next_plan = {
+        "chapter": np_raw.get("chapter"),
+        "title": np_raw.get("title") or "",
+        "position": np_raw.get("position") or "",
+        "core_event": clip(np_raw.get("core_event"), 400),
+        "hook": clip(np_raw.get("hook"), 220),
+        "required_beats": [clip(b, 160) for b in (np_raw.get("required_beats") or [])][:10],
+    } if np_raw else None
+    fs = read_json_variants(nd, "foreshadow_ledger.json", "foreshadow_ledger.initial.json") or {}
+    seeds = []
+    raw_seeds = fs if isinstance(fs, list) else (fs.get("seeds") or fs.get("items") or fs.get("foreshadows") or [])
+    for s in raw_seeds:
+        if isinstance(s, dict):
+            planted = s.get("planted_at") or s.get("source_chapter")
+            seeds.append({
+                "id": s.get("id") or "",
+                "description": clip(s.get("description") or s.get("content"), 180),
+                "status": s.get("status") or "",
+                "target_chapter": s.get("target_chapter") or s.get("payoff_chapter"),
+                "horizon": s.get("payoff_horizon") or (f"埋于第 {planted} 章" if planted else ""),
+            })
+    timeline = []
+    for ev in (read_json(nd / "timeline.json") or [])[-14:]:
+        if isinstance(ev, dict):
+            timeline.append({
+                "chapter": ev.get("chapter"),
+                "time": clip(ev.get("time"), 40),
+                "event": clip(ev.get("event"), 160),
+            })
+    return {"volumes": volumes, "outline": outline, "next_plan": next_plan,
+            "foreshadows": seeds, "timeline": timeline}
+
+
+def offscreen_payload(run: Path) -> dict:
+    nd = novel_dir(run)
+    tick = read_json(nd / "meta" / "world_tick.json") or {}
+    agendas = []
+    ag = read_json(nd / "meta" / "offscreen_agenda.json") or {}
+    for a in ag.get("agendas") or []:
+        if isinstance(a, dict):
+            agendas.append({
+                "name": a.get("name") or "",
+                "tier": a.get("tier") or "",
+                "goal": clip(a.get("current_goal"), 180),
+                "status": a.get("status") or "",
+            })
+    mood = read_json(nd / "meta" / "social_mood.json") or {}
+    events = []
+    try:
+        with open(nd / "meta" / "world_events.jsonl", encoding="utf-8") as f:
+            lines = f.readlines()[-50:]
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events.append({
+                "chapter": e.get("chapter"),
+                "summary": clip(e.get("summary"), 200),
+                "actors": (e.get("actors") or [])[:5],
+                "visibility_chapter": e.get("visibility_chapter"),
+                "visibility_path": e.get("visibility_path") or "",
+                "tier": e.get("tier") or "",
+                "foreshadow": bool(e.get("foreshadow_candidate")),
+            })
+    except OSError:
+        pass
+    tiers = read_json(nd / "meta" / "simulation_tiers.json") or {}
+    tier_counts: dict[str, int] = {}
+    for a in tiers.get("assignments") or []:
+        if isinstance(a, dict):
+            t = a.get("tier") or "unknown"
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+    info = read_json(nd / "meta" / "info_graph.json") or {}
+    readiness = read_json(nd / "meta" / "first_chapter_generation_readiness.json") or {}
+    bw = read_json(nd / "book_world.json") or {}
+    clocks = [{
+        "name": f.get("name") or "",
+        "clock": f.get("clock") or {},
+    } for f in (bw.get("factions") or []) if isinstance(f, dict) and f.get("clock")]
+    return {
+        "tick": tick,
+        "agendas": agendas,
+        "social_mood": {
+            "mood": clip(mood.get("mood"), 160),
+            "intensity": mood.get("intensity"),
+            "rumors": [clip(r, 140) for r in (mood.get("rumors") or [])][:8],
+        },
+        "events": events,
+        "tier_counts": tier_counts,
+        "info_nodes": len(info.get("nodes") or []),
+        "readiness": {"ready": readiness.get("ready"), "generated_at": readiness.get("generated_at") or ""},
+        "clocks": clocks,
+    }
 
 
 # ---------- HTTP ----------
@@ -255,11 +562,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/novels":
                 return self._json({"runs_dir": str(RUNS_DIR),
                                    "novels": [summarize_run(r) for r in list_runs()]})
-            m = re.match(r"^/api/novels/([^/]+)$", path)
+            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen))?$", path)
             if m:
                 run = RUNS_DIR / m.group(1)
                 if not is_run_dir(run) or run.parent != RUNS_DIR:
                     return self._json({"error": "not found"}, 404)
+                section = m.group(2)
+                if section == "setting":
+                    return self._json(setting_payload(run))
+                if section == "cast":
+                    return self._json(cast_payload(run))
+                if section == "plan":
+                    return self._json(plan_payload(run))
+                if section == "offscreen":
+                    return self._json(offscreen_payload(run))
                 return self._json(run_detail(run))
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:

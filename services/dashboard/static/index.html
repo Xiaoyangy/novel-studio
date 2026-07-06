@@ -59,7 +59,7 @@
   .dot.err  { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
 
   main { max-width: 1240px; margin: 0 auto; padding: 30px 28px 80px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 22px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 22px; }
 
   .card {
     position: relative;
@@ -100,8 +100,22 @@
     box-shadow: 0 0 12px rgba(109,141,255,.5);
     transition: width .8s cubic-bezier(.22,1,.36,1);
   }
+  .tri { display: flex; gap: 14px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .tri b { color: var(--text); font-variant-numeric: tabular-nums; }
 
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 16px; }
+  /* 当前章步骤链 */
+  .steps { display: flex; align-items: center; gap: 4px; margin-top: 14px; }
+  .steps .lbl { font-size: 11px; color: var(--muted); margin-right: 6px; white-space: nowrap; }
+  .step {
+    flex: 1; text-align: center; font-size: 10.5px; font-family: var(--mono);
+    padding: 4px 0; border-radius: 6px; color: var(--muted);
+    background: rgba(255,255,255,.04); border: 1px solid transparent;
+  }
+  .step.done { color: var(--ok); background: rgba(61,220,151,.08); }
+  .step.now  { color: var(--warn); background: rgba(245,177,76,.1); border-color: rgba(245,177,76,.45); animation: chipglow 2s infinite; }
+  @keyframes chipglow { 50% { box-shadow: 0 0 12px rgba(245,177,76,.25); } }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
   .stat { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.05); border-radius: 10px; padding: 8px 10px; }
   .stat .k { font-size: 10px; color: var(--muted); letter-spacing: .5px; }
   .stat .v { font-size: 14px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
@@ -113,7 +127,6 @@
   .chip { flex: 1; text-align: center; font-size: 11px; padding: 5px 0; border-radius: 8px; border: 1px dashed var(--line); color: var(--muted); }
   .chip.done { border-style: solid; color: var(--ok); border-color: rgba(61,220,151,.4); background: rgba(61,220,151,.07); }
   .chip.now  { border-style: solid; color: var(--warn); border-color: rgba(245,177,76,.5); background: rgba(245,177,76,.08); animation: chipglow 2s infinite; }
-  @keyframes chipglow { 50% { box-shadow: 0 0 12px rgba(245,177,76,.25); } }
 
   .foot { display: flex; justify-content: space-between; margin-top: 14px; font-size: 11px; color: var(--muted); }
 
@@ -125,37 +138,68 @@
   .overlay { position: fixed; inset: 0; background: rgba(4,6,10,.55); backdrop-filter: blur(3px); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 30; }
   .overlay.show { opacity: 1; pointer-events: auto; }
   .drawer {
-    position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 94vw); z-index: 40;
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(860px, 96vw); z-index: 40;
     background: #0d1019; border-left: 1px solid var(--line);
     transform: translateX(102%); transition: transform .32s cubic-bezier(.22,1,.36,1);
     display: flex; flex-direction: column;
   }
   .drawer.show { transform: none; }
-  .drawer-head { padding: 20px 26px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+  .drawer-head { padding: 18px 26px 0; border-bottom: 1px solid var(--line); }
+  .drawer-head .row { display: flex; align-items: center; gap: 12px; }
   .drawer-head h2 { font-size: 20px; }
   .drawer-head .close { margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted); width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 15px; }
   .drawer-head .close:hover { color: var(--text); border-color: var(--muted); }
+  .tabs { display: flex; gap: 4px; margin-top: 14px; }
+  .tab {
+    padding: 8px 16px; font-size: 13px; color: var(--muted); cursor: pointer;
+    border: none; background: none; border-bottom: 2px solid transparent; letter-spacing: .5px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); border-bottom-color: var(--accent1); font-weight: 600; }
   .drawer-body { overflow-y: auto; padding: 20px 26px 40px; flex: 1; }
   .sec { margin-bottom: 26px; }
   .sec h3 { font-size: 13px; color: var(--muted); letter-spacing: 1px; margin-bottom: 10px; font-weight: 600; }
+  .panel { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .kv { display: flex; gap: 10px; font-size: 12.5px; margin: 4px 0; }
+  .kv .k { color: var(--muted); flex: none; min-width: 76px; }
+  .prose { font-size: 13px; line-height: 1.8; color: #c6cddc; white-space: pre-wrap; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .5px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
-  td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.045); font-variant-numeric: tabular-nums; }
+  td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.045); font-variant-numeric: tabular-nums; vertical-align: top; }
   tr:hover td { background: rgba(255,255,255,.025); }
-  .tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; }
-  .tag.accept { color: var(--ok); background: rgba(61,220,151,.1); }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+  .tag.accept, .tag.ok { color: var(--ok); background: rgba(61,220,151,.1); }
   .tag.rewrite, .tag.fail { color: var(--bad); background: rgba(255,107,129,.1); }
-  .tag.pass { color: var(--info); background: rgba(88,166,255,.1); }
+  .tag.pass, .tag.blue { color: var(--info); background: rgba(88,166,255,.1); }
   .tag.pending { color: var(--muted); background: rgba(255,255,255,.05); }
+  .tag.now { color: var(--warn); background: rgba(245,177,76,.12); }
+  .tag.purple { color: #c9a7ff; background: rgba(176,109,255,.12); }
+
+  .clock { margin: 8px 0; }
+  .clock .t { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .clock .t em { font-style: normal; color: var(--muted); font-size: 11px; }
+  .segs { display: flex; gap: 3px; }
+  .segs i { flex: 1; height: 7px; border-radius: 3px; background: rgba(255,255,255,.08); }
+  .segs i.f { background: linear-gradient(90deg, var(--accent1), var(--accent2)); box-shadow: 0 0 8px rgba(109,141,255,.4); }
+
+  .placechips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .placechips span { font-size: 11.5px; padding: 3px 10px; border-radius: 8px; background: rgba(255,255,255,.05); border: 1px solid var(--line); color: #b9c1d4; }
+
+  .tree { font-size: 13px; }
+  .tree .vol { margin-bottom: 12px; }
+  .tree .vol > b { font-size: 13.5px; }
+  .tree .arc { margin: 5px 0 5px 16px; color: #c6cddc; }
+  .tree .arc small { color: var(--muted); }
 
   .log {
     font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
     background: #070910; border: 1px solid var(--line); border-radius: 12px;
-    padding: 14px 16px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    padding: 14px 16px; max-height: 460px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
     color: #9aa5bd;
   }
-  .log .hl { color: #d7deee; }
+  .log .hl { color: #ffb4c0; }
+  .loading { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
   a { color: var(--accent1); }
 </style>
 </head>
@@ -164,7 +208,7 @@
   <div class="logo"></div>
   <h1><em>novel-studio</em>&nbsp;· 创作进度看板</h1>
   <div class="head-meta">
-    <span id="conn"><span class="dot live"></span><span id="conn-text">已连接</span></span>
+    <span id="conn"><span class="dot live"></span><span>已连接</span></span>
     <span>数据源 <code id="runs-dir">data/runs/</code></span>
     <span id="tick">—</span>
   </div>
@@ -181,11 +225,21 @@
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer">
   <div class="drawer-head">
-    <h2 id="d-title">—</h2>
-    <span class="pill" id="d-phase"></span>
-    <button class="close" id="d-close">✕</button>
+    <div class="row">
+      <h2 id="d-title">—</h2>
+      <span class="pill" id="d-phase"></span>
+      <button class="close" id="d-close">✕</button>
+    </div>
+    <div class="tabs" id="tabs">
+      <button class="tab on" data-tab="overview">总览</button>
+      <button class="tab" data-tab="setting">设定</button>
+      <button class="tab" data-tab="cast">人物</button>
+      <button class="tab" data-tab="plan">计划</button>
+      <button class="tab" data-tab="offscreen">离屏世界</button>
+      <button class="tab" data-tab="log">日志</button>
+    </div>
   </div>
-  <div class="drawer-body" id="d-body"></div>
+  <div class="drawer-body" id="d-body"><div class="loading">加载中…</div></div>
 </aside>
 
 <script>
@@ -193,12 +247,12 @@
 const $ = (s, el = document) => el.querySelector(s);
 const grid = $("#grid"), empty = $("#empty");
 const overlay = $("#overlay"), drawer = $("#drawer");
-let currentDetail = null;   // 打开的书目 dir
-let lastData = [];
+let currentDetail = null, currentTab = "overview", detailTimer = null;
 
 const fmtNum = n => (n >= 10000 ? (n / 10000).toFixed(1) + " 万" : String(n ?? 0));
 const fmtMoney = n => "$" + (n ?? 0).toFixed(2);
 const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
+const stepName = { plan: "构思", draft: "落稿", check: "校验", commit: "提交", review: "评审" };
 const ago = ts => {
   if (!ts) return "—";
   const s = Math.max(0, Date.now() / 1000 - ts);
@@ -208,6 +262,18 @@ const ago = ts => {
   return Math.floor(s / 86400) + " 天前";
 };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const api = p => fetch(p, { cache: "no-store" }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+/* ---------- 卡片 ---------- */
+function stepChain(w, compact) {
+  if (!w || !w.chapter) return "";
+  const chain = (w.chain || []).map((s, i) => {
+    let cls = "";
+    if (w.chain_pos >= 0) { if (i < w.chain_pos) cls = "done"; else if (i === w.chain_pos) cls = "now"; }
+    return `<span class="step ${cls}">${stepName[s] || s}</span>`;
+  }).join("");
+  return `<div class="steps"><span class="lbl">第 ${w.chapter} 章${compact ? "" : " 进展"}</span>${chain}</div>`;
+}
 
 function pipelineChips(b) {
   const done = new Set(b.pipeline_completed || []);
@@ -242,24 +308,30 @@ function card(b) {
     <div class="prog">
       <div class="nums"><span><b>${b.chapters_completed}</b> / ${b.chapters_total || "?"} 章</span><span>${pct}%</span></div>
       <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="tri">
+        <span>目标 <b>${b.chapters_total || "?"}</b> 章</span>
+        <span>已细化规划 <b>${b.chapters_planned}</b></span>
+        <span>已完成 <b>${b.chapters_completed}</b></span>
+        <span>落盘 <b>${b.chapters_on_disk}</b></span>
+      </div>
     </div>
+    ${stepChain(b.working, true)}
     <div class="stats">
       <div class="stat"><div class="k">总字数</div><div class="v">${fmtNum(b.words_total)}</div></div>
       <div class="stat"><div class="k">成本</div><div class="v">${fmtMoney(b.cost_usd)}</div></div>
       <div class="stat"><div class="k">卷 · 弧</div><div class="v">${b.volume || "-"} · ${b.arc || "-"}</div></div>
-      <div class="stat"><div class="k">当前章</div><div class="v">第 ${b.current_chapter || "-"} 章</div></div>
+      <div class="stat"><div class="k">评审/门禁</div><div class="v">${b.reviews_accepted}/${b.gate_passed}</div></div>
     </div>
     ${sparkline(b)}
     <div class="chips">${pipelineChips(b)}</div>
     <div class="foot">
-      <span>评审通过 ${b.reviews_accepted} · 门禁通过 ${b.gate_passed}</span>
+      <span>${b.working && b.working.last_step ? `最近动作 ${esc(b.working.last_step)}${b.working.last_chapter ? `（第${b.working.last_chapter}章）` : ""}` : ""}</span>
       <span>更新于 ${ago(b.updated_at)}</span>
     </div>
   </div>`;
 }
 
 function render(novels) {
-  lastData = novels;
   empty.style.display = novels.length ? "none" : "";
   grid.innerHTML = novels.map(card).join("");
   grid.querySelectorAll(".card").forEach(el =>
@@ -270,8 +342,7 @@ function render(novels) {
 
 async function refresh() {
   try {
-    const res = await fetch("/api/novels", { cache: "no-store" });
-    const data = await res.json();
+    const data = await api("/api/novels");
     $("#runs-dir").textContent = data.runs_dir || "data/runs/";
     render(data.novels || []);
     $("#conn").innerHTML = '<span class="dot live"></span>实时刷新';
@@ -281,61 +352,219 @@ async function refresh() {
   $("#tick").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-/* ---- 详情抽屉 ---- */
-function detailHTML(d) {
-  const chapterRows = (d.chapters || []).map(c => `<tr>
-    <td>第 ${c.n} 章</td>
-    <td>${esc(c.title) || '<span style="color:var(--muted)">—</span>'}</td>
-    <td>${c.words ? c.words + " 字" : "—"}</td>
-    <td>${c.verdict ? `<span class="tag ${esc(c.verdict)}">${c.verdict === "accept" ? "通过" : esc(c.verdict)}</span>` : '<span class="tag pending">待审</span>'}</td>
-    <td>${c.gate ? `<span class="tag ${esc(c.gate)}">${c.gate === "pass" ? "门禁 ✓" : "门禁 ✗"}${c.gate_warnings ? ` · ${c.gate_warnings} 警告` : ""}</span>` : "—"}</td>
-  </tr>`).join("");
+/* ---------- 页签渲染 ---------- */
+const verdictTag = v => v === "accept" ? '<span class="tag accept">通过</span>'
+  : v ? `<span class="tag rewrite">${esc(v)}</span>` : '<span class="tag pending">待审</span>';
+
+function renderOverview(d) {
+  const w = d.working || {};
+  const planned = new Map((d.planned || []).map(p => [p.chapter, p]));
+  const disk = new Map((d.chapters || []).map(c => [c.n, c]));
+  const nums = [...new Set([...planned.keys(), ...disk.keys()])].sort((a, b) => a - b);
+  const rows = nums.map(n => {
+    const p = planned.get(n), c = disk.get(n);
+    let status;
+    if (c && c.verdict === "accept") status = '<span class="tag accept">已完成</span>';
+    else if (c) status = '<span class="tag blue">已落盘</span>';
+    else if (n === w.chapter && d.active) status = `<span class="tag now">写作中 · ${stepName[w.step] || w.step || "…"}</span>`;
+    else if (n === w.chapter) status = '<span class="tag now">当前章</span>';
+    else status = '<span class="tag pending">未开始</span>';
+    return `<tr>
+      <td>第 ${n} 章</td>
+      <td>${esc((c && c.title) || (p && p.title) || "")}${!c && p && p.core_event ? `<br><small style="color:var(--muted)">${esc(p.core_event)}</small>` : ""}</td>
+      <td>${c && c.words ? c.words + " 字" : "—"}</td>
+      <td>${status}</td>
+      <td>${c ? verdictTag(c.verdict) : "—"}</td>
+      <td>${c && c.gate ? `<span class="tag ${esc(c.gate)}">${c.gate === "pass" ? "门禁 ✓" : "门禁 ✗"}${c.gate_warnings ? ` · ${c.gate_warnings} 警告` : ""}</span>` : "—"}</td>
+    </tr>`;
+  }).join("");
   const agentRows = (d.per_agent || []).map(a => `<tr>
     <td>${esc(a.agent)}</td><td>${fmtNum(a.input)}</td><td>${fmtNum(a.output)}</td><td>${fmtMoney(a.cost_usd)}</td>
   </tr>`).join("");
-  const logLines = (d.log || []).map(l =>
-    `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
   return `
-    <div class="sec">
-      <h3>章节（磁盘 ${d.chapters_on_disk} 篇 · 交付沉淀 ${d.deliveries} 次）</h3>
-      ${chapterRows ? `<table><thead><tr><th>章</th><th>标题</th><th>字数</th><th>评审</th><th>AI 门禁</th></tr></thead><tbody>${chapterRows}</tbody></table>`
-                    : '<div style="color:var(--muted);font-size:13px">还没有落盘章节。</div>'}
+    <div class="sec"><h3>当前章进展</h3>
+      <div class="panel">
+        ${stepChain(w) || '<span style="color:var(--muted);font-size:13px">尚未进入章节写作。</span>'}
+        <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span>${esc(w.last_step || "—")}${w.last_kind === "chapter" && w.last_chapter ? `（第 ${w.last_chapter} 章）` : w.last_kind ? `（${esc(w.last_kind)}）` : ""} <em style="color:var(--muted);font-style:normal">${esc((w.last_at || "").replace("T", " ").slice(0, 19))}</em></span></div>
+        <div class="kv"><span class="k">进度口径</span><span>目标 ${d.chapters_total || "?"} 章 · 已细化规划 ${d.chapters_planned} · 已完成 ${d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 交付沉淀 ${d.deliveries} 次</span></div>
+      </div>
     </div>
-    <div class="sec">
-      <h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
+    <div class="sec"><h3>章节状态（规划 ∪ 落盘）</h3>
+      ${rows ? `<table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table>`
+             : '<div class="loading">还没有规划或落盘的章节。</div>'}
+    </div>
+    <div class="sec"><h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
       ${agentRows ? `<table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table>`
-                  : '<div style="color:var(--muted);font-size:13px">暂无用量数据。</div>'}
-    </div>
-    <div class="sec">
-      <h3>运行日志（末尾 ${d.log ? d.log.length : 0} 行，自动刷新）</h3>
-      <div class="log" id="d-log">${logLines || "（暂无日志）"}</div>
+                  : '<div class="loading">暂无用量数据。</div>'}
     </div>`;
 }
 
-async function loadDetail(dir, keepScroll) {
-  const res = await fetch("/api/novels/" + encodeURIComponent(dir), { cache: "no-store" });
-  if (!res.ok) return;
-  const d = await res.json();
-  $("#d-title").textContent = d.name;
-  const ph = $("#d-phase");
-  ph.textContent = phaseName[d.phase] || d.phase;
-  ph.className = "pill phase-" + d.phase;
-  const body = $("#d-body");
-  const prevLog = $("#d-log");
-  const stick = !keepScroll || !prevLog || (prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 20);
-  body.innerHTML = detailHTML(d);
-  const log = $("#d-log");
-  if (log && stick) log.scrollTop = log.scrollHeight;
+function clockHTML(name, c, extra) {
+  const segs = c.segments || 0, prog = c.progress || 0;
+  const cells = Array.from({ length: segs }, (_, i) => `<i class="${i < prog ? "f" : ""}"></i>`).join("");
+  return `<div class="clock"><div class="t"><b>${esc(name)}</b><em>${prog}/${segs}${c.pace ? " · " + esc(c.pace) : ""}</em></div>
+    ${segs ? `<div class="segs">${cells}</div>` : ""}
+    ${c.consequence ? `<div style="font-size:11.5px;color:var(--muted);margin-top:4px">走满 → ${esc(c.consequence)}</div>` : ""}${extra || ""}</div>`;
 }
 
-let detailTimer = null;
+function renderSetting(s) {
+  const rules = (s.world_rules || []).map(r => `<tr>
+    <td><span class="tag purple">${esc(r.category)}</span></td><td>${esc(r.rule)}</td>
+    <td style="color:var(--muted)">${esc(r.boundary)}</td><td>${esc(r.visibility)}</td></tr>`).join("");
+  const factions = (s.factions || []).map(f =>
+    clockHTML(f.name + (f.stance ? `（${f.stance}）` : ""), f.clock || {},
+      f.goal ? `<div style="font-size:11.5px;color:#b9c1d4;margin-top:3px">目标：${esc(f.goal)}</div>` : "")).join("");
+  const cal = s.story_calendar || {};
+  return `
+    <div class="sec"><h3>项目背景（premise）</h3><div class="panel prose">${esc(s.premise) || "（暂无）"}</div></div>
+    <div class="sec"><h3>世界 · ${esc(s.world_name) || "—"}</h3>
+      <div class="panel">
+        <div class="prose" style="margin-bottom:10px">${esc(s.world_summary)}</div>
+        <div class="kv"><span class="k">故事日历</span><span>${cal.era ? esc(cal.era) + " · " : ""}${cal.start_date ? esc(cal.start_date) + " 起 · " : ""}一章 ≈ ${cal.days_per_chapter ?? "?"} 天</span></div>
+        <div class="kv"><span class="k">地点</span><span class="placechips">${(s.places || []).map(p => `<span>${esc(p)}</span>`).join("") || "—"}</span></div>
+      </div>
+    </div>
+    <div class="sec"><h3>势力与进度钟（${(s.factions || []).length}）</h3><div class="panel">${factions || '<span style="color:var(--muted);font-size:13px">暂无势力。</span>'}</div></div>
+    <div class="sec"><h3>世界规则（${(s.world_rules || []).length} 条）</h3>
+      ${rules ? `<table><thead><tr><th>类别</th><th>规则</th><th>边界</th><th>可见性</th></tr></thead><tbody>${rules}</tbody></table>` : '<div class="loading">暂无。</div>'}
+    </div>
+    ${(s.physics_axioms || []).length ? `<div class="sec"><h3>物理公理</h3><div class="panel prose">${s.physics_axioms.map(esc).join("\n")}</div></div>` : ""}`;
+}
+
+function renderCast(c) {
+  const chars = (c.characters || []).map(x => `<tr>
+    <td><b>${esc(x.name)}</b>${x.tier ? `<br><span class="tag ${x.tier === "protagonist" ? "now" : "pending"}">${esc(x.tier)}</span>` : ""}</td>
+    <td>${esc(x.role)}</td>
+    <td>${(x.traits || []).map(t => `<span class="tag purple" style="margin:1px">${esc(t)}</span>`).join(" ")}</td>
+    <td style="color:#c6cddc">${esc(x.description)}${x.arc ? `<br><small style="color:var(--muted)">弧线：${esc(x.arc)}</small>` : ""}</td></tr>`).join("");
+  const rels = (c.relations || []).map(r => `<tr>
+    <td>${esc(r.owner) || "—"} → <b>${esc(r.counterpart)}</b></td>
+    <td>${r.trust ?? "—"}</td>
+    <td>${esc(r.alliance)}</td>
+    <td style="color:#c6cddc">${[r.promise && "承诺：" + r.promise, r.debt && "债：" + r.debt, r.leverage && "筹码：" + r.leverage].filter(Boolean).map(esc).join("；") || "—"}</td></tr>`).join("");
+  return `
+    <div class="sec"><h3>角色（${(c.characters || []).length}）</h3>
+      ${chars ? `<table><thead><tr><th>姓名</th><th>角色</th><th>特质</th><th>简介 / 弧线</th></tr></thead><tbody>${chars}</tbody></table>` : '<div class="loading">暂无角色档案。</div>'}
+    </div>
+    <div class="sec"><h3>人物关系契约（${(c.relations || []).length}${c.relationship_scope ? " · " + esc(c.relationship_scope) : ""}${c.relationship_chapter ? " · 截至第 " + c.relationship_chapter + " 章" : ""}）</h3>
+      ${rels ? `<table><thead><tr><th>关系</th><th>信任</th><th>同盟状态</th><th>承诺 / 债 / 筹码</th></tr></thead><tbody>${rels}</tbody></table>` : '<div class="loading">暂无关系数据。</div>'}
+    </div>`;
+}
+
+function renderPlan(p) {
+  const tree = (p.volumes || []).map(v => `<div class="vol"><b>卷 ${v.index ?? "?"} · ${esc(v.title)}</b>${v.theme ? ` <small style="color:var(--muted)">${esc(v.theme)}</small>` : ""}
+    ${(v.arcs || []).map(a => `<div class="arc">弧 ${a.index ?? "?"} · ${esc(a.title)} <small>（${a.chapters ?? "?"} 章）${a.goal ? " " + esc(a.goal) : ""}</small></div>`).join("")}</div>`).join("");
+  const np = p.next_plan;
+  const outline = (p.outline || []).map(o => `<tr>
+    <td>第 ${o.chapter} 章</td><td><b>${esc(o.title)}</b></td>
+    <td style="color:#c6cddc">${esc(o.core_event)}</td><td style="color:var(--muted)">${esc(o.hook)}</td></tr>`).join("");
+  const seeds = (p.foreshadows || []).map(s => `<tr>
+    <td style="font-family:var(--mono);font-size:11px">${esc(s.id)}</td>
+    <td style="color:#c6cddc">${esc(s.description)}</td>
+    <td><span class="tag ${s.status === "resolved" ? "accept" : "pending"}">${esc(s.status) || "—"}</span></td>
+    <td>${s.target_chapter ? "第 " + s.target_chapter + " 章" : esc(s.horizon) || "—"}</td></tr>`).join("");
+  const tl = (p.timeline || []).map(t => `<tr><td>第 ${t.chapter ?? "?"} 章</td><td>${esc(t.time)}</td><td style="color:#c6cddc">${esc(t.event)}</td></tr>`).join("");
+  return `
+    ${np ? `<div class="sec"><h3>下一章计划 · 第 ${np.chapter} 章</h3><div class="panel">
+      <div class="kv"><span class="k">标题</span><b>${esc(np.title)}</b>${np.position ? `　<span class="tag purple">${esc(np.position)}</span>` : ""}</div>
+      <div class="kv"><span class="k">核心事件</span><span class="prose">${esc(np.core_event)}</span></div>
+      ${np.hook ? `<div class="kv"><span class="k">钩子</span><span>${esc(np.hook)}</span></div>` : ""}
+      ${(np.required_beats || []).length ? `<div class="kv"><span class="k">必备节拍</span><span>${np.required_beats.map(b => "· " + esc(b)).join("<br>")}</span></div>` : ""}
+    </div></div>` : ""}
+    <div class="sec"><h3>卷 / 弧骨架</h3><div class="panel tree">${tree || '<span style="color:var(--muted);font-size:13px">暂无分层大纲。</span>'}</div></div>
+    <div class="sec"><h3>已细化章节规划（${(p.outline || []).length}）</h3>
+      ${outline ? `<table><thead><tr><th>章</th><th>标题</th><th>核心事件</th><th>钩子</th></tr></thead><tbody>${outline}</tbody></table>` : '<div class="loading">暂无细纲。</div>'}
+    </div>
+    <div class="sec"><h3>伏笔台账（${(p.foreshadows || []).length}）</h3>
+      ${seeds ? `<table><thead><tr><th>ID</th><th>描述</th><th>状态</th><th>回收目标</th></tr></thead><tbody>${seeds}</tbody></table>` : '<div class="loading">暂无伏笔。</div>'}
+    </div>
+    ${tl ? `<div class="sec"><h3>时间线（近 ${(p.timeline || []).length} 条）</h3><table><thead><tr><th>章</th><th>时间</th><th>事件</th></tr></thead><tbody>${tl}</tbody></table></div>` : ""}`;
+}
+
+function renderOffscreen(o) {
+  const t = o.tick || {};
+  const agendas = (o.agendas || []).map(a => `<tr>
+    <td><b>${esc(a.name)}</b></td><td><span class="tag ${a.tier === "supporting" ? "blue" : "pending"}">${esc(a.tier)}</span></td>
+    <td style="color:#c6cddc">${esc(a.goal)}</td><td><span class="tag ${a.status === "active" ? "ok" : "pending"}">${esc(a.status)}</span></td></tr>`).join("");
+  const events = (o.events || []).map(e => `<tr>
+    <td>第 ${e.chapter ?? "?"} 章</td>
+    <td style="color:#c6cddc">${esc(e.summary)}${e.foreshadow ? ' <span class="tag purple">伏笔候选</span>' : ""}</td>
+    <td>${(e.actors || []).map(esc).join("、")}</td>
+    <td>${e.visibility_chapter ? `第 ${e.visibility_chapter} 章` : "—"}${e.visibility_path ? `<br><small style="color:var(--muted)">${esc(e.visibility_path)}</small>` : ""}</td></tr>`).join("");
+  const clocks = (o.clocks || []).map(c => clockHTML(c.name, c.clock || {})).join("");
+  const mood = o.social_mood || {};
+  const tiers = Object.entries(o.tier_counts || {}).map(([k, v]) => `<span class="tag ${k === "protagonist" ? "now" : k === "supporting" ? "blue" : "pending"}" style="margin-right:6px">${esc(k)} × ${v}</span>`).join("");
+  return `
+    <div class="sec"><h3>世界推演游标</h3><div class="panel">
+      <div class="kv"><span class="k">tick</span><span class="tag purple">${esc(t.tick_id) || "—"}</span>　<span>已推演至第 <b>${t.through_chapter ?? 0}</b> 章 · 更新 ${esc((t.updated_at || "—").replace("T", " ").slice(0, 19))}</span></div>
+      <div class="kv"><span class="k">模拟分层</span><span>${tiers || "—"}　<span style="color:var(--muted)">信息差图节点 ${o.info_nodes}</span></span></div>
+      ${o.readiness && o.readiness.ready !== undefined ? `<div class="kv"><span class="k">零章就绪</span><span class="tag ${o.readiness.ready ? "ok" : "fail"}">${o.readiness.ready ? "ready" : "not ready"}</span></div>` : ""}
+    </div></div>
+    <div class="sec"><h3>社会情绪</h3><div class="panel">
+      <div class="kv"><span class="k">情绪</span><span>${esc(mood.mood) || "—"}${mood.intensity != null ? `　<span class="tag now">强度 ${mood.intensity}</span>` : ""}</span></div>
+      ${(mood.rumors || []).length ? `<div class="kv"><span class="k">流言</span><span>${mood.rumors.map(r => "· " + esc(r)).join("<br>")}</span></div>` : ""}
+    </div></div>
+    <div class="sec"><h3>离屏日程（supporting 层 ${(o.agendas || []).length} 人）</h3>
+      ${agendas ? `<table><thead><tr><th>角色</th><th>层级</th><th>当前目标</th><th>状态</th></tr></thead><tbody>${agendas}</tbody></table>` : '<div class="loading">暂无离屏日程。</div>'}
+    </div>
+    <div class="sec"><h3>势力进度钟</h3><div class="panel">${clocks || '<span style="color:var(--muted);font-size:13px">暂无进度钟。</span>'}</div></div>
+    <div class="sec"><h3>离屏事件流（近 ${(o.events || []).length} 条）</h3>
+      ${events ? `<table><thead><tr><th>发生</th><th>事件</th><th>参与者</th><th>传到主角</th></tr></thead><tbody>${events}</tbody></table>`
+               : '<div class="loading">尚未发生世界推演 tick——Architect 会在弧 / 卷边界执行 save_world_tick。</div>'}
+    </div>`;
+}
+
+function renderLog(d) {
+  const lines = (d.log || []).map(l =>
+    `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
+  return `<div class="sec"><h3>运行日志（末尾 ${(d.log || []).length} 行，自动刷新）</h3>
+    <div class="log" id="d-log">${lines || "（暂无日志）"}</div></div>`;
+}
+
+/* ---------- 抽屉驱动 ---------- */
+async function loadTab(keepScroll) {
+  if (!currentDetail) return;
+  const body = $("#d-body");
+  try {
+    if (currentTab === "overview" || currentTab === "log") {
+      const d = await api("/api/novels/" + encodeURIComponent(currentDetail));
+      $("#d-title").textContent = d.name;
+      const ph = $("#d-phase");
+      ph.textContent = phaseName[d.phase] || d.phase;
+      ph.className = "pill phase-" + d.phase;
+      if (currentTab === "overview") { body.innerHTML = renderOverview(d); return; }
+      const prev = $("#d-log");
+      const stick = !keepScroll || !prev || (prev.scrollTop + prev.clientHeight >= prev.scrollHeight - 20);
+      body.innerHTML = renderLog(d);
+      const log = $("#d-log");
+      if (log && stick) log.scrollTop = log.scrollHeight;
+      return;
+    }
+    const d = await api(`/api/novels/${encodeURIComponent(currentDetail)}/${currentTab}`);
+    if (currentTab === "setting") body.innerHTML = renderSetting(d);
+    else if (currentTab === "cast") body.innerHTML = renderCast(d);
+    else if (currentTab === "plan") body.innerHTML = renderPlan(d);
+    else if (currentTab === "offscreen") body.innerHTML = renderOffscreen(d);
+  } catch (e) {
+    body.innerHTML = `<div class="loading">加载失败：${esc(e.message)}，稍后自动重试…</div>`;
+  }
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#d-body").innerHTML = '<div class="loading">加载中…</div>';
+  loadTab(false);
+}
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
 function openDetail(dir) {
   currentDetail = dir;
   overlay.classList.add("show");
   drawer.classList.add("show");
-  loadDetail(dir, false);
+  switchTab(currentTab || "overview");
   clearInterval(detailTimer);
-  detailTimer = setInterval(() => currentDetail && loadDetail(currentDetail, true), 4000);
+  detailTimer = setInterval(() => currentDetail && loadTab(true), 4000);
 }
 function closeDetail() {
   currentDetail = null;
