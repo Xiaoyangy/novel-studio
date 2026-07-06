@@ -106,6 +106,7 @@ flowchart TD
     WR --> ST
     ED --> ST
     ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark 双库<br/>（语料源：deconstruction-library/）"]
+    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>六页签实时视图：总览 / 设定 / 人物<br/>计划 / 离屏世界 / 日志"]
 ```
 
 | 智能体 | 职责 | 关键工具 |
@@ -141,6 +142,30 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 ```
 
 启动时按配置确保本机 Qdrant 可用；进入 `write` 前构建或刷新当前项目 RAG。
+
+### 执行入口一览
+
+全部入口在 `cmd/novel-studio` 单一二进制内路由：
+
+| 入口 | 做什么 | 落点 / 产物 |
+|---|---|---|
+| `--pipeline` | 主链路：write → review → rewrite → deliver，断点续跑 | `output/novel/` 全套工件 + `meta/pipeline.json` |
+| `--cocreate` | 多轮对话澄清需求，定稿创作指令 | 创作指令（可直接接 `--pipeline`） |
+| `--zero-init` | 零章推演资产 + 白名单 RAG（写第 1 章前的硬门禁） | `meta/first_chapter_generation_readiness` 等 |
+| `--steer "<指令>"` | 排队一条干预，下次启动注入 Coordinator | `run.json` |
+| `--check` | LLM 连通性自检（含 fallback 验证） | 终端报告，退出码可入 CI |
+| `--diag` | 只读诊断（流程 / 质量 / 规划 / 上下文 + 世界停摆、证据漂移） | `meta/diag-export.md`（脱敏可分享） |
+| `--refresh-progress` | 回填章节推进 / 人物变化 / 下一章计划台账 | `meta/*_progress.*` |
+| `--build-rag` | 构建本书 RAG 索引，`--probe-chapter N` 探测召回 | `meta/rag/index_state.json` + Qdrant |
+| `--simulate` / `--import-sim` | 仿写画像合成 / 导入 | `meta/simulation_profile.json` |
+| `--writing-assets` | 写法资产查看 / 启停 / 组合 / 试写 / seed-defaults | `meta/writing_assets.json` |
+| `eval inspect / run` | 评测 harness（产物断言 / stylestat 门禁 / prompt A/B） | 评测报告 |
+| `reader-metrics log` | 登记真实读者指标（读完率 / 评论 / 收藏），供校准 | 项目 meta 台账 |
+| `service start/status/stop` | 进度看板（只读扫描 `data/runs/`） | `http://127.0.0.1:8765/` |
+| `skills list/context/export` | 内置 skills 查看与一键部署到外部 agent | 目标项目的 skills 目录 |
+| `update` / `--version` | 原地自更新 / 版本信息 | — |
+
+`--headless --prompt`、`--review-existing`、`--rewrite-existing` 是兼容别名，内部委派到 pipeline 对应阶段。恢复语义全线一致：同目录重跑同一命令即续跑（pipeline 看阶段证据，write 看 step 级 checkpoint，review/rewrite 按章号）。
 
 ## 适用平台
 
@@ -194,7 +219,7 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 - **可观测 / 可诊断** —— 全量工具调用日志、LLM 调用级 trace（对齐 OTel gen_ai.* 语义约定）、`--diag` 规则化诊断与脱敏导出、`eval` 评测 harness 与 prompt A/B
 - **Prompt 运行时覆盖** —— `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链，指纹落 manifest，改 prompt 实验不必重编译
 - **写法资产** —— `--writing-assets` 查看 / 启停 / 组合 / 绑定 / 试写本书写法特征池，`seed-defaults` 注入人工感与去 AI 味基线
-- **进度看板** —— `service start` 起浏览器实时看板：统一读取 `data/runs/` 下全部书目，动态展示各书阶段、章节进度、评审与门禁状态、用量成本和运行日志
+- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标/规划/完成/落盘）与当前章步骤链，六页签抽屉动态查看总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ 计划 / 离屏世界 / 日志
 - **功能 skill 化** —— 每个功能一份 SKILL.md，外部 agent（Claude Code / Codex / OpenCode / OpenClaw）读后直接拼命令行调用，`skills export` 一键部署
 - **多 LLM 支持** —— 11 类 provider + 任意自定义代理，角色级模型覆盖 + 请求级 failover
 - **发行与更新** —— 全平台 Release 二进制、一键安装脚本、`update` 原地自更新、Docker 镜像
@@ -361,10 +386,11 @@ meta/              # progress / pipeline / checkpoints / usage / delivery_log
 | [`docs/data-lifecycle-and-progression.md`](docs/data-lifecycle-and-progression.md) | 数据沉淀与推进机制 |
 | [`docs/capability-inventory.md`](docs/capability-inventory.md) | 工程能力清单 |
 | [`docs/observability.md`](docs/observability.md) | 运行观测排查手册 |
+| [`services/dashboard/README.md`](services/dashboard/README.md) | 进度看板服务与 API |
 
 ## 技术栈
 
-- **Go 1.25** —— 主语言（~8.6 万行，350 个源文件）
+- **Go 1.25** —— 主语言（~8.8 万行，358 个源文件）
 - **[agentcore](https://github.com/voocel/agentcore)** —— 极简 Agent 内核（tool-calling + streaming + StopGuard/ToolGate）
 - **[litellm](https://github.com/voocel/litellm)** —— 统一 LLM 接口适配（经 `third_party/litellm` 仓内 fork 引入，修复空参 tool_use 回放丢 input 字段的问题）
 - **Qdrant + llama.cpp** —— 本地向量检索与 embedding 推理，全链路可离线
