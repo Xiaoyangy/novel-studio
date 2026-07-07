@@ -16,7 +16,7 @@
 ```mermaid
 flowchart TD
     Z["--zero-init 零章推演（写第 1 章前的硬门禁）<br/>分层名单 · 初始日程 · 故事日历 · 信息差图 · 物理公理<br/>社会情绪 · 仪式日历 · 势力进度钟 · tick 零点 · 第一章推演草案"]
-    Z -->|readiness 校验通过| W["write：Writer 逐章写作<br/>plan → draft → check → commit"]
+    Z -->|readiness 校验通过| W["write：Writer 逐章写作<br/>Planner 推演 → Drafter 渲染 → check → commit"]
     W --> B{"弧 / 卷边界？"}
     B -->|是| T["save_world_tick 世界推演<br/>Architect 以 Game Master 身份裁决镜头外世界"]
     T --> T1["离屏事件：按物理公理推算<br/>visibility_chapter + 传播路径"]
@@ -122,24 +122,25 @@ flowchart TD
     P -->|一次 Prompt| CO["Coordinator（LLM 长循环）<br/>唯一决策者：读 novel_context → 调子代理 → 读结果 → 继续"]
     P -.->|"--new-novel"| BS["Brainstorm（前置单代理）<br/>web_research + craft_recall<br/>→ brainstorm.md"]
     CO --> AR["Architect<br/>设定 / 大纲 / 弧卷展开<br/>零章推演 / 世界 tick（GM）"]
-    CO --> WR["Writer<br/>plan → draft → check → commit<br/>逐章自主闭环"]
+    CO --> WR["Writer 两阶段<br/>① Planner 推演：落 causal_simulation<br/>② Drafter 渲染：干净上下文写正文 → commit"]
     CO --> ED["Editor / Reviewer<br/>八维评审 · 弧卷摘要<br/>AI 味判别（异族裁判）"]
     AR --> ST["Store（事实层，原子写入）<br/>progress · checkpoints · outline · chapters<br/>timeline · world_events · 各类账本台账"]
     WR --> ST
     ED --> ST
     ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark 双库<br/>（语料源：deconstruction-library/）"]
-    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>六页签实时视图：总览 / 设定 / 人物<br/>计划 / 离屏世界 / 日志"]
+    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>七页签实时视图：总览 / 设定 / 人物 / 成长轨迹<br/>计划 / 离屏世界 / 日志"]
 ```
 
 | 智能体 | 职责 | 关键工具 |
 |--------|------|------|
 | **Brainstorm** | 新建小说前置：调研题材、推敲逻辑、落盘 brainstorm.md（一次性单代理） | `web_research` `craft_recall` `novel_context` `save_brainstorm` |
 | **Coordinator** | 调度全局，处理评审裁定和用户干预 | `subagent` `novel_context` |
-| **Architect** | 前提 / 大纲 / 角色档案 / 世界规则；零章推演与弧边界世界 tick | `novel_context` `save_foundation` `save_world_tick` |
-| **Writer** | 自主完成一章的构思、写作、自审和提交 | `novel_context` `read_chapter` `plan_chapter` `draft_chapter` `check_consistency` `commit_chapter` |
+| **Architect** | 前提 / 大纲 / 角色档案 / 世界规则；零章推演与弧边界世界 tick | `novel_context` `save_foundation` `save_world_tick` `web_research` |
+| **Writer · Planner（推演）** | 读全量规划上下文，产出完整 `chapter_plan.causal_simulation`（40+ 字段：因果链 / 声口 / 对话蓝图 / 情感逻辑 / 视觉设计 / 证据回收 / 章末后果契约…）后停 | `novel_context` `plan_chapter` `plan_structure` `plan_details` `craft_recall` `web_research` |
+| **Writer · Drafter（渲染）** | 起干净会话，只读定稿计划 + 精要写法上下文，把推演渲染成正文并自审提交 | `novel_context` `read_chapter` `draft_chapter` `edit_chapter` `check_consistency` `commit_chapter` |
 | **Editor / Reviewer** | 章级八维评审、弧卷评审与摘要、AI 味盲测 | `novel_context` `read_chapter` `save_review` `save_arc_summary` `save_volume_summary` |
 
-Writer 每章的工具调用顺序是刚性的（写作内容完全自主）：`novel_context` 加载上下文 → `read_chapter` 找回语气 → `plan_chapter` 构思 → `draft_chapter` 落稿 → `check_consistency` 对照事实校验 → `commit_chapter` 提交并回刷时间线 / 伏笔 / 关系 / 角色状态。每章必须通过 Editor 章级审阅（`reviews/NN_ai_gate.json` + `reviews/NN.md`）才允许续写。
+**逐章两阶段拆分**：写一章分成独立上下文的两步——**Planner 推演** 吃全量规划上下文，把"要发生什么、谁怎么想、怎么说话、哪些物件承载信息"全部推演成 `causal_simulation` 落盘即停（长章可用 `plan_structure` + `plan_details` 分批补齐）；**Drafter 渲染** 起一个干净会话，只读已定稿计划把它写成正文，`check_consistency` 对照事实校验后 `commit_chapter` 提交并回刷时间线 / 伏笔 / 关系 / 角色状态。好处：drafter 不背规划对话的历史 token，长章不撑爆窗口、注意力集中在正文；planner 与 drafter 共用 writer 角色的模型配置。每章必须通过 Editor 章级审阅（`reviews/NN_ai_gate.json` + `reviews/NN.md`）才允许续写。
 
 ## 流水线
 
@@ -206,7 +207,9 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 **创作引擎**
 
 - **一句话新建** —— `--new-novel` 从想法起步：brainstorm 代理 web 调研题材 + craft 库检索，落盘 brainstorm.md 供 Architect 初始化世界
-- **多智能体协作** —— Coordinator 在一次长循环中调度 Architect / Writer / Editor 三个子代理，自主决策创作流程
+- **推演 / 渲染两阶段写作** —— 每章拆成 Planner 推演（落 `causal_simulation` 40+ 字段）与 Drafter 渲染（干净上下文只读定稿计划写正文）两个独立上下文，长章不撑爆窗口、注意力集中在正文
+- **联网研究（web_research）** —— brainstorm 与推演阶段可实时检索网页补题材现实支架、行业 / 地域 / 制度细节，结果登记 `meta/web_research_log.md` 可审计来源
+- **多智能体协作** —— Coordinator 在一次长循环中调度 Architect / Writer / Editor 子代理，自主决策创作流程
 - **LLM 驱动长循环** —— 一次 Prompt 写完整本书，Host 不介入调度；越简单越稳定，拒绝复杂编排
 - **卷弧双层滚动规划** —— 初始只规划前 2 卷弧骨架 + 第 1 弧详细章节，后续弧 / 卷在写作推进到时再由 Architect 展开，远期规划不空洞
 - **相关章节智能推荐** —— 每章写作时从伏笔、角色出场、状态变化、关系四个维度自动推荐相关历史章节，配合下一章预告，支撑 500+ 章连续性
@@ -240,7 +243,7 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 **运行时与运维**
 
 - **书目一览** —— `list` / `novels` 扫 `data/runs/`，一屏看清每本书的阶段（brainstorm / foundation / zero-init / writing / complete）、章节进度与字数
-- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标 / 规划 / 完成 / 落盘）与当前章步骤链，六页签抽屉动态查看总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ 计划 / 离屏世界 / 日志
+- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标 / 规划 / 完成 / 落盘）与当前章步骤链，七页签抽屉动态查看——总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ **成长轨迹（人物出场生命线 + 三段弧向 + 决策流 old→new+理由）** / 计划 / 离屏世界（SVG 环形进度钟）/ 日志
 - **Step 级断点恢复** —— 每个工具执行成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename 原子操作
 - **实时干预（Steer）** —— `--steer "<指令>"` 排队干预，下次启动注入 Coordinator，由其评估影响范围决定改设定 / 重写 / 后续调整
 - **成本与预算** —— token / 费用按角色、按模型累计，OpenRouter 价格自动拉取，`budget.book_usd` 越线告警 / 熔断；codex-cli 订阅接入复用订阅额度
