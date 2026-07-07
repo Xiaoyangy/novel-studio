@@ -231,6 +231,58 @@
   .statebox { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
   .statebox .kv { margin: 3px 0; font-size: 12px; }
   .statebox .kv .k { min-width: 62px; }
+
+  /* ---- 成长轨迹：人物生命线 ---- */
+  .lifeline { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-bottom: 14px; }
+  .lifeline .lhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+  .lifeline .lhead b { font-size: 15px; }
+  .lifeline .lhead .role { font-size: 11.5px; color: var(--muted); }
+  .lifeline .lhead .count { margin-left: auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .track { position: relative; height: 30px; margin: 14px 0 6px; }
+  .track .rail { position: absolute; top: 14px; left: 0; right: 0; height: 2px; background: rgba(255,255,255,.08); border-radius: 2px; }
+  .track .span { position: absolute; top: 13px; height: 4px; border-radius: 2px; background: linear-gradient(90deg, rgba(109,141,255,.5), rgba(176,109,255,.5)); }
+  .track .node { position: absolute; top: 8px; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #cdd6f4, var(--accent1)); box-shadow: 0 0 8px rgba(109,141,255,.6); cursor: default; }
+  .track .node.future { background: rgba(255,255,255,.12); box-shadow: none; border: 1px dashed rgba(245,177,76,.7); }
+  .track .now { position: absolute; top: 2px; width: 2px; height: 26px; background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .track .cax { position: absolute; top: 30px; font-size: 9px; color: var(--muted); transform: translateX(-50%); }
+  .phases { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin: 10px 0; }
+  .phase { border-radius: 8px; padding: 7px 10px; font-size: 11.5px; line-height: 1.55; border: 1px solid var(--line); }
+  .phase .pt { font-size: 10px; letter-spacing: 1px; margin-bottom: 3px; font-weight: 600; }
+  .phase.p0 { background: rgba(88,166,255,.06); } .phase.p0 .pt { color: var(--info); }
+  .phase.p1 { background: rgba(245,177,76,.06); } .phase.p1 .pt { color: var(--warn); }
+  .phase.p2 { background: rgba(61,220,151,.06); } .phase.p2 .pt { color: var(--ok); }
+  .facts { font-size: 11.5px; color: #b9c1d4; line-height: 1.6; }
+  .facts .f { display: flex; gap: 6px; margin: 2px 0; }
+  .facts .f .cb { flex: none; font-family: var(--mono); font-size: 10px; color: var(--accent1); padding-top: 1px; }
+  .longarc { margin-top: 8px; font-size: 11.5px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 7px; }
+
+  /* ---- 决策流 ---- */
+  .dfilter { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .dfilter .fb { font-size: 11.5px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; }
+  .dfilter .fb:hover { color: var(--text); }
+  .dfilter .fb.on { color: var(--text); border-color: var(--accent1); background: rgba(109,141,255,.12); }
+  .dstream { position: relative; padding-left: 26px; }
+  .dstream::before { content: ""; position: absolute; left: 8px; top: 4px; bottom: 4px; width: 2px; background: linear-gradient(var(--accent1), var(--accent2)); opacity: .35; }
+  .dnode { position: relative; margin-bottom: 14px; }
+  .dnode::before { content: ""; position: absolute; left: -22px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent1); box-shadow: 0 0 8px rgba(109,141,255,.6); }
+  .dcard { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 11px 14px; }
+  .dcard .dh { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; margin-bottom: 6px; }
+  .dcard .dh b { font-size: 13px; }
+  .dcard .dh .fld { color: var(--muted); }
+  .transit { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 5px 0; flex-wrap: wrap; }
+  .transit .from { color: #9aa5bd; text-decoration: line-through; text-decoration-color: rgba(255,107,129,.5); }
+  .transit .arr { color: var(--accent1); flex: none; }
+  .transit .to { color: var(--ok); }
+  .dcard .why { font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.6; border-left: 2px solid rgba(245,177,76,.4); padding-left: 9px; }
+
+  /* ---- 环形进度钟（SVG） ---- */
+  .clockgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .clockcard { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 14px; padding: 14px; display: flex; gap: 12px; align-items: center; }
+  .clockcard .ring { flex: none; }
+  .clockcard .cbody b { font-size: 13px; display: block; }
+  .clockcard .cbody .cmeta { font-size: 10.5px; color: var(--muted); margin: 2px 0; }
+  .clockcard .cbody .cons { font-size: 11px; color: #b9c1d4; line-height: 1.5; margin-top: 4px; }
   .log .hl { color: #ffb4c0; }
   .loading { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
   a { color: var(--accent1); }
@@ -267,6 +319,7 @@
       <button class="tab on" data-tab="overview">总览</button>
       <button class="tab" data-tab="setting">设定</button>
       <button class="tab" data-tab="cast">人物</button>
+      <button class="tab" data-tab="growth">成长轨迹</button>
       <button class="tab" data-tab="plan">计划</button>
       <button class="tab" data-tab="offscreen">离屏世界</button>
       <button class="tab" data-tab="log">日志</button>
@@ -467,6 +520,36 @@ function clockHTML(name, c, extra) {
     ${c.consequence ? `<div style="font-size:11.5px;color:var(--muted);margin-top:4px">走满 → ${esc(c.consequence)}</div>` : ""}${extra || ""}</div>`;
 }
 
+// SVG 分段环形进度钟（Blades 式）：segs 段，已走 prog 段
+function ringGauge(segs, prog, size = 58) {
+  const r = size / 2 - 5, cx = size / 2, cy = size / 2, gap = segs > 1 ? 7 : 0;
+  const per = 360 / (segs || 1);
+  const arc = (a0, a1, filled) => {
+    const rad = a => (a - 90) * Math.PI / 180;
+    const x0 = cx + r * Math.cos(rad(a0)), y0 = cy + r * Math.sin(rad(a0));
+    const x1 = cx + r * Math.cos(rad(a1)), y1 = cy + r * Math.sin(rad(a1));
+    const large = a1 - a0 > 180 ? 1 : 0;
+    return `<path d="M${x0.toFixed(1)} ${y0.toFixed(1)} A${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}"
+      fill="none" stroke="${filled ? "url(#rg)" : "rgba(255,255,255,.10)"}" stroke-width="5" stroke-linecap="round"/>`;
+  };
+  let paths = "";
+  for (let i = 0; i < (segs || 1); i++) paths += arc(i * per + gap / 2, (i + 1) * per - gap / 2, i < prog);
+  const pctText = segs ? `${prog}/${segs}` : "—";
+  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6d8dff"/><stop offset="1" stop-color="#b06dff"/></linearGradient></defs>
+    ${paths}
+    <text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="13" font-weight="700" fill="#e8ebf4" font-family="monospace">${pctText}</text>
+  </svg>`;
+}
+
+function clockCard(name, c) {
+  return `<div class="clockcard">${ringGauge(c.segments || 0, c.progress || 0)}
+    <div class="cbody"><b>${esc(name)}</b>
+      ${c.pace ? `<div class="cmeta">节奏 ${esc(c.pace)}</div>` : ""}
+      ${c.consequence ? `<div class="cons">走满 → ${esc(c.consequence)}</div>` : ""}</div></div>`;
+}
+
 function renderSetting(s) {
   const rules = (s.world_rules || []).map(r => `<tr>
     <td><span class="tag purple">${esc(r.category)}</span></td><td>${esc(r.rule)}</td>
@@ -613,28 +696,127 @@ function renderOffscreen(o) {
     <td style="color:#c6cddc">${esc(e.summary)}${e.foreshadow ? ' <span class="tag purple">伏笔候选</span>' : ""}</td>
     <td>${(e.actors || []).map(esc).join("、")}</td>
     <td>${e.visibility_chapter ? `第 ${e.visibility_chapter} 章` : "—"}${e.visibility_path ? `<br><small style="color:var(--muted)">${esc(e.visibility_path)}</small>` : ""}</td></tr>`).join("");
-  const clocks = (o.clocks || []).map(c => clockHTML(c.name, c.clock || {})).join("");
+  const clocks = (o.clocks || []).map(c => clockCard(c.name, c.clock || {})).join("");
   const mood = o.social_mood || {};
-  const tiers = Object.entries(o.tier_counts || {}).map(([k, v]) => `<span class="tag ${k === "protagonist" ? "now" : k === "supporting" ? "blue" : "pending"}" style="margin-right:6px">${esc(k)} × ${v}</span>`).join("");
+  const moodPct = mood.intensity != null ? Math.round(Math.max(0, Math.min(1, mood.intensity)) * 100) : null;
+  const tierColors = { protagonist: "var(--warn)", protagonist_circle: "var(--warn)", supporting: "var(--info)", background: "var(--muted)" };
+  const tierTotal = Object.values(o.tier_counts || {}).reduce((a, b) => a + b, 0) || 1;
+  const tierBar = Object.entries(o.tier_counts || {}).map(([k, v]) =>
+    `<span style="display:inline-block;height:100%;width:${v / tierTotal * 100}%;background:${tierColors[k] || "var(--muted)"}" title="${esc(k)} × ${v}"></span>`).join("");
+  const tiers = Object.entries(o.tier_counts || {}).map(([k, v]) => `<span class="tag ${k.startsWith("protagonist") ? "now" : k === "supporting" ? "blue" : "pending"}" style="margin-right:6px">${esc(k)} × ${v}</span>`).join("");
   return `
     <div class="sec"><h3>世界推演游标</h3><div class="panel">
       <div class="kv"><span class="k">tick</span><span class="tag purple">${esc(t.tick_id) || "—"}</span>　<span>已推演至第 <b>${t.through_chapter ?? 0}</b> 章 · 更新 ${esc((t.updated_at || "—").replace("T", " ").slice(0, 19))}</span></div>
-      <div class="kv"><span class="k">模拟分层</span><span>${tiers || "—"}　<span style="color:var(--muted)">信息差图节点 ${o.info_nodes}</span></span></div>
+      <div class="kv" style="align-items:center"><span class="k">模拟分层</span><span style="flex:1">
+        <span style="display:flex;height:9px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.06);max-width:280px">${tierBar}</span>
+        <span style="display:block;margin-top:5px">${tiers}<span style="color:var(--muted)">· 信息差图节点 ${o.info_nodes}</span></span></span></div>
       ${o.readiness && o.readiness.ready !== undefined ? `<div class="kv"><span class="k">零章就绪</span><span class="tag ${o.readiness.ready ? "ok" : "fail"}">${o.readiness.ready ? "ready" : "not ready"}</span></div>` : ""}
     </div></div>
     <div class="sec"><h3>社会情绪</h3><div class="panel">
-      <div class="kv"><span class="k">情绪</span><span>${esc(mood.mood) || "—"}${mood.intensity != null ? `　<span class="tag now">强度 ${mood.intensity}</span>` : ""}</span></div>
+      <div class="kv" style="align-items:center"><span class="k">情绪强度</span><span style="flex:1">
+        ${moodPct != null ? `<span style="display:inline-block;width:100%;max-width:240px;height:8px;border-radius:5px;background:rgba(255,255,255,.07);overflow:hidden;vertical-align:middle"><span style="display:block;height:100%;width:${moodPct}%;background:linear-gradient(90deg,var(--warn),var(--bad))"></span></span> <b>${moodPct}%</b>　` : ""}${esc(mood.mood) || "—"}</span></div>
       ${(mood.rumors || []).length ? `<div class="kv"><span class="k">流言</span><span>${mood.rumors.map(r => "· " + esc(r)).join("<br>")}</span></div>` : ""}
     </div></div>
+    <div class="sec"><h3>势力进度钟（Blades 式，${(o.clocks || []).length}）</h3>
+      ${clocks ? `<div class="clockgrid">${clocks}</div>` : '<div class="loading">暂无进度钟——弧边界 save_world_tick 时拨动。</div>'}
+    </div>
     <div class="sec"><h3>离屏日程（supporting 层 ${(o.agendas || []).length} 人）</h3>
       ${agendas ? `<table><thead><tr><th>角色</th><th>层级</th><th>当前目标</th><th>状态</th></tr></thead><tbody>${agendas}</tbody></table>` : '<div class="loading">暂无离屏日程。</div>'}
     </div>
-    <div class="sec"><h3>势力进度钟</h3><div class="panel">${clocks || '<span style="color:var(--muted);font-size:13px">暂无进度钟。</span>'}</div></div>
     <div class="sec"><h3>离屏事件流（近 ${(o.events || []).length} 条）</h3>
       ${events ? `<table><thead><tr><th>发生</th><th>事件</th><th>参与者</th><th>传到主角</th></tr></thead><tbody>${events}</tbody></table>`
                : '<div class="loading">尚未发生世界推演 tick——Architect 会在弧 / 卷边界执行 save_world_tick。</div>'}
     </div>`;
 }
+
+/* ---------- 成长轨迹：生命线 + 决策流 ---------- */
+let growthCache = null;      // 缓存本书 growth 数据，供决策筛选无需重取
+let decisionFilter = "__all__";
+
+function splitArc(dir) {
+  // arc_direction 通常是「前期，…；中期，…；后期，…」三段
+  const out = { p0: "", p1: "", p2: "" };
+  if (!dir) return out;
+  const grab = (re) => { const m = dir.match(re); return m ? m[1].trim().replace(/^[，,、]/, "") : ""; };
+  out.p0 = grab(/前期[，,]?([^；;]*)/);
+  out.p1 = grab(/中期[，,]?([^；;]*)/);
+  out.p2 = grab(/后期[，,]?([^；;]*)/);
+  if (!out.p0 && !out.p1 && !out.p2) out.p0 = dir; // 非三段式，整段放前期位
+  return out;
+}
+
+function lifeline(c, total, cur) {
+  const span = Math.max(total || 0, cur || 0, ...(c.appearance_chapters || []), 1);
+  const x = ch => (span > 1 ? (ch - 1) / (span - 1) * 100 : 0);
+  const chs = c.appearance_chapters || [];
+  const first = c.first_seen || (chs[0] || 1), last = c.last_seen || (chs[chs.length - 1] || first);
+  const nodes = chs.map(ch => `<div class="node" style="left:${x(ch)}%" title="第 ${ch} 章出场"></div>`).join("");
+  const future = (c.next_use_chapter && c.next_use_chapter > (cur || 0))
+    ? `<div class="node future" style="left:${x(c.next_use_chapter)}%" title="计划第 ${c.next_use_chapter} 章回归"></div>` : "";
+  const nowMark = cur ? `<div class="now" style="left:${x(cur)}%" title="当前第 ${cur} 章"></div>` : "";
+  const axis = [1, Math.round(span / 2), span].filter((v, i, a) => a.indexOf(v) === i)
+    .map(v => `<div class="cax" style="left:${x(v)}%">${v}</div>`).join("");
+  const arc = splitArc(c.arc_direction);
+  const phases = (arc.p0 || arc.p1 || arc.p2) ? `<div class="phases">
+    <div class="phase p0"><div class="pt">前期</div>${esc(arc.p0) || "—"}</div>
+    <div class="phase p1"><div class="pt">中期</div>${esc(arc.p1) || "—"}</div>
+    <div class="phase p2"><div class="pt">后期</div>${esc(arc.p2) || "—"}</div></div>` : "";
+  const facts = (c.current_facts || []).length ? `<div class="facts">${c.current_facts.map(f => {
+    const m = String(f).match(/^第\s*(\d+)\s*章/);
+    return `<div class="f"><span class="cb">${m ? "第" + m[1] + "章" : "现状"}</span><span>${esc(m ? f.replace(/^第\s*\d+\s*章[：: ]*/, "") : f)}</span></div>`;
+  }).join("")}</div>` : "";
+  const la = c.long_arc || {};
+  const longarc = (la.first_three_volumes || la.later_macro) ? `<div class="longarc">
+    <b style="color:#aab3c9">长弧规划</b>　${esc(la.first_three_volumes)}${la.later_macro ? "　" + esc(la.later_macro) : ""}</div>` : "";
+  return `<div class="lifeline">
+    <div class="lhead"><b>${esc(c.name)}</b><span class="role">${esc(c.role)}</span>
+      <span class="tag ${c.group === "core" ? "now" : c.group === "important" ? "blue" : "pending"}">${TIER_LABEL[c.tier] || esc(c.tier)}</span>
+      <span class="count">出场 ${c.appearance_count} 次 · 第 ${first}–${last} 章</span></div>
+    <div class="track"><div class="rail"></div>
+      <div class="span" style="left:${x(first)}%;width:${Math.max(0, x(last) - x(first))}%"></div>
+      ${nodes}${future}${nowMark}${axis}</div>
+    ${phases}${facts}${longarc}</div>`;
+}
+
+function decisionStream(decisions, entity) {
+  const list = entity === "__all__" ? decisions : decisions.filter(d => d.entity === entity);
+  if (!list.length) return '<div class="loading">该人物暂无记录的状态变化。</div>';
+  return `<div class="dstream">${list.map(d => `<div class="dnode"><div class="dcard">
+    <div class="dh"><span class="tag purple">第 ${d.chapter} 章</span><b>${esc(d.entity)}</b><span class="fld">· ${esc(d.field)}</span></div>
+    <div class="transit"><span class="from">${esc(d.old) || "—"}</span><span class="arr">→</span><span class="to">${esc(d.new)}</span></div>
+    ${d.reason ? `<div class="why">因为：${esc(d.reason)}</div>` : ""}
+  </div></div>`).join("")}</div>`;
+}
+
+function renderGrowth(g) {
+  growthCache = g;
+  const chars = g.characters || [];
+  const lifelines = chars.length
+    ? chars.map(c => lifeline(c, g.total_chapters, g.current_chapter)).join("")
+    : '<div class="loading">人物成长轨迹随章节 commit 累积——character_continuity 生成后出现。</div>';
+  const counts = g.decision_counts || {};
+  const entities = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  const total = (g.decisions || []).length;
+  const filters = `<div class="dfilter">
+    <button class="fb ${decisionFilter === "__all__" ? "on" : ""}" data-ent="__all__">全部 ${total}</button>
+    ${entities.map(e => `<button class="fb ${decisionFilter === e ? "on" : ""}" data-ent="${esc(e)}">${esc(e)} ${counts[e]}</button>`).join("")}</div>`;
+  return `
+    <div class="sec"><h3>人物成长轨迹（${chars.length} 人 · 出场时间线 + 阶段弧向 + 当前事实）</h3>${lifelines}</div>
+    <div class="sec"><h3>决策与状态变化流（${total} 条 · old → new + 理由）</h3>
+      ${total ? filters + `<div id="dstream-wrap">${decisionStream(g.decisions, decisionFilter)}</div>`
+              : '<div class="loading">决策流随章节 commit 的 state_changes 累积。</div>'}
+    </div>`;
+}
+
+// 决策筛选：事件委托，切换不重取数据
+document.addEventListener("click", e => {
+  const fb = e.target.closest(".dfilter .fb");
+  if (!fb || !growthCache) return;
+  decisionFilter = fb.dataset.ent;
+  document.querySelectorAll(".dfilter .fb").forEach(b => b.classList.toggle("on", b.dataset.ent === decisionFilter));
+  const wrap = $("#dstream-wrap");
+  if (wrap) wrap.innerHTML = decisionStream(growthCache.decisions, decisionFilter);
+});
 
 function renderLog(d) {
   const lines = (d.log || []).map(l =>
@@ -665,6 +847,7 @@ async function loadTab(keepScroll) {
     const d = await api(`/api/novels/${encodeURIComponent(currentDetail)}/${currentTab}`);
     if (currentTab === "setting") body.innerHTML = renderSetting(d);
     else if (currentTab === "cast") body.innerHTML = renderCast(d);
+    else if (currentTab === "growth") body.innerHTML = renderGrowth(d);
     else if (currentTab === "plan") body.innerHTML = renderPlan(d);
     else if (currentTab === "offscreen") body.innerHTML = renderOffscreen(d);
   } catch (e) {

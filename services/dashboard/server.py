@@ -601,6 +601,77 @@ def offscreen_payload(run: Path) -> dict:
     }
 
 
+def growth_payload(run: Path) -> dict:
+    """人物成长轨迹 + 决策流。成长来自 character_continuity（出场时间线 / 弧向 /
+    当前事实）合入 long_arc_character_plan（长弧规划）；决策来自 state_changes
+    （章号 / 人物 / 字段 old→new + 理由）。"""
+    nd = novel_dir(run)
+    prog = read_json(nd / "meta" / "progress.json") or {}
+    total_ch = prog.get("total_chapters") or 0
+    cur_ch = prog.get("current_chapter") or (len(prog.get("completed_chapters") or []) or 0)
+
+    # 长弧规划按名字索引
+    long_arc = {}
+    lap = read_json(nd / "meta" / "long_arc_character_plan.json") or {}
+    for e in lap.get("entries") or []:
+        if isinstance(e, dict) and e.get("name"):
+            long_arc[e["name"]] = {
+                "first_three_volumes": clip(e.get("first_three_volumes"), 240),
+                "later_macro": clip(e.get("later_macro"), 200),
+            }
+
+    characters = []
+    cc = read_json(nd / "meta" / "character_continuity.json") or {}
+    for e in cc.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("name") or ""
+        facts = e.get("current_facts") or []
+        characters.append({
+            "name": name,
+            "role": e.get("role") or "",
+            "tier": e.get("tier") or "",
+            "group": TIER_GROUPS.get(str(e.get("tier") or "").lower(), "minor"),
+            "first_seen": e.get("first_seen_chapter"),
+            "last_seen": e.get("last_seen_chapter"),
+            "appearance_chapters": [c for c in (e.get("appearance_chapters") or []) if isinstance(c, int)],
+            "appearance_count": e.get("appearance_count") or len(e.get("appearance_chapters") or []),
+            "arc_direction": clip(e.get("arc_direction"), 400),
+            "current_facts": [clip(f, 180) for f in facts][:5],
+            "return_plan": (e.get("return_plan") or {}).get("return_priority") or "",
+            "next_use_chapter": (e.get("return_plan") or {}).get("suggested_chapter"),
+            "long_arc": long_arc.get(name) or {},
+        })
+    # 主角圈优先、出场多者在前
+    order = {"core": 0, "important": 1, "minor": 2}
+    characters.sort(key=lambda c: (order.get(c["group"], 3), -c["appearance_count"]))
+
+    decisions = []
+    for s in read_json(nd / "meta" / "state_changes.json") or []:
+        if isinstance(s, dict):
+            decisions.append({
+                "chapter": s.get("chapter"),
+                "entity": s.get("entity") or "",
+                "field": clip(s.get("field"), 60),
+                "old": clip(s.get("old_value"), 160),
+                "new": clip(s.get("new_value"), 160),
+                "reason": clip(s.get("reason"), 220),
+            })
+    decisions.sort(key=lambda d: (d["chapter"] or 0))
+    # 决策按人物聚合计数（供前端筛选/热度）
+    by_entity: dict[str, int] = {}
+    for d in decisions:
+        by_entity[d["entity"]] = by_entity.get(d["entity"], 0) + 1
+
+    return {
+        "total_chapters": total_ch,
+        "current_chapter": cur_ch,
+        "characters": characters,
+        "decisions": decisions,
+        "decision_counts": by_entity,
+    }
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -632,7 +703,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/novels":
                 return self._json({"runs_dir": str(RUNS_DIR),
                                    "novels": [summarize_run(r) for r in list_runs()]})
-            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen))?$", path)
+            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen|growth))?$", path)
             if m:
                 run = RUNS_DIR / m.group(1)
                 if not is_run_dir(run) or run.parent != RUNS_DIR:
@@ -646,6 +717,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(plan_payload(run))
                 if section == "offscreen":
                     return self._json(offscreen_payload(run))
+                if section == "growth":
+                    return self._json(growth_payload(run))
                 return self._json(run_detail(run))
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
