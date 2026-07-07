@@ -71,8 +71,13 @@ def chapter_files(nd: Path) -> list[int]:
 
 
 def review_state(nd: Path, ch: int):
-    """返回 (verdict, gate, gate_warnings)。verdict 来自 reviews/NN.json；
-    gate 依据 NN_ai_gate.json 的 rule_violations：含 error 级 → fail，否则 pass。"""
+    """返回 (verdict, gate, gate_warnings, rewrite)。
+    verdict 来自 reviews/NN.json；gate 依据 NN_ai_gate.json 的 rule_violations。
+    rewrite 汇总返工状态：
+      · rounds     —— 评审/返工圈数（NN.history.jsonl 行数，无则据备份/brief 推 1）
+      · rewritten  —— 是否已重写过（存在 chapters/NN.md.pre-rewrite.md 备份）
+      · pending    —— 是否待返工（最新 verdict=rewrite，或有 brief 但未见备份）
+    """
     verdict, gate, warns = "", "", 0
     rv = read_json(nd / "reviews" / f"{ch:02d}.json")
     if isinstance(rv, dict):
@@ -83,7 +88,19 @@ def review_state(nd: Path, ch: int):
         sev = [str(v.get("severity", "")).lower() for v in violations if isinstance(v, dict)]
         warns = sev.count("warning")
         gate = "fail" if "error" in sev else "pass"
-    return verdict, gate, warns
+    rewritten = (nd / "chapters" / f"{ch:02d}.md.pre-rewrite.md").exists()
+    has_brief = (nd / "reviews" / f"{ch:02d}_rewrite_brief.md").exists()
+    rounds = 0
+    try:
+        with open(nd / "reviews" / f"{ch:02d}.history.jsonl", encoding="utf-8") as f:
+            rounds = sum(1 for line in f if line.strip())
+    except OSError:
+        pass
+    if not rounds and (rewritten or has_brief):
+        rounds = 1
+    pending = verdict == "rewrite" or (has_brief and not rewritten and verdict != "accept")
+    rewrite = {"rounds": rounds, "rewritten": rewritten, "pending": pending, "has_brief": has_brief}
+    return verdict, gate, warns, rewrite
 
 
 def chapter_title(nd: Path, ch: int) -> str:
@@ -204,13 +221,19 @@ def summarize_run(run: Path) -> dict:
     reviews_dir = nd / "reviews"
     accepted = 0
     gate_pass = 0
+    rewritten_count = 0
+    rewrite_pending = 0
     if reviews_dir.is_dir():
         for ch in files:
-            verdict, gate, _ = review_state(nd, ch)
+            verdict, gate, _, rw = review_state(nd, ch)
             if verdict == "accept":
                 accepted += 1
             if gate == "pass":
                 gate_pass += 1
+            if rw["rewritten"]:
+                rewritten_count += 1
+            if rw["pending"]:
+                rewrite_pending += 1
 
     word_counts = prog.get("chapter_word_counts") or {}
     return {
@@ -238,6 +261,8 @@ def summarize_run(run: Path) -> dict:
         "pipeline_completed": pipe.get("completed") or [],
         "reviews_accepted": accepted,
         "gate_passed": gate_pass,
+        "rewritten_count": rewritten_count,
+        "rewrite_pending": rewrite_pending,
         "updated_at": updated,
         "active": bool(updated and time.time() - updated < ACTIVE_WINDOW_SECONDS),
     }
@@ -249,7 +274,7 @@ def run_detail(run: Path) -> dict:
     usage = read_json(nd / "meta" / "usage.json") or {}
     chapters = []
     for ch in chapter_files(nd):
-        verdict, gate, warns = review_state(nd, ch)
+        verdict, gate, warns, rw = review_state(nd, ch)
         chapters.append({
             "n": ch,
             "title": chapter_title(nd, ch),
@@ -257,6 +282,9 @@ def run_detail(run: Path) -> dict:
             "verdict": verdict,
             "gate": gate,
             "gate_warnings": warns,
+            "rewritten": rw["rewritten"],
+            "rewrite_pending": rw["pending"],
+            "rewrite_rounds": rw["rounds"],
         })
     per_agent = []
     for name, row in (usage.get("per_agent") or {}).items():

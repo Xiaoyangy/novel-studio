@@ -411,7 +411,7 @@ function card(b) {
     ${sparkline(b)}
     <div class="chips">${pipelineChips(b)}</div>
     <div class="foot">
-      <span>${b.working && b.working.last_step ? `最近动作 ${esc(b.working.last_step)}${b.working.last_chapter ? `（第${b.working.last_chapter}章）` : ""}` : ""}</span>
+      <span>${b.rewrite_pending ? `<span class="tag rewrite">${b.rewrite_pending} 章待返工</span> ` : ""}${b.rewritten_count ? `已返工 ${b.rewritten_count} 章` : (b.working && b.working.last_step ? `最近 ${esc(b.working.last_step)}` : "")}</span>
       <span>更新于 ${ago(b.updated_at)}</span>
     </div>
   </div>`;
@@ -477,17 +477,23 @@ function renderOverview(d) {
   const rows = nums.map(n => {
     const p = planned.get(n), c = disk.get(n);
     let status;
-    if (c && c.verdict === "accept") status = '<span class="tag accept">已完成</span>';
+    if (c && c.rewrite_pending) status = '<span class="tag rewrite">待返工</span>';
+    else if (c && c.verdict === "accept") status = '<span class="tag accept">已完成</span>';
     else if (c) status = '<span class="tag blue">已落盘</span>';
     else if (n === w.chapter && d.active) status = `<span class="tag now">写作中 · ${stepName[w.step] || w.step || "…"}</span>`;
     else if (n === w.chapter) status = '<span class="tag now">当前章</span>';
     else status = '<span class="tag pending">未开始</span>';
+    let rework = "—";
+    if (c && c.rewrite_pending) rework = `<span class="tag rewrite">待返工${c.rewrite_rounds > 1 ? " · 第" + c.rewrite_rounds + "轮" : ""}</span>`;
+    else if (c && c.rewritten) rework = `<span class="tag now">已返工 ${c.rewrite_rounds || 1} 轮</span>`;
+    else if (c) rework = '<span class="tag ok">一稿通过</span>';
     return `<tr>
       <td>第 ${n} 章</td>
       <td>${esc((c && c.title) || (p && p.title) || "")}${!c && p && p.core_event ? `<br><small style="color:var(--muted)">${esc(p.core_event)}</small>` : ""}</td>
       <td>${c && c.words ? c.words + " 字" : "—"}</td>
       <td>${status}</td>
       <td>${c ? verdictTag(c.verdict) : "—"}</td>
+      <td>${rework}</td>
       <td>${c && c.gate ? `<span class="tag ${esc(c.gate)}">${c.gate === "pass" ? "门禁 ✓" : "门禁 ✗"}${c.gate_warnings ? ` · ${c.gate_warnings} 警告` : ""}</span>` : "—"}</td>
     </tr>`;
   }).join("");
@@ -500,10 +506,11 @@ function renderOverview(d) {
         ${stepChain(w) || '<span style="color:var(--muted);font-size:13px">尚未进入章节写作。</span>'}
         <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span>${esc(w.last_step || "—")}${w.last_kind === "chapter" && w.last_chapter ? `（第 ${w.last_chapter} 章）` : w.last_kind ? `（${esc(w.last_kind)}）` : ""} <em style="color:var(--muted);font-style:normal">${esc((w.last_at || "").replace("T", " ").slice(0, 19))}</em></span></div>
         <div class="kv"><span class="k">进度口径</span><span>目标 ${d.chapters_total || "?"} 章 · 已细化规划 ${d.chapters_planned} · 已完成 ${d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 交付沉淀 ${d.deliveries} 次</span></div>
+        <div class="kv"><span class="k">返工情况</span><span>${d.rewritten_count ? `已返工 <b>${d.rewritten_count}</b> 章` : "暂无返工"}${d.rewrite_pending ? `　<span class="tag rewrite">${d.rewrite_pending} 章待返工</span>` : ""}　<span style="color:var(--muted)">评审通过 ${d.reviews_accepted} · 门禁通过 ${d.gate_passed}</span></span></div>
       </div>
     </div>
     <div class="sec"><h3>章节状态（规划 ∪ 落盘）</h3>
-      ${rows ? `<table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table>`
+      ${rows ? `<table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>返工</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table>`
              : '<div class="loading">还没有规划或落盘的章节。</div>'}
     </div>
     <div class="sec"><h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
