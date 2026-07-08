@@ -183,7 +183,9 @@ const SingleDetectionSegmentMaxHanzi = 5000
 
 // EffectiveGatePercent 返回用于门禁判定的 AIGC 百分比：
 //   - 内容完整性风险（脏码/绕检噪声）在场 → 直接用 AIGCPercent。
-//   - 短章（≤5000 字，单检测片段）→ 用 AIGCPercent（含 segment_risk_floor 真高），
+//   - 强人工叙事锚点已触发 final cap → 使用 human_anchor_final_cap_percent 对应的
+//     AIGCPercent；报告仍保留原始 segment_risk_floor 供复核。
+//   - 短章（≤5000 字，单检测片段）默认用 AIGCPercent（含 segment_risk_floor 真高），
 //     不允许被多片段 blended 平均稀释；因为读者就是整章丢进检测器看这个分。
 //   - 长章（>5000 字，能切成多个检测片段）且各 composite 都低 → 允许用 blended 降权，
 //     避免长文里个别长尾片段把整章误判高。
@@ -192,6 +194,12 @@ const SingleDetectionSegmentMaxHanzi = 5000
 func EffectiveGatePercent(report Report) float64 {
 	if report.ContentIntegrityFloor > 0 {
 		return report.AIGCPercent
+	}
+	if capValue, ok := HumanAnchorFinalCap(report); ok {
+		if report.AIGCPercent > 0 && report.AIGCPercent < capValue {
+			return report.AIGCPercent
+		}
+		return capValue
 	}
 	singleDetectionSegment := report.Stats.Hanzi <= SingleDetectionSegmentMaxHanzi
 	if !singleDetectionSegment &&
@@ -203,6 +211,14 @@ func EffectiveGatePercent(report Report) float64 {
 		return report.BlendedAIGCPercent
 	}
 	return report.AIGCPercent
+}
+
+func HumanAnchorFinalCap(report Report) (float64, bool) {
+	if report.ContentIntegrityFloor > 0 || report.HumanAnchorFinalCap == nil {
+		return 0, false
+	}
+	capValue := *report.HumanAnchorFinalCap
+	return capValue, capValue > 0
 }
 
 func analyze(text string, includeSegments bool) Report {
@@ -311,6 +327,9 @@ func analyze(text string, includeSegments bool) Report {
 		}
 	}
 	final := math.Max(math.Max(blended, segmentProxy.RiskFloorPercent), contentFloor)
+	if humanAnchorFinalCap != nil && contentFloor == 0 {
+		final = math.Max(blended, contentFloor)
+	}
 	return Report{
 		Engine:                 Engine,
 		LexiconVersion:         LexiconVersion(),

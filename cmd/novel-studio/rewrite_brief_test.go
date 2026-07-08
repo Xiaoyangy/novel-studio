@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chenhongyang/novel-studio/internal/rules"
 )
 
 func TestParseRewriteFlagsBriefOnly(t *testing.T) {
@@ -16,6 +18,20 @@ func TestParseRewriteFlagsBriefOnly(t *testing.T) {
 	}
 	if !flags.BriefOnly || flags.Start != 1 || flags.End != 1 {
 		t.Fatalf("unexpected flags: %+v", flags)
+	}
+}
+
+func TestMechanicalViolationBriefLabelFormatsNumericLimits(t *testing.T) {
+	label := mechanicalViolationBriefLabel(rules.Violation{
+		Rule:   "micro_action_overuse",
+		Actual: 4,
+		Limit:  3,
+	})
+	if !strings.Contains(label, "actual=4") || !strings.Contains(label, "limit=3") {
+		t.Fatalf("label should include formatted numeric actual/limit, got %q", label)
+	}
+	if strings.Contains(label, "%!") {
+		t.Fatalf("label should not contain fmt mismatch marker, got %q", label)
 	}
 }
 
@@ -212,6 +228,30 @@ func TestRewritePatchBoundsUseRuntimeWordCount(t *testing.T) {
 	}
 }
 
+func TestRewritePatchBoundsClampToProjectChapterWords(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "meta", "user_rules.json"), `{
+  "version": 1,
+  "structured": {
+    "chapter_words": {"min": 2800, "max": 3400}
+  }
+}`)
+	original := strings.Repeat("江", 3650)
+	bounds := rewritePatchBoundsFor(dir, original)
+	if bounds.Min != 2800 || bounds.Max != 3400 {
+		t.Fatalf("rewrite bounds should clamp to project chapter words, got %+v", bounds)
+	}
+	if strings.Contains(bounds.Source, "仅作参考") {
+		t.Fatalf("chapter_words must be a hard boundary, got source %q", bounds.Source)
+	}
+	if err := validatePatchRewriteWithBounds(original, strings.Repeat("江", 3481), bounds); err == nil {
+		t.Fatal("expected rewrite over project max to be rejected before writeback")
+	}
+	if err := validatePatchRewriteWithBounds(original, strings.Repeat("江", 3350), bounds); err != nil {
+		t.Fatalf("expected rewrite within project bounds to pass, got %v", err)
+	}
+}
+
 func TestRewriteRetryTargetLeavesUpperMargin(t *testing.T) {
 	target := rewriteRetryTargetMax(rewritePatchBounds{Min: 2100, Max: 3000})
 	if target >= 3000 || target < 2700 {
@@ -228,7 +268,7 @@ func TestRewriteLengthInstructionMarksCompressionMode(t *testing.T) {
 		ProjectMax: 3000,
 		Source:     "test",
 	}, "")
-	for _, want := range []string{"不少于 2300", "净增不超过 15%", "写回校验口径"} {
+	for _, want := range []string{"不少于 2300", "净增不超过 15%", "更严格口径"} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("instruction missing %q:\n%s", want, instruction)
 		}

@@ -36,7 +36,7 @@
 - **字数**：`user_rules.structured.chapter_words` 的区间，commit 强制；明显低于下限或高于上限即打回。
 - **禁用词 / 疲劳词**：`user_rules.structured` 的 `forbidden_chars` / `forbidden_phrases` / `fatigue_words`，commit 强制计数，超阈值打回。
 - **AI 率（aigc 门禁）**：约 3000 字的章节读者会**整章丢进检测器**，按 `segment_risk_floor` 判真实风险，`aigc_ratio` ≥35% 直接 error 打回，目标压到 5% 以下。它由四维驱动，逐条压：① 突发性=句长要有明显长短变化（别整章同一节奏）；② 困惑度=用字多样度 ttr 要高（别整章复述同一个具象名词）；③ 结构指纹=段首不重复、单句成段别密集；④ 跨段一致性=各段功能/句式要有差异。
-- **门禁采用值优先**：`reference_pack.references.longform_ai_detector` 是本项的扩展规则。看 `effective_gate_percent` / `门禁采用值`，不要看 `blended_aigc_percent` 自我放行。短章高 segment floor 必须整章重排段落功能，直到机械门禁清空。
+- **门禁采用值优先**：`reference_pack.references.longform_ai_detector` 是本项的扩展规则。看 `effective_gate_percent` / `门禁采用值`，不要看普通 `blended_aigc_percent` 自我放行。短章高 segment floor 必须整章重排段落功能，直到机械门禁清空；只有 `human_anchor_final_cap_percent` 明确触发时，强人工锚点 cap 才能成为门禁采用值，raw floor 仍要展示。
 - **AI voice 红旗**（章级审阅据此降级/打回）：比喻密度不过高（保留最有功能的那处）；`supporting_dialogue_ratio` ≥25% 且带冲突；`dialogue_info_dump` 禁（不许一口气罗列清单/姓名+房号+背景）；`templated_dialogue_chain` 禁（点名/叫人 -> 停笔或抬眼 -> 补口径/查字段 -> 第三人追问，命中即改）；`single_sentence_paragraphs` 单句成段 ≤4 且不连续；主角必须有一处真实动摇；禁"我要…/这意味着/终于明白"类格言腔。
 - **计划范围**：`required_beats` 必须全部落实，`forbidden_moves` 硬禁，不得引入计划外的情节/角色/场景（`check_consistency` 会核 `chapter_plan_scope`）。
 - **一致性对账**：存亡/位置/资源/时序/别名五类机器筛查，`check_consistency` 会逐条给证据，确认为真的矛盾必须改。
@@ -50,6 +50,8 @@
 - **留存筛选优先**：正文显性内容先看 `reader_retention_plan.surface_beats`，每个 surface beat 必须变成页面上的动作、对白、物件变化、证据或选择后果；`latent_context` 不许被旁白讲成设定说明，`reveal_budget` 不许提前揭底，`cut_or_compress` 不许还原成清单段落。计划里没有进入 surface 的字段不是不用，而是藏在角色选择、沉默、误判和物件回扣里。
 - **物件承载信息**：兑现 `scene_anchors` 与 `causal_simulation.environment_state`——每章至少 2 个现场物件/痕迹承担新信息、关系位移或规则代价，不做装饰名词。
 - **声口区分**：按 `voice_logic` 写出人物各自的句长、标点、话术习惯；不同角色说话不能同一个腔。对白带信息差、隐瞒、误判或临场交易，不替作者解释设定。
+- **作者画像入文**：默认叙述者背后是 30 岁左右、有文学素养的程序员。她可以懂算法、字段、审计、权限和系统边界，但不要把懂写成术语说明书；专业信息用界面痕迹、字段错位、权限卡点、同事误判、生活动作和后果让非专业读者跟上。
+- **自然对白格式**：连续双人对白可以靠声口、上一句问题、动作位置和关系压力区分说话人，不必每行都写“某某说/问/答”。禁止“人物：台词”剧本格式；动作拍只保留会改变局面、遮掩信息、暴露情绪、打断台词或触发规则的部分。
 - **反 AI 味**：规避 `anti_ai_tone` 的结构/用词/描写/对话/节奏五类模式；禁"他终于明白/这意味着/前所未有的恐惧/命运齿轮"类套话；抽象判断之后必须落到动作、物件、感官、对白或选择后果；连续 2-3 句不承担同一语义功能。疲劳词/套句阈值见 `user_rules.structured`，commit 时强制检查。
 - **结构性 warning 必修**：`isolated_sentence_overuse`、`object_response_overuse`、`object_response_rhythm_flat`、`paragraph_start_repetition`、`not_but_overuse`、`state_clause_pile`、`templated_dialogue_chain` 不是可选润色；命中说明结构指纹或 AI 味已过重，提交前必须局部改写。做法是合并孤句段、删等距物件确认、把解释型转折改成行动后果、把状态堆叠拆成动作链。
 - **AI 率红线（可量化，提交前逐条自查）**：检测器最爱抓这五类结构性 AI 特征，正文必须压住——

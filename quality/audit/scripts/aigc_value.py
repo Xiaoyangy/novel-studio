@@ -1939,7 +1939,10 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
     ):
         human_anchor_final_cap = 4.8
         blended_percent = round(min(blended_percent, human_anchor_final_cap), 2)
-    percent = round(max(blended_percent, segment_proxy.get("risk_floor_percent", 0), content_floor), 2)
+    if human_anchor_final_cap is not None and content_floor == 0.0:
+        percent = round(max(blended_percent, content_floor), 2)
+    else:
+        percent = round(max(blended_percent, segment_proxy.get("risk_floor_percent", 0), content_floor), 2)
     score = percent / 100
     return {
         "engine": ENGINE,
