@@ -38,6 +38,16 @@ func TestLoadReferencesIncludesCharacterAndEmotionalCraft(t *testing.T) {
 	}
 }
 
+func TestLoadReferencesIncludesFictionParagraphing(t *testing.T) {
+	bundle := Load("default")
+	if !strings.Contains(bundle.References.FictionParagraphing, "小说正文分段规范") {
+		t.Fatalf("expected fiction paragraphing reference to be loaded")
+	}
+	if !strings.Contains(bundle.References.FictionParagraphing, "文字墙候选") {
+		t.Fatalf("expected fiction paragraphing reference to include long paragraph handling")
+	}
+}
+
 func TestLoadReferencesIncludesWritingTechniquesDigest(t *testing.T) {
 	bundle := Load("default")
 	if !strings.Contains(bundle.References.WritingTechniquesDigest, "19 篇写作技巧文章") {

@@ -325,9 +325,10 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	}
 
 	// 循环刹车提示（纯事实，不动控制流）：同章第 3 轮及以上仍判 rewrite，
-	// 大概率是标准漂移或换 issue 循环——提醒改走 polish/带备注放行或升级给用户。
+	// 大概率是标准漂移、缺少写法资料或换 issue 循环——提醒先查资料再改，
+	// 再决定改走 polish/带备注放行或升级给用户。
 	if reviewRound >= 3 && (finalVerdict == "rewrite" || finalVerdict == "polish") {
-		result["review_round_note"] = fmt.Sprintf("本章已进入第 %d 轮审阅仍未通过：先对照 reviews/%02d.history.jsonl 确认本轮 issue 与前几轮是否同类；同类=返工无效应换策略（polish 局部修/带备注放行/升级用户），不同类=标准可能在漂移，收敛到最初契约", reviewRound, r.Chapter)
+		result["review_round_note"] = fmt.Sprintf("本章已进入第 %d 轮审阅仍未通过：先对照 reviews/%02d.history.jsonl 确认本轮 issue 与前几轮是否同类；同类=返工无效，必须先 craft_recall(dialogue/methodology/scene_situation) 查人物刻画、情感叙事、对白摩擦、段落节奏或 AI 检测方法，召回弱/无料时先 web_research 查资料并沉淀到 meta/writing-techniques、web_reference_brief 或 review RAG，再决定 polish 局部修/带备注放行/升级用户；不同类=标准可能在漂移，收敛到最初契约", reviewRound, r.Chapter)
 	}
 	return json.Marshal(result)
 }

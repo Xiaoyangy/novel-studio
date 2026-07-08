@@ -168,7 +168,7 @@ func TestBenchmarkLibraryChannel(t *testing.T) {
 		t.Fatalf("benchmark field flags wrong")
 	}
 	// 常规召回隔离判定
-	if !IsDesignOnlySourceKind(BenchmarkSourceKind) || !IsDesignOnlySourceKind(CraftSourceKind) || IsDesignOnlySourceKind("note") {
+	if !IsDesignOnlySourceKind(BenchmarkSourceKind) || !IsDesignOnlySourceKind(CraftSourceKind) || !IsDesignOnlySourceKind(CalibrationSourceKind) || IsDesignOnlySourceKind("note") {
 		t.Fatalf("IsDesignOnlySourceKind wrong")
 	}
 }

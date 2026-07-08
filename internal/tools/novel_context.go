@@ -37,6 +37,7 @@ type References struct {
 	HumanFeelCraft          string // 高人工度样本文沉淀的可迁移写法资产
 	CharacterBuilding       string // 人物塑造、动机、压力反应与关系动态参考
 	EmotionalNarrativeCraft string // 情感叙事、情绪弧线、动机-反应和场景情绪变化参考
+	FictionParagraphing     string // 小说正文分段、对话换段、移动阅读文字墙规避参考
 	WritingTechniquesDigest string // refer/写作技巧逐篇压缩后的工程写作规则
 	RAGWritingGuidelines    string // RAG 召回在小说写作中的使用边界与 trace 判读
 	WebReferenceGuidelines  string // 网络参考、最新资料和热梗进入正文的边界
@@ -529,6 +530,7 @@ func (t *ContextTool) writerReferences(chapter int) map[string]string {
 	add("human_feel_craft", t.refs.HumanFeelCraft)
 	add("character_building", t.refs.CharacterBuilding)
 	add("emotional_narrative_craft", t.refs.EmotionalNarrativeCraft)
+	add("fiction_paragraphing", t.refs.FictionParagraphing)
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)
@@ -565,6 +567,7 @@ func (t *ContextTool) architectReferences() map[string]string {
 	add("human_feel_craft", t.refs.HumanFeelCraft)
 	add("character_building", t.refs.CharacterBuilding)
 	add("emotional_narrative_craft", t.refs.EmotionalNarrativeCraft)
+	add("fiction_paragraphing", t.refs.FictionParagraphing)
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)

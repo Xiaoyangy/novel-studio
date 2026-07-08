@@ -289,6 +289,17 @@ func mergeRAGConfig(base, overlay RAGConfig) RAGConfig {
 			base.Qdrant.TimeoutSeconds = overlay.Qdrant.TimeoutSeconds
 		}
 	}
+	// 共享库路径：overlay 非空则覆盖（此前 mergeRAGConfig 漏拷这三个字段，
+	// 项目级配置里单独指定的库路径会在合并后丢失）。
+	if overlay.CraftLibrary != "" {
+		base.CraftLibrary = overlay.CraftLibrary
+	}
+	if overlay.BenchmarkLibrary != "" {
+		base.BenchmarkLibrary = overlay.BenchmarkLibrary
+	}
+	if overlay.CalibrationLibrary != "" {
+		base.CalibrationLibrary = overlay.CalibrationLibrary
+	}
 	return base
 }
 

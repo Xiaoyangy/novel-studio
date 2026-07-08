@@ -10,14 +10,14 @@
 
 严格按顺序，不跳步，所有产物必须通过工具落盘。
 
-1. `novel_context(chapter=N)`：读取本章上下文，**必须完整读完整份 `chapter_plan` 与 `chapter_plan.causal_simulation`（不是扫一眼）**——40+ 个字段是你渲染的唯一边界：goal/conflict/hook、initial_state、voice_logic、dialogue_scene_blueprints、emotional_logic、visual_design、environment_state、scene_anchors、information_asymmetry、ending_consequence_contract、reader_retention_plan 等都要读懂。读完整不等于逐条写出：落笔时只显性兑现 `reader_retention_plan.surface_beats`、`required_beats`、`scene_anchors` 和本场必要的角色/信息边界；`latent_context` 只约束角色反应，不让旁白解释；`reveal_budget` 延后或只露证据；`cut_or_compress` 必须删、合并进动作或压成半句。同时读 `reference_pack.writing_engine`、`reference_pack.references`（`human_feel_craft` / `character_building` / `emotional_narrative_craft` / `anti_ai_tone` / `writing_techniques_digest` / `dialogue_writing` / `longform_ai_detector`）、`working_memory.user_rules`（字数与禁用词等机械约束）、`episodic_memory.recent_summaries`（前一章结尾衔接）、`working_memory.horizon_events`。**没读完整份计划和留存筛选，禁止进入下一步。**
+1. `novel_context(chapter=N)`：读取本章上下文，**必须完整读完整份 `chapter_plan` 与 `chapter_plan.causal_simulation`（不是扫一眼）**——40+ 个字段是你渲染的唯一边界：goal/conflict/hook、initial_state、voice_logic、dialogue_scene_blueprints、emotional_logic、visual_design、environment_state、scene_anchors、information_asymmetry、ending_consequence_contract、reader_retention_plan 等都要读懂。读完整不等于逐条写出：落笔时只显性兑现 `reader_retention_plan.surface_beats`、`required_beats`、`scene_anchors` 和本场必要的角色/信息边界；`latent_context` 只约束角色反应，不让旁白解释；`reveal_budget` 延后或只露证据；`cut_or_compress` 必须删、合并进动作或压成半句。同时读 `reference_pack.writing_engine`、`reference_pack.references`（`human_feel_craft` / `character_building` / `emotional_narrative_craft` / `fiction_paragraphing` / `anti_ai_tone` / `writing_techniques_digest` / `dialogue_writing` / `longform_ai_detector`）、`working_memory.user_rules`（字数与禁用词等机械约束）、`episodic_memory.recent_summaries`（前一章结尾衔接）、`working_memory.horizon_events`。**没读完整份计划和留存筛选，禁止进入下一步。**
 2. `read_chapter(source="final", chapter=N-1)`：回读前一章结尾，保证开场衔接口吻、时间、位置连续。
 3. **写前依计划取手法（强制，不可跳过）**：读完计划后，按计划实际内容 `craft_recall` 检索对应写作手法，落笔前手上要有具体技法参考，不许凭感觉硬写：
-   - 计划有 `dialogue_scene_blueprints`/关键对白 → 检索**对白/交涉/信息博弈**手法（`scene_situation`），配合 `dialogue_writing` 规范。
+   - 计划有 `dialogue_scene_blueprints`/关键对白 → 优先检索**对白/交涉/信息博弈**手法（`dialogue`），配合 `dialogue_writing` 规范；`dialogue` 无料时再用 `scene_situation` 宽主题补场景压力。
    - 计划有 `emotional_logic`/`relationship_emotion_arcs`/人物弧线或审核指出“情绪不落地/人物动机弱” → 检索**人物刻画/情感叙事/情绪弧线/动机反应**手法（`methodology`），优先使用项目 `meta/writing-techniques/novel-craft-methodology` 中的资料。
    - 计划 `visual_design` 里本章有出场角色 → 检索**外貌/形象**手法（`appearance`）。
    - 计划有重点 `environment_state`/动作场面 → 检索**环境/动作/场景**手法（`scene_situation`）。
-   - 每次检索记 `material_source`；窄字段 `no_material` 时不能把它当作已用到写法库，必须再用 `methodology` 或 `scene_situation` 做一次宽主题检索（主题包含：小说场景 留存 冲突 对话 人物刻画 情感叙事 情绪弧线 动机反应 信息延迟 句长变化 AI检测），仍无料时改用 `dialogue_writing`/`human_feel_craft`/`character_building`/`emotional_narrative_craft`/`writing_techniques_digest`/`longform_ai_detector` 的通则，并在 `feedback` 或提交备注里声明 `method_source=fallback_reference_pack`。
+   - 每次检索记 `material_source`；窄字段 `no_material` 时不能把它当作已用到写法库，必须再用 `dialogue` / `methodology` / `scene_situation` 做一次宽主题检索（主题包含：小说场景 留存 冲突 对话 人物刻画 情感叙事 情绪弧线 动机反应 信息延迟 句长变化 AI检测），仍无料时改用 `dialogue_writing`/`human_feel_craft`/`character_building`/`emotional_narrative_craft`/`fiction_paragraphing`/`writing_techniques_digest`/`longform_ai_detector` 的通则，并在 `feedback` 或提交备注里声明 `method_source=fallback_reference_pack`。
    - `web_research`：计划的 `external_reference_plan`/`grounding_details` 指向的现实细节若需更具体支撑，`query`/`url` 检索后换皮转化，不照搬（联网可失败，查不到就用计划已有素材，不阻塞）。
    - 写前做一次页面筛选：把计划材料分成三栏：`写到页面`（动作/对白/物件变化/选择后果）、`折进场景`（半句、动作拍、他人误读、物件细节）、`不写出来`（台账、未来答案、解释性背景）。正文每个段落都要有功能变化：冲突、选择、证据、隐瞒、代价、关系位移、生活打断或章末拉力；只是在解释计划的段落直接删。
 4. `draft_chapter(mode="write")`：按计划写入完整正文。**渲染要求见下方"正文质量合同"**。
@@ -50,6 +50,7 @@
 - **计划即事实**：`causal_simulation.initial_state`/`voice_logic`/`dialogue_scene_blueprints` 里每个角色的目标、知识边界、声口、潜台词就是他们在正文里的行为约束。角色不说自己不知道的信息，不为推进剧情突然转性、解释世界观或救场。
 - **留存筛选优先**：正文显性内容先看 `reader_retention_plan.surface_beats`，每个 surface beat 必须变成页面上的动作、对白、物件变化、证据或选择后果；`latent_context` 不许被旁白讲成设定说明，`reveal_budget` 不许提前揭底，`cut_or_compress` 不许还原成清单段落。计划里没有进入 surface 的字段不是不用，而是藏在角色选择、沉默、误判和物件回扣里。
 - **物件承载信息**：兑现 `scene_anchors` 与 `causal_simulation.environment_state`——每章至少 2 个现场物件/痕迹承担新信息、关系位移或规则代价，不做装饰名词。
+- **小说分段**：按 `fiction_paragraphing` 执行。换说话人通常换段；换行动主体、焦点、时间地点、证据落点也换段。动作 beat 跟所属台词同段；同一段里不要让三个人轮流说话，除非是群体噪声。150-220 字段落必须有慢速观察/复杂反应理由，220 字以上默认视为文字墙候选；同时不要为了规避大段切成连续孤句。
 - **声口区分**：按 `voice_logic` 写出人物各自的句长、标点、话术习惯；不同角色说话不能同一个腔。对白带信息差、隐瞒、误判或临场交易，不替作者解释设定。
 - **作者画像入文**：默认叙述者背后是 30 岁左右、有文学素养的程序员。她可以懂算法、字段、审计、权限和系统边界，但不要把懂写成术语说明书；专业信息用界面痕迹、字段错位、权限卡点、同事误判、生活动作和后果让非专业读者跟上。
 - **自然对白格式**：连续双人对白可以靠声口、上一句问题、动作位置和关系压力区分说话人，不必每行都写“某某说/问/答”。禁止“人物：台词”剧本格式；动作拍只保留会改变局面、遮掩信息、暴露情绪、打断台词或触发规则的部分。

@@ -23,6 +23,9 @@ import (
 // CraftSourceKind 写作手法库 chunk 的 source_kind 标记。
 const CraftSourceKind = "craft_technique"
 
+// CalibrationSourceKind 审核校准库（review-calibration）chunk 的 source_kind 标记。
+const CalibrationSourceKind = "calibration_reference"
+
 // BenchmarkSourceKind 对标素材库（novel_all）chunk 的 source_kind 标记。
 // 对标素材只可迁移手法/结构/节奏，禁止照搬情节、人名与专有设定。
 const BenchmarkSourceKind = "benchmark_reference"
@@ -31,7 +34,9 @@ const BenchmarkSourceKind = "benchmark_reference"
 // novel_context 必须排除这些 chunk；若写作/重写要用其中的技法，必须显式调用 craft_recall。
 func IsDesignOnlySourceKind(kind string) bool {
 	kind = strings.TrimSpace(kind)
-	return strings.EqualFold(kind, CraftSourceKind) || strings.EqualFold(kind, BenchmarkSourceKind)
+	return strings.EqualFold(kind, CraftSourceKind) ||
+		strings.EqualFold(kind, BenchmarkSourceKind) ||
+		strings.EqualFold(kind, CalibrationSourceKind)
 }
 
 // BenchmarkCategory 从 novel_all 路径推导类目（剥掉编号前缀）。
@@ -86,6 +91,7 @@ type CraftDesignField string
 
 const (
 	CraftFieldAppearance  CraftDesignField = "appearance"  // 外貌/穿着 → visual_design
+	CraftFieldDialogue    CraftDesignField = "dialogue"    // 对白/交涉 → dialogue_scene_blueprints
 	CraftFieldWeapon      CraftDesignField = "weapon"      // 武器 → character_kit.weapons / props
 	CraftFieldEquipment   CraftDesignField = "equipment"   // 装备/法宝 → character_kit.equipment
 	CraftFieldAbility     CraftDesignField = "ability"     // 能力分级/体系 → world_codex.ability_tiers
@@ -108,16 +114,23 @@ const (
 
 // craftFieldRecipe 一个设计字段的确定性检索配方。
 type craftFieldRecipe struct {
-	Categories    []string // 命中类目集合（craft_category ∈ Categories）
-	Subcategories []string // 可选子类目过滤（空 = 不限）
-	SourceKinds   []string // 命中库集合；空 = 仅 craft_technique
+	Categories    []string     // 命中类目集合（craft_category ∈ Categories，目录级）
+	Facets        []CraftFacet // 命中内容级细分面集合（craft_facet ∈ Facets，跨目录内容级）
+	Subcategories []string     // 可选子类目过滤（空 = 不限）
+	SourceKinds   []string     // 命中库集合；空 = 仅 craft_technique
 	Description   string
 	Benchmark     bool // 含对标素材：产出只可迁移手法/结构，须登记 external_reference_plan
 }
 
 // craftFieldRecipes 字段 ↔ 检索配方绑定表（确定性路由核心）。
 var craftFieldRecipes = map[CraftDesignField]craftFieldRecipe{
-	CraftFieldAppearance:  {Categories: []string{"appearance"}, Description: "外貌/五官/服饰描写词库"},
+	CraftFieldAppearance: {Categories: []string{"appearance"}, Facets: []CraftFacet{FacetAppearance, FacetEmotion},
+		SourceKinds: []string{CraftSourceKind, BenchmarkSourceKind}, Benchmark: true,
+		Description: "外貌/五官/神态/服饰/发型/心理/动作描写词库（跨库按内容取）"},
+	// dialogue：原库无对白目录，靠内容级 craft_facet 跨库检索对白/交涉/台词技法。
+	CraftFieldDialogue: {Facets: []CraftFacet{FacetDialogue},
+		SourceKinds: []string{CraftSourceKind, BenchmarkSourceKind}, Benchmark: true,
+		Description: "对白/对话/交涉/台词/信息博弈技法"},
 	CraftFieldWeapon:      {Categories: []string{"weapons", "ancient-history"}, Description: "冷兵器/名刀名剑/法宝神器/古代武器"},
 	CraftFieldEquipment:   {Categories: []string{"weapons", "magic-arts"}, Description: "法宝/装备/炼金产物"},
 	CraftFieldAbility:     {Categories: []string{"fantasy", "magic-arts", "scifi"}, Description: "阶位划分/神格/超凡体系分级"},
@@ -138,7 +151,8 @@ var craftFieldRecipes = map[CraftDesignField]craftFieldRecipe{
 		Description: "题材选型/流派套路/桥段模式"},
 	CraftFieldPersona: {Categories: []string{"人设与角色"}, SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
 		Description: "人设模板/角色小传/反派设定"},
-	CraftFieldLexicon: {Categories: []string{"素材与描写词汇"}, SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
+	CraftFieldLexicon: {Categories: []string{"素材与描写词汇"}, Facets: []CraftFacet{FacetLexicon},
+		SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
 		Description: "描写词汇/替换词/取名/黑话/地名素材"},
 	CraftFieldPlotBeats: {Categories: []string{"爽点与剧情钩子"}, SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
 		Description: "爽点清单/剧情钩子/不卡文剧情点/商战手段"},
@@ -146,8 +160,9 @@ var craftFieldRecipes = map[CraftDesignField]craftFieldRecipe{
 		Description: "对标作品拆文：结构/节奏/信息释放分析（严禁照搬情节人名）"},
 	CraftFieldMarket: {Categories: []string{"运营与平台"}, SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
 		Description: "投稿渠道/签约模板/拒签原因/平台运营"},
-	CraftFieldSceneCraft: {Categories: []string{"场景与情境"}, SourceKinds: []string{BenchmarkSourceKind}, Benchmark: true,
-		Description: "场景设计/情境模板"},
+	CraftFieldSceneCraft: {Categories: []string{"场景与情境"}, Facets: []CraftFacet{FacetScene},
+		SourceKinds: []string{CraftSourceKind, BenchmarkSourceKind}, Benchmark: true,
+		Description: "场景/环境/景色/情境设计（跨库按内容取）"},
 }
 
 // CraftFieldNames 返回全部设计字段名（schema enum 用），字典序稳定。
@@ -196,10 +211,15 @@ func CraftRecall(chunks []domain.RAGChunk, field CraftDesignField, topic string,
 			continue
 		}
 		category, subcategory := chunkCraftCategory(chunk)
-		if !containsFold(recipe.Categories, category) {
+		// 命中判定：目录类目命中 或 内容级 craft_facet 命中（两者取并集，让"素材与描写词汇"
+		// 这类混合目录里被内容判为 dialogue/appearance/scene 的文件也能被对应字段取到）。
+		categoryHit := containsFold(recipe.Categories, category)
+		facetHit := len(recipe.Facets) > 0 && containsCraftFacet(recipe.Facets, chunkCraftFacet(chunk))
+		if !categoryHit && !facetHit {
 			continue
 		}
-		if len(recipe.Subcategories) > 0 && !containsFold(recipe.Subcategories, subcategory) {
+		// 子类目过滤仅在靠目录类目命中时生效（facet 命中的跨目录文件不受子类目约束）。
+		if categoryHit && len(recipe.Subcategories) > 0 && !containsFold(recipe.Subcategories, subcategory) {
 			continue
 		}
 		subset = append(subset, chunk)

@@ -29,7 +29,7 @@ func (t *CraftRecallTool) Name() string { return "craft_recall" }
 func (t *CraftRecallTool) Description() string {
 	return "检索写作手法库（外貌词库/武器/能力分级/法术/制度史料/科幻/世界构成/创作方法论/场景情境/对标拆文）。" +
 		"每个设计字段绑定固定检索配方，命中与否是确定的；查不到会显式返回 no_material=true——" +
-		"此时不得假装用到写法库，必须改用 methodology/scene_situation 宽主题或 reference_pack.references 兜底。" +
+		"此时不得假装用到写法库，必须改用 dialogue/methodology/scene_situation 宽主题或 reference_pack.references 兜底。" +
 		"设计取料结果必须实例化为本书事实（visual_design/character_kit/world_codex）后才能进入正文；" +
 		"草稿/重写取手法时只迁移结构、节奏、对白摩擦、信息延迟和段落功能，不改写本书事实；查角色现状请用 novel_context。"
 }
@@ -106,7 +106,7 @@ func (t *CraftRecallTool) Execute(_ context.Context, args json.RawMessage) (json
 			"草稿/重写阶段则登记为写法来源，转成 reader_retention_plan 的 surface/latent/reveal/cut 筛选与段落功能变化。"
 	}
 	if result.NoMaterial {
-		nextStep = "本字段无可用素材：对应产物字段必须显式写 material_source=no_material；草稿/重写阶段请立刻改用 methodology 或 scene_situation 做宽主题检索（主题含 小说场景/留存/冲突/对白/信息延迟/句长变化/AI检测），仍无料时用 reference_pack.references 兜底并声明 method_source=fallback_reference_pack；不允许假装引用了素材。"
+		nextStep = "本字段无可用素材：对应产物字段必须显式写 material_source=no_material；草稿/重写阶段请立刻改用 dialogue、methodology 或 scene_situation 做宽主题检索（主题含 小说场景/留存/冲突/对白/人物刻画/情感叙事/情绪弧线/动机反应/信息延迟/句长变化/AI检测）。若同章同类问题已循环两轮以上，或宽主题仍无料，必须先 web_research 查写作资料、检测平台口径或现实支架，并沉淀为 meta/writing-techniques、meta/web_reference_brief 或 review RAG 规则后再改；仍无料时用 reference_pack.references 兜底并声明 method_source=fallback_reference_pack。不允许假装引用了素材，也不允许凭感觉硬联想。"
 	}
 	return json.Marshal(map[string]any{
 		"field":        a.Field,

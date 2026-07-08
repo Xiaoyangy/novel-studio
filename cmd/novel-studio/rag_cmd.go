@@ -503,9 +503,10 @@ func collectRAGSourceFiles(outputDir string, rawSources []string, maxFiles int) 
 		if rag.IsForbiddenSourcePath(abs) {
 			return nil, fmt.Errorf("RAG source 不允许引用拆解库(deconstruction-library)、对标库或外部参考库: %s", src)
 		}
-		// 写作手法库（writing-techniques）与对标素材库（novel_all）是跨书共享资产，
-		// 允许来自项目目录外；其余来源仍必须在项目内，防止误扫外部正文库。
-		if !isPathWithin(abs, projectRoot) && !rag.IsCraftTechniquePath(abs) && !rag.IsBenchmarkLibraryPath(abs) {
+		// 写作手法库（writing-techniques）、对标素材库（novel_all）与显式校准库
+		// （review-calibration）是跨书共享资产，允许来自项目目录外；其余来源仍必须在项目内，
+		// 防止误扫外部正文库。
+		if !isPathWithin(abs, projectRoot) && !rag.IsCraftTechniquePath(abs) && !rag.IsBenchmarkLibraryPath(abs) && !rag.IsCalibrationPath(abs) {
 			return nil, fmt.Errorf("RAG source 必须位于当前项目目录 %s 内: %s", projectRoot, src)
 		}
 		info, err := os.Stat(abs)
@@ -655,6 +656,14 @@ func chunksFromRAGFile(path, outputDir, text string, maxChunkRunes int) []domain
 			} else if category := rag.BenchmarkCategory(path); category != "" {
 				metadata["craft_category"] = category
 			}
+			// 设计库（craft/benchmark/review-calibration）再打内容级细分面 + 可用阶段标签：
+			// 目录分类太粗，按文件名+正文内容判 craft_facet，并派生 usage_stage
+			// （architect/plan/writing/review），让各阶段按内容取料而非只按目录。
+			if rag.IsCraftTechniquePath(path) || rag.IsBenchmarkLibraryPath(path) || rag.IsCalibrationPath(path) {
+				facet := rag.CraftContentFacet(path, part)
+				metadata["craft_facet"] = string(facet)
+				metadata["usage_stage"] = strings.Join(rag.UsageStagesForFacet(facet), ",")
+			}
 			chunks = append(chunks, domain.RAGChunk{
 				ID:         fmt.Sprintf("local:%x:%03d", stableHash(rel), idx),
 				SourcePath: rel,
@@ -759,6 +768,9 @@ func inferRAGSourceKind(path string) string {
 	case rag.IsBenchmarkLibraryPath(clean):
 		// 对标素材库（novel_all）：只服务设计时刻，只可迁移手法/结构。
 		return rag.BenchmarkSourceKind
+	case rag.IsCalibrationPath(clean):
+		// 审核校准库（review-calibration）：AI 检测校准 + 人工文笔样本，服务 review/writing。
+		return rag.CalibrationSourceKind
 	case filepath.Base(clean) == "prompt.md":
 		return "note"
 	case strings.Contains(clean, "/input/"):
@@ -1080,11 +1092,12 @@ func probeRAGRecall(outputDir, style string, refs toolspkg.References, chapter i
 	return len(payload.Selected.RAG), nil
 }
 
-// appendConfiguredSharedLibraries 把配置的共享库（写作手法库 + 对标素材库）追加进
-// 索引来源（去重）。让 --build-rag / --zero-init 的重建默认保留这些 chunk，复用不靠记忆。
+// appendConfiguredSharedLibraries 把配置的共享库（写作手法库 + 对标素材库 + 显式校准库）
+// 追加进索引来源（去重）。让 --build-rag / --zero-init 的重建默认保留这些 chunk，复用不靠记忆。
 func appendConfiguredSharedLibraries(sources []string, cfg bootstrap.Config) []string {
 	sources = appendSharedLibrary(sources, cfg.RAG.CraftLibrary, "rag.craft_library", rag.IsCraftTechniquePath)
 	sources = appendSharedLibrary(sources, cfg.RAG.BenchmarkLibrary, "rag.benchmark_library", rag.IsBenchmarkLibraryPath)
+	sources = appendSharedLibrary(sources, cfg.RAG.CalibrationLibrary, "rag.calibration_library", rag.IsCalibrationPath)
 	return sources
 }
 

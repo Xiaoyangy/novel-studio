@@ -177,6 +177,11 @@ type RAGConfig struct {
 	// 同 CraftLibrary 自动追加；chunk 标记 benchmark_reference，只服务设计时刻，
 	// 检索结果只可迁移手法/结构，禁止照搬情节与人名。
 	BenchmarkLibrary string `json:"benchmark_library,omitempty"`
+
+	// CalibrationLibrary 审核校准库路径（如 deconstruction-library/review-calibration）。
+	// AI 检测校准报告 + 高质量人工文笔样本，chunk 标记 calibration_reference；
+	// 仅作显式校准/审阅参考，不进入 novel_context 常规事实召回。
+	CalibrationLibrary string `json:"calibration_library,omitempty"`
 }
 
 type RAGEmbeddingConfig struct {

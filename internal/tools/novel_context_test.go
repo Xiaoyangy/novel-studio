@@ -821,6 +821,38 @@ func TestContextToolInjectsCharacterAndEmotionalCraftReferences(t *testing.T) {
 	}
 }
 
+func TestContextToolInjectsFictionParagraphingReference(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewContextTool(s, References{
+		FictionParagraphing: "小说分段：换说话人、换焦点、避免文字墙",
+	}, "default")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack")
+	}
+	refs, ok := pack["references"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack.references")
+	}
+	if got, ok := refs["fiction_paragraphing"].(string); !ok || got == "" {
+		t.Fatalf("expected fiction_paragraphing reference, got %#v", refs["fiction_paragraphing"])
+	}
+}
+
 func TestContextToolInjectsWritingTechniquesDigestReference(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)

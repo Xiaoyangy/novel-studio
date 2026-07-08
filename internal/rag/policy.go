@@ -19,10 +19,20 @@ const craftTechniqueSegment = "writing-techniques"
 // 归并前的散源（novel_sucai / novel_sucai2 / *.bak）保持禁入，避免重复计数。
 const benchmarkLibrarySegment = "novel_all"
 
+// calibrationLibrarySegment 标记审核校准库（review-calibration：AI 检测校准报告、
+// 高质量人工文笔样本、创作方法论）。它只能作为显式校准/审阅参考，chunk 会被
+// design-only 隔离，不进入 novel_context 常规事实召回。
+const calibrationLibrarySegment = "review-calibration"
+
 // IsCraftTechniquePath reports whether a path points at the curated
 // writing-techniques craft library, which is exempt from the deconstruction ban.
 func IsCraftTechniquePath(path string) bool {
 	return pathHasSegment(path, craftTechniqueSegment)
+}
+
+// IsCalibrationPath 判断是否审核校准库路径（review-calibration），同样豁免拆解库禁令。
+func IsCalibrationPath(path string) bool {
+	return pathHasSegment(path, calibrationLibrarySegment)
 }
 
 // IsBenchmarkLibraryPath reports whether a path points at the consolidated
@@ -53,7 +63,7 @@ func IsForbiddenSourcePath(path string) bool {
 	if clean == "" {
 		return false
 	}
-	if IsCraftTechniquePath(clean) || IsBenchmarkLibraryPath(clean) {
+	if IsCraftTechniquePath(clean) || IsBenchmarkLibraryPath(clean) || IsCalibrationPath(clean) {
 		return false
 	}
 	for _, segment := range strings.Split(clean, "/") {
@@ -80,6 +90,7 @@ func MentionsForbiddenSourceMarker(text string) bool {
 		"deconstruction-library/"+craftTechniqueSegment, "",
 		"拆文库/"+craftTechniqueSegment, "",
 		"deconstruction-library/"+benchmarkLibrarySegment, "",
+		"deconstruction-library/"+calibrationLibrarySegment, "",
 	).Replace(clean)
 	lower := strings.ToLower(scrub)
 	if strings.Contains(scrub, "拆文库") || strings.Contains(scrub, "对标库") ||

@@ -85,6 +85,7 @@ func TestGhostcityCraftRoutingAllFields(t *testing.T) {
 	}{
 		{CraftFieldWeapon, "长剑 淬火", "writing-techniques"},
 		{CraftFieldAppearance, "眼睛 冷峻", "writing-techniques/appearance"},
+		{CraftFieldDialogue, "对白 交涉 信息博弈", ""},
 		{CraftFieldAbility, "阶位 神格", "writing-techniques"},
 		{CraftFieldSkill, "阵法 雷法", "writing-techniques/magic-arts"},
 		{CraftFieldInstitution, "物价 银子", "writing-techniques/ancient-history"},
