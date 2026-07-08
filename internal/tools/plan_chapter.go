@@ -26,7 +26,7 @@ func NewPlanChapterTool(store *store.Store) *PlanChapterTool {
 
 func (t *PlanChapterTool) Name() string { return "plan_chapter" }
 func (t *PlanChapterTool) Description() string {
-	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
+	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、读者留存筛选、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；计划是素材池与边界，不是正文清单，必须明确哪些只留台账、哪些延后揭示、哪些压缩不写；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
 }
 func (t *PlanChapterTool) Label() string { return "规划章节" }
 
@@ -350,6 +350,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	require(len(sim.DialogueBlueprints) > 0, "causal_simulation.dialogue_scene_blueprints")
 	require(len(sim.CharacterArcTests) > 0, "causal_simulation.character_arc_tests")
 	require(hasReaderRewardPlan(sim.ReaderRewardPlan), "causal_simulation.reader_reward_plan")
+	require(hasReaderRetentionPlan(sim.ReaderRetentionPlan), "causal_simulation.reader_retention_plan")
 	require(len(sim.EvidenceChains) > 0, "causal_simulation.evidence_return_chains")
 	require(hasEndingConsequenceContract(sim.EndingContract), "causal_simulation.ending_consequence_contract")
 	require(len(sim.DormantPolicy) > 0, "causal_simulation.dormant_character_policy")
@@ -828,6 +829,26 @@ func hasReaderRewardPlan(plan domain.ReaderRewardPlan) bool {
 		len(plan.RewardLadder) > 0
 }
 
+func hasReaderRetentionPlan(plan domain.ReaderRetentionPlan) bool {
+	if len(plan.SurfaceBeats) == 0 ||
+		len(plan.LatentContext) == 0 ||
+		len(plan.RevealBudget) == 0 ||
+		len(plan.CutOrCompress) == 0 ||
+		len(plan.PageTurnQuestions) == 0 {
+		return false
+	}
+	for _, beat := range plan.SurfaceBeats {
+		if strings.TrimSpace(beat.PlanSource) != "" &&
+			strings.TrimSpace(beat.MustShow) != "" &&
+			strings.TrimSpace(beat.ReaderPayoff) != "" &&
+			strings.TrimSpace(beat.SceneVehicle) != "" &&
+			strings.TrimSpace(beat.ProofOnPage) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func hasEndingConsequenceContract(contract domain.EndingConsequenceContract) bool {
 	return strings.TrimSpace(contract.EndingMode) != "" &&
 		strings.TrimSpace(contract.ConcreteAnchor) != "" &&
@@ -1158,6 +1179,21 @@ func causalSimulationSchema(strict bool) map[string]any {
 		schema.Property("reward_ladder", schema.Array("未来 3-4 章的奖励/代价阶梯", readerRewardStep)).Required(),
 		schema.Property("forbidden_reward_patterns", schema.Array("禁止的奖励方式，如只摆按钮、只承诺无限额度、只解释设定", schema.String(""))),
 	)
+	retentionSurfaceBeat := schema.Object(
+		schema.Property("plan_source", schema.String("来自哪个计划字段或章节契约，例如 required_beats[0]/dialogue_scene_blueprints/security-review")).Required(),
+		schema.Property("must_show", schema.String("正文必须让读者看见的动作、对白、物件变化、选择或后果；不是解释性摘要")).Required(),
+		schema.Property("reader_payoff", schema.String("这一拍给读者的即时收益：确认、悬念、误判、爽点、关系变化、规则代价等")).Required(),
+		schema.Property("scene_vehicle", schema.String("用哪个场景/物件/冲突载体承载，禁止只写成计划说明")).Required(),
+		schema.Property("proof_on_page", schema.String("正文里可核对的页面证据，例如某句打断、某个动作、某个物件状态变化")).Required(),
+		schema.Property("function_shift", schema.String("这一拍在段落功能上制造的换挡：事故/争执/沉默/证据迟到/生活打断/后果入账等，避免全章同一叙述曲线")),
+	)
+	readerRetentionPlan := schema.Object(
+		schema.Property("surface_beats", schema.Array("从全量计划中筛出的 3-6 个必须显性写到页面的留存节拍；计划是素材池，不是全部写出清单", retentionSurfaceBeat)).Required(),
+		schema.Property("latent_context", schema.Array("只留在台账/角色逻辑里的内容：可约束行为，但本章不显性解释、不让旁白摊开", schema.String(""))).Required(),
+		schema.Property("reveal_budget", schema.Array("本章必须延后、只露半截或只通过证据暗示的信息；避免把大纲答案一次讲完", schema.String(""))).Required(),
+		schema.Property("cut_or_compress", schema.Array("若正文出现会变成结构化清单、说明书或 AI 味的计划材料；应删除、合并进动作或压成半句", schema.String(""))).Required(),
+		schema.Property("page_turn_questions", schema.Array("读者读完本章会想继续看的具体问题；必须落到人/物/代价/选择，不写抽象金句", schema.String(""))).Required(),
+	)
 	evidenceReturnChain := schema.Object(
 		schema.Property("offscreen_character", schema.String("离屏/后台事件涉及的角色或群体")).Required(),
 		schema.Property("event", schema.String("他/他们在主角视角外实际经历或推动的事件")).Required(),
@@ -1387,6 +1423,7 @@ func causalSimulationSchema(strict bool) map[string]any {
 		schema.Property("longform_opening", longformOpening),
 		req(schema.Property("character_arc_tests", schema.Array("人物 Want/Lie/Need/Truth、本章合理犯错和纠错触发；主角必须覆盖，关键配角按章节压力覆盖", characterArcTest))),
 		req(schema.Property("reader_reward_plan", readerRewardPlan)),
+		req(schema.Property("reader_retention_plan", readerRetentionPlan)),
 		req(schema.Property("evidence_return_chains", schema.Array("主角视角外事件如何以证据回到主线，保证梗、伏笔和配角线可回收", evidenceReturnChain))),
 		req(schema.Property("ending_consequence_contract", endingContract)),
 		req(schema.Property("dormant_character_policy", schema.Array("未出场/休眠/暂不推进角色的最小状态和后续检查；没有休眠角色也要写 none 占位", dormantPolicy))),

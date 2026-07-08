@@ -93,13 +93,14 @@ flowchart LR
     B --> F["foundation<br/>前提、人物、世界、分层大纲"]
     F --> Z["zero-init<br/>第一章前世界推演硬门禁"]
     Z --> P["plan_chapter<br/>causal_simulation"]
-    P --> D["drafter<br/>干净上下文渲染正文"]
+    P --> RP["reader_retention_plan<br/>surface / latent / reveal / cut"]
+    RP --> D["drafter<br/>按显性留存节拍渲染正文"]
     D --> C["check_consistency<br/>事实与计划校验"]
     C --> M["commit_chapter<br/>正文提交 + AI gate"]
     M --> R["review<br/>DeepSeek / 统一八维报告"]
     R -->|accept| L["deliver<br/>台账刷新 + RAG 入库"]
     R -->|rewrite| RB["rewrite_brief<br/>机械门禁 + 审核问题同源"]
-    RB --> D
+    RB --> P
     L --> P
 ```
 
@@ -132,7 +133,7 @@ flowchart TD
 | Codex 订阅适配 | `internal/llmcodex/codex.go`、`internal/llmcodex/codex_test.go`、`internal/bootstrap/*` | 将 Codex CLI 订阅封装为 agentcore ChatModel，支持工具调用与自由文本正文重渲染 |
 | 长文本 AI 检测 | `assets/references/longform-ai-detector.md`、`assets/references/anti-ai-tone.md`、`internal/aigc/aigc.go`、`internal/rules/lint.go` | 针对 3000 字整章检测补 segment floor、段首复读、模板对白、结构性 AI 味规则 |
 | 审核报告一致性 | `internal/reviewreport/*`、`cmd/novel-studio/review_existing.go`、`cmd/novel-studio/review_existing_gate_test.go` | 拦截、统一报告、终端摘要读取同一份 gate 结论；warning 不再误报为主要 blocker |
-| Writer / Drafter 约束 | `assets/prompts/writer.md`、`assets/prompts/drafter.md`、`internal/tools/plan_chapter.go`、`internal/tools/plan_chapter_phases.go` | Planner 负责完整因果推演，Drafter 只读定稿计划渲染正文，减少上下文污染与模板化 |
+| Writer / Drafter 约束 | `assets/prompts/writer.md`、`assets/prompts/drafter.md`、`internal/tools/plan_chapter.go`、`internal/tools/plan_chapter_phases.go`、`internal/tools/craft_recall.go` | Planner 负责完整因果推演，并通过 `reader_retention_plan` 区分显性写出、隐性台账、延后揭示和删压缩内容；Drafter 完整读计划但只按留存节拍渲染，写法 RAG 无料时必须走宽检索或 reference_pack fallback |
 | 世界与 zero-init | `internal/tools/save_foundation.go`、`cmd/novel-studio/zero_init_*`、`internal/tools/worldsim_gate.go` | foundation 改动会使第一章 readiness 过期，世界推演资产和白名单 RAG 更严格 |
 | 上下文治理 | `internal/agents/context_manager.go`、`internal/tools/novel_context*.go`、`internal/tools/context_architect.go` | 加入长文本检测参考、rewrite_brief 机械门禁摘要、计划一致性与 RAG 召回证据 |
 | 质量审计脚本 | `quality/audit/scripts/content_lint.py` | 离线审计补结构性 AI 味和章节机械规则检查 |
