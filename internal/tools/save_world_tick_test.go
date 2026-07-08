@@ -114,8 +114,13 @@ func mustLoadEvents(t *testing.T, tool *SaveWorldTickTool) []domain.WorldEvent {
 
 func TestSaveWorldTickRejectsBadArgs(t *testing.T) {
 	tool, _ := newWorldTickTool(t)
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"volume":1}`)); err == nil {
-		t.Fatal("缺 through_chapter 应报错")
+	// 负 through_chapter 非法。
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"volume":1,"through_chapter":-1}`)); err == nil {
+		t.Fatal("负 through_chapter 应报错")
+	}
+	// through_chapter=0（缺省）是合法的开局前初始 tick。
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"volume":1}`)); err != nil {
+		t.Fatalf("through_chapter=0 初始 tick 应允许: %v", err)
 	}
 }
 
@@ -210,5 +215,24 @@ func TestStoryCalendarRoundtripAndInjection(t *testing.T) {
 	ctxTool.buildMethodologyContext(working)
 	if _, ok := working["story_calendar"]; !ok {
 		t.Fatalf("story_calendar 未注入: %v", working)
+	}
+}
+
+func TestSaveWorldTickStoryDayAnchoring(t *testing.T) {
+	tool, s := newWorldTickTool(t)
+	if err := s.WorldSim.SaveStoryCalendar(domain.StoryCalendar{DaysPerChapter: 2}); err != nil {
+		t.Fatalf("save calendar: %v", err)
+	}
+	execWorldTick(t, tool, `{
+		"volume":1, "arc":1, "through_chapter": 5,
+		"events":[{"chapter":4,"actors":["势力X"],"summary":"离屏推进","visibility_chapter":6}]
+	}`)
+	events, err := s.WorldSim.LoadWorldEvents()
+	if err != nil || len(events) != 1 {
+		t.Fatalf("load events: %v n=%d", err, len(events))
+	}
+	// chapter=4 × 2 天/章 = 8 天，回填到 story_day。
+	if events[0].StoryDay != 8 {
+		t.Fatalf("story_day 应按 days_per_chapter 回填为 8，got %v", events[0].StoryDay)
 	}
 }

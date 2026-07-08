@@ -172,6 +172,18 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 	switch strings.TrimSpace(rule) {
 	case "chapter_words":
 		return "篇幅超标只做局部压缩：优先删重复规则说明、重复互动问答和同义情绪句；保留已成立的场景、规则链、钩子和人物声口，不要整章重写。"
+	case "state_clause_pile":
+		return "状态说明堆叠要拆成动作链：删掉同句多个“还/没/已经”，让人物动作、页面变化和沉默分别承载信息。"
+	case "not_but_overuse":
+		return "“不是A而是B”每章最多留一处；多余句子改成普通判断、动作后果或人物误读，不要用解释型转折总结局面。"
+	case "isolated_sentence_overuse":
+		return "单行孤句只保留最关键 3-4 处；其余并回相邻段，或改成对话、动作余波、物件状态，避免全章像分镜提纲。"
+	case "vague_quantifier_overuse":
+		return "半/一点/几分等虚量词超量时，删抽象虚量或换成具体物件状态；不要用同一类模糊词铺“人味”。"
+	case "object_response_overuse":
+		return "屏幕、纸面、门牌、灯光等物件不要每次替人物确认；删掉多余即时响应，改成延迟、缺席、误读、旁人反应或后续代价。"
+	case "object_response_rhythm_flat":
+		return "物件回应必须不等距：至少一次重话后没有任何外部响应，一次响应延后到下一动作之后；不要句句重话后显字/亮屏/震动。"
 	case "structured_note_triplet":
 		return "便签和备忘录不要三条工整并列；改成划掉、补字、写半截和现场犹豫。"
 	case "card_tos_block":

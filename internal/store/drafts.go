@@ -32,6 +32,24 @@ func (s *DraftStore) LoadChapterPlan(chapter int) (*domain.ChapterPlan, error) {
 	return &plan, nil
 }
 
+// SaveChapterPlanConsistencyWarnings 落盘 plan 一致性检查的软疑点，供 drafter
+// 在正文阶段（check_consistency）核对，确保正文不越出计划范围。
+func (s *DraftStore) SaveChapterPlanConsistencyWarnings(chapter int, warnings []string) error {
+	return s.io.WriteJSON(fmt.Sprintf("drafts/%02d.plan_consistency.json", chapter), warnings)
+}
+
+// LoadChapterPlanConsistencyWarnings 读取 plan 一致性软疑点；不存在时返回 nil。
+func (s *DraftStore) LoadChapterPlanConsistencyWarnings(chapter int) ([]string, error) {
+	var warnings []string
+	if err := s.io.ReadJSON(fmt.Sprintf("drafts/%02d.plan_consistency.json", chapter), &warnings); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return warnings, nil
+}
+
 // SaveChapterPlanPartial 保存两阶段规划的中间态到 drafts/{ch}.plan.partial.json。
 // plan_details finalize 通过后由 DeleteChapterPlanPartial 清理。
 func (s *DraftStore) SaveChapterPlanPartial(chapter int, partial map[string]any) error {

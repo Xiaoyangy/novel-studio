@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -44,6 +45,7 @@ type pipelineFlags struct {
 	MaxRewriteRounds int
 	PolishWarnings   bool
 	RewriteBriefOnly bool
+	NewNovel         bool
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -67,6 +69,7 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.IntVar(&f.MaxRewriteRounds, "max-rewrite-rounds", 0, "rewrite 阶段红旗重写-复审闭环最多轮数，0 = 使用默认 3")
 	fs.BoolVar(&f.PolishWarnings, "polish-warnings", false, "rewrite 阶段无红旗但存在黄旗时，也按质量优先原则择优打磨")
 	fs.BoolVar(&f.RewriteBriefOnly, "brief-only", false, "rewrite 阶段只刷新 rewrite brief，不调用 Writer、不改正文")
+	fs.BoolVar(&f.NewNovel, "new-novel", false, "新建小说：先跑头脑风暴（web/RAG 调研 + 落盘 brainstorm.md），再据此初始化并写作")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
 	}
@@ -106,7 +109,38 @@ func pipelinePipeline(opts cliOptions, args []string) error {
 		return err
 	}
 
+	// 新建小说：先跑头脑风暴，落盘 data/runs/<书名>/brainstorm.md，再把项目目录设为它，
+	// 让后续 Architect 基于 brainstorm.md 初始化世界 → zero-init → 写作。
+	if flags.NewNovel {
+		projectDir, berr := runPipelineBrainstorm(opts, prompt)
+		if berr != nil {
+			return fmt.Errorf("头脑风暴阶段失败: %w", berr)
+		}
+		opts.Dir = projectDir  // 后续 OutputDir = projectDir/output/novel
+		prompt = ""            // 创作指令改由 brainstorm.md 承载，不再透传原始 idea
+		flags.NewNovel = false // 已完成
+	}
+
 	return runPipelineWithStages(opts, flags, stages, prompt, nil)
+}
+
+// runPipelineBrainstorm 跑头脑风暴子代理，产出 brainstorm.md，返回项目根目录。
+func runPipelineBrainstorm(opts cliOptions, idea string) (string, error) {
+	if strings.TrimSpace(idea) == "" {
+		return "", fmt.Errorf("新建小说需要一个想法：用 --prompt \"<你的小说想法>\"")
+	}
+	cfg, bundle, err := loadCfgBundle(opts)
+	if err != nil {
+		return "", err
+	}
+	runsRoot := filepath.Join("data", "runs")
+	fmt.Fprintln(os.Stderr, "[pipeline:brainstorm] 头脑风暴中：调研题材、推敲逻辑、落盘 brainstorm.md…")
+	projectDir, err := agents.RunBrainstorm(cfg, bundle, runsRoot, idea)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:brainstorm] 已落盘：%s\n", filepath.Join(projectDir, "brainstorm.md"))
+	return projectDir, nil
 }
 
 func runPipelineAlias(opts cliOptions, stages []string, prompt string, stageArgs map[string][]string) error {

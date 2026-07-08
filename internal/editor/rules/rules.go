@@ -91,6 +91,7 @@ func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMet
 		GeneratedAt: metrics.GeneratedAt,
 	}
 	analysis.RedFlags = append(redFlags(metrics, history), patternFlags...)
+	analysis.RedFlags = append(analysis.RedFlags, dialogueInfoDumpFlags(text)...)
 	analysis.Label = labelFor(metrics, analysis.RedFlags)
 	analysis.Summary = summaryFor(metrics, analysis.RedFlags)
 	return analysis
@@ -203,6 +204,46 @@ func dialogueStats(text string) (dialogueChars int, supportingDialogue int) {
 		supportingDialogue += size
 	}
 	return dialogueChars, supportingDialogue
+}
+
+// infoDumpDigitRe 匹配对白里的数字串（房号/编号/日期），用于识别"罗列清单"的信息倾倒。
+var infoDumpDigitRe = regexp.MustCompile(`[0-9]{2,}`)
+
+// dialogueInfoDumpFlags 检测信息倾倒式对白：单段引号内一口气罗列清单（姓名+房号+背景、
+// 来龙去脉）。真人在慌乱里说话是断的、有隐瞒、被追问才挤出下一条——"一口气念完一串结构化
+// 信息"是检测器与读者都反感的 AI 招牌。命中给 warning，驱动重写把长独白拆成被追问/打断逼出。
+func dialogueInfoDumpFlags(text string) []domain.AIVoiceRedFlag {
+	var worst string
+	worstScore := 0
+	for _, loc := range quoteRe.FindAllStringIndex(text, -1) {
+		span := text[loc[0]:loc[1]]
+		n := utf8.RuneCountInString(span)
+		if n < 60 {
+			continue
+		}
+		seps := strings.Count(span, "，") + strings.Count(span, "、")
+		digitGroups := len(infoDumpDigitRe.FindAllString(span, -1))
+		// 长独白 + 多枚举分句，或 长独白 + 多个编号（房号/清单）→ 判为信息倾倒。
+		if (n >= 70 && seps >= 3) || (n >= 60 && digitGroups >= 2) {
+			score := n + seps*10 + digitGroups*15
+			if score > worstScore {
+				worstScore = score
+				worst = span
+			}
+		}
+	}
+	if worst == "" {
+		return nil
+	}
+	ex := []rune(worst)
+	if len(ex) > 32 {
+		ex = ex[:32]
+	}
+	return []domain.AIVoiceRedFlag{{
+		Rule:       "dialogue_info_dump",
+		Severity:   "warning",
+		Suggestion: "信息倾倒式对白（一口气罗列清单/姓名+房号+背景）：拆成被对方追问、打断、质疑后一句一句逼出来，或把信息落到动作物件（推名单、指门、掏湿钱）上。示例段：「" + string(ex) + "…」",
+	}}
 }
 
 func aphorismHits(paragraphs []string) []domain.AphorismHit {

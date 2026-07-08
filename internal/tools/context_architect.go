@@ -168,7 +168,38 @@ func (t *ContextTool) buildArchitectReferences(envelope *architectContextEnvelop
 	t.addProjectWebReferenceBrief(refs, warn)
 	t.addPrewriteStorycraftPlan(refs, warn)
 	t.addWorldBackgroundPlan(refs, warn)
+	t.addBrainstorm(refs, warn)
 	envelope.References["references"] = refs
+}
+
+// addBrainstorm 注入 brainstorm.md——头脑风暴阶段确认好的小说思路，是整本小说产出的
+// 基础文件。Architect 初始化世界（premise/characters/world_codex…）必须以它为依据：
+// 预期字数、题材、人物设定、主角 CP、世界观、核心爽点、给 Architect 的交接说明。
+func (t *ContextTool) addBrainstorm(refs map[string]string, warn func(string, error)) {
+	if refs == nil {
+		return
+	}
+	// brainstorm.md 存在 run 根（<novel>/../../brainstorm.md）或 novel meta/ 下。
+	dir := t.store.Dir()
+	candidates := []string{
+		filepath.Join(dir, "meta", "brainstorm.md"),
+		filepath.Join(dir, "brainstorm.md"),
+		filepath.Join(dir, "..", "..", "brainstorm.md"), // <run>/output/novel → <run>
+		filepath.Join(dir, "..", "brainstorm.md"),
+	}
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				warn("brainstorm:"+p, err)
+			}
+			continue
+		}
+		if text := strings.TrimSpace(string(data)); text != "" {
+			refs["brainstorm"] = text
+			return
+		}
+	}
 }
 
 func (t *ContextTool) addPrewriteStorycraftPlan(refs map[string]string, warn func(string, error)) {

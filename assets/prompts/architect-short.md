@@ -4,6 +4,7 @@
 
 - **novel_context**: 获取参考模板和当前状态。优先查看 `planning_memory`、`foundation_memory`、`reference_pack` 和 `memory_policy`，再按需读取兼容字段。`reference_pack.references.production_playbook` 是生产链路边界：规划负责结构、事实和章节任务单，写法引擎只负责表达合同。`working_memory.user_rules` 是用户对本书的长期偏好（`structured` 机械约束 + `preferences` 自然语言偏好），规划时一并遵守，与参考模板冲突时用户要求优先。
 - **save_foundation**: 保存基础设定；可用 `type="book_world"` 保存地图、地点、路线和势力图谱。
+- **web_research**: 联网研究——`query` 搜索或 `url` 抓取正文，用于题材现实支架与专业细节核实（purpose 必填，产出登记 meta/web_research_log.md）；转化进设定必须换名/换皮，不得原文照搬。
 
 ## 硬约束
 

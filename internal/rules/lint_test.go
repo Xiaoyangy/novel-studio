@@ -422,11 +422,75 @@ func TestLint_CadenceSignalsAllowLightUse(t *testing.T) {
 		"object_response_overuse",
 		"object_response_rhythm_flat",
 		"dialogue_aphorism_overuse",
+		"templated_dialogue_chain",
 		"serial_device_repetition",
 	} {
 		if v := findRule(Lint(text), rule); v != nil {
 			t.Fatalf("unexpected %s violation: %+v", rule, v)
 		}
+	}
+}
+
+func TestLint_TemplatedDialogueChain(t *testing.T) {
+	text := `# 第一章
+
+“许闻溪。”傅行简叫她。
+
+她把笔停住。“我在看字段来源。”
+
+“先补现场口径。”他把模板推过来一寸，“今天只确认演示效果，不扩范围。”
+
+梁渡抬眼。“管理建议生成了吗？”
+
+会议室另一头的投影闪了一下。
+
+“梁渡。”许闻溪叫他。
+
+他把记号笔停住。“我在核演示样本。”
+
+“先补审计口径。”她把模板推过去，“今天只确认导出效果，不扩流程。”
+
+傅行简抬眼。“权限说明生成了吗？”`
+
+	vs := Lint(text)
+	v := findRule(vs, "templated_dialogue_chain")
+	if v == nil {
+		t.Fatalf("expected templated_dialogue_chain violation, got %+v", vs)
+	}
+	if v.Actual != 2 || v.Limit != 0 {
+		t.Fatalf("actual/limit=%v/%v, want 2/0: %+v", v.Actual, v.Limit, v)
+	}
+}
+
+func TestLint_TemplatedDialogueChainFlagsSingleProceduralChain(t *testing.T) {
+	text := `# 第一章
+
+“许闻溪。”傅行简叫她。
+
+她把笔停住。“我在看字段来源。”
+
+“先补现场口径。”他把模板推过来一寸，“今天只确认演示效果，不扩范围。”
+
+梁渡抬眼。“管理建议生成了吗？”
+
+许闻溪没答，先把错列名圈出来。梁渡凑近看了一会儿，把自己的问题划掉，改成了另一句：“那我问现场负责人，不问你。”`
+
+	if v := findRule(Lint(text), "templated_dialogue_chain"); v == nil || v.Actual != 1 {
+		t.Fatalf("single procedural chain should violate once: %+v", v)
+	}
+}
+
+func TestLint_TemplatedDialogueChainAllowsMessyProceduralExchange(t *testing.T) {
+	text := `# 第一章
+
+傅行简把模板推过来，没叫她名字，只点了点记录页。“先补现场口径。”
+
+许闻溪没有停笔。她把字段来源那一栏划掉，改写成“待核”，又问投屏同事：“日志入口是谁开的？”
+
+梁渡看着封条，没有接傅行简的话。“我只记现场未见全量导出。”`
+
+	if v := findRule(Lint(text), "templated_dialogue_chain"); v != nil {
+		t.Fatalf("messy procedural exchange should not violate: %+v", v)
 	}
 }
 

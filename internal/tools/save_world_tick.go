@@ -117,8 +117,10 @@ func (t *SaveWorldTickTool) Execute(_ context.Context, args json.RawMessage) (js
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
-	if a.ThroughChapter <= 0 {
-		return nil, fmt.Errorf("through_chapter must be > 0: %w", errs.ErrToolArgs)
+	// through_chapter=0 是合法的开局前初始 tick（第 1 章写作前建立离屏信息流）；
+	// 负数才非法。此时事件的 chapter 也可为 0（开局前发生），visibility_chapter>=1 陆续浮出。
+	if a.ThroughChapter < 0 {
+		return nil, fmt.Errorf("through_chapter 不能为负: %w", errs.ErrToolArgs)
 	}
 
 	var warnings []string
@@ -150,9 +152,15 @@ func (t *SaveWorldTickTool) Execute(_ context.Context, args json.RawMessage) (js
 	}
 
 	tickID := fmt.Sprintf("v%d-a%d", a.Volume, a.Arc)
+	// 故事时钟锚定：按 story_calendar 的 days_per_chapter 把每条离屏事件的发生章号
+	// 换算成故事内天数坐标（story_day），让镜头外时间线与主角章节时钟同尺可比。
+	calendar, _ := t.store.WorldSim.LoadStoryCalendar()
 	for i := range a.Events {
 		if a.Events[i].TickID == "" {
 			a.Events[i].TickID = tickID
+		}
+		if a.Events[i].StoryDay == 0 && a.Events[i].Chapter > 0 && calendar != nil {
+			a.Events[i].StoryDay = calendar.EstimateElapsedDays(a.Events[i].Chapter)
 		}
 	}
 

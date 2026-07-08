@@ -20,6 +20,7 @@ var blockingMechanicalRules = map[string]bool{
 	"object_response_overuse":      true,
 	"object_response_rhythm_flat":  true,
 	"dialogue_semicolon_formality": true,
+	"templated_dialogue_chain":     true,
 	"form_notice_semicolon_chain":  true,
 	"semicolon_overuse":            true,
 	"stiff_trade_dialogue":         true,
@@ -154,11 +155,19 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 			return false
 		}
 	}
-	if mechanical == nil || mechanical.AIGCReport.BlendedAIGCPercent <= 0 || mechanical.AIGCReport.BlendedAIGCPercent > 5 {
+	// 与 commit 机械门禁共用口径：短章按 segment floor 真高判，不被 blended 稀释。
+	// 读者会把整章 ~3000 字丢进检测器，看到的就是这个分——高于 5% 不许"仅告警通过"。
+	if mechanical == nil {
+		return false
+	}
+	if gate := aigc.EffectiveGatePercent(mechanical.AIGCReport); gate <= 0 || gate > 5 {
+		return false
+	}
+	if len(BlockingAIGCDimensionReasons(mechanical.AIGCReport)) > 0 {
 		return false
 	}
 	for _, violation := range mechanical.RuleViolations {
-		if violation.Severity == rules.SeverityError {
+		if IsBlockingMechanicalViolation(violation) {
 			return false
 		}
 	}
@@ -170,7 +179,25 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 			}
 		}
 	}
-	return true
+	return len(mechanical.RuleViolations) > 0 || hasAIVoiceWarnings(aiVoice)
+}
+
+func hasAIVoiceWarnings(analysis *domain.AIVoiceAnalysis) bool {
+	if analysis == nil {
+		return false
+	}
+	for _, flag := range analysis.RedFlags {
+		if strings.TrimSpace(flag.Rule) == "" && strings.TrimSpace(flag.Evidence) == "" {
+			continue
+		}
+		switch strings.TrimSpace(flag.Severity) {
+		case "", "info", "note":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func BlockingAIGCDimensionReasons(report aigc.Report) []string {

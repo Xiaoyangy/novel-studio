@@ -849,6 +849,38 @@ func TestContextToolInjectsRAGWritingGuidelinesReference(t *testing.T) {
 	}
 }
 
+func TestContextToolInjectsLongformAIDetectorReference(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewContextTool(s, References{
+		LongformAIDetector: "3000 字整章检测：交付看 effective_gate_percent，不看 blended 平均值",
+	}, "default")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack")
+	}
+	refs, ok := pack["references"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack.references")
+	}
+	if got, ok := refs["longform_ai_detector"].(string); !ok || got == "" {
+		t.Fatalf("expected longform_ai_detector reference, got %#v", refs["longform_ai_detector"])
+	}
+}
+
 func TestContextToolInjectsWebReferenceGuidelinesAndProjectBrief(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)

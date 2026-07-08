@@ -32,6 +32,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "skills" {
 		os.Exit(runSkillsCommand(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && (os.Args[1] == "list" || os.Args[1] == "novels") {
+		os.Exit(runNovelsListCommand(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "reader-metrics" {
 		opts, _, err := parseCLIOptions(nil)
 		if err != nil {

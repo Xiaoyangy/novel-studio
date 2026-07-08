@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -567,12 +568,26 @@ func TestMechanicalGateRetryLimitHandsOffToChapterReview(t *testing.T) {
 	}
 }
 
+func TestBlockingViolationReasonIncludesTemplatedDialogueChain(t *testing.T) {
+	reason := blockingViolationReason([]rules.Violation{{
+		Rule:     "templated_dialogue_chain",
+		Target:   "点名/停笔/补口径/追问",
+		Actual:   1,
+		Limit:    0,
+		Severity: rules.SeverityWarning,
+	}})
+	if !strings.Contains(reason, "templated_dialogue_chain") {
+		t.Fatalf("reason = %q, want templated_dialogue_chain", reason)
+	}
+}
+
 func TestAIGCViolationUsesBlendedGateForSegmentFloorOnlyRisk(t *testing.T) {
 	violations := aigcViolation(aigc.Report{
 		Engine:                 aigc.Engine,
 		AIGCPercent:            80,
 		AIRatioPercent:         80,
 		BlendedAIGCPercent:     7.52,
+		Stats:                  aigc.Stats{Hanzi: 6000}, // 长章多检测片段才允许 blended 降权
 		SegmentRiskFloor:       80,
 		ContentIntegrityFloor:  0,
 		ZhuqueCompositePercent: 29.9,
@@ -597,6 +612,7 @@ func TestAIGCViolationUsesBlendedGateForMediumCompositeSegmentRisk(t *testing.T)
 		AIGCPercent:            80,
 		AIRatioPercent:         80,
 		BlendedAIGCPercent:     13.08,
+		Stats:                  aigc.Stats{Hanzi: 6000}, // 长章多检测片段才允许 blended 降权
 		SegmentRiskFloor:       80,
 		ContentIntegrityFloor:  0,
 		ZhuqueCompositePercent: 17.4,
@@ -621,6 +637,7 @@ func TestAIGCViolationUsesBlendedGateForBorderlineSegmentRisk(t *testing.T) {
 		AIGCPercent:            80,
 		AIRatioPercent:         80,
 		BlendedAIGCPercent:     19.03,
+		Stats:                  aigc.Stats{Hanzi: 6000}, // 长章多检测片段才允许 blended 降权
 		SegmentRiskFloor:       80,
 		ContentIntegrityFloor:  0,
 		ZhuqueCompositePercent: 17.4,
@@ -636,6 +653,31 @@ func TestAIGCViolationUsesBlendedGateForBorderlineSegmentRisk(t *testing.T) {
 	}
 	if violations[0].Actual != 19.03 {
 		t.Fatalf("expected blended gate actual 19.03, got %+v", violations[0].Actual)
+	}
+}
+
+// TestAIGCViolationShortChapterUsesRawSegmentFloor 验证用户要求：约 3000 字的短章会被
+// 读者一次性丢进检测器（单检测片段），此时 segment_risk_floor 就是读者看到的真实风险，
+// 不能被多片段 blended 平均稀释成低分放行——必须按 raw floor 判 error 打回，而不是 warning。
+func TestAIGCViolationShortChapterUsesRawSegmentFloor(t *testing.T) {
+	violations := aigcViolation(aigc.Report{
+		Engine:                 aigc.Engine,
+		AIGCPercent:            80,
+		AIRatioPercent:         80,
+		BlendedAIGCPercent:     7.52,
+		Stats:                  aigc.Stats{Hanzi: 3000}, // 短章：单检测片段，不许 blended 降权
+		SegmentRiskFloor:       80,
+		ZhuqueCompositePercent: 29.9,
+		LatestDetectorProxy:    aigc.DetectorProxy{CompositePercent: 5.2},
+	})
+	if len(violations) != 1 {
+		t.Fatalf("短章高 segment floor 应产生一条违规, got %+v", violations)
+	}
+	if violations[0].Severity != "error" {
+		t.Fatalf("短章 80%% floor 应判 error 打回, got %+v", violations[0])
+	}
+	if violations[0].Actual != 80.0 {
+		t.Fatalf("短章应按 raw floor 80 判, got %+v", violations[0].Actual)
 	}
 }
 

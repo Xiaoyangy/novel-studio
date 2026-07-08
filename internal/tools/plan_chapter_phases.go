@@ -75,9 +75,18 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	}
 	delete(structure, "causal_simulation") // 细节只走 plan_details，避免两处口径漂移
 
+	// 保留已累积的 causal_simulation：planner 在重试/续跑时常再调一次 plan_structure，
+	// 若每次清空会把之前 plan_details 攒下的字段全丢，导致 MiniMax 卡流后进度归零死循环。
+	// 仅更新骨架，保住已有推演字段。
+	existingSim := map[string]any{}
+	if prev, err := t.store.Drafts.LoadChapterPlanPartial(chapter); err == nil && prev != nil {
+		if sim, ok := prev["causal_simulation"].(map[string]any); ok {
+			existingSim = sim
+		}
+	}
 	partial := map[string]any{
 		"structure":         structure,
-		"causal_simulation": map[string]any{},
+		"causal_simulation": existingSim,
 		"rewrite":           isRewritePlan,
 		"updated_at":        time.Now().Format(time.RFC3339),
 	}
@@ -116,10 +125,29 @@ func (t *PlanDetailsTool) ConcurrencySafe(_ json.RawMessage) bool { return false
 
 func (t *PlanDetailsTool) Schema() map[string]any {
 	return schema.Object(
-		schema.Property("chapter", schema.Int("章节号；必须已有 plan_structure 中间态")).Required(),
-		schema.Property("causal_simulation", causalSimulationSchema(false)).Required(),
+		// chapter / causal_simulation 均不设 schema-required：
+		// - chapter 缺省用 in-progress 章推断；
+		// - causal_simulation 缺省允许"仅 finalize"——把已累积的 partial 直接收口。
+		//   否则 planner 想 finalize 已攒好的字段时被迫每次重发整个 causal_simulation，
+		//   请求暴涨→MiniMax 卡流→永远收不了口（实测 05:51 死循环根因）。
+		//   Execute 里 maps.Copy(merged, nil) 是安全空操作，finalize 校验会精确列出真缺的字段。
+		schema.Property("chapter", schema.Int("章节号；缺省时用当前 in-progress 章。必须已有 plan_structure 中间态")),
+		schema.Property("causal_simulation", causalSimulationSchema(false)),
 		schema.Property("finalize", schema.Bool("最后一批传 true：合并全部批次后运行与 plan_chapter 相同的完整校验；校验失败会列出缺失字段，补批后可重试")),
 	)
+}
+
+// inProgressChapter 从进度推断当前正在写作的章号：优先 in_progress_chapter，
+// 回退到下一待写章。弱模型丢 chapter 参数时用它兜底。
+func (t *PlanDetailsTool) inProgressChapter() int {
+	progress, err := t.store.Progress.Load()
+	if err != nil || progress == nil {
+		return 0
+	}
+	if progress.InProgressChapter > 0 {
+		return progress.InProgressChapter
+	}
+	return progress.NextChapter()
 }
 
 func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
@@ -132,7 +160,10 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
 	if a.Chapter <= 0 {
-		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
+		a.Chapter = t.inProgressChapter()
+	}
+	if a.Chapter <= 0 {
+		return nil, fmt.Errorf("chapter 缺失且无法从进度推断当前章：请显式传 chapter: %w", errs.ErrToolArgs)
 	}
 	partial, err := t.store.Drafts.LoadChapterPlanPartial(a.Chapter)
 	if err != nil {

@@ -38,7 +38,7 @@ func TestBlockingMechanicalWarningsAndHighRiskDimensions(t *testing.T) {
 		Mechanical: payload,
 		Editor:     &domain.ReviewEntry{Chapter: 1, Verdict: "accept", Summary: "编辑通过"},
 	})
-	for _, want := range []string{"## 是否需要改写：是", "机械门禁：未通过", "AI味/节奏机械门禁未通过"} {
+	for _, want := range []string{"## 是否需要改写：是", "机械门禁：未通过", "AI味/节奏机械门禁未通过", "机械门禁 error｜高风险维度 42.00%｜结构指纹"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("unified markdown missing %q:\n%s", want, md)
 		}
@@ -52,19 +52,20 @@ func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8, // 干净短章：raw 与 blended 一致，EffectiveGatePercent ≤5 才允许仅告警通过
 			BlendedAIGCPercent: 4.8,
 			Dimensions: map[string]aigc.Dimension{
 				"perplexity_proxy": {
 					Name:  "困惑度代理",
-					Score: 48,
+					Score: 18,
 				},
 			},
 		},
 		RuleViolations: []rules.Violation{{
-			Rule:     "isolated_sentence_overuse",
+			Rule:     "fatigue_words",
 			Severity: rules.SeverityWarning,
-			Actual:   18,
-			Limit:    "4",
+			Actual:   2,
+			Limit:    1,
 		}},
 	}
 	voice := &domain.AIVoiceAnalysis{RedFlags: []domain.AIVoiceRedFlag{{
@@ -100,8 +101,108 @@ func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 			t.Fatalf("unified markdown missing %q:\n%s", want, md)
 		}
 	}
+	if strings.Contains(md, "本章可进入下一章") {
+		t.Fatalf("accepted warning-only gate must not be displayed as a complete pass:\n%s", md)
+	}
 	if strings.Contains(md, "进入返工队列") {
 		t.Fatalf("accepted warning-only gate should not force rewrite:\n%s", md)
+	}
+}
+
+func TestEditorAcceptWithOpenIssuesIsNotCompletePass(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			AIRatioPercent:     4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Summary:        "编辑认为结构可用",
+		Issues: []domain.ConsistencyIssue{{
+			Type:        "aesthetic",
+			Severity:    "error",
+			Description: "第42段总结腔仍需改成动作后果",
+		}},
+	}
+
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		Editor:     editor,
+	})
+	for _, want := range []string{"## 是否需要改写：可选", "Editor 复审：通过（有主要问题）", "主要问题仍未清空"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "主要问题已清空") {
+		t.Fatalf("open editor issues must not be displayed as cleared:\n%s", md)
+	}
+}
+
+func TestEditorAcceptWithWarningIssuesIsCompletePass(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			AIRatioPercent:     4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Summary:        "编辑认为结构可用，仅有后续建议",
+		Issues: []domain.ConsistencyIssue{{
+			Type:        "aesthetic",
+			Severity:    "warning",
+			Description: "后续可增加更私人、更具体的利益捆绑",
+		}},
+	}
+
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		Editor:     editor,
+	})
+	for _, want := range []string{"## 是否需要改写：否", "Editor 复审：通过", "主要问题已清空"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "后续可增加") || strings.Contains(md, "通过（有主要问题）") {
+		t.Fatalf("accepted warning-only editor advice must not be displayed as main issues:\n%s", md)
+	}
+}
+
+func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			Engine:             aigc.Engine,
+			AIGCPercent:        80,
+			AIRatioPercent:     80,
+			BlendedAIGCPercent: 4.8,
+			Stats:              aigc.Stats{Hanzi: 3000},
+			SegmentRiskFloor:   80,
+		},
+	}
+
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		Editor:     &domain.ReviewEntry{Chapter: 1, Verdict: "accept", Summary: "编辑通过"},
+	})
+	for _, want := range []string{"AI 占比：80.00%", "门禁采用值：80.00%", "融合值：4.80%", "朱雀分片风险下限：80.00%"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
 	}
 }
 
@@ -171,7 +272,10 @@ func TestUnifiedMarkdownStripsEditorRewriteSuggestions(t *testing.T) {
 	if strings.Contains(md, "## 改写建议") || strings.Contains(md, "改成另一句") {
 		t.Fatalf("unified markdown should strip editor rewrite suggestions:\n%s", md)
 	}
-	if !strings.Contains(md, "钩子偏弱") || !strings.Contains(md, "## 结论") {
+	if strings.Contains(md, "钩子偏弱") || strings.Contains(md, "## 主要问题（按严重度排序）\n1.") {
+		t.Fatalf("unified markdown should strip raw editor main-issue section when unified issues are empty:\n%s", md)
+	}
+	if !strings.Contains(md, "## 结论") {
 		t.Fatalf("unified markdown stripped too much:\n%s", md)
 	}
 }

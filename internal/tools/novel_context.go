@@ -38,6 +38,7 @@ type References struct {
 	WritingTechniquesDigest string // refer/写作技巧逐篇压缩后的工程写作规则
 	RAGWritingGuidelines    string // RAG 召回在小说写作中的使用边界与 trace 判读
 	WebReferenceGuidelines  string // 网络参考、最新资料和热梗进入正文的边界
+	LongformAIDetector      string // 3000 字整章 AI 检测与交付门禁口径
 }
 
 // ContextTool 组装当前章节所需上下文。
@@ -527,6 +528,7 @@ func (t *ContextTool) writerReferences(chapter int) map[string]string {
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)
+	add("longform_ai_detector", t.refs.LongformAIDetector)
 	if chapter <= 3 {
 		add("chapter_guide", t.refs.ChapterGuide)
 		add("dialogue_writing", t.refs.DialogueWriting)
@@ -560,6 +562,7 @@ func (t *ContextTool) architectReferences() map[string]string {
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)
+	add("longform_ai_detector", t.refs.LongformAIDetector)
 	return refs
 }
 

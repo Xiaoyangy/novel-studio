@@ -27,30 +27,35 @@ func zeroInitDynamics(project zeroInitProject) zeroInitCharacterDynamicsDoc {
 }
 
 func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.CharacterSimulationState {
-	counterpart := zeroCounterpartForCharacter(project, c)
 	role := zeroFirstNonEmpty(c.Role, "关键角色")
 	desc := zeroFirstNonEmpty(c.Description, "角色卡未写明细节，第一章必须用行动补证。")
 	arc := zeroFirstNonEmpty(c.Arc, "从静态设定进入可追踪的行动变化。")
 	actionBias := zeroActionBias(c)
+	// 主角是关系枢纽，应对每个关键配角都有契约；非主角对主角有契约。
+	// 旧逻辑只给主角找单个 FirstCast 对手，第一章大纲没点名匹配时主角契约为空。
+	counterparts := zeroCounterpartsForCharacter(project, c)
 	relationshipForces := []string{"当前章的主要牵引来自现场规则、资源压力和可见证据。"}
 	relationshipContracts := []domain.CharacterRelationshipContract{}
-	if strings.TrimSpace(counterpart) != "" {
-		relationshipForces = []string{fmt.Sprintf("与%s的信任、债务或信息差必须在行动中体现。", counterpart)}
-		relationshipContracts = []domain.CharacterRelationshipContract{{
-			Counterpart:       counterpart,
-			Trust:             "零章基线：未因正文事件新增信任。",
-			Debt:              "无新增债务，第一章若发生交换必须入账。",
-			Leverage:          "信息差和现场资源是主要筹码。",
-			Promise:           "不默认承诺长期协作。",
-			SharedSecret:      "无正文确认的共同秘密。",
-			BetrayalRecord:    "无正文确认的背叛记录。",
-			Dependency:        "第一章仅允许低强度依赖，不能瞬间绝对信任。",
-			FearSource:        "害怕失去目标、资源、身份或关系边界。",
-			AllianceStatus:    "未结盟/试探期。",
-			BetrayalThreshold: "对方要求无证据承诺、隐瞒关键代价或夺走核心资源。",
-			HelpCondition:     "必须有可见证据、明确交换或情感压力触发。",
-			SourceChapter:     0,
-		}}
+	if len(counterparts) > 0 {
+		relationshipForces = relationshipForces[:0]
+		for _, cp := range counterparts {
+			relationshipForces = append(relationshipForces, fmt.Sprintf("与%s的信任、债务或信息差必须在行动中体现。", cp))
+			relationshipContracts = append(relationshipContracts, domain.CharacterRelationshipContract{
+				Counterpart:       cp,
+				Trust:             "零章基线：未因正文事件新增信任。",
+				Debt:              "无新增债务，第一章若发生交换必须入账。",
+				Leverage:          "信息差和现场资源是主要筹码。",
+				Promise:           "不默认承诺长期协作。",
+				SharedSecret:      "无正文确认的共同秘密。",
+				BetrayalRecord:    "无正文确认的背叛记录。",
+				Dependency:        "第一章仅允许低强度依赖，不能瞬间绝对信任。",
+				FearSource:        "害怕失去目标、资源、身份或关系边界。",
+				AllianceStatus:    "未结盟/试探期。",
+				BetrayalThreshold: "对方要求无证据承诺、隐瞒关键代价或夺走核心资源。",
+				HelpCondition:     "必须有可见证据、明确交换或情感压力触发。",
+				SourceChapter:     0,
+			})
+		}
 	}
 	return domain.CharacterSimulationState{
 		Character:          c.Name,

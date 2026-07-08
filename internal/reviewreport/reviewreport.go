@@ -132,9 +132,9 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 	issues := unifiedIssues(in)
 	writeListOrDash(&b, issues)
 
-	if strings.TrimSpace(in.EditorMarkdown) != "" {
+	if strings.TrimSpace(in.EditorMarkdown) != "" && len(issues) > 0 {
 		b.WriteString("\n## Editor 原始报告摘录\n\n")
-		b.WriteString(truncateRunes(stripRewriteSuggestionsSection(strings.TrimSpace(in.EditorMarkdown)), 2200))
+		b.WriteString(truncateRunes(stripEditorAuxiliarySections(strings.TrimSpace(in.EditorMarkdown), len(issues) == 0), 2200))
 		b.WriteString("\n")
 	}
 
@@ -166,6 +166,9 @@ func editorStatus(entry *domain.ReviewEntry) string {
 	case "polish":
 		return "需打磨"
 	case "accept":
+		if hasEditorOpenIssues(entry) {
+			return "通过（有主要问题）"
+		}
 		return "通过"
 	default:
 		return entry.Verdict
@@ -192,6 +195,9 @@ func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoi
 			if mechanical != nil && len(mechanical.RuleViolations) > 0 {
 				return "可选"
 			}
+			if hasEditorOpenIssues(editor) {
+				return "可选"
+			}
 			return "否"
 		}
 	}
@@ -203,7 +209,7 @@ func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoi
 
 func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, editor *domain.ReviewEntry) string {
 	if AcceptedWarningOnlyGate(mechanical, aiVoice, editor) {
-		return "Editor 已通过，机械/AI voice 仅剩 warning 且 blended AI 值达标；本章可进入下一章，剩余警告沉淀为后续黄旗打磨。"
+		return "Editor 已通过，机械/AI voice/Editor 仅剩 warning；本章不能称为完全通过，交付前需清空主要问题，是否进入下一章由当前批处理策略决定。"
 	}
 	if HasBlockingAIMechanicalGate(mechanical) {
 		return "AI味/节奏机械门禁未通过，进入返工队列；Writer 必须先修复 AI 味、段首/短句、动作/物件响应或高风险维度后再提交复审。"
@@ -222,9 +228,12 @@ func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoic
 			return "Editor 判定打磨；Writer 应按建议优化后重新审核。"
 		case "accept":
 			if mechanical != nil && len(mechanical.RuleViolations) > 0 {
-				return "Editor 已通过，但机械门禁仍有警告；后续写作需吸收警告项。"
+				return "Editor 已通过，但机械门禁仍有警告；本章不能称为完全通过，交付前需清空主要问题。"
 			}
-			return "机械门禁与 Editor 复审均通过，可进入下一章。"
+			if hasEditorOpenIssues(editor) {
+				return "Editor 已通过，但主要问题仍未清空；交付前继续打磨到主要问题为空。"
+			}
+			return "机械门禁、AI voice 与 Editor 复审均通过，主要问题已清空，可进入下一章。"
 		}
 	}
 	return "机械门禁已生成，等待 Editor 章级复审。"
@@ -233,9 +242,9 @@ func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoic
 func unifiedDiagnosis(in UnifiedMarkdownInput) string {
 	if AcceptedWarningOnlyGate(in.Mechanical, in.AIVoice, in.Editor) {
 		if in.Editor != nil && strings.TrimSpace(in.Editor.Summary) != "" {
-			return strings.TrimSpace(in.Editor.Summary)
+			return strings.TrimSpace(in.Editor.Summary) + "；仍有主要问题未清空，非完全通过。"
 		}
-		return "Editor 已通过，机械/AI voice 仅剩可选打磨项。"
+		return "Editor 已通过，机械/AI voice/Editor 仅剩可选打磨项；仍有主要问题未清空，非完全通过。"
 	}
 	if HasBlockingAIMechanicalGate(in.Mechanical) {
 		return "AI味、段首/短句、动作/物件响应或高风险维度存在阻断项，当前章不能直接放行。"
@@ -247,6 +256,9 @@ func unifiedDiagnosis(in UnifiedMarkdownInput) string {
 		return "AI味红/黄旗存在阻断项，当前章不能直接放行。"
 	}
 	if in.Editor != nil && strings.TrimSpace(in.Editor.Summary) != "" {
+		if hasEditorOpenIssues(in.Editor) {
+			return strings.TrimSpace(in.Editor.Summary) + "；主要问题仍需清空后交付。"
+		}
 		return strings.TrimSpace(in.Editor.Summary)
 	}
 	if in.AIVoice != nil && strings.TrimSpace(in.AIVoice.Summary) != "" {
@@ -256,6 +268,34 @@ func unifiedDiagnosis(in UnifiedMarkdownInput) string {
 		return "机械门禁已完成，等待 Editor 给出结构和审美复审。"
 	}
 	return "尚未生成审核结果。"
+}
+
+func hasEditorOpenIssues(entry *domain.ReviewEntry) bool {
+	if entry == nil {
+		return false
+	}
+	for _, issue := range entry.Issues {
+		if isEditorOpenIssue(entry, issue) {
+			return true
+		}
+	}
+	return false
+}
+
+func isEditorOpenIssue(entry *domain.ReviewEntry, issue domain.ConsistencyIssue) bool {
+	if strings.TrimSpace(issue.Description) == "" &&
+		strings.TrimSpace(issue.Evidence) == "" &&
+		strings.TrimSpace(issue.Type) == "" {
+		return false
+	}
+	switch strings.TrimSpace(issue.Severity) {
+	case "critical", "error":
+		return true
+	case "warning":
+		return entry == nil || strings.TrimSpace(entry.Verdict) != "accept"
+	default:
+		return false
+	}
 }
 
 func editorTotalScore(entry *domain.ReviewEntry) string {
@@ -284,6 +324,7 @@ func renderMechanicalGate(b *strings.Builder, payload *MechanicalGatePayload) {
 	report := payload.AIGCReport
 	fmt.Fprintf(b, "- 引擎：%s\n", emptyDash(report.Engine))
 	fmt.Fprintf(b, "- AI 占比：%.2f%%\n", report.AIRatioPercent)
+	fmt.Fprintf(b, "- 门禁采用值：%.2f%%\n", aigc.EffectiveGatePercent(report))
 	fmt.Fprintf(b, "- 融合值：%.2f%%\n", report.BlendedAIGCPercent)
 	fmt.Fprintf(b, "- 朱雀分片风险下限：%.2f%%\n", report.SegmentRiskFloor)
 	fmt.Fprintf(b, "- 风险标签：%s｜置信度：%s\n", emptyDash(report.RiskLabel), emptyDash(report.Confidence))
@@ -291,8 +332,8 @@ func renderMechanicalGate(b *strings.Builder, payload *MechanicalGatePayload) {
 		b.WriteString("\n### 规则命中\n\n")
 		for _, violation := range payload.RuleViolations {
 			fmt.Fprintf(b, "- %s｜%s｜actual=%v", violation.Severity, violation.Rule, violation.Actual)
-			if violation.Limit != "" {
-				fmt.Fprintf(b, "｜limit=%s", violation.Limit)
+			if rules.HasLimitValue(violation.Limit) {
+				fmt.Fprintf(b, "｜limit=%s", rules.FormatLimitValue(violation.Limit))
 			}
 			if violation.Target != "" {
 				fmt.Fprintf(b, "｜target=%s", violation.Target)
@@ -367,6 +408,9 @@ func unifiedIssues(in UnifiedMarkdownInput) []string {
 			}
 			out = append(out, label)
 		}
+		for _, reason := range BlockingAIGCDimensionReasons(in.Mechanical.AIGCReport) {
+			out = append(out, "机械门禁 error｜"+reason)
+		}
 	}
 	if in.AIVoice != nil {
 		for _, flag := range in.AIVoice.RedFlags {
@@ -379,6 +423,9 @@ func unifiedIssues(in UnifiedMarkdownInput) []string {
 	}
 	if in.Editor != nil {
 		for _, issue := range in.Editor.Issues {
+			if !isEditorOpenIssue(in.Editor, issue) {
+				continue
+			}
 			label := fmt.Sprintf("Editor %s｜%s", issue.Severity, issue.Description)
 			if issue.Evidence != "" {
 				label += "｜证据：" + issue.Evidence
@@ -467,12 +514,24 @@ func truncateRunes(value string, limit int) string {
 }
 
 func stripRewriteSuggestionsSection(md string) string {
+	return stripMarkdownSection(md, "## 改写建议")
+}
+
+func stripEditorAuxiliarySections(md string, stripMainIssues bool) string {
+	md = stripRewriteSuggestionsSection(md)
+	if stripMainIssues {
+		md = stripMarkdownSection(md, "## 主要问题")
+	}
+	return strings.TrimSpace(md)
+}
+
+func stripMarkdownSection(md string, headingPrefix string) string {
 	lines := strings.Split(md, "\n")
 	out := make([]string, 0, len(lines))
 	skip := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## 改写建议") {
+		if strings.HasPrefix(trimmed, headingPrefix) {
 			skip = true
 			continue
 		}

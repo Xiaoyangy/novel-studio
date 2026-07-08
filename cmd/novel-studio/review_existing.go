@@ -101,6 +101,9 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	projDir := flags.ReviewExisting
 	if projDir == "" {
+		projDir = opts.Dir // --pipeline --dir <项目> 经此传入；此前漏用导致回落到 cwd/output/novel
+	}
+	if projDir == "" {
 		projDir, _ = os.Getwd()
 	}
 	if err := normalizeOutputDirForInvocation(&cfg, projDir); err != nil {
@@ -229,8 +232,12 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d RAG 评审沉淀失败：%v\n", chNum, err)
 		}
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d → %s\n", chNum, outPath)
-		// 提取前两行作为 summary
-		summaries = append(summaries, summarizeReview(chNum, review))
+		summaryReview := review
+		if unified, err := os.ReadFile(outPath); err == nil && strings.TrimSpace(string(unified)) != "" {
+			summaryReview = string(unified)
+		}
+		// 提取统一报告口径作为 summary，避免原始 Editor 可选建议覆盖最终门禁结论。
+		summaries = append(summaries, summarizeReview(chNum, summaryReview))
 		successCount++
 	}
 
@@ -303,17 +310,9 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 }
 
 func reviewExistingAIGCGatePercent(report aigc.Report) float64 {
-	if report.ContentIntegrityFloor > 0 {
-		return report.AIGCPercent
-	}
-	if report.SegmentRiskFloor >= 70 &&
-		report.BlendedAIGCPercent > 0 &&
-		report.BlendedAIGCPercent < 25 &&
-		report.LatestDetectorProxy.CompositePercent < 25 &&
-		report.ZhuqueCompositePercent < 35 {
-		return report.BlendedAIGCPercent
-	}
-	return report.AIGCPercent
+	// 与 commit_chapter 和统一审核降级策略共用同一口径：
+	// 短章按单检测片段/segment floor 真高判，不被 blended 平均值稀释放行。
+	return aigc.EffectiveGatePercent(report)
 }
 
 var reviewDimensionNames = []string{

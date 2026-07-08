@@ -9,6 +9,10 @@
 
 > An autonomous long-form novel engine in Go: from a one-line idea to a finished book — dynamic world simulation, multi-agent long-run loop, mechanical quality gates and local RAG.
 
+## 2026-07-08 工程交付
+
+本轮把《她的第二算法》第一章审核链路、DeepSeek v4 Pro 复审、3000 字整章 AI 检测口径、拦截与展示一致性、新建小说 brainstorm 流水线和架构图统一整理到一份交付文档：见 [docs/engineering-delivery-20260708.md](docs/engineering-delivery-20260708.md)。文档开头包含第一章进度图、AI 门禁占比图、审核前后对比和最新系统流程图。
+
 ## 动态推演：镜头外的世界不等主角
 
 绝大多数 AI 写作工具的世界是"舞台布景"：主角走到哪里，世界才在哪里生成，配角在下场后就停止存在。novel-studio 把世界当作**独立于镜头持续运转的模拟系统**，写作只是对这个系统的采样：
