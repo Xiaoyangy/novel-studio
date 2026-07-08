@@ -127,7 +127,7 @@ func TestBuildRevisionPlanKeepsLowRiskDeepSeekSuggestionsNonBlocking(t *testing.
 		"raw_body_only":true,
 		"verdict":"human_like",
 		"risk_level":"low",
-		"ai_probability_percent":3,
+		"ai_probability_percent":12,
 		"blocking":false,
 		"revision_plan":["可微调一处重复动作"],
 		"dialogue_fix_plan":["对白已自然，无需系统修改"],

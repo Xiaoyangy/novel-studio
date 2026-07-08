@@ -212,7 +212,7 @@ func addDeepSeekAIJudgeToPlan(
 		addRed(label)
 	} else if artifact.AIProbabilityPercent >= 15 || artifact.RiskLevel == "medium" {
 		addYellow(label)
-	} else if artifact.AIProbabilityPercent >= 10 && (len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0) {
+	} else if deepSeekJudgeHasActionableLowRiskPolish(artifact) {
 		addYellow("DeepSeek 裸正文 AI 判定给出非阻断修改方案，按黄旗择优打磨")
 	}
 	if strings.TrimSpace(artifact.ParseWarning) != "" {
@@ -233,6 +233,13 @@ func addDeepSeekAIJudgeToPlan(
 	for _, rule := range artifact.RAGRules {
 		addSuggestion("DeepSeek 后续规避规则: " + rule)
 	}
+}
+
+func deepSeekJudgeHasActionableLowRiskPolish(artifact deepseekAIJudgeArtifact) bool {
+	if artifact.AIProbabilityPercent < 10 || artifact.RiskLevel == "low" || artifact.Verdict == "human_like" {
+		return false
+	}
+	return len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0
 }
 
 func isNonActionableAcceptedIssue(entry domain.ReviewEntry, issue domain.ConsistencyIssue) bool {
