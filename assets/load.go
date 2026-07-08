@@ -28,7 +28,9 @@ type Prompts struct {
 	Coordinator      string
 	ArchitectShort   string
 	ArchitectLong    string
+	Brainstorm       string
 	Writer           string
+	Drafter          string
 	Editor           string
 	SimulationSource string
 	SimulationMerge  string
@@ -164,6 +166,7 @@ func loadReferences(style string) tools.References {
 		WritingTechniquesDigest: mustRead(referencesFS, "references/refer-writing-techniques-digest.md"),
 		RAGWritingGuidelines:    mustRead(referencesFS, "references/rag-writing-guidelines.md"),
 		WebReferenceGuidelines:  mustRead(referencesFS, "references/web-reference-guidelines.md"),
+		LongformAIDetector:      mustRead(referencesFS, "references/longform-ai-detector.md"),
 	}
 	if style != "" && style != "default" {
 		genreDir := "references/genres/" + style + "/"
@@ -182,7 +185,9 @@ func loadPrompts() Prompts {
 		Coordinator:      WithSimulationGuidance(mustRead(promptsFS, "prompts/coordinator.md"), "coordinator"),
 		ArchitectShort:   WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-short.md"), "architect"),
 		ArchitectLong:    WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
+		Brainstorm:       mustRead(promptsFS, "prompts/brainstorm.md"),
 		Writer:           WithSimulationGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
+		Drafter:          WithSimulationGuidance(mustRead(promptsFS, "prompts/drafter.md"), "writer"),
 		Editor:           WithSimulationGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
 		SimulationSource: mustRead(promptsFS, "prompts/simulation-source.md"),
 		SimulationMerge:  mustRead(promptsFS, "prompts/simulation-merge.md"),

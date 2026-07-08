@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -34,11 +36,14 @@ func (t *PlanChapterTool) ConcurrencySafe(_ json.RawMessage) bool { return false
 
 func (t *PlanChapterTool) Schema() map[string]any {
 	return schema.Object(
-		schema.Property("chapter", schema.Int("章节号")).Required(),
-		schema.Property("title", schema.String("章节标题")).Required(),
-		schema.Property("goal", schema.String("本章目标")).Required(),
-		schema.Property("conflict", schema.String("核心冲突")).Required(),
-		schema.Property("hook", schema.String("章末钩子")).Required(),
+		// 核心字段不设 schema-required：弱模型在超大 plan / 压缩后常丢字段触发
+		// harness InputValidationError 死循环；且已有两阶段 partial 时这些字段来自
+		// plan_structure。放行到 Execute 由 partial 合并或核心字段校验兜底。
+		schema.Property("chapter", schema.Int("章节号；缺省用当前 in-progress 章")),
+		schema.Property("title", schema.String("章节标题")),
+		schema.Property("goal", schema.String("本章目标")),
+		schema.Property("conflict", schema.String("核心冲突")),
+		schema.Property("hook", schema.String("章末钩子")),
 		schema.Property("emotion_arc", schema.String("情绪曲线")),
 		schema.Property("notes", schema.String("自由备忘；写明本章承接的历史数据、大纲、动态台账、资源/人物连续性、写法资产或 RAG 召回依据")),
 		schema.Property("required_beats", schema.Array("本章必须完成的推进项", schema.String(""))),
@@ -54,15 +59,100 @@ func (t *PlanChapterTool) Schema() map[string]any {
 }
 
 func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	// 与两阶段互通：若该章已有 plan_details 建立的中间态（partial），把本次 plan_chapter
+	// 的字段合并进 partial 后按同一口径 finalize。这样即使 planner 在单发/两阶段之间
+	// 混用（弱模型在压缩后常"忘了"自己在走两阶段），也能用已累积的字段收口，
+	// 而不是要求单发一次性给全导致"缺字段"+超大请求。
+	if merged, handled, err := t.tryFinalizeFromPartial(args); handled {
+		return merged, err
+	}
 	plan, err := decodeChapterPlanArgs(args)
 	if err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
+	}
+	if plan.Chapter <= 0 {
+		plan.Chapter = inProgressChapterOf(t.store)
+	}
+	// 无 partial 的单发路径：核心字段缺失时给明确指引（schema 已不强制）。
+	if strings.TrimSpace(plan.Goal) == "" || strings.TrimSpace(plan.Conflict) == "" || strings.TrimSpace(plan.Hook) == "" {
+		return nil, fmt.Errorf("plan_chapter 单发需给出 goal/conflict/hook（或改用两阶段 plan_structure+plan_details）: %w", errs.ErrToolArgs)
 	}
 	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, plan.Chapter)
 	if err != nil || skipped != nil {
 		return skipped, err
 	}
 	return finalizeChapterPlan(t.store, plan, isRewritePlan)
+}
+
+// inProgressChapterOf 从进度推断当前正在推演的章号（in_progress 优先，回退下一待写章）。
+func inProgressChapterOf(s *store.Store) int {
+	progress, err := s.Progress.Load()
+	if err != nil || progress == nil {
+		return 0
+	}
+	if progress.InProgressChapter > 0 {
+		return progress.InProgressChapter
+	}
+	return progress.NextChapter()
+}
+
+// tryFinalizeFromPartial 若目标章已有两阶段 partial，则把本次 plan_chapter 的字段并入
+// partial 后 finalize，实现单发/两阶段互通。返回 (结果, 是否已处理, err)。
+// 无 partial 时返回 handled=false，走普通单发路径。
+func (t *PlanChapterTool) tryFinalizeFromPartial(args json.RawMessage) (json.RawMessage, bool, error) {
+	var callMap map[string]any
+	if err := unmarshalToolArgs(args, &callMap); err != nil {
+		return nil, false, nil
+	}
+	chapter := intFromAny(callMap["chapter"])
+	if chapter <= 0 {
+		chapter = inProgressChapterOf(t.store)
+	}
+	if chapter <= 0 {
+		return nil, false, nil
+	}
+	partial, err := t.store.Drafts.LoadChapterPlanPartial(chapter)
+	if err != nil || partial == nil {
+		return nil, false, nil
+	}
+	structure, _ := partial["structure"].(map[string]any)
+	if structure == nil {
+		structure = map[string]any{}
+	}
+	for k, v := range callMap {
+		if k != "causal_simulation" {
+			structure[k] = v // 本次单发的顶层字段覆盖 partial 中的骨架字段
+		}
+	}
+	merged, _ := partial["causal_simulation"].(map[string]any)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	if cs, ok := callMap["causal_simulation"].(map[string]any); ok {
+		maps.Copy(merged, cs)
+	}
+	full := make(map[string]any, len(structure)+2)
+	maps.Copy(full, structure)
+	full["chapter"] = chapter
+	full["causal_simulation"] = merged
+	raw, err := json.Marshal(full)
+	if err != nil {
+		return nil, false, nil
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		return nil, true, fmt.Errorf("invalid merged plan: %w: %w", errs.ErrToolArgs, err)
+	}
+	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, chapter)
+	if err != nil || skipped != nil {
+		return skipped, true, err
+	}
+	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan)
+	if err != nil {
+		return nil, true, err
+	}
+	_ = t.store.Drafts.DeleteChapterPlanPartial(chapter)
+	return result, true, nil
 }
 
 // ensureChapterPlannable 跑规划前置门禁：重启口径、完成态、队列、弧扩展。
@@ -104,8 +194,19 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 		return nil, err
 	}
 
+	// plan 收尾一致性检查：计划是正文的唯一范围依据，收尾前先与本书既定事实对齐。
+	// hard 矛盾挡下 finalize 让 planner 修正；warn 疑点透出并落盘供 drafter 正文阶段核对。
+	hardIssues, warnIssues := checkChapterPlanConsistency(s, plan)
+	if len(hardIssues) > 0 {
+		return nil, fmt.Errorf("第 %d 章计划一致性检查未过，请修正后重新收尾计划：\n- %s: %w",
+			plan.Chapter, strings.Join(hardIssues, "\n- "), errs.ErrToolPrecondition)
+	}
+
 	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
 		return nil, fmt.Errorf("save chapter plan: %w", err)
+	}
+	if len(warnIssues) > 0 {
+		_ = s.Drafts.SaveChapterPlanConsistencyWarnings(plan.Chapter, warnIssues)
 	}
 	if !isRewritePlan {
 		if err := s.Progress.StartChapter(plan.Chapter); err != nil {
@@ -129,6 +230,10 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 		"chapter":   plan.Chapter,
 		"rewrite":   isRewritePlan,
 		"next_step": nextStep,
+	}
+	if len(warnIssues) > 0 {
+		result["consistency_warnings"] = warnIssues
+		result["consistency_warnings_usage"] = "计划一致性疑点：正文阶段 drafter 会在 check_consistency 里看到这些点并须逐一核对；如是笔误请现在就改计划"
 	}
 	// Task 078：plan 与事件编织表冲突时透出警告（软约束：改排要在 notes 说明理由）。
 	if weave, err := s.WorldSim.LoadEventWeave(); err == nil && weave != nil {
@@ -175,7 +280,18 @@ func decodeChapterPlanArgs(args json.RawMessage) (domain.ChapterPlan, error) {
 		CausalSimulation domain.ChapterCausalSimulation `json:"causal_simulation"`
 	}
 	if err := unmarshalToolArgs(args, &a); err != nil {
-		return domain.ChapterPlan{}, err
+		// 形状回退：LLM 把数组写成对象/标量时按目标类型纠正后重试（causal_beats、
+		// risk_signals 等 []T 字段的高频失误），仍失败才把原始错误交回让 LLM 自修。
+		cleaned := json.RawMessage(stripJSONWrapping(string(args)))
+		if coerced, changed := coerceJSONShape(cleaned, reflect.TypeOf(a)); changed {
+			if err2 := json.Unmarshal(coerced, &a); err2 != nil {
+				// 形状纠正后仍失败：回传纠正后的错误（更准确地指向真正未修复的字段），
+				// 而不是纠正前的首个错误，避免把 LLM 引向已被自动修复的字段。
+				return domain.ChapterPlan{}, err2
+			}
+		} else {
+			return domain.ChapterPlan{}, err
+		}
 	}
 
 	return domain.ChapterPlan{
@@ -300,7 +416,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(hasSource("prewrite_storycraft_plan", "storycraft"), "causal_simulation.context_sources(prewrite_storycraft_plan)")
 		require(hasSource("world_background_plan", "world_background_layers"), "causal_simulation.context_sources(world_background_plan)")
 		require(hasSource("dialogue_writing", "dialogue"), "causal_simulation.context_sources(dialogue_writing)")
-		require(hasSource("web_reference", "web_search", "网络"), "causal_simulation.context_sources(web_reference/web_search)")
+		require(hasSource("web_reference", "web_search", "web_research", "网络"), "causal_simulation.context_sources(web_reference/web_research)")
 	}
 	if plan.Chapter == 1 && !rewrite {
 		require(hasLongformOpeningDesign(sim.LongformOpening), "causal_simulation.longform_opening")
@@ -1262,7 +1378,7 @@ func causalSimulationSchema(strict bool) map[string]any {
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、审计证据链、升级爽点等")),
 		schema.Property("chapter_function", schema.String("本章在全书/卷/弧中的功能；第一章必须写明开局承诺、核心问题和主角初始选择")),
 		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
-		req(schema.Property("writing_norms_applied", schema.Array("本章写作规范执行计划：必须覆盖 writing_engine/user_rules/anti_ai_tone/human_feel_craft/writing_techniques_digest/web_reference_guidelines 中实际可见且相关的规则", writingNormApplication))),
+		req(schema.Property("writing_norms_applied", schema.Array("本章写作规范执行计划：必须覆盖 writing_engine/user_rules/anti_ai_tone/human_feel_craft/writing_techniques_digest/web_reference_guidelines/longform_ai_detector 中实际可见且相关的规则", writingNormApplication))),
 		req(schema.Property("anti_ai_execution_plan", antiAIExecutionPlan)),
 		req(schema.Property("external_reference_plan", schema.Array("外部资料、网络检索、项目 web_reference_brief 和 RAG 召回如何进入正文；不用网络资料也要说明不用原因", externalReferencePlan))),
 		req(schema.Property("trend_language_plan", schema.Array("热梗/流行语的受控使用计划；不用时写 item=none 并说明禁用原因", trendLanguagePlan))),

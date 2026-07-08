@@ -136,12 +136,20 @@ type Config struct {
 	// 创作参数
 	Style string `json:"style,omitempty"`
 
-	// ContextWindow 上下文压缩使用的窗口大小。留空（0）时按模型名自动解析：
-	// registry 命中用模型真实窗口，未命中兜底 DefaultContextWindow。
-	// 显式配置则优先生效——用于给 registry 查不到的自定义模型指定真实窗口，
-	// 或把大窗口模型钉在更小的值上提前触发压缩（1M 名义窗口在 200k+ 通常已注意力衰退）。
+	// ContextWindow 上下文压缩使用的全局窗口大小（一刀切套所有模型）。留空（0）时
+	// 按模型名自动解析：ContextWindows[model] > registry > DefaultContextWindow。
 	// 仅影响压缩阈值，不改变 LLM API 实际请求长度；配置值由用户自负其责。
+	//
+	// 注意：一刀切窗口会让"能力强、想吃大上下文"的模型与"大上下文会卡流/衰退"的
+	// 模型被迫共用一个值，牺牲前者质量或后者稳定性。多模型场景优先用 ContextWindows
+	// 按模型分别指定，而不是设这个全局值。
 	ContextWindow int `json:"context_window,omitempty"`
+
+	// ContextWindows 按模型名分别指定压缩窗口，优先级高于全局 ContextWindow。
+	// 用于多模型（如 GPT 跑推演/渲染 + MiniMax review）时，给每个模型它真正合适的
+	// 窗口——capable 模型给大窗口（避免过早压缩丢上下文、伤质量），易卡流模型给
+	// 稳妥窗口。key 是配置里写的模型名（原样匹配，含 [1M] 后缀）。
+	ContextWindows map[string]int `json:"context_windows,omitempty"`
 
 	// Budget 单本书的成本预算政策；book_usd > 0 才启用。
 	Budget BudgetConfig `json:"budget,omitzero"`
@@ -443,6 +451,10 @@ const (
 //
 // 注意：返回值仅用于压缩阈值计算，不会缩小 LLM API 真实可发请求长度。
 func (c Config) ResolveContextWindow(modelName string) (int, ContextWindowSource) {
+	// 按模型分别指定优先级最高：多模型场景各取所需窗口，不被全局值一刀切。
+	if w, ok := c.ContextWindows[modelName]; ok && w > 0 {
+		return w, CtxWindowConfig
+	}
 	if c.ContextWindow > 0 {
 		return c.ContextWindow, CtxWindowConfig
 	}

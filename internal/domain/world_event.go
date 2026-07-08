@@ -20,7 +20,8 @@ type WorldEvent struct {
 	VisibilityChapter   int      `json:"visibility_chapter"`        // 最早进入主角感知的章号
 	VisibilityPath      string   `json:"visibility_path,omitempty"` // 谣言/信使/亲见/官报
 	ForeshadowCandidate bool     `json:"foreshadow_candidate,omitempty"`
-	Tier                string   `json:"tier,omitempty"` // supporting / background
+	Tier                string   `json:"tier,omitempty"`      // supporting / background
+	StoryDay            float64  `json:"story_day,omitempty"` // 事件发生的故事内天数坐标（按 story_calendar 由 chapter 换算，save 时确定性回填）
 }
 
 // Validate 校验事件必填字段与因果次序（信息不能早于事件发生）。
@@ -31,8 +32,10 @@ func (e WorldEvent) Validate() error {
 	if len(e.Actors) == 0 {
 		return fmt.Errorf("world_event %q 缺少 actors", e.Summary)
 	}
-	if e.Chapter <= 0 {
-		return fmt.Errorf("world_event %q 的 chapter 必须 > 0", e.Summary)
+	// chapter=0 表示开局前（pre-story）事件：初始 world_tick 建立离屏信息流时使用，
+	// 这类事件在故事开始前已发生、随剧情推进才浮出。负数才非法。
+	if e.Chapter < 0 {
+		return fmt.Errorf("world_event %q 的 chapter 不能为负", e.Summary)
 	}
 	if e.VisibilityChapter < e.Chapter {
 		return fmt.Errorf("world_event %q 的 visibility_chapter(%d) 不能早于事件发生章(%d)", e.Summary, e.VisibilityChapter, e.Chapter)

@@ -47,9 +47,15 @@ func TestRoute_NonWritingPhasesDelegateToLLM(t *testing.T) {
 func TestRoute_PendingRewritesFirst(t *testing.T) {
 	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
 	p.PendingRewrites = []int{3, 5}
-	got := Route(State{Progress: p})
-	if got == nil || got.Agent != "writer" {
-		t.Fatalf("expected writer for rewrites, got %+v", got)
+	// 阶段拆分：计划未按审阅重推演 → planner 先重做计划。
+	got := Route(State{Progress: p, NextActionPlanReady: false})
+	if got == nil || got.Agent != "writer" || got.Chapter != 3 {
+		t.Fatalf("expected planner(writer) re-plan for rewrite ch3, got %+v", got)
+	}
+	// 计划就绪 → drafter 渲染重写。
+	got = Route(State{Progress: p, NextActionPlanReady: true})
+	if got == nil || got.Agent != "drafter" {
+		t.Fatalf("expected drafter for rewrites, got %+v", got)
 	}
 	if got.Task != "重写第 3 章" {
 		t.Errorf("expected '重写第 3 章', got %q", got.Task)
@@ -62,9 +68,9 @@ func TestRoute_PendingRewritesFirst(t *testing.T) {
 func TestRoute_PendingPolishingVerb(t *testing.T) {
 	p := writingProgress([]int{1}, domain.FlowPolishing)
 	p.PendingRewrites = []int{2}
-	got := Route(State{Progress: p})
-	if got == nil || got.Task != "打磨第 2 章" {
-		t.Fatalf("expected polish verb, got %+v", got)
+	got := Route(State{Progress: p, NextActionPlanReady: true})
+	if got == nil || got.Agent != "drafter" || got.Task != "打磨第 2 章" {
+		t.Fatalf("expected drafter polish verb, got %+v", got)
 	}
 }
 
@@ -217,9 +223,15 @@ func TestRoute_NeedsNewVolume(t *testing.T) {
 func TestRoute_NormalContinue(t *testing.T) {
 	p := writingProgress([]int{1, 2, 3}, domain.FlowWriting)
 	p.TotalChapters = 20
-	got := Route(State{Progress: p, LastCompleted: 3, HasChapterReview: true})
-	if got == nil || got.Agent != "writer" {
-		t.Fatalf("expected writer for next chapter, got %+v", got)
+	// 阶段拆分：计划未落盘 → planner 先推演。
+	got := Route(State{Progress: p, LastCompleted: 3, HasChapterReview: true, NextActionPlanReady: false})
+	if got == nil || got.Agent != "writer" || got.Chapter != 4 {
+		t.Fatalf("expected planner(writer) for ch4, got %+v", got)
+	}
+	// 计划就绪 → drafter 渲染正文。
+	got = Route(State{Progress: p, LastCompleted: 3, HasChapterReview: true, NextActionPlanReady: true})
+	if got == nil || got.Agent != "drafter" {
+		t.Fatalf("expected drafter for next chapter, got %+v", got)
 	}
 	if got.Task != "写第 4 章" {
 		t.Errorf("expected '写第 4 章', got %q", got.Task)
@@ -469,7 +481,8 @@ func TestDispatcher_SteersAfterSuccessfulBoundaryToolBeforeNextModelCall(t *test
 		t.Fatalf("expected tool result immediately before Host instruction, got %q", result.Role)
 	}
 	got := secondReq.Messages[len(secondReq.Messages)-1].TextContent()
-	for _, want := range []string{"[Host 下达指令]", "subagent(writer", "写第 1 章"} {
+	// 阶段拆分：第 1 章无计划 → Host 先派 planner(writer) 做写前推演。
+	for _, want := range []string{"[Host 下达指令]", "subagent(writer", "第 1 章"} {
 		if !contains(got, want) {
 			t.Fatalf("Host instruction missing %q: %s", want, got)
 		}

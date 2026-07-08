@@ -130,16 +130,28 @@ func TestGhostcityNoStaleSources(t *testing.T) {
 	stale := 0
 	for _, c := range state.Chunks {
 		sp := c.SourcePath
-		var path string
+		var candidates []string
 		switch {
 		case strings.HasPrefix(sp, "deconstruction-library/"):
-			path = "../../" + sp
+			candidates = append(candidates, "../../"+sp)
 		case strings.HasPrefix(sp, "data/runs/"):
-			path = "../../" + sp
+			candidates = append(candidates, "../../"+sp)
 		default:
-			path = "../../data/runs/鬼城/" + sp
+			// RAG source_path 对本书事实层通常相对 output/novel；旧索引里也可能有
+			// 相对 run 根的路径，两个都检查，避免把健康 chunk 误判为陈旧。
+			candidates = append(candidates,
+				"../../data/runs/鬼城/output/novel/"+sp,
+				"../../data/runs/鬼城/"+sp,
+			)
 		}
-		if _, err := os.Stat(path); err != nil {
+		found := false
+		for _, path := range candidates {
+			if _, err := os.Stat(path); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
 			stale++
 			if stale <= 5 {
 				t.Errorf("陈旧 chunk：%s（源文件不存在）", sp)

@@ -91,6 +91,15 @@ IMPOSSIBLE_SHADOW_GEOMETRY_RE = re.compile(r"肩膀以下[^。！？!?；;\n]{0,
 CAT_EYE_IMPOSSIBLE_READ_RE = re.compile(r"(?:猫眼|门里|1704)[^。！？!?；;\n]{0,70}(?:白纸背面|背面翻起一角)[^。！？!?；;\n]{0,45}(?:代缴|双方确认|需双方确认)")
 FORM_IMAGE_MISMATCH_RE = re.compile(r"四栏[^。！？!?；;\n]{0,30}像临时盖上去的章")
 DIALOGUE_RE = re.compile(r"[“\"]([^”\"]{2,160})[”\"]")
+TEMPLATED_DIALOGUE_NAME_CALL_IN_TEXT_RE = re.compile(r"[“\"「][\u4e00-\u9fff]{2,4}[。！？!?]?[”\"」][^。！？!?；;\n]{0,12}叫[他她]")
+TEMPLATED_DIALOGUE_MICRO_BEAT_RE = re.compile(
+    r"(?:叫[他她]|停住|停下|抬眼|抬头|看了[^。！？!?；;\n]{0,8}一眼|"
+    r"把[^。！？!?；;\n]{0,8}(?:停住|放下|推过来|推过去)|模板[^。！？!?；;\n]{0,12}推|"
+    r"笔[^。！？!?；;\n]{0,12}(?:停|顿))"
+)
+TEMPLATED_DIALOGUE_PROCEDURE_RE = re.compile(
+    r"(?:口径|字段|来源|管理建议|模板|确认|范围|流程|记录|说明|权限|演示|样本|审计|日志|保全|导出)"
+)
 PANIC_DIALOGUE_MARKERS = [
     "我交",
     "借我",
@@ -823,6 +832,37 @@ def cadence_issues(raw: str) -> list[dict]:
     serial_issue = serial_device_issue(raw)
     if serial_issue:
         issues.append(serial_issue)
+    templated_chains: list[str] = []
+    index = 0
+    while index < len(paras):
+        window_paras = paras[index : index + 4]
+        window = "\n".join(window_paras)
+        quotes = [match.group(1).strip() for match in DIALOGUE_RE.finditer(window)]
+        if (
+            len(quotes) >= 3
+            and TEMPLATED_DIALOGUE_NAME_CALL_IN_TEXT_RE.search(window)
+            and TEMPLATED_DIALOGUE_MICRO_BEAT_RE.search(window)
+            and TEMPLATED_DIALOGUE_PROCEDURE_RE.search(window)
+        ):
+            templated_chains.append(window)
+            index += 4
+            continue
+        index += 1
+    if templated_chains:
+        first_target = templated_chains[0].strip()
+        first_line = first_target.splitlines()[0].strip()
+        first_index = raw.find(first_line)
+        issues.append(
+            {
+                "rule": "templated_dialogue_chain",
+                "severity": "warning",
+                "line": line_number(raw, first_index if first_index >= 0 else 0),
+                "limit": 0,
+                "actual": len(templated_chains),
+                "target": " / ".join(chain.strip()[:70] for chain in templated_chains[:2]),
+                "evidence": "点名、停笔/抬眼、补口径/查字段、第三人追问的三拍对白链命中即改；它会让职场戏像流程脚本",
+            }
+        )
     return issues
 
 

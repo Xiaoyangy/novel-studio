@@ -739,6 +739,52 @@ func zeroCounterpartForCharacter(project zeroInitProject, c domain.Character) st
 	return ""
 }
 
+// zeroCounterpartsForCharacter 返回角色的零章关系契约对手集：
+//   - 非主角：契约对手是主角（单条）。
+//   - 主角：对手是关键配角集合——优先 FirstCast（第一章点名出场），
+//     再补 core/important 层配角，至多 5 个。主角是关系枢纽，不应因第一章
+//     大纲未点名配角而契约为空（旧单对手逻辑的缺陷）。
+func zeroCounterpartsForCharacter(project zeroInitProject, c domain.Character) []string {
+	if !zeroIsProtagonist(c) {
+		if cp := strings.TrimSpace(zeroProtagonist(project.Characters).Name); cp != "" {
+			return []string{cp}
+		}
+		return nil
+	}
+	const maxProtagonistContracts = 5
+	self := strings.TrimSpace(c.Name)
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == self || seen[name] || len(out) >= maxProtagonistContracts {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	// 第一优先：第一章点名出场的配角。
+	for _, other := range project.Characters {
+		if zeroIsProtagonist(other) {
+			continue
+		}
+		if project.FirstCast[strings.TrimSpace(other.Name)] {
+			add(other.Name)
+		}
+	}
+	// 补充：core/important 层配角（tier 空按 important 口径）。
+	for _, other := range project.Characters {
+		if zeroIsProtagonist(other) {
+			continue
+		}
+		switch strings.TrimSpace(other.Tier) {
+		case "core", "important", "":
+			add(other.Name)
+		}
+	}
+	return out
+}
+
 func zeroOpeningPressureName(project zeroInitProject) string {
 	text := zeroOutlineEntryText(project.FirstChapter)
 	switch {

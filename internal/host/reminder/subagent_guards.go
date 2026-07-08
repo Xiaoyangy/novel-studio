@@ -73,12 +73,22 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 	}
 }
 
-// NewWriterStopGuard 要求 writer 本轮至少产生一次成功的 commit_chapter。
+// NewWriterStopGuard 要求 writer（正文渲染阶段/drafter）本轮至少产生一次 commit_chapter。
 // HARNESS-METADATA: name=writer_stop_guard class=model_gap review=2027-Q1
 func NewWriterStopGuard(st *store.Store) agentcore.StopGuard {
 	return newCheckpointDeltaGuard(st, "writer",
 		[]string{"commit"},
 		"你必须调用 commit_chapter 提交本章后才能结束。draft_chapter 只是保存草稿，不算完成。",
+	)
+}
+
+// NewPlannerStopGuard 要求推演阶段（planner）本轮至少落盘一次章节计划（plan checkpoint）。
+// 阶段拆分后 planner 不 commit，收敛信号是计划落盘，不是正文提交。
+// HARNESS-METADATA: name=planner_stop_guard class=model_gap review=2027-Q1
+func NewPlannerStopGuard(st *store.Store) agentcore.StopGuard {
+	return newCheckpointDeltaGuard(st, "planner",
+		[]string{"plan"},
+		"你必须调用 plan_chapter（或两阶段 plan_structure + plan_details finalize=true）把本章计划落盘后才能结束。只输出计划文字等于没落盘。",
 	)
 }
 
@@ -89,8 +99,12 @@ func NewArchitectStopGuard(st *store.Store) agentcore.StopGuard {
 		[]string{
 			"premise", "outline", "layered_outline", "characters", "world_rules", "book_world",
 			"expand_arc", "append_volume", "update_compass", "complete_book",
+			// 开局/弧末 world_tick 也是 architect 的合法收尾产物：被派去只跑 save_world_tick
+			// （第 1 章前的离屏世界推演、或弧末推进）时，落盘 world_tick 即算完成，否则
+			// stop_guard 会因"没产出 foundation 类 checkpoint"连拦到升级终止（虽能重派恢复但浪费轮次）。
+			"world_tick",
 		},
-		"你必须调用 save_foundation 将产出落盘后才能结束。只输出 Markdown/JSON 文字等于丢失。",
+		"你必须调用 save_foundation / save_world_tick 将产出落盘后才能结束。只输出 Markdown/JSON 文字等于丢失。",
 	)
 }
 

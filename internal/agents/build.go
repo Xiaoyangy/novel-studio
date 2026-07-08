@@ -35,7 +35,57 @@ func agentToRole(name string) string {
 	if strings.HasPrefix(name, "architect_") {
 		return "architect"
 	}
+	if name == "drafter" {
+		// 渲染阶段与推演阶段共用 writer 角色的模型/推理强度配置。
+		return "writer"
+	}
 	return name
+}
+
+// plannerShouldStopAfterToolResult 推演阶段收敛信号：章节计划落盘（plan_chapter
+// 成功或 plan_details finalize 通过，均返回 planned=true）即结束本轮；plan_details
+// 分批中（staged）不停。
+func plannerShouldStopAfterToolResult(toolName string, result json.RawMessage) bool {
+	if toolName != "plan_chapter" && toolName != "plan_details" {
+		return false
+	}
+	var r struct {
+		Planned bool   `json:"planned"`
+		Staged  string `json:"staged"`
+	}
+	_ = json.Unmarshal(result, &r)
+	return r.Planned && r.Staged == ""
+}
+
+type writingContextProfile struct {
+	keepRecentTokens        int
+	toolKeepRecent          int
+	storeKeepRecentTokens   int
+	storeSummaryTokenBudget int
+	lightTrim               corecontext.LightTrimConfig
+	commitOnProject         bool
+}
+
+func writingContextProfileFor(agentTag string) writingContextProfile {
+	profile := writingContextProfile{
+		keepRecentTokens:      32000,
+		toolKeepRecent:        8,
+		storeKeepRecentTokens: 32000,
+	}
+	if agentTag == "drafter" {
+		profile.keepRecentTokens = 12000
+		profile.toolKeepRecent = 2
+		profile.storeKeepRecentTokens = 12000
+		profile.storeSummaryTokenBudget = 5000
+		profile.lightTrim = corecontext.LightTrimConfig{
+			KeepRecent:    2,
+			TextThreshold: 2200,
+			PreserveHead:  800,
+			PreserveTail:  500,
+		}
+		profile.commitOnProject = true
+	}
+	return profile
 }
 
 // subagentMaxRetries 给所有 SubAgentConfig 与 Coordinator 统一的 LLM retry 上限。
@@ -139,8 +189,11 @@ func BuildCoordinator(
 	readChapter := tools.NewReadChapterTool(store)
 	askUser := tools.NewAskUserTool()
 
-	// 设计时刻的手法库检索：字段绑定确定性配方，产出立刻实例化为本书事实。
+	// 手法库检索（craft_recall）与联网研究（web_research）都是共享实例：
+	// 设计时刻（architect）与写作/返工时刻（writer）都能动态调，产出带来源标记，
+	// 不与本书事实层混淆。web_research 结果登记 meta/web_research_log.md 可审计。
 	craftRecall := tools.NewCraftRecallTool(store)
+	webResearch := tools.NewWebResearchTool(store)
 	architectTools := []agentcore.Tool{
 		contextTool,
 		saveFoundation,
@@ -148,16 +201,29 @@ func BuildCoordinator(
 		// 世界推演（离屏世界 tick）：Architect 在弧边界以 GM 身份裁决镜头外世界变化。
 		// 短篇/不 tick 的项目不调用即无副作用。
 		tools.NewSaveWorldTickTool(store),
+		webResearch,
 	}
+	// 阶段拆分：推演（planner=writer）与正文渲染（drafter）各自独立上下文，
+	// 每阶段只拿本阶段所需上下文——planner 吃全量规划上下文产出完整计划落盘，
+	// drafter 起一个干净会话只读已定稿计划 + 精要写法上下文渲染正文。
+	// 好处：drafter 不背规划对话的历史 token，长章不再撑爆窗口、注意力集中在正文。
 	writerTools := []agentcore.Tool{
 		contextTool,
 		readChapter,
 		craftRecall,
+		// 联网研究：推演时按本章需要动态补题材现实支架、生活/职业/平台细节、描写素材。
+		webResearch,
 		tools.NewPlanChapterTool(store),
 		// 两阶段规划：plan_structure 先落核心骨架，plan_details 分批补 causal_simulation；
 		// 与单发 plan_chapter 同一校验口径，长章/大 plan 用它降低单次输出压力。
 		tools.NewPlanStructureTool(store),
 		tools.NewPlanDetailsTool(store),
+	}
+	drafterTools := []agentcore.Tool{
+		contextTool,
+		readChapter,
+		craftRecall,
+		webResearch,
 		tools.NewDraftChapterTool(store),
 		tools.NewEditChapterTool(store),
 		tools.NewCheckConsistencyTool(store),
@@ -267,40 +333,33 @@ func BuildCoordinator(
 	restore := &ctxpack.WriterRestorePack{}
 	restore.Refresh(store)
 
-	writer := subagent.Config{
-		Name:         "writer",
-		Description:  "创作者：自主完成一章的构思、写作、自审和提交",
-		Model:        writerModel,
-		SystemPrompt: writerPrompt,
-		Tools:        writerTools,
-		// writer 的收敛依赖 StopAfterTools(commit_chapter)+StopGuard+预算护栏，而不是回合数；
-		// 30 的旧上限会把长章（plan 拆阶段+多轮自审+返修）在半途砍断，默认放到 300。
-		MaxTurns:           cfg.ResolveMaxTurns("writer", 300),
-		MaxRetries:         subagentMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
-		ToolsAreIdempotent: true,
-		StopAfterTools:     []string{"commit_chapter"},
-		OnMessage:          onMsg,
-		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
-			return reminder.NewWriterStopGuard(store)
-		},
-		ContextManagerFactory: func(model agentcore.ChatModel) agentcore.ContextManager {
-			// 每次 subagent(writer) 调用都会重建，从当前 runModel 读取最新模型名。
-			// /model 切换 writer 后下一章自动用新窗口。
+	// writerContextFactory 推演/渲染两阶段共用的上下文管理器工厂（同模型同窗口）。
+	writerContextFactory := func(agentTag string) func(agentcore.ChatModel) agentcore.ContextManager {
+		return func(model agentcore.ChatModel) agentcore.ContextManager {
 			window, _ := cfg.ResolveContextWindow(bootstrap.ModelName(model))
+			profile := writingContextProfileFor(agentTag)
 			return newContextManager(contextManagerConfig{
 				Model:            model,
 				ContextWindow:    window,
 				ReserveTokens:    bootstrap.CompactReserveTokens(window),
-				KeepRecentTokens: 20000,
-				Agent:            "writer",
+				KeepRecentTokens: profile.keepRecentTokens,
+				Agent:            agentTag,
+				CommitOnProject:  profile.commitOnProject,
 				ToolMicrocompact: &corecontext.ToolResultMicrocompactConfig{
 					IdleThreshold: 5 * time.Minute,
+					// 保护承载性工具结果（novel_context 的世界/角色/计划注入等）不被 microcompact
+					// 硬删——它是推演/渲染的事实基础。需要缩容时留给 store_summary / full_summary
+					// 做"摘要而非丢弃"，保住信息本体不伤质量；可再取的结果（read_chapter/
+					// check_consistency/craft_recall 等）才允许激进重写。
+					Classifier: loadBearingToolClassifier,
+					KeepRecent: profile.toolKeepRecent,
 				},
+				LightTrim: &profile.lightTrim,
 				ExtraStrategies: []corecontext.Strategy{
 					ctxpack.NewStoreSummaryCompact(ctxpack.StoreSummaryCompactConfig{
-						Store:            store,
-						KeepRecentTokens: 20000,
+						Store:              store,
+						KeepRecentTokens:   profile.storeKeepRecentTokens,
+						SummaryTokenBudget: profile.storeSummaryTokenBudget,
 					}),
 				},
 				Summary: &corecontext.FullSummaryConfig{
@@ -311,7 +370,47 @@ func BuildCoordinator(
 					TurnPrefixPrompt:    ctxpack.WriterTurnPrefixPrompt,
 				},
 			})
+		}
+	}
+
+	// 推演阶段（planner，沿用 name="writer" 保持流程/事件兼容）：只做写前推演，
+	// 计划落盘（planned=true）即停，不写正文——drafter 会在干净上下文里渲染。
+	writer := subagent.Config{
+		Name:                "writer",
+		Description:         "章节推演师：把大纲/世界/角色推演成完整的写前计划并落盘",
+		Model:               writerModel,
+		SystemPrompt:        writerPrompt,
+		Tools:               writerTools,
+		MaxTurns:            cfg.ResolveMaxTurns("writer", 300),
+		MaxRetries:          subagentMaxRetries,
+		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
+		ToolsAreIdempotent:  true,
+		StopAfterToolResult: plannerShouldStopAfterToolResult,
+		OnMessage:           onMsg,
+		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
+			return reminder.NewPlannerStopGuard(store)
 		},
+		ContextManagerFactory: writerContextFactory("writer"),
+	}
+
+	// 正文渲染阶段（drafter）：起干净会话，只读已定稿计划 + 精要写法上下文，
+	// 把推演渲染成正文并 commit——不背规划对话历史，长章不撑爆窗口。
+	drafter := subagent.Config{
+		Name:               "drafter",
+		Description:        "正文渲染者：基于已定稿的章节计划写出正文、自审并提交",
+		Model:              writerModel,
+		SystemPrompt:       bundle.Prompts.Drafter,
+		Tools:              drafterTools,
+		MaxTurns:           cfg.ResolveMaxTurns("writer", 300),
+		MaxRetries:         subagentMaxRetries,
+		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
+		ToolsAreIdempotent: true,
+		StopAfterTools:     []string{"commit_chapter"},
+		OnMessage:          onMsg,
+		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
+			return reminder.NewWriterStopGuard(store)
+		},
+		ContextManagerFactory: writerContextFactory("drafter"),
 	}
 
 	editor := subagent.Config{
@@ -337,7 +436,7 @@ func BuildCoordinator(
 		},
 	}
 
-	subagentTool := subagent.New(architectShort, architectLong, writer, editor)
+	subagentTool := subagent.New(architectShort, architectLong, writer, drafter, editor)
 
 	coordinatorEngine := newContextManager(contextManagerConfig{
 		Model:            coordinatorModel,
@@ -346,6 +445,11 @@ func BuildCoordinator(
 		KeepRecentTokens: 30000,
 		Agent:            "coordinator",
 		CommitOnProject:  true,
+		// 同样保护 novel_context 承载性结果不被硬删（Coordinator 裁定也依赖它）。
+		ToolMicrocompact: &corecontext.ToolResultMicrocompactConfig{
+			Classifier: loadBearingToolClassifier,
+			KeepRecent: 8,
+		},
 	})
 
 	agent := agentcore.NewAgent(
@@ -366,6 +470,7 @@ func BuildCoordinator(
 			completePhaseGate(store),
 			writerExpandedChapterGate(store),
 			writerZeroInitGate(store),
+			expandArcWorldTickGate(store),
 		)),
 	)
 	// Coordinator 推理强度：无条件应用解析结果。未配置时为空（不发 thinking，用 provider
@@ -387,6 +492,10 @@ func BuildCoordinator(
 		case "writer", "editor":
 			level, _ = ResolveThinkingForModel(models.ForRole(role), level)
 			subagentTool.SetThinkingLevel(role, level)
+			if role == "writer" {
+				// drafter 与 writer 共用推理强度配置，联动切换。
+				subagentTool.SetThinkingLevel("drafter", level)
+			}
 		}
 	}
 
@@ -456,7 +565,7 @@ func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 			Agent string `json:"agent"`
 			Task  string `json:"task"`
 		}
-		if err := json.Unmarshal(req.Call.Args, &args); err != nil || args.Agent != "writer" {
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || (args.Agent != "writer" && args.Agent != "drafter") {
 			return nil, nil
 		}
 		chapter := chapterFromTask(args.Task)
@@ -490,7 +599,7 @@ func writerZeroInitGate(st *store.Store) agentcore.ToolGate {
 			Agent string `json:"agent"`
 			Task  string `json:"task"`
 		}
-		if err := json.Unmarshal(req.Call.Args, &args); err != nil || args.Agent != "writer" {
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || (args.Agent != "writer" && args.Agent != "drafter") {
 			return nil, nil
 		}
 		chapter := chapterFromTask(args.Task)
@@ -500,11 +609,56 @@ func writerZeroInitGate(st *store.Store) agentcore.ToolGate {
 		if chapter != 1 {
 			return nil, nil
 		}
+		// world_codex 先于零章检查：它是会话内可补救的（改派 architect 即可），
+		// 不要让 Coordinator 误以为只能收工等宿主。
+		if err := tools.EnsureWorldCodexForChapterOne(st); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: err.Error()}, nil
+		}
 		if err := tools.EnsureZeroInitReadyForChapterOne(st); err != nil {
 			return &agentcore.GateDecision{
 				Allowed: false,
 				Reason: err.Error() + "。zero-init 是宿主流水线的命令行步骤，你在会话内无法执行：" +
 					"请立即结束本轮运行（不要重试派 writer，也不要改派其他代理补救），宿主会自动执行 zero-init 并继续写第 1 章。",
+			}, nil
+		}
+		// 初始 world_tick：零章就绪后，第 1 章推演前离屏世界必须已生成信息流（会话内可补救）。
+		if err := tools.EnsureInitialWorldTickForChapterOne(st); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: err.Error()}, nil
+		}
+		// 放行也留痕：门禁只在不满足时拦截，通过时若无日志，事后审计会误以为没检查。
+		slog.Info("第 1 章门禁通过：world_codex / 零章 readiness / 初始 world_tick 均就绪，放行", "module", "agents.gate")
+		return nil, nil
+	}
+}
+
+// expandArcWorldTickGate 弧/卷边界硬卡点：world_tick 落后正文时拒绝 expand_arc/append_volume。
+// 展开下一弧/追加新卷前必须先 save_world_tick 把镜头外世界推进到弧末（会话内可补救）。
+// HARNESS-METADATA: name=expand_arc_world_tick_gate class=business_logic note=弧边界世界推演必须先于展开
+func expandArcWorldTickGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" {
+			return nil, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil {
+			return nil, nil
+		}
+		// 只拦"展开下一弧/追加新卷"的 architect 派发；其它 architect 任务（含 save_world_tick
+		// 本身）放行，否则会把补救动作也一起挡掉造成死锁。
+		if !strings.HasPrefix(args.Agent, "architect") {
+			return nil, nil
+		}
+		if !strings.Contains(args.Task, "expand_arc") && !strings.Contains(args.Task, "append_volume") &&
+			!strings.Contains(args.Task, "展开") && !strings.Contains(args.Task, "追加") && !strings.Contains(args.Task, "下一弧") && !strings.Contains(args.Task, "下一卷") {
+			return nil, nil
+		}
+		if err := tools.EnsureWorldTickCurrent(st); err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  err.Error() + "。请先派 architect_long 调用 save_world_tick 把世界推进到弧末，再展开下一弧/追加新卷。",
 			}, nil
 		}
 		return nil, nil

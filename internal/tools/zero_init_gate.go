@@ -24,9 +24,29 @@ const zeroInitFreshnessGrace = 2 * time.Second
 
 // foundationFreshnessFiles 参与 readiness 过期判定的 foundation 工件。
 // 任何一个在 readiness 生成之后被重写，零章推演资产就可能引用了旧设定。
+//
+// 刻意不含 book_world.json：save_world_tick 会常规更新其中的势力进度钟（模拟状态，
+// 非 authored 设定变更），尤其是"第 1 章前的初始 world_tick"必然晚于 readiness 落盘，
+// 若纳入会把这条正常路径误判为"foundation 变更→零章过期"造成死循环。真正的 authored
+// 变更（人物/世界规则/法典/大纲）仍会触发过期。
 var foundationFreshnessFiles = []string{
-	"premise.md", "characters.json", "world_rules.json", "book_world.json",
-	"layered_outline.json", "outline.json",
+	"premise.md", "characters.json", "world_rules.json",
+	"layered_outline.json", "outline.json", "world_codex.json",
+}
+
+// EnsureWorldCodexForChapterOne 第 1 章前的全局世界法典门禁：
+// 能力分级/技能范畴/种族/武器/装备/16 维世界 sections 是本工作室的
+// 第 1 章硬性交付，缺失时引导 Coordinator 派 architect 补齐（会话内可完成）。
+func EnsureWorldCodexForChapterOne(st *store.Store) error {
+	if !ChapterOnePendingFirstWrite(st) {
+		return nil
+	}
+	if nonEmptyRegularFile(filepath.Join(st.Dir(), "world_codex.json")) {
+		return nil
+	}
+	return fmt.Errorf("第 1 章前必须先落盘全局世界法典（world_codex.json 缺失）：" +
+		"请派 architect_long 调用 save_foundation(type=world_codex) 保存能力分级、技能范畴、种族、武器/装备范畴、" +
+		"16 维世界 sections 与 immutability_policy，之后再派 writer")
 }
 
 // EnsureZeroInitReadyForChapterOne 第 1 章开写前的硬卡点。
@@ -89,8 +109,9 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 
 // FoundationCoreComplete 报告 Architect 的核心 foundation 是否已齐。
 // 用于区分"该派 architect 补设定"与"该做零章初始化"两种未就绪。
+// world_codex 也算核心：StopGuard 在它缺失时不放行收工，逼 Coordinator 派 architect 补齐。
 func FoundationCoreComplete(dir string) bool {
-	for _, rel := range []string{"premise.md", "characters.json", "world_rules.json", "book_world.json", filepath.Join("meta", "compass.json")} {
+	for _, rel := range []string{"premise.md", "characters.json", "world_rules.json", "book_world.json", "world_codex.json", filepath.Join("meta", "compass.json")} {
 		if !nonEmptyRegularFile(filepath.Join(dir, rel)) {
 			return false
 		}

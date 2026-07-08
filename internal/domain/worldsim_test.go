@@ -10,12 +10,16 @@ func TestWorldEventValidate(t *testing.T) {
 	for _, bad := range []WorldEvent{
 		{Chapter: 10, Actors: []string{"x"}, VisibilityChapter: 10},              // 缺 summary
 		{Chapter: 10, Summary: "s", VisibilityChapter: 10},                       // 缺 actors
-		{Chapter: 0, Actors: []string{"x"}, Summary: "s", VisibilityChapter: 1},  // chapter<=0
+		{Chapter: -1, Actors: []string{"x"}, Summary: "s", VisibilityChapter: 1}, // chapter<0（负数非法）
 		{Chapter: 10, Actors: []string{"x"}, Summary: "s", VisibilityChapter: 8}, // 信息早于事件
 	} {
 		if err := bad.Validate(); err == nil {
 			t.Fatalf("非法事件应报错: %+v", bad)
 		}
+	}
+	// chapter=0 是合法的开局前 pre-story 事件（初始 world_tick 用）。
+	if err := (WorldEvent{Chapter: 0, Actors: []string{"x"}, Summary: "开局前", VisibilityChapter: 2}).Validate(); err != nil {
+		t.Fatalf("chapter=0 pre-story 事件应合法: %v", err)
 	}
 }
 

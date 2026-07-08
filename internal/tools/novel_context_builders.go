@@ -1243,8 +1243,11 @@ func (t *ContextTool) loadMechanicalGateBrief(chapter int) (map[string]any, erro
 		"engine":                     report.Engine,
 		"aigc_percent":               report.AIGCPercent,
 		"ai_ratio_percent":           report.AIRatioPercent,
+		"effective_gate_percent":     aigc.EffectiveGatePercent(report),
 		"blended_aigc_percent":       report.BlendedAIGCPercent,
 		"segment_risk_floor_percent": report.SegmentRiskFloor,
+		"single_detection_segment":   report.Stats.Hanzi > 0 && report.Stats.Hanzi <= aigc.SingleDetectionSegmentMaxHanzi,
+		"gate_basis":                 "EffectiveGatePercent: 短章按整章单检测片段/segment floor 判，不被 blended 平均值稀释",
 		"risk_label":                 report.RiskLabel,
 		"confidence":                 report.Confidence,
 	}
@@ -1314,7 +1317,7 @@ func compactRuleViolations(violations []rules.Violation, limit int) []map[string
 		if violation.Target != "" {
 			item["target"] = violation.Target
 		}
-		if violation.Limit != "" {
+		if rules.HasLimitValue(violation.Limit) {
 			item["limit"] = violation.Limit
 		}
 		out = append(out, item)
@@ -1327,7 +1330,15 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 	for _, violation := range violations {
 		switch violation.Rule {
 		case "aigc_ratio":
-			focus = append(focus, "先按 high_risk_dimensions 和 latest_detector_proxy 重排段落功能，补足动作、物件、感官、对话和选择后果，再做句子级润色。")
+			gatePercent := aigc.EffectiveGatePercent(report)
+			if report.Stats.Hanzi > 0 && report.Stats.Hanzi <= aigc.SingleDetectionSegmentMaxHanzi {
+				focus = append(focus, fmt.Sprintf("AIGC 门禁采用值 %.2f%%：本章约 %d 汉字，会被读者整章直接丢进检测器；按单检测片段/segment floor 返工，不能用 blended=%.2f%% 放行。", gatePercent, report.Stats.Hanzi, report.BlendedAIGCPercent))
+			} else {
+				focus = append(focus, fmt.Sprintf("AIGC 门禁采用值 %.2f%%：按 EffectiveGatePercent 返工，优先看最高风险片段和 latest detector proxy，不随机换词。", gatePercent))
+			}
+			focus = append(focus, "整章重排段落功能：事故触发、口头争执、私人生活侵入、物件迟到、沉默/缺席、权限后果要轮换出现，避免每 180 字窗口都同样稳定。")
+			focus = append(focus, "降低流程句密度：连续出现“保全/导出/权限/说明/审批”时，改成角色怕担责、甩锅、拒签、误按、被私人消息打断等具体压力。")
+			focus = append(focus, "增加真实局部不均匀：允许少量由角色压力推动的口语重复、打断、没听清、改口和生活细节，但禁止无信息清单、冷僻词堆砌和脏码。")
 		case "chapter_words":
 			focus = append(focus, "篇幅超标只做局部压缩：优先删重复规则说明、重复互动问答和同义情绪句；保留已成立的场景、规则链、钩子和人物声口，不要整章重写。")
 		case "content_count_mismatch":
@@ -1360,6 +1371,8 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "物件回应不能等距；至少补一次延迟、一次缺席/静默，允许一次抢拍，但不要每句重话后立刻显字或亮灯。")
 		case "dialogue_aphorism_overuse":
 			focus = append(focus, "金句限流扩到主角；连续警句式应答最多三回合，双人对手戏要用语域、句长、利益点和错答区分声口。")
+		case "templated_dialogue_chain":
+			focus = append(focus, "删掉重复的“点名/叫人→停笔或抬眼→补口径/查字段→第三人追问”三拍对白链；改成目标冲突、误读、拒写、打断、物件承压或信息延迟。")
 		case "serial_device_repetition":
 			focus = append(focus, "登记每章开头/结尾装置；同一装置连续最多两章，章尾显字三连要改成动作未完成、对话截断、场景余像或物件缺席。")
 		case "semicolon_overuse":

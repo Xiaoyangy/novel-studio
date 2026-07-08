@@ -47,6 +47,10 @@ type State struct {
 
 	// 基础设定缺项（规划阶段的补齐信号）。
 	FoundationMissing []string
+
+	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
+	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
+	NextActionPlanReady bool
 }
 
 // Route 根据事实返回下一步指令；返回 nil 表示让 Coordinator LLM 自主裁定。
@@ -83,17 +87,26 @@ func Route(s State) *Instruction {
 		return nil
 	}
 
-	// 3. 重写/打磨队列优先（事实已在工具层落盘，Router 只照单派发）
+	// 3. 重写/打磨队列优先（事实已在工具层落盘，Router 只照单派发）。
+	//    阶段拆分：计划未按审阅结论重推演 → planner 先重做计划；已就绪 → drafter 渲染。
 	if len(p.PendingRewrites) > 0 {
 		ch := p.PendingRewrites[0]
 		verb := "重写"
 		if p.Flow == domain.FlowPolishing {
 			verb = "打磨"
 		}
+		if !s.NextActionPlanReady {
+			return &Instruction{
+				Agent:   "writer",
+				Task:    fmt.Sprintf("为第 %d 章按审阅结论重做写前推演计划（%s前）", ch, verb),
+				Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划需先纳入 rewrite_brief 重推演", len(p.PendingRewrites)),
+				Chapter: ch,
+			}
+		}
 		return &Instruction{
-			Agent:   "writer",
+			Agent:   "drafter",
 			Task:    fmt.Sprintf("%s第 %d 章", verb, ch),
-			Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章", len(p.PendingRewrites)),
+			Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划已就绪", len(p.PendingRewrites)),
 			Chapter: ch,
 		}
 	}
@@ -172,10 +185,19 @@ func Route(s State) *Instruction {
 	if next <= 0 {
 		return nil
 	}
+	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
+	if !s.NextActionPlanReady {
+		return &Instruction{
+			Agent:   "writer",
+			Task:    fmt.Sprintf("为第 %d 章做写前推演，落盘完整章节计划", next),
+			Reason:  "下一章计划待推演",
+			Chapter: next,
+		}
+	}
 	return &Instruction{
-		Agent:   "writer",
+		Agent:   "drafter",
 		Task:    fmt.Sprintf("写第 %d 章", next),
-		Reason:  "续写下一章",
+		Reason:  "下一章计划已就绪，渲染正文",
 		Chapter: next,
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -155,7 +156,13 @@ func ResolveRAGQdrantConfig(cfg Config) (RAGQdrantConfig, bool) {
 }
 
 func ragCollectionName(outputDir string) string {
-	return rag.CollectionName("novel_studio", outputDir)
+	// 规范化为绝对路径再派生 collection 名：否则同一物理目录被不同代码路径以相对/绝对/
+	// 带斜杠等不同字符串引用时会 hash 出不同 collection（曾导致 pipeline 与 build-rag 用了
+	// 两个 collection、rewrite 写入时 404）。
+	if abs, err := filepath.Abs(outputDir); err == nil {
+		outputDir = abs
+	}
+	return rag.CollectionName("novel_studio", filepath.Clean(outputDir))
 }
 
 func resolveQdrantAPIKey(qc RAGQdrantConfig) string {

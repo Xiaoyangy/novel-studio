@@ -167,9 +167,9 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 }`)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_gate.json"), `{
   "chapter": 1,
-  "aigc_report": {"blended_aigc_percent": 4.8},
+  "aigc_report": {"aigc_percent": 4.8, "blended_aigc_percent": 4.8},
   "rule_violations": [
-    {"rule": "isolated_sentence_overuse", "severity": "warning", "actual": 18, "limit": "4"}
+    {"rule": "fatigue_words", "severity": "warning", "actual": 2, "limit": 1}
   ]
 }`)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_voice_redflags.json"), `{

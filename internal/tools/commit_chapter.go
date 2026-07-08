@@ -1157,9 +1157,12 @@ func (t *CommitChapterTool) clearStaleFinalGlobalReview(progress *domain.Progres
 	_ = t.store.World.ClearGlobalReview(progress.TotalChapters)
 }
 
+// blockingViolationReason 决定哪些机械项直接打回返工（重新入队）。高置信 AI
+// 风险和命中即改的写法模板在提交阶段硬拦；其余 warning 仍交给章级审阅判定，
+// 避免慢速逐轮下机械指标无限返工。
 func blockingViolationReason(violations []rules.Violation) string {
 	for _, v := range violations {
-		if v.Rule == "aigc_ratio" && v.Severity == rules.SeverityError {
+		if immediateMechanicalGateFailure(v) {
 			target := v.Target
 			if target == "" {
 				target = fmt.Sprint(v.Actual)
@@ -1168,6 +1171,17 @@ func blockingViolationReason(violations []rules.Violation) string {
 		}
 	}
 	return ""
+}
+
+func immediateMechanicalGateFailure(v rules.Violation) bool {
+	switch v.Rule {
+	case "aigc_ratio":
+		return v.Severity == rules.SeverityError
+	case "templated_dialogue_chain":
+		return true
+	default:
+		return false
+	}
 }
 
 func (t *CommitChapterTool) enqueueMechanicalGateFailure(chapter int, reason string) error {
@@ -1220,17 +1234,8 @@ func aigcViolation(report aigc.Report) []rules.Violation {
 }
 
 func aigcGatePercent(report aigc.Report) float64 {
-	if report.ContentIntegrityFloor > 0 {
-		return report.AIGCPercent
-	}
-	if report.SegmentRiskFloor >= 70 &&
-		report.BlendedAIGCPercent > 0 &&
-		report.BlendedAIGCPercent < 25 &&
-		report.LatestDetectorProxy.CompositePercent < 25 &&
-		report.ZhuqueCompositePercent < 35 {
-		return report.BlendedAIGCPercent
-	}
-	return report.AIGCPercent
+	// 与章级审阅门禁共用同一口径（短章按 segment floor 真高判，不被 blended 稀释）。
+	return aigc.EffectiveGatePercent(report)
 }
 
 // buildSkipResult 为"章节已完成的重复提交"构造与正常 commit 对齐的事实返回。

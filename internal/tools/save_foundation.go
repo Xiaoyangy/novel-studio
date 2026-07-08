@@ -1,11 +1,15 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,7 +193,9 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 
 	case "world_codex":
 		var codex domain.WorldCodex
-		if err := decode("world_codex", &codex); err != nil {
+		// LLM（尤其 MiniMax）惯用 name/key 做键的对象表达这些列表，先确定性
+		// 归一化成约定数组形状，避免逐字段报错重发 14KB 的收敛循环。
+		if err := decodeFoundationJSON("world_codex", normalizeWorldCodexContent(content), &codex); err != nil {
 			return nil, err
 		}
 		if err := t.saveWorldCodex(&codex, a.ChangeReason, a.ChangeEvidence); err != nil {
@@ -420,17 +426,186 @@ func decodeFoundationJSON(typeName, content string, out any) error {
 			return nil
 		}
 	}
-	hint := `常见原因：字符串值中的双引号未转义为 \", 换行未转义为 \n, 或对象字段间漏了逗号。请整段重新生成一次。`
+	// 反射式形状归一化：LLM 高频把对象写成数组、标量写成数组、单元素结构裸写成对象
+	// （book_world 的 map_notes/pillars 即此类）。与 plan 路径同一套，能自愈就不必回退
+	// 让模型重发、省一次 codex/LLM 往返。仅当 out 是指针时可取目标类型。
+	if rv := reflect.ValueOf(out); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		if coerced, changed := coerceJSONShape(json.RawMessage(content), rv.Elem().Type()); changed {
+			if json.Unmarshal(coerced, out) == nil {
+				return nil
+			}
+		}
+	}
+	shape := foundationShapeHint(typeName)
+	hint := `常见原因：字符串值中的双引号未转义为 \", 换行未转义为 \n, 或对象字段间漏了逗号。请整段重新生成一次。` + shape
 	if se, ok := err.(*json.SyntaxError); ok {
 		line, col := offsetToLineCol(content, int(se.Offset))
 		return fmt.Errorf("parse %s JSON (line %d col %d): %w — %s", typeName, line, col, err, hint)
 	}
 	// 类型不匹配单独给字段级提示：默认 hint 只讲转义/逗号，会把重试引向错误方向。
 	if te := (*json.UnmarshalTypeError)(nil); errors.As(err, &te) {
-		return fmt.Errorf("parse %s JSON: 字段 %q 期望 %s，实际收到 %s — 请只修正该字段的形状（其余保持不变）后整段重发",
-			typeName, te.Field, jsonShapeName(te.Type), te.Value)
+		return fmt.Errorf("parse %s JSON: 字段 %q 期望 %s，实际收到 %s — 请只修正该字段的形状（其余保持不变）后整段重发%s",
+			typeName, te.Field, jsonShapeName(te.Type), te.Value, shape)
 	}
 	return fmt.Errorf("parse %s JSON: %w — %s", typeName, err, hint)
+}
+
+// worldCodexArrayFields world_codex 里约定为数组的字段 → 元素身份键。
+// LLM 高频把它们写成 {身份: {…}} 的对象；归一化时把身份注入回元素。
+var worldCodexArrayFields = map[string]string{
+	"ability_tiers":        "name",
+	"skill_domains":        "name",
+	"races":                "name",
+	"weapon_categories":    "name",
+	"equipment_categories": "name",
+	"sections":             "key",
+}
+
+// worldCodexListItemFields 元素内约定为 []string 的键；模型常给单个字符串。
+var worldCodexListItemFields = map[string]bool{
+	"constraints": true, "traits": true, "grades": true,
+	"aliases": true, "samples": true, "rules": true,
+}
+
+// normalizeWorldCodexContent 在严格解析前对 world_codex 内容做确定性形状归一化：
+//  1. 六个列表字段：对象 → 数组（键注入为 name/key，按键排序保证确定性）；
+//  2. 元素内 constraints/traits/grades/aliases/samples/rules：字符串 → 单元素数组；
+//  3. immutability_policy：非字符串 → 压缩 JSON 字符串。
+//
+// 任一步解析失败即放弃归一化原样返回，让 decodeFoundationJSON 的错误提示接手。
+func normalizeWorldCodexContent(content string) string {
+	var root map[string]json.RawMessage
+	if json.Unmarshal([]byte(content), &root) != nil {
+		return content
+	}
+	changed := false
+	for field, idKey := range worldCodexArrayFields {
+		raw, ok := root[field]
+		if !ok {
+			continue
+		}
+		normalized, didChange := normalizeCodexListField(raw, idKey)
+		if didChange {
+			root[field] = normalized
+			changed = true
+		}
+	}
+	if raw, ok := root["immutability_policy"]; ok {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) > 0 && trimmed[0] != '"' {
+			if quoted, err := json.Marshal(string(trimmed)); err == nil {
+				root["immutability_policy"] = quoted
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return content
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return content
+	}
+	return string(out)
+}
+
+// normalizeCodexListField 处理单个列表字段：对象转数组 + 元素内 []string 键收敛。
+func normalizeCodexListField(raw json.RawMessage, idKey string) (json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return raw, false
+	}
+	changed := false
+	var items []map[string]json.RawMessage
+	switch trimmed[0] {
+	case '{':
+		var m map[string]json.RawMessage
+		if json.Unmarshal(trimmed, &m) != nil {
+			return raw, false
+		}
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			item := map[string]json.RawMessage{}
+			v := bytes.TrimSpace(m[k])
+			if len(v) > 0 && v[0] == '{' {
+				if json.Unmarshal(v, &item) != nil {
+					return raw, false
+				}
+			} else {
+				// 值不是对象（如 "sections":{"key":"一段设定文本"}）：文本落到内容位。
+				contentKey := "content"
+				if idKey == "name" {
+					contentKey = "description"
+				}
+				item[contentKey] = m[k]
+			}
+			if _, has := item[idKey]; !has {
+				kj, _ := json.Marshal(k)
+				item[idKey] = kj
+			}
+			items = append(items, item)
+		}
+		changed = true
+	case '[':
+		var arr []json.RawMessage
+		if json.Unmarshal(trimmed, &arr) != nil {
+			return raw, false
+		}
+		for _, el := range arr {
+			item := map[string]json.RawMessage{}
+			if json.Unmarshal(el, &item) != nil {
+				return raw, false // 数组元素不是对象，交给严格解析报错
+			}
+			items = append(items, item)
+		}
+	default:
+		return raw, false
+	}
+	for _, item := range items {
+		for k, v := range item {
+			if !worldCodexListItemFields[k] {
+				continue
+			}
+			vt := bytes.TrimSpace(v)
+			if len(vt) > 0 && vt[0] == '"' {
+				item[k] = json.RawMessage("[" + string(vt) + "]")
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return raw, false
+	}
+	out, err := json.Marshal(items)
+	if err != nil {
+		return raw, false
+	}
+	return out, true
+}
+
+// foundationShapeHint 给结构复杂、模型高频猜错的类型返回一份紧凑结构模板，
+// 附在解析/校验错误后，让模型一次重试就能对齐，而不是每轮收敛一个字段。
+func foundationShapeHint(typeName string) string {
+	if typeName != "world_codex" {
+		return ""
+	}
+	keys := make([]string, 0, len(domain.RequiredCodexSections))
+	for _, sec := range domain.RequiredCodexSections {
+		keys = append(keys, sec.Key)
+	}
+	return "\nworld_codex 结构模板（字段名必须完全一致）：" +
+		`{"ability_tiers":[{"order":1,"name":"…","magnitude":"…","limits":"…","promotion":"…","cost":"…"}],` +
+		`"skill_domains":[{"name":"…","description":"…","tier_binding":"…","constraints":["…"]}],` +
+		`"races":[{"name":"…","description":"…","constraints":["…"]}],` +
+		`"weapon_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…"}],` +
+		`"equipment_categories":[同 weapon_categories 结构],` +
+		`"sections":[{"key":"…","content":"…","rules":["…"]} 或 {"key":"…","not_applicable":true,"reason":"…"}],` +
+		`"immutability_policy":"…"}` +
+		"；sections 是数组且必须覆盖全部 16 个 key：" + strings.Join(keys, ", ")
 }
 
 // repairLooseJSON 对 LLM 产出 JSON 的两类高频语法失误做确定性修复：
@@ -564,10 +739,97 @@ func (t *SaveFoundationTool) isWriting() bool {
 	return p != nil && p.Phase == domain.PhaseWriting
 }
 
+// worldCodexDraftRel 初建期的增量草稿缓冲。LLM 稳定输出不了一次成型的完整
+// 法典（16 维 sections + 五类硬设定动辄 15KB+，常只送到 sections 就断），
+// 所以初建走"合并暂存"协议：不完整的提交合并进草稿并暂存，回错只列剩余
+// 缺失字段；凑齐后一次性提交正式文件并删除草稿。修订路径（已有正式法典）
+// 不走草稿——修订语义是整文替换 + change_log。
+const worldCodexDraftRel = "meta/world_codex.draft.json"
+
+func (t *SaveFoundationTool) loadWorldCodexDraft() *domain.WorldCodex {
+	data, err := os.ReadFile(filepath.Join(t.store.Dir(), worldCodexDraftRel))
+	if err != nil {
+		return nil
+	}
+	var draft domain.WorldCodex
+	if json.Unmarshal(data, &draft) != nil {
+		return nil
+	}
+	return &draft
+}
+
+func (t *SaveFoundationTool) saveWorldCodexDraft(codex *domain.WorldCodex) {
+	data, err := json.MarshalIndent(codex, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(t.store.Dir(), worldCodexDraftRel), data, 0o644)
+}
+
+func (t *SaveFoundationTool) dropWorldCodexDraft() {
+	_ = os.Remove(filepath.Join(t.store.Dir(), worldCodexDraftRel))
+}
+
+// mergeWorldCodex 把本次提交（in）合并到草稿（base）上：整块字段来者非空则覆盖，
+// sections 按 key 合并（来者覆盖同 key，新 key 追加）。
+func mergeWorldCodex(base, in *domain.WorldCodex) *domain.WorldCodex {
+	out := *base
+	if len(in.AbilityTiers) > 0 {
+		out.AbilityTiers = in.AbilityTiers
+	}
+	if len(in.SkillDomains) > 0 {
+		out.SkillDomains = in.SkillDomains
+	}
+	if len(in.Races) > 0 {
+		out.Races = in.Races
+	}
+	if len(in.WeaponCategories) > 0 {
+		out.WeaponCategories = in.WeaponCategories
+	}
+	if len(in.EquipmentCategories) > 0 {
+		out.EquipmentCategories = in.EquipmentCategories
+	}
+	if strings.TrimSpace(in.ImmutabilityPolicy) != "" {
+		out.ImmutabilityPolicy = in.ImmutabilityPolicy
+	}
+	if strings.TrimSpace(in.NovelName) != "" {
+		out.NovelName = in.NovelName
+	}
+	if len(in.Sections) > 0 {
+		byKey := map[string]int{}
+		for i, sec := range out.Sections {
+			byKey[strings.TrimSpace(sec.Key)] = i
+		}
+		for _, sec := range in.Sections {
+			key := strings.TrimSpace(sec.Key)
+			if i, ok := byKey[key]; ok {
+				out.Sections[i] = sec
+			} else {
+				out.Sections = append(out.Sections, sec)
+				byKey[key] = len(out.Sections) - 1
+			}
+		}
+	}
+	return &out
+}
+
 // saveWorldCodex 校验并保存全局世界法典。已有法典时强制走修订流程：
 // 必须带 change_reason + change_evidence，版本自增并落 change_log——世界硬设定
 // 不允许随写作漂移。
 func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReason, changeEvidence string) error {
+	// 初建期增量合并：已有草稿时先并入本次提交（见 worldCodexDraftRel 注释）。
+	existingCodex, _ := t.store.LoadWorldCodex()
+	if existingCodex != nil && strings.TrimSpace(changeReason) == "" && strings.TrimSpace(changeEvidence) == "" {
+		// 法典已定稿且本次不是修订：直接短路，防止重派的 architect 反复重交
+		// 不完整 payload 空烧回合（修订必须显式带 change_reason+change_evidence）。
+		return fmt.Errorf("world_codex 已存在（v%d，能力分级 %d/种族 %d/维度 %d）且内容完整，无需重复保存。若确需修订请带 change_reason+change_evidence；否则请继续后续任务（如零章初始化由宿主自动执行，直接结束本轮即可）: %w",
+			existingCodex.Version, len(existingCodex.AbilityTiers), len(existingCodex.Races), len(existingCodex.Sections), errs.ErrToolPrecondition)
+	}
+	if existingCodex == nil {
+		if draft := t.loadWorldCodexDraft(); draft != nil {
+			codex = mergeWorldCodex(draft, codex)
+		}
+	}
 	var missing []string
 	require := func(ok bool, field string) {
 		if !ok {
@@ -606,14 +868,21 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 		require(strings.TrimSpace(sec.Content) != "" || len(sec.Rules) > 0, "sections."+want.Key+".content/rules")
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("world_codex 不完整，缺少：%s：世界必须像真实世界一样自洽，每个维度要么设定、要么显式 not_applicable+理由: %w",
-			strings.Join(missing, ", "), errs.ErrToolPrecondition)
+		if existingCodex == nil {
+			// 初建期：把已收到的部分暂存草稿，后续调用只需补缺失字段。
+			t.saveWorldCodexDraft(codex)
+			return fmt.Errorf("world_codex 已合并暂存为草稿，仍缺：%s。下次调用 save_foundation(type=world_codex) 只需补发缺失字段（已收到的部分不必重发，会自动合并）: %w%s",
+				strings.Join(missing, ", "), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
+		}
+		return fmt.Errorf("world_codex 不完整，缺少：%s：世界必须像真实世界一样自洽，每个维度要么设定、要么显式 not_applicable+理由: %w%s",
+			strings.Join(missing, ", "), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
 	}
 
 	existing, err := t.store.LoadWorldCodex()
 	if err != nil {
 		return fmt.Errorf("load world_codex: %w: %w", errs.ErrStoreRead, err)
 	}
+	t.dropWorldCodexDraft()
 	now := time.Now().Format(time.RFC3339)
 	if existing == nil {
 		codex.Version = 1

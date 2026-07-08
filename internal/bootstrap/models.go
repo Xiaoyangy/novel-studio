@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/llmcodex"
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/llm"
 )
@@ -20,7 +21,10 @@ import (
 // 5 分钟覆盖绝大多数实测案例（参见 tasks/todo.md plan→draft 思考时长统计），
 // 仍小于 RequestTimeout 10 分钟，网络真死时仍能兜底。
 const (
-	streamIdleTimeout        = 5 * time.Minute
+	// 2 分钟：健康的流式响应持续吐 thinking/content 事件，间隔远小于 2 分钟；
+	// 连续 2 分钟无任何事件即判定为 provider 卡流（MiniMax 大请求偶发），尽早重试
+	// 而不是白等 5 分钟。retry 由 subagentMaxRetries 兜底。
+	streamIdleTimeout        = 2 * time.Minute
 	writerDefaultTemperature = 0.95
 )
 
@@ -325,6 +329,15 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 	providerType, err := pc.ProviderType(providerKey)
 	if err != nil {
 		return nil, fmt.Errorf("解析 provider 类型失败: %w", err)
+	}
+	// 订阅接入：codex-cli 走 Codex CLI（ChatGPT/Codex 订阅），非 litellm HTTP。
+	// base_url 复用为 codex 二进制路径（空=自动探测 Codex.app）。
+	if providerType == "codex-cli" || providerType == "codex" {
+		// reasoning 交给 codex 配置默认（config.toml model_reasoning_effort）；
+		// 角色级推理强度由上层 ResolveThinkingForModel 走 agentcore ThinkingLevel 处理。
+		cm := llmcodex.New(pc.BaseURL, model, "")
+		cache[cacheKey] = cm
+		return cm, nil
 	}
 	providerExtra := cloneMap(pc.Extra)
 	if pc.API != "" {

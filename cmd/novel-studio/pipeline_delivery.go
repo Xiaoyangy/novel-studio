@@ -729,6 +729,9 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		if err := pipelineEnsureZeroInit(opts, cfg.OutputDir); err != nil {
 			return err
 		}
+		// zero-init（--reset-simulation-state）会切换 progress 的推演线，
+		// 必须重载后再做推演线一致性检查，否则拿旧快照误报不一致。
+		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
 		if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
 			return err
 		}

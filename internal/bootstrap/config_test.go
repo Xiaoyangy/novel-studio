@@ -37,3 +37,20 @@ func TestConfigResolveReasoningEffort(t *testing.T) {
 		t.Errorf("空默认下 writer 覆盖应生效，得 %q", got)
 	}
 }
+
+func TestResolveContextWindowPerModel(t *testing.T) {
+	cfg := Config{
+		ContextWindow:  200000, // 全局
+		ContextWindows: map[string]int{"gpt-5.5": 400000, "MiniMax-M3[1M]": 128000},
+	}
+	if w, src := cfg.ResolveContextWindow("gpt-5.5"); w != 400000 || src != CtxWindowConfig {
+		t.Fatalf("gpt-5.5 应取 per-model 400000, got %d/%s", w, src)
+	}
+	if w, _ := cfg.ResolveContextWindow("MiniMax-M3[1M]"); w != 128000 {
+		t.Fatalf("MiniMax 应取 per-model 128000, got %d", w)
+	}
+	// 未在 per-model 里的模型回落全局。
+	if w, _ := cfg.ResolveContextWindow("other-model"); w != 200000 {
+		t.Fatalf("未指定模型应回落全局 200000, got %d", w)
+	}
+}

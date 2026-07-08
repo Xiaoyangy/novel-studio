@@ -177,6 +177,34 @@ func Analyze(text string) Report {
 	return analyze(text, true)
 }
 
+// SingleDetectionSegmentMaxHanzi 是"读者会一次性整章丢进检测器"的字数上限。多数小说章节
+// 2000-4000 字，读者复制整章检测时全章就是一个检测片段，看到的是 segment_risk_floor。
+const SingleDetectionSegmentMaxHanzi = 5000
+
+// EffectiveGatePercent 返回用于门禁判定的 AIGC 百分比：
+//   - 内容完整性风险（脏码/绕检噪声）在场 → 直接用 AIGCPercent。
+//   - 短章（≤5000 字，单检测片段）→ 用 AIGCPercent（含 segment_risk_floor 真高），
+//     不允许被多片段 blended 平均稀释；因为读者就是整章丢进检测器看这个分。
+//   - 长章（>5000 字，能切成多个检测片段）且各 composite 都低 → 允许用 blended 降权，
+//     避免长文里个别长尾片段把整章误判高。
+//
+// commit 机械门禁与章级审阅门禁共用此口径，保证两处判定一致。
+func EffectiveGatePercent(report Report) float64 {
+	if report.ContentIntegrityFloor > 0 {
+		return report.AIGCPercent
+	}
+	singleDetectionSegment := report.Stats.Hanzi <= SingleDetectionSegmentMaxHanzi
+	if !singleDetectionSegment &&
+		report.SegmentRiskFloor >= 70 &&
+		report.BlendedAIGCPercent > 0 &&
+		report.BlendedAIGCPercent < 25 &&
+		report.LatestDetectorProxy.CompositePercent < 25 &&
+		report.ZhuqueCompositePercent < 35 {
+		return report.BlendedAIGCPercent
+	}
+	return report.AIGCPercent
+}
+
 func analyze(text string, includeSegments bool) Report {
 	body := stripMarkdownTitles(text)
 	chars := hanzi(body)
@@ -424,6 +452,10 @@ func scoreStructureFingerprint(body string, paras []string, perK map[string]floa
 		fragment["median_hanzi_per_paragraph"] <= 12 &&
 		fragment["single_sentence_paragraph_ratio"] >= 0.62 {
 		signals = append(signals, sig("fragmented_single_sentence_paragraphs", 86, "单句短段密度过高，像后期反检测式碎段"))
+	} else if fragment["paragraph_count"] >= 40 && fragment["single_sentence_paragraph_ratio"] >= 0.45 {
+		// 中档：大量单句成段（一句话独立成段当节奏）但未到极端碎段——检测器偏爱的
+		// "戏剧性一行"招牌，需在审阅里surface以驱动重写把多数并进连贯段落。
+		signals = append(signals, sig("single_sentence_paragraphs_elevated", 44, "单句成段占比偏高，戏剧性一行段用得过多，节奏偏碎"))
 	}
 	if fragment["very_short_paragraph_ratio"] >= 0.28 && fragment["paragraph_count"] >= 70 {
 		signals = append(signals, sig("very_short_paragraph_overuse", 58, "6字以内短段占比过高"))
@@ -1376,10 +1408,19 @@ func legacyHeuristicPercent(stats Stats, perK map[string]float64) float64 {
 	return round2(clamp(score, 0, 100))
 }
 
+// plainChapterTitleRe 匹配正常小说格式的纯文本章节标题首行（无 # 号），如「第一章 欠费单」/
+// 「第 12 章」，用于在 AIGC 分析时剔除标题、只统计正文。
+var plainChapterTitleRe = regexp.MustCompile(`^第[0-9零一二三四五六七八九十百千]+章([ 　].*)?$`)
+
 func stripMarkdownTitles(text string) string {
 	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+	for i, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// 正常小说格式：首个非空行若是「第N章 …」纯文本标题，也剔除。
+		if i < 3 && plainChapterTitleRe.MatchString(trimmed) {
 			continue
 		}
 		lines = append(lines, line)
