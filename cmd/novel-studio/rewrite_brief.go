@@ -52,7 +52,7 @@ func buildRevisionPlan(projectDir string, chapter int, chapterText string, revie
 		if suggestion == "" || suggestion == "—" {
 			return
 		}
-		plan.Suggestions = appendUniqueLimit(plan.Suggestions, suggestion, 18)
+		plan.Suggestions = appendUniqueLimit(plan.Suggestions, suggestion, 32)
 	}
 
 	if strings.TrimSpace(chapterText) != "" {
@@ -137,7 +137,7 @@ func buildRevisionPlan(projectDir string, chapter int, chapterText string, revie
 			mechanicalPayload = &aigcPayload
 			addSource(rel)
 			for _, violation := range aigcPayload.RuleViolations {
-				label := fmt.Sprintf("%s actual=%v limit=%s", violation.Rule, violation.Actual, violation.Limit)
+				label := mechanicalViolationBriefLabel(violation)
 				if suggestion := mechanicalRewriteBriefSuggestion(violation.Rule); suggestion != "" {
 					addSuggestion(suggestion)
 				}
@@ -164,14 +164,79 @@ func buildRevisionPlan(projectDir string, chapter int, chapterText string, revie
 	}
 
 	plan = downgradeAcceptedWarningOnlyPlan(plan, acceptedReview, mechanicalPayload, aiVoiceAnalysis)
+	addDeepSeekAIJudgeToPlan(projectDir, chapter, &plan, addSource, addRed, addYellow, addSuggestion)
 	plan.Brief = renderRevisionBrief(plan, reviewMarkdown)
 	return plan
 }
 
+func addDeepSeekAIJudgeToPlan(
+	projectDir string,
+	chapter int,
+	plan *revisionPlan,
+	addSource func(string),
+	addRed func(string),
+	addYellow func(string),
+	addSuggestion func(string),
+) {
+	var artifact deepseekAIJudgeArtifact
+	rel := fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chapter)
+	if !readJSONIfExists(filepath.Join(projectDir, filepath.FromSlash(rel)), &artifact) {
+		mdRel := fmt.Sprintf("reviews/%02d_deepseek_ai_judge.md", chapter)
+		md := readTextIfExists(filepath.Join(projectDir, filepath.FromSlash(mdRel)))
+		if strings.TrimSpace(md) == "" {
+			return
+		}
+		addSource(mdRel)
+		addYellow("DeepSeek 裸正文 AI 判定存在 Markdown 结果但 JSON 不可解析，需人工复核")
+		for _, item := range sectionListItems(md, "### 修改方案") {
+			addSuggestion("DeepSeek 修改方案: " + item)
+		}
+		for _, item := range sectionListItems(md, "### 对白专项修改方案") {
+			addSuggestion("DeepSeek 对白修复: " + item)
+		}
+		return
+	}
+	addSource(rel)
+	label := fmt.Sprintf("DeepSeek 裸正文 AI 判定: verdict=%s risk=%s ai=%d%% model=%s/%s", artifact.Verdict, artifact.RiskLevel, artifact.AIProbabilityPercent, artifact.Provider, artifact.Model)
+	if artifact.Blocking {
+		addRed(label)
+	} else if artifact.AIProbabilityPercent >= 15 || artifact.RiskLevel == "medium" {
+		addYellow(label)
+	} else if len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0 {
+		addYellow("DeepSeek 裸正文 AI 判定给出非阻断修改方案，按黄旗择优打磨")
+	}
+	if strings.TrimSpace(artifact.ParseWarning) != "" {
+		addYellow("DeepSeek 判定配置/解析提示: " + artifact.ParseWarning)
+	}
+	for _, reason := range artifact.Reasons {
+		addSuggestion("DeepSeek AI味原因: " + reason)
+	}
+	for _, suggestion := range artifact.RevisionPlan {
+		addSuggestion("DeepSeek 修改方案: " + suggestion)
+	}
+	for _, suggestion := range artifact.DialogueFixPlan {
+		addSuggestion("DeepSeek 对白修复: " + suggestion)
+	}
+	for _, suggestion := range artifact.AuthorVoicePlan {
+		addSuggestion("DeepSeek 作者声口: " + suggestion)
+	}
+	for _, rule := range artifact.RAGRules {
+		addSuggestion("DeepSeek 后续规避规则: " + rule)
+	}
+}
+
 func mechanicalRewriteBriefSuggestion(rule string) string {
 	switch strings.TrimSpace(rule) {
+	case "aigc_ratio":
+		return "AI率/segment_risk_floor 超标时按整章单检测片段重排：先删“第一/第二/第三”“不是A而是B”等结构标记，合并孤句段，打散连续同功能段落，用对话阻力、现场误判、延迟/缺席的物件响应和具体规则后果替换解释性总结。"
 	case "chapter_words":
 		return "篇幅超标只做局部压缩：优先删重复规则说明、重复互动问答和同义情绪句；保留已成立的场景、规则链、钩子和人物声口，不要整章重写。"
+	case "dangling_order_word":
+		return "删掉悬空的顺序词/阶段词（第一组、第二组、第三组、先、再、最后等）；改成角色动作触发或现场打断，让事件自然递进。"
+	case "micro_action_overuse":
+		return "删掉只负责停顿的微动作；保留会改变权限、关系、证据或空间位置的动作，其余交给对话、沉默或后果承接。"
+	case "dramatic_negation_overuse":
+		return "减少“没有立刻/没急着/没有顺着”等否定声明，直接写角色做了什么、避开了什么或把话题推向哪里。"
 	case "state_clause_pile":
 		return "状态说明堆叠要拆成动作链：删掉同句多个“还/没/已经”，让人物动作、页面变化和沉默分别承载信息。"
 	case "not_but_overuse":
@@ -213,6 +278,20 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 	default:
 		return ""
 	}
+}
+
+func mechanicalViolationBriefLabel(violation rules.Violation) string {
+	parts := []string{violation.Rule}
+	if rules.HasLimitValue(violation.Actual) {
+		parts = append(parts, fmt.Sprintf("actual=%s", rules.FormatLimitValue(violation.Actual)))
+	}
+	if rules.HasLimitValue(violation.Limit) {
+		parts = append(parts, fmt.Sprintf("limit=%s", rules.FormatLimitValue(violation.Limit)))
+	}
+	if violation.Target != "" {
+		parts = append(parts, "target="+violation.Target)
+	}
+	return strings.Join(parts, " ")
 }
 
 func addAIVoiceAnalysisToPlan(analysis domain.AIVoiceAnalysis, addRed, addYellow, addSuggestion func(string)) {

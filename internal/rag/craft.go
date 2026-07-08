@@ -8,10 +8,14 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
 
-// craft 检索通道：写作手法库只服务「设计时刻」——零章初始化、新角色/新武器/
-// 新能力首次出场的章计划。检索结果立刻实例化成本书事实（dossier、props、
-// visual_design、world_codex），写作中途的一致性由本书事实层负责，craft 库
-// 不参与常规章节召回（见 novel_context 的 source_kind 过滤）。
+// craft 检索通道：写作手法库服务两类场景。
+// 1. 设计取料：零章初始化、新角色/新武器/新能力首次出场的章计划。检索结果立刻
+//    实例化成本书事实（dossier、props、visual_design、world_codex）。
+// 2. 写法取料：草稿/重写阶段检索场景处理、对白摩擦、信息延迟、段落节奏和留存手法。
+//    这类结果只能当表达方法，不能覆盖角色现状、资源状态和本书事实。
+//
+// novel_context 的常规事实召回仍排除 craft/benchmark chunk，避免方法库被误写成 canon；
+// 写作阶段要通过 craft_recall 显式调用并留下审计日志。
 //
 // 路由是确定性的：每个设计字段绑定固定的类目 filter（集合运算，命中与否确定），
 // BM25 只负责在命中子集内排序。查不到 = 显式 no_material，可见、可审计。
@@ -23,8 +27,8 @@ const CraftSourceKind = "craft_technique"
 // 对标素材只可迁移手法/结构/节奏，禁止照搬情节、人名与专有设定。
 const BenchmarkSourceKind = "benchmark_reference"
 
-// IsDesignOnlySourceKind 判断某 source_kind 是否属于"只服务设计时刻"的库：
-// 常规章节召回必须排除这些 chunk，写作中途一律走本书事实层。
+// IsDesignOnlySourceKind 判断某 source_kind 是否属于"不能作为常规事实召回"的库：
+// novel_context 必须排除这些 chunk；若写作/重写要用其中的技法，必须显式调用 craft_recall。
 func IsDesignOnlySourceKind(kind string) bool {
 	kind = strings.TrimSpace(kind)
 	return strings.EqualFold(kind, CraftSourceKind) || strings.EqualFold(kind, BenchmarkSourceKind)

@@ -10,6 +10,9 @@
 
 - Writing Excuses 的 Dialogue Masterclass 把对白拆成作者意图、角色意图、场景冲突、上下文、潜台词和角色声口；对话不是现实闲聊照录，而是带目标的行动。
 - Reedsy 强调 scene-based dialogue、动作拍、角色声口区分、删掉多余寒暄和把信息藏进对话动作里。
+- Center for Fiction 强调对白里每个角色都要想要某样东西，并会在谈话中改变策略；台词的表层内容、潜台词和行动目标不能是同一层。
+- Gotham Writers 与 NowNovel 都提示：读者能从上下文分辨说话人时，不必每行都标“他说/她问”；动作标签的职责是让场景和情绪显形，不是给每句台词配一个停顿动作。
+- 中文小说对白同样遵守“什么人说什么话”：身份、知识边界、心理位置、关系旧账会进入用词和断句；对白应在冲突中变化，而不是人物轮流报流程。
 - K.M. Weiland / Jane Friedman 的冲突型对白强调：角色有外在场景目标，也有内在隐秘赌注；对话冲突不一定是吵架，也可以是观点、欲望、恐惧和权力位置相互顶住。
 - Gotham Writers Workshop、Writing Excuses 的 subtext 资料都强调：潜台词来自文本和上下文之间，身体语言、沉默、误读、文化语境和关系旧账会让同一句话变成另一层意思。
 - Writers Helping Writers 把对话张力拆成相反目标、情绪包袱、不安全感、偏见、错误假设、小烦躁、文化差异和潜台词。
@@ -51,6 +54,9 @@
 - K.M. Weiland / Jane Friedman, conflict in dialogue: https://janefriedman.com/conflict-in-dialogue/
 - Gotham Writers Workshop, subtext in dialogue: https://www.writingclasses.com/toolbox/ask-writer/in-dialogue-what-is-subtext
 - Writers Helping Writers, tension-building dialogue elements: https://writershelpingwriters.net/2022/03/9-tension-building-elements-for-character-dialogue/
+- Center for Fiction, Tips for Writing Dialogue: https://centerforfiction.org/writing-tools/tips-for-writing-dialogue/
+- NowNovel, Dialogue Tags vs Action Tags: https://nownovel.com/dialogue-tags-vs-action-tags/
+- 中国青年作家报, 小说对话与人物身份/矛盾冲突: https://qnzj.cyol.com/html/2020-08/11/nw.D110000qnzjb_20200811_3-01.htm
 
 ### 1. 对话必须有目的
 
@@ -145,6 +151,9 @@
 - 能辨识说话人时，省略标签
 - 使用"说""问"等中性标签
 - 避免过度使用副词修饰
+- 连续两三轮双人对白可以靠声口、上一句问题、动作位置和关系压力区分说话人；不要为了保险每行都写"某某说/问/答"。
+- 动作 beat 不等于标签替代品。只有动作改变空间、暴露情绪、打断信息、制造误读或触发物件后果时才保留；纯粹"抬眼/停笔/看向屏幕"要删或合并。
+- 禁止剧本式 `人物：台词`。小说正文用自然段、声口和场景动作区分说话人。
 
 | 过度使用 | 改进后 |
 |---------|--------|

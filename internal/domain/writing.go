@@ -47,6 +47,7 @@ type ChapterCausalSimulation struct {
 	LongformOpening     LongformOpeningDesign        `json:"longform_opening,omitempty"`            // 百万字长篇第一章开局设计
 	CharacterArcTests   []CharacterArcTest           `json:"character_arc_tests,omitempty"`         // 本章如何测试人物 Want/Lie/Need/Truth 和合理犯错
 	ReaderRewardPlan    ReaderRewardPlan             `json:"reader_reward_plan,omitempty"`          // 读者奖励、小胜利、新债务和前几章兑现阶梯
+	ReaderRetentionPlan ReaderRetentionPlan          `json:"reader_retention_plan,omitempty"`       // 章节计划的显性/隐性/延后/删压缩筛选，防止把大纲清单全写进正文
 	EvidenceChains      []EvidenceReturnChain        `json:"evidence_return_chains,omitempty"`      // 离屏/后台事件如何以证据回到主视角
 	EndingContract      EndingConsequenceContract    `json:"ending_consequence_contract,omitempty"` // 章末必须落成的后果契约
 	DormantPolicy       []DormantCharacterPolicy     `json:"dormant_character_policy,omitempty"`    // 暂不出场角色的最小推进/静止理由
@@ -297,6 +298,25 @@ type ReaderRewardPlan struct {
 	TrafficRisk             string             `json:"traffic_risk,omitempty"`
 	RewardLadder            []ReaderRewardStep `json:"reward_ladder,omitempty"`
 	ForbiddenRewardPatterns []string           `json:"forbidden_reward_patterns,omitempty"`
+}
+
+// ReaderRetentionPlan 把全量章节计划筛成读者会在页面上感到有效的内容。
+// 计划是素材池和边界，不是正文清单；未进入 SurfaceBeats 的内容默认不显性展开。
+type ReaderRetentionPlan struct {
+	SurfaceBeats      []RetentionSurfaceBeat `json:"surface_beats,omitempty"`
+	LatentContext     []string               `json:"latent_context,omitempty"`
+	RevealBudget      []string               `json:"reveal_budget,omitempty"`
+	CutOrCompress     []string               `json:"cut_or_compress,omitempty"`
+	PageTurnQuestions []string               `json:"page_turn_questions,omitempty"`
+}
+
+type RetentionSurfaceBeat struct {
+	PlanSource    string `json:"plan_source,omitempty"`
+	MustShow      string `json:"must_show,omitempty"`
+	ReaderPayoff  string `json:"reader_payoff,omitempty"`
+	SceneVehicle  string `json:"scene_vehicle,omitempty"`
+	ProofOnPage   string `json:"proof_on_page,omitempty"`
+	FunctionShift string `json:"function_shift,omitempty"`
 }
 
 type ReaderRewardStep struct {

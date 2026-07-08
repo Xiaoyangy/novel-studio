@@ -168,6 +168,13 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	// ForRole 对未显式配置的角色回退到默认模型，始终返回可用实例。
 	model := eng.Models().ForRole("editor")
+	reviewerModel := eng.Models().ForRole("reviewer")
+	reviewerProvider, reviewerName, reviewerExplicit := eng.Models().CurrentSelection("reviewer")
+	reviewerSelection := deepseekAIJudgeModelSelection{
+		Provider: reviewerProvider,
+		Model:    reviewerName,
+		Explicit: reviewerExplicit,
+	}
 
 	summaries := make([]string, 0, end-start+1)
 	successCount, failureCount := 0, 0
@@ -200,6 +207,19 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			continue
 		}
 		entry := structuredReviewFromMarkdown(chNum, review)
+		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定中（reviewer=%s/%s effort=max）...\n", chNum, reviewerProvider, reviewerName)
+		deepseekJudge, err := runDeepSeekAIJudge(reviewerModel, reviewerSelection, chNum, string(body), flags.Budget)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定失败：%v\n", chNum, err)
+			summaries = append(summaries, fmt.Sprintf("- ch%02d: DeepSeek AI 判定失败 %v", chNum, err))
+			failureCount++
+			continue
+		}
+		if err := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定写入失败：%v\n", chNum, err)
+			failureCount++
+			continue
+		}
 		if mechanical == nil {
 			var mechanicalErr error
 			mechanical, _, mechanicalErr = reviewreport.LoadMechanicalGate(eng.Dir(), chNum)
@@ -219,6 +239,11 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			failureCount++
 			continue
 		}
+		if err := appendDeepSeekAIJudgeToUnifiedMarkdown(eng.Dir(), deepseekJudge); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定并入统一报告失败：%v\n", chNum, err)
+			failureCount++
+			continue
+		}
 		if err := reviewreport.RemoveLegacyMarkdown(eng.Dir(), chNum); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 清理旧 AI味报告失败：%v\n", chNum, err)
 		}
@@ -230,6 +255,10 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d review checkpoint 写入失败：%v\n", chNum, err)
 		} else if err := toolspkg.UpsertRAGChunks(context.Background(), st, ragEmbedder, ragVectorWriter, toolspkg.ReviewRAGChunks(entry, entry.Verdict, entry.AffectedChapters, ""), domain.RAGIndexConfig{}); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d RAG 评审沉淀失败：%v\n", chNum, err)
+		} else if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "deepseek-ai-judge", fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chNum)); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定 checkpoint 写入失败：%v\n", chNum, err)
+		} else if err := sedimentDeepSeekAIJudgeRAG(context.Background(), st, ragEmbedder, ragVectorWriter, deepseekJudge); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定 RAG 沉淀失败：%v\n", chNum, err)
 		}
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d → %s\n", chNum, outPath)
 		summaryReview := review

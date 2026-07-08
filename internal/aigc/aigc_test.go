@@ -70,3 +70,22 @@ func TestNarrativeHumanAnchorAllowsFinalCapForStrongScenes(t *testing.T) {
 		t.Fatalf("expected repeated text to disable final cap: %+v", anchor)
 	}
 }
+
+func TestEffectiveGatePercentUsesHumanAnchorFinalCap(t *testing.T) {
+	capValue := 4.8
+	report := Report{
+		AIGCPercent:         80,
+		BlendedAIGCPercent:  4.8,
+		SegmentRiskFloor:    80,
+		Stats:               Stats{Hanzi: 3000},
+		HumanAnchorFinalCap: &capValue,
+	}
+	if got := EffectiveGatePercent(report); got != 4.8 {
+		t.Fatalf("EffectiveGatePercent() = %.2f, want 4.80", got)
+	}
+
+	report.ContentIntegrityFloor = 82
+	if got := EffectiveGatePercent(report); got != 80 {
+		t.Fatalf("content integrity should bypass cap, got %.2f", got)
+	}
+}

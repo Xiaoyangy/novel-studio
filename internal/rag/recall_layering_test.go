@@ -3,6 +3,7 @@ package rag
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,6 +130,9 @@ func TestGhostcityNoStaleSources(t *testing.T) {
 	state := loadGhostcityIndex(t)
 	stale := 0
 	for _, c := range state.Chunks {
+		if isSyntheticAuditChunk(c) {
+			continue
+		}
 		sp := c.SourcePath
 		var candidates []string
 		switch {
@@ -161,4 +165,20 @@ func TestGhostcityNoStaleSources(t *testing.T) {
 	if stale > 5 {
 		t.Errorf("...陈旧 chunk 共 %d 个", stale)
 	}
+}
+
+func isSyntheticAuditChunk(c domain.RAGChunk) bool {
+	kind := strings.ToLower(strings.TrimSpace(c.SourceKind))
+	if kind != "chapter_rewrite" && kind != "review" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(filepath.ToSlash(c.SourcePath)), "rewrite_existing/") {
+		return true
+	}
+	if c.Metadata != nil {
+		if source, ok := c.Metadata["source"].(string); ok && strings.EqualFold(strings.TrimSpace(source), "rewrite_existing") {
+			return true
+		}
+	}
+	return false
 }

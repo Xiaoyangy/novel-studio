@@ -173,6 +173,20 @@ func testCausalSimulation(rewrite bool) map[string]any {
 				"hook":    "异常笔迹指向内门",
 			}},
 		},
+		"reader_retention_plan": map[string]any{
+			"surface_beats": []map[string]any{{
+				"plan_source":    "required_beats[0]/reader_reward_plan",
+				"must_show":      "林砚在登记口亲眼看见名册新增笔迹，并因此改变选择",
+				"reader_payoff":  "读者确认规则不是空设定，主角得到一条可追的证据",
+				"scene_vehicle":  "山门登记口的名册、钟声和守门弟子的阻拦",
+				"proof_on_page":  "名册红字、停笔、守门弟子改口",
+				"function_shift": "从流程阻拦转为物证异常，再转为追问代价",
+			}},
+			"latent_context":      []string{"内门执事调换名册的完整原因只约束离屏行动，不在本章摊开"},
+			"reveal_budget":       []string{"只露名册异常和登记弟子反应，不解释内门执事动机"},
+			"cut_or_compress":     []string{"登记制度长篇说明", "所有离屏角色同时间线行动清单"},
+			"page_turn_questions": []string{"名册红字为什么刚好在林砚追问后出现？"},
+		},
 		"evidence_return_chains": []map[string]any{{
 			"offscreen_character":   "登记弟子",
 			"event":                 "压住名册并向内门递消息",
@@ -916,6 +930,20 @@ func TestPlanChapterPersistsCausalSimulation(t *testing.T) {
 					"cost":    "收租方开始审计江烬身份",
 					"hook":    "旧布鞋停向1702",
 				}},
+			},
+			"reader_retention_plan": map[string]any{
+				"surface_beats": []map[string]any{{
+					"plan_source":    "reader_reward_plan.first_chapter_small_win/ending_consequence_contract",
+					"must_show":      "江烬拒绝替蒋牧确认代缴后，欠费单和黑卡残字把风险转向他",
+					"reader_payoff":  "读者看到主角保住一次选择权，同时背上更具体的账单问题",
+					"scene_vehicle":  "1704欠费单、门牌、黑卡背面残字和蒋牧的现金失败",
+					"proof_on_page":  "拒绝确认、现金失效、欠费单改向、黑卡残字",
+					"function_shift": "从求救压力转为交易验证，再转为新账单钩子",
+				}},
+				"latent_context":      []string{"阴司银行来源、白骨财神、蒋牧旧欠全貌只保留在台账和后续证据链"},
+				"reveal_budget":       []string{"只露代付对价未知，不解释黑卡系统和收租方组织"},
+				"cut_or_compress":     []string{"黑卡功能清单", "住户/房号/旧欠背景一口气说明"},
+				"page_turn_questions": []string{"欠费单为什么会把江烬写成下一位承担者？"},
 			},
 			"evidence_return_chains": []map[string]any{{
 				"offscreen_character":   "蒋牧",

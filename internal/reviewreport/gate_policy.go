@@ -201,6 +201,11 @@ func hasAIVoiceWarnings(analysis *domain.AIVoiceAnalysis) bool {
 }
 
 func BlockingAIGCDimensionReasons(report aigc.Report) []string {
+	if gate := aigc.EffectiveGatePercent(report); gate > 0 && gate <= 5 {
+		if _, ok := aigc.HumanAnchorFinalCap(report); ok {
+			return nil
+		}
+	}
 	var reasons []string
 	for _, dim := range sortedDimensions(report.Dimensions) {
 		if dim.Score < blockingAIGCDimensionThreshold {

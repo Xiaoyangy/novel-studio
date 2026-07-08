@@ -206,6 +206,25 @@ func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
 	}
 }
 
+func TestBlockingAIGCDimensionsAreSuppressedByHumanAnchorCap(t *testing.T) {
+	capValue := 4.8
+	reasons := BlockingAIGCDimensionReasons(aigc.Report{
+		AIGCPercent:         80,
+		BlendedAIGCPercent:  4.8,
+		SegmentRiskFloor:    80,
+		HumanAnchorFinalCap: &capValue,
+		Dimensions: map[string]aigc.Dimension{
+			"perplexity_proxy": {
+				Name:  "困惑度代理",
+				Score: 48,
+			},
+		},
+	})
+	if len(reasons) != 0 {
+		t.Fatalf("human-anchor capped report should not have blocking dimension reasons, got %+v", reasons)
+	}
+}
+
 func TestChapterWordsBlockingIsNotReportedAsAIVoiceFailure(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,

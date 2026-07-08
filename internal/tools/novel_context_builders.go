@@ -420,6 +420,7 @@ func hasChapterCausalSimulation(sim domain.ChapterCausalSimulation) bool {
 		hasLongformOpeningDesign(sim.LongformOpening) ||
 		len(sim.CharacterArcTests) > 0 ||
 		hasReaderRewardPlan(sim.ReaderRewardPlan) ||
+		hasReaderRetentionPlan(sim.ReaderRetentionPlan) ||
 		len(sim.EvidenceChains) > 0 ||
 		hasEndingConsequenceContract(sim.EndingContract) ||
 		len(sim.DormantPolicy) > 0 ||
