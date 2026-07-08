@@ -35,6 +35,8 @@ type References struct {
 	AntiAITone              string // 去 AI 味判据库（writer/editor 共用，全程注入）
 	ProductionPlaybook      string // 从 AI-Novel-Writing-Assistant 蒸馏的生产链路边界
 	HumanFeelCraft          string // 高人工度样本文沉淀的可迁移写法资产
+	CharacterBuilding       string // 人物塑造、动机、压力反应与关系动态参考
+	EmotionalNarrativeCraft string // 情感叙事、情绪弧线、动机-反应和场景情绪变化参考
 	WritingTechniquesDigest string // refer/写作技巧逐篇压缩后的工程写作规则
 	RAGWritingGuidelines    string // RAG 召回在小说写作中的使用边界与 trace 判读
 	WebReferenceGuidelines  string // 网络参考、最新资料和热梗进入正文的边界
@@ -525,6 +527,8 @@ func (t *ContextTool) writerReferences(chapter int) map[string]string {
 	add("anti_ai_tone", t.refs.AntiAITone) // 去 AI 味判据全程注入，不随章节裁剪
 	add("production_playbook", t.refs.ProductionPlaybook)
 	add("human_feel_craft", t.refs.HumanFeelCraft)
+	add("character_building", t.refs.CharacterBuilding)
+	add("emotional_narrative_craft", t.refs.EmotionalNarrativeCraft)
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)
@@ -559,6 +563,8 @@ func (t *ContextTool) architectReferences() map[string]string {
 	add("anti_ai_tone", t.refs.AntiAITone) // architect 大纲去 AI 腔；亦兜 editor 走 Chapter=0 路径
 	add("production_playbook", t.refs.ProductionPlaybook)
 	add("human_feel_craft", t.refs.HumanFeelCraft)
+	add("character_building", t.refs.CharacterBuilding)
+	add("emotional_narrative_craft", t.refs.EmotionalNarrativeCraft)
 	add("writing_techniques_digest", t.refs.WritingTechniquesDigest)
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)

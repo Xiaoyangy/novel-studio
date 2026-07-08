@@ -12,6 +12,9 @@
 
 ## 工作流程
 
+### 0. 校准作品定位
+审阅前先读取 `premise`、`brainstorm`、`chapter_contract`、`longform_opening`、`user_rules.structured.genre` 和 `reference_pack.references`，确认本书是长篇/短篇、女频/男频、悬疑/言情/现实/爽文等哪种消费承诺。除非项目资料明确要求“番茄男频短篇爽文/都市反转爽文/强爽点快节奏”，不得用这类平台口径给慢热长篇、女性职场悬疑、现实情感、文学向项目扣分。若发现标尺错位，只能写成“评审口径校准备注”，不能作为当前章 rewrite/polish 问题；真正 issue 必须落到本项目定位下仍成立的正文问题，例如人物动机、情感落点、对白区分、钩子后果或信息密度。
+
 ### 1. 获取上下文
 调用 novel_context(chapter=最新章节号)，获取全部状态数据。
 先根据 `working_memory` 理解当前章局部上下文，再根据 `episodic_memory` 检查长期连续性；`memory_policy` 会告诉你当前摘要窗口和是否更适合依赖结构化交接工件。

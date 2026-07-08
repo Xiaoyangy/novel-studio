@@ -114,6 +114,39 @@ func TestBuildRevisionPlanIncludesDeepSeekBlockingJudge(t *testing.T) {
 	}
 }
 
+func TestBuildRevisionPlanKeepsLowRiskDeepSeekSuggestionsNonBlocking(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "reviews"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	json := `{
+		"chapter":1,
+		"provider":"deepseek",
+		"model":"deepseek-v4-pro",
+		"reasoning_effort":"max",
+		"raw_body_only":true,
+		"verdict":"human_like",
+		"risk_level":"low",
+		"ai_probability_percent":3,
+		"blocking":false,
+		"revision_plan":["可微调一处重复动作"],
+		"dialogue_fix_plan":["对白已自然，无需系统修改"],
+		"author_voice_plan":["保持程序员观察式声口"],
+		"rag_rules":["专业名词通过现场动作呈现"]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "reviews", "01_deepseek_ai_judge.json"), []byte(json), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := buildRevisionPlan(dir, 1, "", "")
+	if plan.HasRed || plan.HasYellow {
+		t.Fatalf("low-risk DeepSeek suggestions should not trigger rewrite flags: %+v", plan)
+	}
+	if !strings.Contains(plan.Brief, "DeepSeek 修改方案: 可微调一处重复动作") {
+		t.Fatalf("brief should still preserve low-risk suggestions:\n%s", plan.Brief)
+	}
+}
+
 func TestExtractJSONObjectFromFencedResponse(t *testing.T) {
 	got := extractJSONObject("```json\n{\"verdict\":\"mixed\"}\n```")
 	if got != `{"verdict":"mixed"}` {

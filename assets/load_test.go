@@ -25,6 +25,19 @@ func TestLoadReferencesIncludesHumanFeelCraft(t *testing.T) {
 	}
 }
 
+func TestLoadReferencesIncludesCharacterAndEmotionalCraft(t *testing.T) {
+	bundle := Load("default")
+	if !strings.Contains(bundle.References.CharacterBuilding, "人物塑造原则") {
+		t.Fatalf("expected character building reference to be loaded")
+	}
+	if !strings.Contains(bundle.References.EmotionalNarrativeCraft, "情感叙事与人物推进写法") {
+		t.Fatalf("expected emotional narrative craft reference to be loaded")
+	}
+	if !strings.Contains(bundle.References.EmotionalNarrativeCraft, "长循环处理规则") {
+		t.Fatalf("expected emotional narrative craft to define loop handling")
+	}
+}
+
 func TestLoadReferencesIncludesWritingTechniquesDigest(t *testing.T) {
 	bundle := Load("default")
 	if !strings.Contains(bundle.References.WritingTechniquesDigest, "19 篇写作技巧文章") {

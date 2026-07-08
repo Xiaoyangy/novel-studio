@@ -95,11 +95,17 @@ func buildRevisionPlan(projectDir string, chapter int, chapterText string, revie
 			if label == "" {
 				label = issue.Type
 			}
-			switch issue.Severity {
-			case "critical", "error":
-				addRed(fmt.Sprintf("结构化 issue %s: %s", issue.Severity, label))
-			case "warning":
-				addYellow(fmt.Sprintf("结构化 issue warning: %s", label))
+			if reviewEntry.Verdict == "accept" && issue.Severity == "warning" {
+				if !isNonActionableAcceptedIssue(reviewEntry, issue) {
+					addSuggestion("Editor accept 观察: " + label)
+				}
+			} else {
+				switch issue.Severity {
+				case "critical", "error":
+					addRed(fmt.Sprintf("结构化 issue %s: %s", issue.Severity, label))
+				case "warning":
+					addYellow(fmt.Sprintf("结构化 issue warning: %s", label))
+				}
 			}
 			addSuggestion(issue.Suggestion)
 		}
@@ -108,7 +114,11 @@ func buildRevisionPlan(projectDir string, chapter int, chapterText string, revie
 			case "fail":
 				addRed(fmt.Sprintf("八维失败 %s(%d): %s", dim.Dimension, dim.Score, dim.Comment))
 			case "warning":
-				addYellow(fmt.Sprintf("八维警告 %s(%d): %s", dim.Dimension, dim.Score, dim.Comment))
+				if reviewEntry.Verdict == "accept" {
+					addSuggestion(fmt.Sprintf("Editor accept 观察 %s(%d): %s", dim.Dimension, dim.Score, dim.Comment))
+				} else {
+					addYellow(fmt.Sprintf("八维警告 %s(%d): %s", dim.Dimension, dim.Score, dim.Comment))
+				}
 			}
 		}
 	}
@@ -202,7 +212,7 @@ func addDeepSeekAIJudgeToPlan(
 		addRed(label)
 	} else if artifact.AIProbabilityPercent >= 15 || artifact.RiskLevel == "medium" {
 		addYellow(label)
-	} else if len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0 {
+	} else if artifact.AIProbabilityPercent >= 10 && (len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0) {
 		addYellow("DeepSeek 裸正文 AI 判定给出非阻断修改方案，按黄旗择优打磨")
 	}
 	if strings.TrimSpace(artifact.ParseWarning) != "" {
@@ -223,6 +233,52 @@ func addDeepSeekAIJudgeToPlan(
 	for _, rule := range artifact.RAGRules {
 		addSuggestion("DeepSeek 后续规避规则: " + rule)
 	}
+}
+
+func isNonActionableAcceptedIssue(entry domain.ReviewEntry, issue domain.ConsistencyIssue) bool {
+	if entry.Verdict != "accept" || issue.Severity != "warning" {
+		return false
+	}
+	text := strings.TrimSpace(strings.Join([]string{issue.Description, issue.Evidence, issue.Suggestion}, " "))
+	if text == "" {
+		return true
+	}
+	if strings.Contains(text, "无其他问题") || strings.Contains(text, "暂无问题") || strings.Contains(text, "无突出问题") {
+		return true
+	}
+	if acceptedIssueIsReviewCalibration(text) {
+		return true
+	}
+	if acceptedIssueIsFutureOnly(text) {
+		return true
+	}
+	if !(strings.Contains(text, "无需修改") || strings.Contains(text, "不需要修改") || strings.Contains(text, "无需回头")) {
+		return false
+	}
+	return strings.Contains(text, "无严重问题") ||
+		strings.Contains(text, "微小") ||
+		strings.Contains(text, "微瑕") ||
+		strings.Contains(text, "未达到") ||
+		strings.Contains(text, "低风险") ||
+		strings.Contains(text, "当前版本")
+}
+
+func acceptedIssueIsReviewCalibration(text string) bool {
+	return strings.Contains(text, "定位错位") ||
+		strings.Contains(text, "评分体系失真") ||
+		strings.Contains(text, "评审口径校准") ||
+		strings.Contains(text, "评审标尺错位")
+}
+
+func acceptedIssueIsFutureOnly(text string) bool {
+	if !(strings.Contains(text, "后续") || strings.Contains(text, "下一章")) {
+		return false
+	}
+	return strings.Contains(text, "预防") ||
+		strings.Contains(text, "若高频") ||
+		strings.Contains(text, "后续类似") ||
+		strings.Contains(text, "后续章节") ||
+		strings.Contains(text, "在下一章")
 }
 
 func mechanicalRewriteBriefSuggestion(rule string) string {

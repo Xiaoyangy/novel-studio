@@ -163,6 +163,8 @@ func loadReferences(style string) tools.References {
 		AntiAITone:              mustRead(referencesFS, "references/anti-ai-tone.md"),
 		ProductionPlaybook:      mustRead(referencesFS, "references/assistant-production-playbook.md"),
 		HumanFeelCraft:          mustRead(referencesFS, "references/human-feel-craft.md"),
+		CharacterBuilding:       mustRead(referencesFS, "references/character-building.md"),
+		EmotionalNarrativeCraft: mustRead(referencesFS, "references/emotional-narrative-craft.md"),
 		WritingTechniquesDigest: mustRead(referencesFS, "references/refer-writing-techniques-digest.md"),
 		RAGWritingGuidelines:    mustRead(referencesFS, "references/rag-writing-guidelines.md"),
 		WebReferenceGuidelines:  mustRead(referencesFS, "references/web-reference-guidelines.md"),

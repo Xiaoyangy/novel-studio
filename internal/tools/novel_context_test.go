@@ -785,6 +785,42 @@ func TestContextToolInjectsHumanFeelCraftReference(t *testing.T) {
 	}
 }
 
+func TestContextToolInjectsCharacterAndEmotionalCraftReferences(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewContextTool(s, References{
+		CharacterBuilding:       "人物塑造：目标、恐惧、压力反应",
+		EmotionalNarrativeCraft: "情感叙事：情绪弧线、动机反应、长循环联网查资料",
+	}, "default")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack")
+	}
+	refs, ok := pack["references"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack.references")
+	}
+	if got, ok := refs["character_building"].(string); !ok || got == "" {
+		t.Fatalf("expected character_building reference, got %#v", refs["character_building"])
+	}
+	if got, ok := refs["emotional_narrative_craft"].(string); !ok || got == "" {
+		t.Fatalf("expected emotional_narrative_craft reference, got %#v", refs["emotional_narrative_craft"])
+	}
+}
+
 func TestContextToolInjectsWritingTechniquesDigestReference(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)

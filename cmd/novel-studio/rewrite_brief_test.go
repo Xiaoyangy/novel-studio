@@ -160,6 +160,60 @@ func TestBuildRevisionPlanKeepsYellowNonBlocking(t *testing.T) {
 	}
 }
 
+func TestBuildRevisionPlanIgnoresAcceptedNonActionableWarnings(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "reviews", "01.json"), `{
+  "chapter": 1,
+  "scope": "chapter",
+  "verdict": "accept",
+  "issues": [
+    {"type": "aesthetic", "severity": "warning", "description": "无严重问题。唯一微小痕迹未达到AI腔阈值，且与整体笔调相容，无需修改。"},
+    {"type": "aesthetic", "severity": "warning", "description": "无其他问题。"},
+    {"type": "ai_voice_detection", "severity": "warning", "description": "后续章节若高频出现排比式内心独白会触发AI腔模式匹配，建议在下一章故意打断一至两处。"},
+    {"type": "aesthetic", "severity": "warning", "description": "定位错位导致评分体系失真：当前是女性职场悬疑长篇，不应按短篇爽文扣分。"}
+  ],
+  "dimensions": [
+    {"dimension": "aesthetic", "score": 100, "verdict": "pass", "comment": "通过"}
+  ],
+  "summary": "通过"
+}`)
+	plan := buildRevisionPlan(dir, 1, "", "")
+	if plan.HasRed || plan.HasYellow {
+		t.Fatalf("accepted non-actionable warnings should not trigger rewrite flags: %+v\n%s", plan, plan.Brief)
+	}
+	if strings.Contains(plan.Brief, "结构化 issue warning") {
+		t.Fatalf("brief should not surface non-actionable accepted warnings:\n%s", plan.Brief)
+	}
+}
+
+func TestBuildRevisionPlanKeepsAcceptedWarningsAsObservations(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "reviews", "01.json"), `{
+  "chapter": 1,
+  "scope": "chapter",
+  "verdict": "accept",
+  "issues": [
+    {"type": "hook", "severity": "warning", "description": "章末钩子可更锋利，但当前压力闭环成立。"}
+  ],
+  "dimensions": [
+    {"dimension": "hook", "score": 70, "verdict": "warning", "comment": "倒计时是压力，不是新事件。"}
+  ],
+  "summary": "通过，可进入下一章"
+}`)
+	plan := buildRevisionPlan(dir, 1, "", "")
+	if plan.HasRed || plan.HasYellow {
+		t.Fatalf("accepted warnings should not set rewrite flags: %+v\n%s", plan, plan.Brief)
+	}
+	for _, want := range []string{"Editor accept 观察: 章末钩子可更锋利", "Editor accept 观察 hook(70)"} {
+		if !strings.Contains(plan.Brief, want) {
+			t.Fatalf("expected accepted observation %q in brief:\n%s", want, plan.Brief)
+		}
+	}
+	if strings.Contains(plan.Brief, "结构化 issue warning") || strings.Contains(plan.Brief, "八维警告") {
+		t.Fatalf("accepted observations should not be labeled as yellow flags:\n%s", plan.Brief)
+	}
+}
+
 func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01.md"), `# 第001章 统一审核
