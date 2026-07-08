@@ -77,8 +77,11 @@ func CraftContentFacet(path, sample string) CraftFacet {
 	// 元分析——它们都是"什么是好的人类文笔 / AI 味校准"的参照，统一归 calibration。
 	// 唯独 review-calibration 下的 novel-craft-methodology 是创作方法论，仍按关键词判 methodology。
 	lowerPath := strings.ToLower(filepath.ToSlash(path))
-	if strings.Contains(lowerPath, "review-calibration") && !strings.Contains(lowerPath, "novel-craft-methodology") {
-		return FacetCalibration
+	if strings.Contains(lowerPath, "review-calibration") {
+		if strings.Contains(lowerPath, "novel-craft-methodology") {
+			return FacetMethodology // 校准库里的创作方法论
+		}
+		return FacetCalibration // 人工文笔样本 + 校准报告
 	}
 	name := strings.ToLower(filepath.Base(path))
 	body := strings.ToLower(sample)

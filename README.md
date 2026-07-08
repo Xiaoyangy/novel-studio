@@ -105,7 +105,7 @@ flowchart LR
 | 长篇上下文 | 无限拼接直到溢出 | 按总章数自动切换全量 / 滑窗 / 分层摘要，四级压缩管线 + Lost-in-the-Middle 治理（关键信息头尾、参考资料居中），支撑 500+ 章 |
 | 断点恢复 | 从头再来或手工找进度 | 每个工具成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename，断电不损坏 |
 | 编排哲学 | 复杂工作流引擎 | LLM 驱动长循环：一次 Prompt 写完整本书，Host 不介入调度；工具只返事实，指令由 Reminder 每轮从事实层重算 |
-| 记忆 | 对话历史即记忆 | 本地 RAG（keyword + embedding + Qdrant）：accept 后事实入库 + 拆文手法库 / 对标素材库双通道，检索有 trace 可审计 |
+| 记忆 | 对话历史即记忆 | 本地 RAG（keyword + embedding + Qdrant）：accept 后事实入库 + 拆文手法库 / 对标素材库 / 审核校准库三通道，设计库按**内容级 facet + 可用阶段**打标（Architect / plan / writing / review 各取所需），检索有 trace 可审计 |
 | 成本 | 跑完才知道花了多少 | token / 费用按角色按模型累计，预算越线告警 / 熔断；支持 codex-cli 订阅接入省 API 费 |
 
 ### 生态位：和主流工具比，它站在哪
@@ -131,7 +131,7 @@ flowchart TD
     AR --> ST["Store（事实层，原子写入）<br/>progress · checkpoints · outline · chapters<br/>timeline · world_events · 各类账本台账"]
     WR --> ST
     ED --> ST
-    ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark 双库<br/>（语料源：deconstruction-library/）"]
+    ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark / calibration 三库<br/>设计库按内容 facet + 阶段(architect/plan/writing/review)打标<br/>（语料源：deconstruction-library/）"]
     ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>七页签实时视图：总览 / 设定 / 人物 / 成长轨迹<br/>计划 / 离屏世界 / 日志"]
 ```
 

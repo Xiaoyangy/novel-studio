@@ -136,6 +136,7 @@ flowchart TD
 | Writer / Drafter 约束 | `assets/prompts/writer.md`、`assets/prompts/drafter.md`、`internal/tools/plan_chapter.go`、`internal/tools/plan_chapter_phases.go`、`internal/tools/craft_recall.go` | Planner 负责完整因果推演，并通过 `reader_retention_plan` 区分显性写出、隐性台账、延后揭示和删压缩内容；Drafter 完整读计划但只按留存节拍渲染，写法 RAG 无料时必须走宽检索或 reference_pack fallback |
 | 世界与 zero-init | `internal/tools/save_foundation.go`、`cmd/novel-studio/zero_init_*`、`internal/tools/worldsim_gate.go` | foundation 改动会使第一章 readiness 过期，世界推演资产和白名单 RAG 更严格 |
 | 上下文治理 | `internal/agents/context_manager.go`、`internal/tools/novel_context*.go`、`internal/tools/context_architect.go` | 加入长文本检测参考、rewrite_brief 机械门禁摘要、计划一致性与 RAG 召回证据 |
+| 设计库内容级打标 | `internal/rag/facet.go`、`internal/rag/craft.go`、`internal/rag/policy.go`、`cmd/novel-studio/rag_cmd.go`、`internal/bootstrap/config.go` | 手法库 / 对标库 / 审核校准库按文件名+正文内容判 18 类 `craft_facet` 并派生 `usage_stage`（architect / plan / writing / review），`craft_recall` 按内容 facet 跨目录检索；新增 `dialogue` 字段与 `review-calibration` 入库（`calibration_reference`） |
 | 质量审计脚本 | `quality/audit/scripts/content_lint.py` | 离线审计补结构性 AI 味和章节机械规则检查 |
 | 文档与运维 | `docs/subscription-and-pipeline-setup.md`、`docs/production-interruption-analysis-20260707.md`、本文件 | 记录订阅接入、新流水线、生产中断原因、第一章审核证据与架构图 |
 
