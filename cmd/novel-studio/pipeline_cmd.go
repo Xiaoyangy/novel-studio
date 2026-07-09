@@ -198,6 +198,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
 			if err == nil {
 				state.MarkDone(stage, evidence)
+				if err := savePipelineState(statePath, state); err != nil {
+					return fmt.Errorf("保存流水线状态失败: %w", err)
+				}
 				fmt.Fprintf(os.Stderr, "[pipeline] 跳过已完成阶段：%s\n", stage)
 				continue
 			}

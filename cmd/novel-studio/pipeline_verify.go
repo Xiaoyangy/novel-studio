@@ -99,8 +99,8 @@ func verifyPipelineArchitectStage(outputDir string, evidence domain.PipelineStag
 
 func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
 	st := store.NewStore(outputDir)
-	if !tools.ChapterOnePendingFirstWrite(st) {
-		evidence.Message = "zero-init skipped after chapter one"
+	if !tools.ChapterOnePendingFirstWrite(st) && !pipelineZeroInitEvidenceExists(outputDir) {
+		evidence.Message = "zero-init skipped after chapter one (legacy project)"
 		return evidence, nil
 	}
 	for _, rel := range []string{
@@ -118,7 +118,7 @@ func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStage
 		sort.Strings(evidence.Missing)
 		return evidence, fmt.Errorf("zero-init 阶段 readiness 未就绪：%s", reason)
 	}
-	if err := tools.EnsureInitialWorldTickForChapterOne(st); err != nil {
+	if err := verifyPipelineZeroInitWorldTick(st); err != nil {
 		evidence.Missing = append(evidence.Missing, filepath.ToSlash(filepath.Join("meta", "world_tick.json")), filepath.ToSlash(filepath.Join("meta", "world_events.jsonl")))
 		sort.Strings(evidence.Missing)
 		return evidence, fmt.Errorf("zero-init 阶段初始 world_tick 未就绪：%w", err)
@@ -137,6 +137,35 @@ func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStage
 	}
 	evidence.Message = "zero-init ready"
 	return evidence, nil
+}
+
+func pipelineZeroInitEvidenceExists(outputDir string) bool {
+	for _, rel := range []string{
+		filepath.Join("meta", "first_chapter_generation_readiness.json"),
+		filepath.Join("meta", "first_chapter_generation_readiness.md"),
+		filepath.Join("meta", "ch01_zero_init_plan.md"),
+		filepath.Join("drafts", "01.zero_init.plan.json"),
+		filepath.Join("meta", "world_tick.json"),
+		filepath.Join("meta", "world_events.jsonl"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, rel)) {
+			return true
+		}
+	}
+	return false
+}
+
+func verifyPipelineZeroInitWorldTick(st *store.Store) error {
+	if tools.ChapterOnePendingFirstWrite(st) {
+		return tools.EnsureInitialWorldTickForChapterOne(st)
+	}
+	if !pipelineZeroInitEvidenceExists(st.Dir()) {
+		return nil
+	}
+	if issues := tools.InitialWorldTickQualityIssues(st); len(issues) > 0 {
+		return fmt.Errorf("%s", strings.Join(issues, "；"))
+	}
+	return nil
 }
 
 func verifyPipelineWriteStage(outputDir string, flags pipelineFlags, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
@@ -289,7 +318,13 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 		body, _ := os.ReadFile(chapterPath)
 		plan := buildRevisionPlan(outputDir, ch, string(body), "")
 		if !plan.HasRed && !(flags.PolishWarnings && plan.HasYellow) {
-			evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:rewrite-not-needed", ch))
+			if cp := latestRewriteResolutionCheckpoint(store.NewStore(outputDir), ch); cp != nil {
+				evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:%s#%d", ch, cp.Step, cp.Seq))
+			} else if nonEmptyFile(filepath.Join(outputDir, filepath.FromSlash(backupRel))) {
+				evidence.Artifacts = append(evidence.Artifacts, backupRel)
+			} else {
+				evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:rewrite-not-needed", ch))
+			}
 			continue
 		}
 		if !nonEmptyFile(filepath.Join(outputDir, filepath.FromSlash(backupRel))) {
@@ -304,6 +339,16 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 	}
 	evidence.CompletedChapters = len(chapters)
 	return evidence, nil
+}
+
+func latestRewriteResolutionCheckpoint(st *store.Store, chapter int) *domain.Checkpoint {
+	scope := domain.ChapterScope(chapter)
+	for _, step := range []string{"rewrite-existing", "rewrite-not-needed", "rewrite-brief-only"} {
+		if cp := st.Checkpoints.LatestByStep(scope, step); cp != nil {
+			return cp
+		}
+	}
+	return nil
 }
 
 func filterChaptersForPipelineRange(chapters []int, flags pipelineFlags) []int {

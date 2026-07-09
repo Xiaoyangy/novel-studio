@@ -321,6 +321,9 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 			if err := toolspkg.UpsertRAGChunks(context.Background(), st, ragEmbedder, ragVectorWriter, rewriteExistingRAGChunks(chNum, plan.Brief, newText), domain.RAGIndexConfig{}); err != nil {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d RAG 重写沉淀失败：%v\n", chNum, err)
 			}
+			if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "rewrite-existing", chapterRel); err != nil {
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d rewrite-existing checkpoint 失败：%v\n", chNum, err)
+			}
 			fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d → %d 字（备份在 %s）\n", chNum, rewriteWordCount(newText), backupPath)
 			successCount++
 			totalRewritten++

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +503,23 @@ func TestVerifyPipelineRewriteStageAllowsCleanChaptersWithoutBackup(t *testing.T
 	}
 }
 
+func TestVerifyPipelineRewriteStageAcceptsResolvedRewriteBackup(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。周行舟问：“还要核哪一项？”他指了指押金条：“先核这个，别添别的。”")
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md.pre-rewrite.md"), "改写前正文")
+
+	evidence, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
+	if err != nil {
+		t.Fatalf("resolved rewrite should accept pre-rewrite backup: %v", err)
+	}
+	if got := strings.Join(evidence.Artifacts, " "); !strings.Contains(got, "chapters/01.md.pre-rewrite.md") {
+		t.Fatalf("expected pre-rewrite artifact, got %+v", evidence.Artifacts)
+	}
+	if got := strings.Join(evidence.Checkpoints, " "); strings.Contains(got, "rewrite-not-needed") {
+		t.Fatalf("resolved rewrite should not claim rewrite-not-needed without checkpoint: %+v", evidence.Checkpoints)
+	}
+}
+
 func TestVerifyPipelineRewriteStageBriefOnlyRequiresBriefNotBackup(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。")
@@ -635,6 +653,52 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 	}
 	if got := strings.Join(args["rewrite"], " "); got != "--from 3 --to 8 --budget 5m0s --role coordinator --max-rounds 4 --polish-warnings --brief-only" {
 		t.Fatalf("rewrite args = %q", got)
+	}
+}
+
+func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("她的第二算法", 70); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "许闻溪把讲稿翻到最后一页。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 13, "crisis", "quest"); err != nil {
+		t.Fatal(err)
+	}
+	generatedAt := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
+	mustWriteFile(t, filepath.Join(dir, "meta", "first_chapter_generation_readiness.json"), fmt.Sprintf(`{"ready":true,"generated_at":%q}`, generatedAt))
+	mustWriteFile(t, filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"), "ready")
+	mustWriteFile(t, filepath.Join(dir, "meta", "ch01_zero_init_plan.md"), "plan")
+	if _, err := st.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"AI提效项目组"},
+		Summary:           "AI提效项目组把溪流助手列入运营中心试点。",
+		VisibilityChapter: 1,
+	}}); err != nil {
+		t.Fatalf("AppendWorldEvents: %v", err)
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1}); err != nil {
+		t.Fatalf("SaveTick: %v", err)
+	}
+
+	evidence, err := verifyPipelineStage("zero-init", dir, pipelineFlags{}, &domain.PipelineState{})
+	if err != nil {
+		t.Fatalf("verify zero-init: %v", err)
+	}
+	if evidence.Message != "zero-init ready" {
+		t.Fatalf("message=%q, want zero-init ready", evidence.Message)
+	}
+	for _, want := range []string{"meta/first_chapter_generation_readiness.json", "meta/world_tick.json", "meta/world_events.jsonl"} {
+		if !slices.Contains(evidence.Artifacts, want) {
+			t.Fatalf("zero-init evidence missing %s: %+v", want, evidence.Artifacts)
+		}
 	}
 }
 

@@ -130,6 +130,42 @@ func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
 	}
 }
 
+func TestZeroInitOverwriteRepairsWorldTickFromExistingEvents(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+	if _, err := st.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"AI提效项目组"},
+		Summary:           "AI提效项目组把溪流助手列为运营中心试点。",
+		VisibilityChapter: 1,
+	}}); err != nil {
+		t.Fatalf("AppendWorldEvents: %v", err)
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
+		t.Fatalf("SaveTick: %v", err)
+	}
+
+	if err := zeroInitPipeline(cliOptions{}, []string{"--dir", dir, "--overwrite", "--rebuild-rag=false"}); err != nil {
+		t.Fatalf("zeroInitPipeline overwrite: %v", err)
+	}
+
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil {
+		t.Fatalf("LoadTick: %v", err)
+	}
+	if tick == nil || tick.TickID != "v1-a1" || tick.EventCount != 1 {
+		t.Fatalf("world_tick should be repaired from existing events, got %+v", tick)
+	}
+	events, err := st.WorldSim.LoadWorldEvents()
+	if err != nil {
+		t.Fatalf("LoadWorldEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("world events should be preserved, got %d", len(events))
+	}
+}
+
 func TestZeroInitPipelineBuildsCleanProjectRAG(t *testing.T) {
 	dir := seedZeroInitProject(t)
 	mustWriteZeroInitTestFile(t, filepath.Join(dir, "chapters", "01.md"), "# 旧正文\n\n旧正文不得进入零章 RAG。")

@@ -1164,12 +1164,57 @@ func writeZeroWorldSimAssets(dir string, project zeroInitProject, overwrite bool
 	}
 
 	// 世界 tick 零点：让首次弧边界推演有游标基准。
-	if zeroShouldWriteArtifact(dir, overwrite, "meta/world_tick.json") {
-		if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
-			return err
-		}
+	if err := zeroEnsureWorldTickSeed(st, overwrite); err != nil {
+		return err
 	}
 	return nil
+}
+
+func zeroEnsureWorldTickSeed(st *store.Store, overwrite bool) error {
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil {
+		return err
+	}
+	events, err := st.WorldSim.LoadWorldEvents()
+	if err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		if tick != nil && strings.TrimSpace(tick.TickID) != "" && tick.TickID != "v0-a0" && tick.EventCount > 0 {
+			return nil
+		}
+		return st.WorldSim.SaveTick(zeroWorldTickFromEvents(events))
+	}
+	if tick != nil && strings.TrimSpace(tick.TickID) != "" && !overwrite {
+		return nil
+	}
+	if zeroShouldWriteArtifact(st.Dir(), overwrite, "meta/world_tick.json") {
+		return st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0})
+	}
+	return nil
+}
+
+func zeroWorldTickFromEvents(events []domain.WorldEvent) domain.WorldTick {
+	tickID := "v1-a1"
+	through := 0
+	for _, event := range events {
+		if strings.TrimSpace(event.TickID) != "" {
+			tickID = strings.TrimSpace(event.TickID)
+		}
+		if event.Chapter > through {
+			through = event.Chapter
+		}
+	}
+	tick := domain.WorldTick{
+		TickID:         tickID,
+		ThroughChapter: through,
+		EventCount:     len(events),
+	}
+	if _, err := fmt.Sscanf(tickID, "v%d-a%d", &tick.Volume, &tick.Arc); err != nil {
+		tick.Volume = 0
+		tick.Arc = 0
+	}
+	return tick
 }
 
 // writeZeroMethodologyArtifacts Task 056：把 world_background_plan 里的世界背景层
