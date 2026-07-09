@@ -64,7 +64,7 @@ func parseBuildRAGFlags(argv []string) (buildRAGFlags, []string, error) {
 	fs := flag.NewFlagSet("build-rag", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --build-rag [--dir <output/novel>] [--source <path> ...] [--probe-chapter N]\n\n")
-		fmt.Fprintf(os.Stderr, "构建本书本地 RAG 索引，写入 meta/rag/index_state.json/md。默认只索引当前项目的 prompt.md、input/*.md 与 output/novel 关键设定/账本文件；拒绝拆解库(deconstruction-library)、对标库和外部参考库。\n\n选项：\n")
+		fmt.Fprintf(os.Stderr, "构建本书本地 RAG 索引，写入 meta/rag/index_state.json/md。默认只索引当前项目的 prompt.md、brainstorm.md、input/*.md 与 output/novel 关键设定/账本文件；拒绝拆解库(deconstruction-library)、对标库和外部参考库。\n\n选项：\n")
 		fs.PrintDefaults()
 	}
 	var f buildRAGFlags
@@ -152,6 +152,11 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 		} else if err != nil {
 			return err
 		}
+	}
+	if removed, err := sanitizeExistingRAGVectorStore(st, &result.State); err != nil {
+		return err
+	} else if removed > 0 {
+		fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", removed)
 	}
 	vectorEmbedded := 0
 	vectorWritten := 0
@@ -247,16 +252,26 @@ func hasConfiguredRAGQdrantCollection(opts cliOptions) bool {
 func ensureDefaultRAGIndex(outputDir string) error {
 	st := store.NewStore(outputDir)
 	if state, err := st.RAG.LoadIndexState(); err == nil && state != nil && len(state.Chunks) > 0 {
-		removed := sanitizeRAGIndexState(state)
+		removed := sanitizeRAGIndexState(st, state)
+		vectorRemoved, vectorErr := sanitizeExistingRAGVectorStore(st, state)
+		if vectorErr != nil {
+			return vectorErr
+		}
 		if removed > 0 {
 			if len(state.Chunks) > 0 {
 				if err := st.RAG.SaveIndexState(*state); err != nil {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 参考库 chunks=%d\n", removed)
+				if vectorRemoved > 0 {
+					fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", vectorRemoved)
+				}
 				return nil
 			}
 			fmt.Fprintf(os.Stderr, "[build-rag] 旧 RAG 索引仅含参考库 chunks=%d，重新构建当前项目索引\n", removed)
+		} else if vectorRemoved > 0 {
+			fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", vectorRemoved)
+			return nil
 		} else {
 			return nil
 		}
@@ -402,6 +417,11 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	if embCfg.BuildConcurrency <= 0 {
 		embCfg.BuildConcurrency = 2
 	}
+	configuredConcurrency := embCfg.BuildConcurrency
+	embCfg.BuildConcurrency = effectiveRAGEmbeddingBuildConcurrency(embCfg)
+	if strings.TrimSpace(embCfg.LocalGGUF) != "" && configuredConcurrency != embCfg.BuildConcurrency {
+		fmt.Fprintf(os.Stderr, "[build-rag] 本地 GGUF embedding 自动串行化：configured=%d effective=%d（避免 llama-server 并发 EOF，不更换模型）\n", configuredConcurrency, embCfg.BuildConcurrency)
+	}
 	// Task 071：维度探针——切换模型前后可对比；哈希伪向量时提示升级为真语义模型。
 	if probe, err := embedder.Embed(ctx, "维度探针"); err == nil {
 		fmt.Fprintf(os.Stderr, "[build-rag] embedder=%s dims=%d（本次全量构建会重建 Qdrant collection 与 vector_store.json，维度变更自动生效）\n", embCfg.Model, len(probe))
@@ -469,6 +489,77 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	return result, vectorStore, nil
 }
 
+func sanitizeExistingRAGVectorStore(st *store.Store, state *domain.RAGIndexState) (int, error) {
+	vectorStore, err := st.RAG.LoadVectorStore()
+	if err != nil {
+		return 0, err
+	}
+	if vectorStore == nil {
+		return 0, nil
+	}
+	removed := sanitizeRAGVectorStore(st, vectorStore, state)
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := st.RAG.SaveVectorStore(*vectorStore); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore, state *domain.RAGIndexState) int {
+	if vectorStore == nil {
+		return 0
+	}
+	allowed := map[string]struct{}{}
+	if state != nil {
+		for _, chunk := range state.Chunks {
+			chunk = rag.NormalizeChunk(chunk)
+			if chunk.Hash != "" {
+				allowed[chunk.Hash] = struct{}{}
+			}
+		}
+	}
+	filtered := vectorStore.Points[:0]
+	removed := 0
+	for _, point := range vectorStore.Points {
+		chunk := rag.NormalizeChunk(point.Chunk)
+		hash := strings.TrimSpace(point.Hash)
+		if hash == "" {
+			hash = chunk.Hash
+		}
+		if len(allowed) > 0 {
+			if _, ok := allowed[hash]; !ok {
+				removed++
+				continue
+			}
+		}
+		if rag.IsForbiddenChunk(chunk) || ragChunkHasProjectContamination(st, chunk) {
+			removed++
+			continue
+		}
+		point.Hash = hash
+		point.Chunk = chunk
+		filtered = append(filtered, point)
+	}
+	vectorStore.Points = filtered
+	if removed > 0 {
+		vectorStore.UpdatedAt = time.Now().Format(time.RFC3339)
+	}
+	return removed
+}
+
+func effectiveRAGEmbeddingBuildConcurrency(embCfg bootstrap.RAGEmbeddingConfig) int {
+	concurrency := embCfg.BuildConcurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	if strings.TrimSpace(embCfg.LocalGGUF) != "" && concurrency > 1 {
+		return 1
+	}
+	return concurrency
+}
+
 func discoverDefaultRAGSources(outputDir string) []string {
 	outputDir = cleanAbsRAGPath(outputDir)
 	projectRoot := ragProjectRoot(outputDir)
@@ -482,6 +573,7 @@ func discoverDefaultRAGSources(outputDir string) []string {
 		}
 	}
 	addIfExists(filepath.Join(projectRoot, "prompt.md"))
+	addIfExists(filepath.Join(projectRoot, "brainstorm.md"))
 	addIfExists(filepath.Join(projectRoot, "input"))
 	addIfExists(outputDir)
 	return sources
@@ -882,14 +974,14 @@ func isPathWithin(path, root string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func sanitizeRAGIndexState(state *domain.RAGIndexState) int {
+func sanitizeRAGIndexState(st *store.Store, state *domain.RAGIndexState) int {
 	if state == nil {
 		return 0
 	}
 	filtered := state.Chunks[:0]
 	removed := 0
 	for _, chunk := range state.Chunks {
-		if rag.IsForbiddenChunk(chunk) {
+		if rag.IsForbiddenChunk(chunk) || ragChunkHasProjectContamination(st, chunk) {
 			removed++
 			continue
 		}
@@ -901,6 +993,20 @@ func sanitizeRAGIndexState(state *domain.RAGIndexState) int {
 		state.UpdatedAt = time.Now().Format(time.RFC3339)
 	}
 	return removed
+}
+
+func ragChunkHasProjectContamination(st *store.Store, chunk domain.RAGChunk) bool {
+	if st == nil {
+		return false
+	}
+	metadata := ""
+	if len(chunk.Metadata) > 0 {
+		if data, err := json.Marshal(chunk.Metadata); err == nil {
+			metadata = string(data)
+		}
+	}
+	text := strings.Join([]string{chunk.SourcePath, chunk.Text, chunk.Summary, chunk.Context, strings.Join(chunk.Keywords, " "), metadata}, "\n")
+	return len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, text)) > 0
 }
 
 func resetRAGTrace(outputDir string) {
@@ -926,6 +1032,7 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 	if state == nil {
 		state = &domain.RAGIndexState{Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
 	}
+	sanitizeRAGIndexState(st, state)
 	if strings.TrimSpace(state.Config.Collection) == "" {
 		state.Config.Collection = "local_keyword"
 	}

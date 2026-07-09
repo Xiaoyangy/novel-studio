@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -118,6 +120,150 @@ func (s *DraftStore) LoadChapterContent(chapter int) (string, int, error) {
 		return draft, utf8.RuneCountInString(draft), nil
 	}
 	return "", 0, nil
+}
+
+func draftPartIndexPath(chapter int) string {
+	return fmt.Sprintf("drafts/%02d.parts/index.json", chapter)
+}
+
+func draftPartPath(chapter, part int) string {
+	return fmt.Sprintf("drafts/%02d.parts/part-%02d.md", chapter, part)
+}
+
+// SaveDraftPart 保存章节正文分片，并更新 drafts/NN.parts/index.json。
+// 分片草稿用于长章/高上下文压力场景；最终仍需 MergeDraftParts 后写整章草稿。
+func (s *DraftStore) SaveDraftPart(chapter, part, totalParts int, title, focus, content string) (*domain.ChapterDraftPartIndex, domain.ChapterDraftPart, error) {
+	if totalParts < part {
+		totalParts = part
+	}
+	now := time.Now().Format(time.RFC3339)
+	var idx *domain.ChapterDraftPartIndex
+	var item domain.ChapterDraftPart
+	err := s.io.WithWriteLock(func() error {
+		loaded, err := s.loadDraftPartIndexUnlocked(chapter)
+		if err != nil {
+			return err
+		}
+		if loaded == nil {
+			loaded = &domain.ChapterDraftPartIndex{Version: 1, Chapter: chapter}
+		}
+		loaded.Version = 1
+		loaded.Chapter = chapter
+		loaded.UpdatedAt = now
+		path := draftPartPath(chapter, part)
+		item = domain.ChapterDraftPart{
+			Part:        part,
+			TotalParts:  totalParts,
+			Title:       title,
+			Focus:       focus,
+			ContentPath: path,
+			RuneCount:   utf8.RuneCountInString(content),
+			UpdatedAt:   now,
+		}
+		replaced := false
+		for i := range loaded.Parts {
+			if loaded.Parts[i].Part == part {
+				loaded.Parts[i] = item
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			loaded.Parts = append(loaded.Parts, item)
+		}
+		sort.Slice(loaded.Parts, func(i, j int) bool { return loaded.Parts[i].Part < loaded.Parts[j].Part })
+		if err := s.io.WriteFileUnlocked(path, []byte(content)); err != nil {
+			return err
+		}
+		if err := s.io.WriteJSONUnlocked(draftPartIndexPath(chapter), loaded); err != nil {
+			return err
+		}
+		cp := *loaded
+		cp.Parts = append([]domain.ChapterDraftPart(nil), loaded.Parts...)
+		idx = &cp
+		return nil
+	})
+	return idx, item, err
+}
+
+// LoadDraftPartIndex 读取分片草稿索引；不存在时返回 nil。
+func (s *DraftStore) LoadDraftPartIndex(chapter int) (*domain.ChapterDraftPartIndex, error) {
+	var idx domain.ChapterDraftPartIndex
+	if err := s.io.ReadJSON(draftPartIndexPath(chapter), &idx); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Slice(idx.Parts, func(i, j int) bool { return idx.Parts[i].Part < idx.Parts[j].Part })
+	return &idx, nil
+}
+
+func (s *DraftStore) loadDraftPartIndexUnlocked(chapter int) (*domain.ChapterDraftPartIndex, error) {
+	var idx domain.ChapterDraftPartIndex
+	if err := s.io.ReadJSONUnlocked(draftPartIndexPath(chapter), &idx); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Slice(idx.Parts, func(i, j int) bool { return idx.Parts[i].Part < idx.Parts[j].Part })
+	return &idx, nil
+}
+
+// LoadDraftPartContent 读取指定正文分片。
+func (s *DraftStore) LoadDraftPartContent(chapter, part int) (string, error) {
+	data, err := s.io.ReadFile(draftPartPath(chapter, part))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// MergeDraftParts 按 index 顺序合并正文分片。调用方负责写入整章草稿。
+func (s *DraftStore) MergeDraftParts(chapter, expectedParts int) (string, *domain.ChapterDraftPartIndex, []int, error) {
+	idx, err := s.LoadDraftPartIndex(chapter)
+	if err != nil || idx == nil {
+		return "", idx, nil, err
+	}
+	if expectedParts <= 0 {
+		for _, part := range idx.Parts {
+			if part.TotalParts > expectedParts {
+				expectedParts = part.TotalParts
+			}
+			if part.Part > expectedParts {
+				expectedParts = part.Part
+			}
+		}
+	}
+	byPart := make(map[int]domain.ChapterDraftPart, len(idx.Parts))
+	for _, part := range idx.Parts {
+		byPart[part.Part] = part
+	}
+	var missing []int
+	var chunks []string
+	for part := 1; part <= expectedParts; part++ {
+		if _, ok := byPart[part]; !ok {
+			missing = append(missing, part)
+			continue
+		}
+		content, err := s.LoadDraftPartContent(chapter, part)
+		if err != nil {
+			return "", idx, missing, err
+		}
+		if strings.TrimSpace(content) == "" {
+			missing = append(missing, part)
+			continue
+		}
+		chunks = append(chunks, strings.TrimSpace(content))
+	}
+	if len(missing) > 0 {
+		return "", idx, missing, nil
+	}
+	return strings.Join(chunks, "\n\n"), idx, nil, nil
 }
 
 // SaveFinalChapter 保存最终章节正文到 chapters/{ch}.md。

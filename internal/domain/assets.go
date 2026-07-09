@@ -117,6 +117,11 @@ func (w BookWorld) ValidateFactionRelations() []string {
 		if f.Name != "" {
 			known[f.Name] = struct{}{}
 		}
+		for _, alias := range f.Aliases {
+			if alias != "" {
+				known[alias] = struct{}{}
+			}
+		}
 	}
 	var issues []string
 	for _, f := range w.Factions {
@@ -186,6 +191,7 @@ func (c *FactionClock) IsComplete() bool {
 type WorldFaction struct {
 	ID        string            `json:"id"`
 	Name      string            `json:"name"`
+	Aliases   []string          `json:"aliases,omitempty"`
 	Goal      string            `json:"goal,omitempty"`
 	Resources []string          `json:"resources,omitempty"`
 	Relations []FactionRelation `json:"relations,omitempty"`

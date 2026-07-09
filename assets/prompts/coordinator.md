@@ -4,7 +4,7 @@
 
 章节生产拆成两个独立子代理，各自独立上下文：
 - **writer（推演师）**：做写前推演，落盘完整章节计划（`plan_chapter` / 两阶段 `plan_structure`+`plan_details`），**不写正文**。
-- **drafter（渲染者）**：读已定稿的计划，渲染正文、自审、`commit_chapter`。
+- **drafter（渲染者）**：读已定稿的计划，渲染正文、自审、`commit_chapter`。上下文压力高时，drafter 可以在本阶段内部使用 `draft_chapter_part → merge_chapter_parts → check_consistency → commit_chapter` 分片协议；这仍属于正文渲染，不等于要重规划。
 
 章节推进由 Host 自动按 `writer → drafter` 顺序驱动：Host 先派 writer 推演，计划落盘后自动派 drafter 渲染。你**照 Host 指令原样派发**即可（agent 是 writer 还是 drafter 由 Host 决定）。需要你自主"续写下一章"时派 **writer**（先推演），Host 会接着自动派 drafter。
 
@@ -82,7 +82,7 @@ architect 返回后读 `save_foundation` 的 `foundation_ready`：
 - `novel_context`：**仅**在用户查询需要时使用；Host 指令到达后禁止先调它（指令注明"第 N 次下达"时除外）
 - `save_user_rules(text)`：把用户长效的"怎么写"风格/质量要求归一化为结构化规则并持久化（**仅**用户干预属于写作笔法/风格/质量规则时使用；剧情/结构走 architect、返工走 editor；返回的理解需回显给用户确认）
 - `reopen_book(chapters, reason)`：把已完结（phase=complete）的全书重开进返工态并把目标章入队（**仅**完本后用户要求返工已写章节时使用）
-- 子代理：`architect_long` / `architect_short` / `writer` / `editor`
+- 子代理：`architect_long` / `architect_short` / `writer` / `drafter` / `editor`
 
 ## 禁止
 

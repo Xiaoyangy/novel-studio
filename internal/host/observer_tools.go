@@ -626,11 +626,22 @@ func displayToolName(tool string, args json.RawMessage) string {
 		if json.Unmarshal(args, &p) == nil && p.Type != "" {
 			return fmt.Sprintf("%s[%s]", tool, p.Type)
 		}
-	case "commit_chapter", "plan_chapter", "plan_structure", "plan_details", "draft_chapter", "check_consistency":
+	case "commit_chapter", "plan_chapter", "plan_structure", "plan_details", "draft_chapter", "merge_chapter_parts", "check_consistency":
 		var p struct {
 			Chapter int `json:"chapter"`
 		}
 		if json.Unmarshal(args, &p) == nil && p.Chapter > 0 {
+			return fmt.Sprintf("%s(第%d章)", tool, p.Chapter)
+		}
+	case "draft_chapter_part":
+		var p struct {
+			Chapter int `json:"chapter"`
+			Part    int `json:"part"`
+		}
+		if json.Unmarshal(args, &p) == nil && p.Chapter > 0 {
+			if p.Part > 0 {
+				return fmt.Sprintf("%s(第%d章·片%d)", tool, p.Chapter, p.Part)
+			}
 			return fmt.Sprintf("%s(第%d章)", tool, p.Chapter)
 		}
 	case "save_review":

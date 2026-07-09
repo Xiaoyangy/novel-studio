@@ -144,6 +144,84 @@ func TestStageCoCreate_OccupancyBlocksConcurrentEntries(t *testing.T) {
 	}
 }
 
+func TestEnsureStartProgressInitializedPreservesSimulationRestartProgress(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	want := &domain.Progress{
+		NovelName:       "她的第二算法",
+		Phase:           domain.PhaseInit,
+		TotalChapters:   70,
+		Layered:         true,
+		CurrentVolume:   1,
+		CurrentArc:      1,
+		GenerationID:    "simulation-test",
+		GenerationMode:  "simulation_restart_from_seed",
+		CurrentChapter:  0,
+		TotalWordCount:  0,
+		CompletedScenes: nil,
+	}
+	if err := st.Progress.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{store: st}
+	if err := h.ensureStartProgressInitialized(); err != nil {
+		t.Fatalf("ensureStartProgressInitialized: %v", err)
+	}
+	got, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GenerationID != want.GenerationID || got.TotalChapters != want.TotalChapters || !got.Layered || got.CurrentVolume != 1 || got.CurrentArc != 1 {
+		t.Fatalf("progress should be preserved, got %+v", got)
+	}
+}
+
+func TestEnsureStartProgressInitializedCreatesMissingProgress(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{store: st}
+	if err := h.ensureStartProgressInitialized(); err != nil {
+		t.Fatalf("ensureStartProgressInitialized: %v", err)
+	}
+	got, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Phase != domain.PhaseInit {
+		t.Fatalf("expected init progress, got %+v", got)
+	}
+}
+
+func TestResetStartRuntimeStateClearsQueueAndCheckpoints(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runtime.AppendQueue(domain.RuntimeQueueItem{Category: "TOOL", Summary: "old loop"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.GlobalScope(), "old", "old", "digest"); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{store: st}
+	if err := h.resetStartRuntimeState(); err != nil {
+		t.Fatalf("resetStartRuntimeState: %v", err)
+	}
+	if items, err := st.Runtime.LoadQueue(); err != nil || len(items) != 0 {
+		t.Fatalf("runtime queue should be empty: %+v err=%v", items, err)
+	}
+	if cps := st.Checkpoints.All(); len(cps) != 0 {
+		t.Fatalf("checkpoints should be empty: %+v", cps)
+	}
+}
+
 func TestBuildStoryStateSummary_NilStore(t *testing.T) {
 	if got := buildStoryStateSummary(nil); got != "" {
 		t.Errorf("nil store 应返回空串，得 %q", got)

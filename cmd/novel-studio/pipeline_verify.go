@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
+// 阶段：cocreate → architect → zero-init → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -18,6 +18,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *domain.PipelineState) (domain.PipelineStageEvidence, error) {
@@ -33,6 +34,10 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 			return evidence, fmt.Errorf("cocreate 未产出创作指令")
 		}
 		evidence.Message = "prompt captured"
+	case "architect":
+		return verifyPipelineArchitectStage(outputDir, evidence)
+	case "zero-init":
+		return verifyPipelineZeroInitStage(outputDir, evidence)
 	case "write":
 		return verifyPipelineWriteStage(outputDir, flags, evidence)
 	case "review":
@@ -44,6 +49,93 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 	default:
 		return evidence, fmt.Errorf("未知阶段：%s", stage)
 	}
+	return evidence, nil
+}
+
+func verifyPipelineArchitectStage(outputDir string, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+	for _, rel := range []string{
+		"premise.md",
+		"characters.json",
+		"world_rules.json",
+		"book_world.json",
+		"world_codex.json",
+		filepath.Join("meta", "compass.json"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, filepath.FromSlash(rel))) {
+			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+		}
+	}
+	if nonEmptyFile(filepath.Join(outputDir, "layered_outline.json")) {
+		evidence.Artifacts = append(evidence.Artifacts, "layered_outline.json")
+	} else if nonEmptyFile(filepath.Join(outputDir, "outline.json")) {
+		evidence.Artifacts = append(evidence.Artifacts, "outline.json")
+	}
+	if missing := tools.FoundationCoreMissing(outputDir); len(missing) > 0 {
+		evidence.Missing = append(evidence.Missing, missing...)
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("architect 阶段 foundation 未齐：%s", strings.Join(evidence.Missing, ", "))
+	}
+	for _, rel := range []string{
+		filepath.Join("meta", "architect_readiness.json"),
+		filepath.Join("meta", "architect_readiness.md"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, rel)) {
+			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+		} else {
+			evidence.Missing = append(evidence.Missing, filepath.ToSlash(rel))
+		}
+	}
+	if ok, reason := architectReadinessState(outputDir); !ok {
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("architect 阶段 readiness 未通过：%s", reason)
+	}
+	if len(evidence.Missing) > 0 {
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("architect 阶段缺少 readiness 产物：%s", strings.Join(evidence.Missing, ", "))
+	}
+	evidence.Message = "foundation ready"
+	return evidence, nil
+}
+
+func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+	st := store.NewStore(outputDir)
+	if !tools.ChapterOnePendingFirstWrite(st) {
+		evidence.Message = "zero-init skipped after chapter one"
+		return evidence, nil
+	}
+	for _, rel := range []string{
+		filepath.Join("meta", "first_chapter_generation_readiness.json"),
+		filepath.Join("meta", "first_chapter_generation_readiness.md"),
+		filepath.Join("meta", "ch01_zero_init_plan.md"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, rel)) {
+			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+		} else {
+			evidence.Missing = append(evidence.Missing, filepath.ToSlash(rel))
+		}
+	}
+	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok {
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("zero-init 阶段 readiness 未就绪：%s", reason)
+	}
+	if err := tools.EnsureInitialWorldTickForChapterOne(st); err != nil {
+		evidence.Missing = append(evidence.Missing, filepath.ToSlash(filepath.Join("meta", "world_tick.json")), filepath.ToSlash(filepath.Join("meta", "world_events.jsonl")))
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("zero-init 阶段初始 world_tick 未就绪：%w", err)
+	}
+	for _, rel := range []string{
+		filepath.Join("meta", "world_tick.json"),
+		filepath.Join("meta", "world_events.jsonl"),
+	} {
+		if nonEmptyFile(filepath.Join(outputDir, rel)) {
+			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+		}
+	}
+	if len(evidence.Missing) > 0 {
+		sort.Strings(evidence.Missing)
+		return evidence, fmt.Errorf("zero-init 阶段缺少产物：%s", strings.Join(evidence.Missing, ", "))
+	}
+	evidence.Message = "zero-init ready"
 	return evidence, nil
 }
 

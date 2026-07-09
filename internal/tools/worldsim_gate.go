@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -20,8 +21,90 @@ func worldSimEnabled(st *store.Store) bool {
 // worldTickSubstantive 报告离屏世界是否已有实质信息流（≥1 条镜头外事件）。
 // 空的 v0-a0 基线（0 事件）不算——那只是占位，世界还没"活起来"。
 func worldTickSubstantive(st *store.Store) bool {
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil || tick == nil || strings.TrimSpace(tick.TickID) == "" || tick.TickID == "v0-a0" || tick.EventCount <= 0 {
+		return false
+	}
 	events, err := st.WorldSim.LoadWorldEvents()
 	return err == nil && len(events) > 0
+}
+
+// InitialWorldTickQualityIssues returns blocking issues for the opening world
+// tick. These are not style warnings: if the tick references unknown actors,
+// downstream planning can consume a different project/genre without noticing.
+func InitialWorldTickQualityIssues(st *store.Store) []string {
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil {
+		return []string{fmt.Sprintf("world_tick 不可读: %v", err)}
+	}
+	if tick == nil || strings.TrimSpace(tick.TickID) == "" || tick.TickID == "v0-a0" || tick.EventCount <= 0 {
+		return []string{"world_tick 仍是空基线或缺少事件计数"}
+	}
+	events, err := st.WorldSim.LoadWorldEvents()
+	if err != nil {
+		return []string{fmt.Sprintf("world_events 不可读: %v", err)}
+	}
+	if len(events) == 0 {
+		return []string{"world_events 为空"}
+	}
+	known := worldTickKnownActorSet(st)
+	if len(known) == 0 {
+		return nil
+	}
+	var issues []string
+	for _, event := range events {
+		for _, actor := range event.Actors {
+			actor = strings.TrimSpace(actor)
+			if actor == "" {
+				continue
+			}
+			if _, ok := known[actor]; !ok {
+				issues = append(issues, fmt.Sprintf("world_tick 事件 %q 的 actor %q 不在角色册/势力册/别名中", compactWorldTickIssue(event.Summary), actor))
+			}
+		}
+	}
+	return issues
+}
+
+func worldTickKnownActorSet(st *store.Store) map[string]struct{} {
+	known := map[string]struct{}{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			known[value] = struct{}{}
+		}
+	}
+	if chars, err := st.Characters.Load(); err == nil {
+		for _, c := range chars {
+			add(c.Name)
+			for _, alias := range c.Aliases {
+				add(alias)
+			}
+		}
+	}
+	if entries, err := st.Cast.Load(); err == nil {
+		for _, e := range entries {
+			add(e.Name)
+		}
+	}
+	if world, err := st.World.LoadBookWorld(); err == nil && world != nil {
+		for _, faction := range world.Factions {
+			add(faction.ID)
+			add(faction.Name)
+			for _, alias := range faction.Aliases {
+				add(alias)
+			}
+		}
+	}
+	return known
+}
+
+func compactWorldTickIssue(s string) string {
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= 30 {
+		return string(runes)
+	}
+	return string(runes[:30]) + "..."
 }
 
 // EnsureInitialWorldTickForChapterOne 第 1 章写作前的初始 world_tick 硬卡点。
@@ -32,15 +115,33 @@ func EnsureInitialWorldTickForChapterOne(st *store.Store) error {
 	if !ChapterOnePendingFirstWrite(st) || !worldSimEnabled(st) {
 		return nil
 	}
-	if progress, err := st.Progress.Load(); err != nil || progress == nil || !progress.Layered {
+	if !worldSimRequiresInitialTick(st) {
 		return nil // 短篇/扁平项目不强制离屏世界推演
 	}
 	if worldTickSubstantive(st) {
-		return nil
+		if issues := InitialWorldTickQualityIssues(st); len(issues) == 0 {
+			return nil
+		} else {
+			return fmt.Errorf("第 1 章写作前的 world_tick 不合格：%s", strings.Join(issues, "；"))
+		}
 	}
 	return fmt.Errorf("第 1 章写作前，离屏世界推演游标必须已生成：请派 architect_long 先跑一次开局 save_world_tick，" +
 		"按各离屏角色 agenda 与势力钟推进出开局前的镜头外事件（每条带 visibility_chapter/visibility_path），" +
 		"让世界在第 1 章之前已经在自转，之后再推演/渲染第 1 章")
+}
+
+func worldSimRequiresInitialTick(st *store.Store) bool {
+	progress, err := st.Progress.Load()
+	if err == nil && progress != nil {
+		if progress.Layered {
+			return true
+		}
+		if progress.TotalChapters > 30 {
+			return true
+		}
+	}
+	layered, err := st.Outline.LoadLayeredOutline()
+	return err == nil && len(layered) > 0
 }
 
 // EnsureWorldTickCurrent 弧/卷边界的 world_tick 硬卡点：world_tick 落后已完成正文时拒绝。

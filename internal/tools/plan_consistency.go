@@ -18,6 +18,16 @@ import (
 // 语义级矛盾（违反世界硬规则等）交给 planner 自身在 novel_context 下判断；这里只做
 // 机器能确定的检查，避免误伤合法计划。
 func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard []string, warn []string) {
+	// 0) 章节标题必须继承 outline：plan.title 是章节名，不是书名，也不能另起标题。
+	// 标题漂移会直接让 Writer 误判本章入口，必须在计划收口时挡下。
+	if entry, err := s.Outline.GetChapterOutline(plan.Chapter); err == nil && entry != nil {
+		want := strings.TrimSpace(entry.Title)
+		got := strings.TrimSpace(plan.Title)
+		if want != "" && !chapterTitleEquivalent(got, want) {
+			hard = append(hard, fmt.Sprintf("章节标题与大纲不一致：第 %d 章 plan.title=%q，outline.title=%q；plan.title 必须使用大纲章节名，不能写成书名或另起章名", plan.Chapter, got, want))
+		}
+	}
+
 	// 1) 契约自我矛盾（hard）：同一推进项既要求又禁止，计划无法自洽。
 	for _, fm := range plan.Contract.ForbiddenMoves {
 		fn := normalizeBeat(fm)
@@ -57,6 +67,23 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 // normalizeBeat 归一化推进项文本用于比对（去空白、转小写）。
 func normalizeBeat(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func chapterTitleEquivalent(a, b string) bool {
+	return normalizeChapterTitleText(a) == normalizeChapterTitleText(b)
+}
+
+func normalizeChapterTitleText(s string) string {
+	s = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(s), "#"))
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "第") {
+		if idx := strings.Index(s, "章"); idx >= 0 {
+			s = strings.TrimSpace(s[idx+len("章"):])
+		}
+	}
+	s = strings.TrimLeft(s, " ：:.-")
+	s = strings.Join(strings.Fields(s), "")
+	return strings.ToLower(s)
 }
 
 // chapterPlanCast 从推演层收集本章涉及的角色名（各含 Character 字段的子结构）。

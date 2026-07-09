@@ -59,7 +59,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
 		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 可带 stance（对主角立场）/ internal_tension（内部矛盾）/ core_values，relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / volume_codex 时必传）")),
@@ -326,7 +326,7 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 
 	// 返回剩余未完成项，引导 Architect 继续或结束；
 	// 齐全时一次性把 phase 推进到 writing，避免 Coordinator 再回来派单。
-	remaining := t.store.FoundationMissing()
+	remaining := FoundationCoreMissing(t.store.Dir())
 	ready := len(remaining) == 0
 	result["remaining"] = remaining
 	result["foundation_ready"] = ready

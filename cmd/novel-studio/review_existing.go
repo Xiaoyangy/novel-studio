@@ -215,6 +215,7 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			failureCount++
 			continue
 		}
+		sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
 		if err := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定写入失败：%v\n", chNum, err)
 			failureCount++
@@ -229,11 +230,12 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		}
 		outPath := filepath.Join(reviewsDir, fmt.Sprintf("%02d.md", chNum))
 		if err := reviewreport.WriteUnifiedMarkdown(eng.Dir(), reviewreport.UnifiedMarkdownInput{
-			Chapter:        chNum,
-			Mechanical:     mechanical,
-			AIVoice:        &analysis,
-			Editor:         &entry,
-			EditorMarkdown: review,
+			Chapter:         chNum,
+			Mechanical:      mechanical,
+			AIVoice:         &analysis,
+			ExternalAIJudge: deepSeekExternalAIJudge(deepseekJudge),
+			Editor:          &entry,
+			EditorMarkdown:  review,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 写文件失败：%v\n", chNum, err)
 			failureCount++
@@ -304,6 +306,7 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		structured = snap.Structured
 	}
 	violations = append(violations, rules.Check(body, wordCount, structured)...)
+	violations = append(violations, toolspkg.SecondAlgorithmProjectContaminationViolations(st, body)...)
 	if gatePercent := reviewExistingAIGCGatePercent(report); gatePercent > 5 {
 		severity := rules.SeverityWarning
 		if gatePercent >= 35 {

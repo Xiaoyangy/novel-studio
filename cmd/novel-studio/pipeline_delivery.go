@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
+// 阶段：cocreate → architect → zero-init → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -9,6 +9,7 @@ package main
 // review/rewrite 按章号），两层恢复叠加。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/assets"
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/entry/headless"
 	"github.com/chenhongyang/novel-studio/internal/rag"
@@ -704,11 +707,502 @@ func nonEmptyFile(path string) bool {
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
+func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
+	_ = flags
+	cfg, bundle, err := loadCfgBundle(opts)
+	if err != nil {
+		return err
+	}
+	if err := ensurePipelineRAGReady(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] RAG 检查失败：%v\n", err)
+		return err
+	}
+	if err := store.NewStore(cfg.OutputDir).Init(); err != nil {
+		return err
+	}
+	if tools.FoundationCoreComplete(cfg.OutputDir) {
+		fmt.Fprintln(os.Stderr, "[pipeline:architect] foundation 已齐，检查 Architect readiness")
+		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
+			return nil
+		} else {
+			fmt.Fprintf(os.Stderr, "[pipeline:architect] Architect readiness 未通过，进入 foundation 修复：%v\n", err)
+			return pipelineRepairArchitectReadiness(opts, cfg, bundle, state.Prompt, err)
+		}
+	}
+	prompt, err := pipelineArchitectPrompt(cfg.OutputDir, state.Prompt)
+	if err != nil {
+		return err
+	}
+	const maxArchitectRuns = 4
+	for run := 1; run <= maxArchitectRuns; run++ {
+		if tools.FoundationCoreComplete(cfg.OutputDir) {
+			return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+		}
+		runPrompt := ""
+		if run == 1 {
+			runPrompt = prompt
+			fmt.Fprintln(os.Stderr, "[pipeline:architect] 启动 Architect 初始化 foundation")
+		} else {
+			fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次恢复 Architect 补齐 foundation\n", run, maxArchitectRuns)
+		}
+		if err := headless.Run(cfg, bundle, headless.Options{Prompt: runPrompt, StopAfterFoundation: true}); err != nil {
+			return err
+		}
+	}
+	if !tools.FoundationCoreComplete(cfg.OutputDir) {
+		return fmt.Errorf("architect 阶段运行 %d 次后 foundation 仍未齐：missing=%s", maxArchitectRuns, strings.Join(tools.FoundationCoreMissing(cfg.OutputDir), ", "))
+	}
+	return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+}
+
+func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string, cause error) error {
+	if repaired, err := pipelineAutoRepairBookWorldStructure(cfg.OutputDir); err != nil {
+		return err
+	} else if repaired {
+		fmt.Fprintln(os.Stderr, "[pipeline:architect] 已自动修复 book_world 悬空关系/别名，重新检查 readiness")
+		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
+			return nil
+		} else {
+			cause = err
+		}
+	}
+	const maxRepairRuns = 3
+	for run := 1; run <= maxRepairRuns; run++ {
+		repairPrompt, err := pipelineArchitectRepairPrompt(cfg.OutputDir, prompt, cause)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 Architect readiness 修复\n", run, maxRepairRuns)
+		if err := headless.Run(cfg, bundle, headless.Options{Prompt: repairPrompt}); err != nil {
+			return err
+		}
+		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
+			return nil
+		} else {
+			cause = err
+		}
+	}
+	return fmt.Errorf("Architect readiness 修复 %d 次后仍未通过：%w", maxRepairRuns, cause)
+}
+
+func pipelineAutoRepairBookWorldStructure(outputDir string) (bool, error) {
+	st := store.NewStore(outputDir)
+	world, err := st.World.LoadBookWorld()
+	if err != nil || world == nil {
+		return false, err
+	}
+	changed := false
+	known := pipelineBookWorldFactionNames(*world)
+	for _, faction := range world.Factions {
+		source := strings.TrimSpace(firstNonEmptyString(faction.ID, faction.Name))
+		for _, rel := range faction.Relations {
+			target := strings.TrimSpace(rel.Target)
+			if target == "" {
+				continue
+			}
+			if _, ok := known[target]; ok {
+				continue
+			}
+			added := pipelineDefaultFactionForDanglingRelation(target, source, rel)
+			world.Factions = append(world.Factions, added)
+			for _, name := range pipelineFactionNames(added) {
+				if strings.TrimSpace(name) != "" {
+					known[strings.TrimSpace(name)] = struct{}{}
+				}
+			}
+			changed = true
+		}
+	}
+	for i := range world.Factions {
+		aliases := pipelineDerivedFactionAliases(world.Factions[i])
+		if len(aliases) == 0 {
+			continue
+		}
+		before := len(world.Factions[i].Aliases)
+		world.Factions[i].Aliases = pipelineMergeUniqueStrings(world.Factions[i].Aliases, aliases...)
+		if len(world.Factions[i].Aliases) != before {
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := st.World.SaveBookWorld(*world); err != nil {
+		return false, fmt.Errorf("自动修复 book_world 失败: %w", err)
+	}
+	return true, nil
+}
+
+func pipelineBookWorldFactionNames(world domain.BookWorld) map[string]struct{} {
+	known := map[string]struct{}{}
+	for _, faction := range world.Factions {
+		for _, name := range pipelineFactionNames(faction) {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				known[name] = struct{}{}
+			}
+		}
+	}
+	return known
+}
+
+func pipelineFactionNames(faction domain.WorldFaction) []string {
+	names := []string{faction.ID, faction.Name}
+	names = append(names, faction.Aliases...)
+	return names
+}
+
+func pipelineDefaultFactionForDanglingRelation(target, source string, rel domain.FactionRelation) domain.WorldFaction {
+	name := pipelineDisplayNameForFactionID(target)
+	note := strings.TrimSpace(rel.Note)
+	goal := fmt.Sprintf("承接 %s 的 %s 关系，补齐 Architect 势力图谱中的结构缺口。", source, firstNonEmptyString(rel.Kind, "关联"))
+	if note != "" {
+		goal = fmt.Sprintf("承接 %s：%s", firstNonEmptyString(source, "既有势力"), note)
+	}
+	return domain.WorldFaction{
+		ID:        target,
+		Name:      name,
+		Aliases:   pipelineAliasesForFactionID(target),
+		Goal:      goal,
+		Resources: []string{"现场反馈", "执行压力", "一线信息"},
+		Relations: []domain.FactionRelation{{
+			Target:        source,
+			Kind:          firstNonEmptyString(rel.Kind, "linked"),
+			Note:          "pipeline 自动补齐悬空 relation.target 后生成的反向关系；后续 Architect 可细化。",
+			ConflictType:  firstNonEmptyString(rel.ConflictType, "资源"),
+			ConflictState: firstNonEmptyString(rel.ConflictState, "truce"),
+		}},
+		Tags: []string{"pipeline_auto_repair"},
+		Clock: &domain.FactionClock{
+			Segments:    6,
+			Progress:    0,
+			Consequence: fmt.Sprintf("%s 的压力必须转化为可见的现场事件或反馈。", name),
+			Pace:        "每弧 1 段；被主线直接触发时 2 段",
+		},
+	}
+}
+
+func pipelineDisplayNameForFactionID(id string) string {
+	switch strings.TrimSpace(id) {
+	case "store_ops":
+		return "门店运营组"
+	default:
+		return strings.ReplaceAll(strings.TrimSpace(id), "_", " ")
+	}
+}
+
+func pipelineAliasesForFactionID(id string) []string {
+	switch strings.TrimSpace(id) {
+	case "store_ops":
+		return []string{"门店运营组", "社区商圈门店", "门店运营组一线"}
+	default:
+		return nil
+	}
+}
+
+func pipelineDerivedFactionAliases(faction domain.WorldFaction) []string {
+	id := strings.TrimSpace(faction.ID)
+	name := strings.TrimSpace(faction.Name)
+	switch id {
+	case "bridgepoint":
+		return []string{"桥点工作室"}
+	case "operations_center":
+		return []string{"内容运营组", "运营中心"}
+	case "ai_efficiency_team":
+		return []string{"自动排班系统", "AI排班试点", "溪流助手", "AI提效项目组"}
+	case "local_brands":
+		return []string{"本地亲子品牌", "本地品牌联盟"}
+	case "chengguang_life":
+		return []string{"澄光生活供应商系统"}
+	case "family_qiu":
+		return []string{"旧百货同事群", "许家生活圈"}
+	case "store_ops":
+		return []string{"门店运营组", "社区商圈门店", "自动排班系统"}
+	}
+	if strings.Contains(name, "桥点") && !strings.Contains(name, "工作室") {
+		return []string{"桥点工作室"}
+	}
+	return nil
+}
+
+func pipelineMergeUniqueStrings(base []string, values ...string) []string {
+	out := append([]string(nil), base...)
+	seen := map[string]struct{}{}
+	for _, item := range out {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			seen[item] = struct{}{}
+		}
+	}
+	for _, item := range values {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
+	brainstormPath := filepath.Join(ragProjectRoot(outputDir), "brainstorm.md")
+	brainstorm := ""
+	if data, err := os.ReadFile(brainstormPath); err == nil {
+		brainstorm = strings.TrimSpace(string(data))
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("读取 brainstorm.md 失败: %w", err)
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" && brainstorm == "" {
+		return "", fmt.Errorf("architect 阶段需要创作指令：用 --prompt/--prompt-file，或提供项目根 brainstorm.md")
+	}
+
+	var b strings.Builder
+	b.WriteString("[Pipeline Architect 阶段]\n")
+	b.WriteString("本阶段只允许完成 Architect foundation，不允许进入正文写作。\n")
+	b.WriteString("必须派 architect_long/architect_short，并通过 save_foundation 落盘完整核心设定：premise、characters、world_rules、book_world、world_codex、compass，以及 layered_outline 或 outline。\n")
+	b.WriteString("完成 foundation 后立即停止，宿主会在下一阶段执行 zero-init；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter。\n")
+	b.WriteString("请特别落实用户硬规则：复杂项目按现实时间尺度合理压缩，不得把复杂工程写成和小项目同一时间节奏。\n")
+	if prompt != "" {
+		b.WriteString("\n[创作指令]\n")
+		b.WriteString(prompt)
+		b.WriteString("\n")
+	}
+	if brainstorm != "" {
+		b.WriteString("\n[brainstorm.md]\n")
+		b.WriteString(brainstorm)
+		b.WriteString("\n")
+	}
+	return b.String(), nil
+}
+
+func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
+	_ = prompt
+	readinessPath := filepath.Join(outputDir, "meta", "architect_readiness.md")
+	readiness := ""
+	if data, err := os.ReadFile(readinessPath); err == nil {
+		readiness = strings.TrimSpace(string(data))
+	}
+	bookWorldPath := filepath.Join(outputDir, "book_world.json")
+	bookWorld := ""
+	if data, err := os.ReadFile(bookWorldPath); err == nil {
+		bookWorld = strings.TrimSpace(string(data))
+	} else {
+		return "", fmt.Errorf("读取 book_world.json 失败，无法执行 Architect readiness 修复: %w", err)
+	}
+	var b strings.Builder
+	b.WriteString("[Pipeline Architect readiness 修复阶段]\n")
+	b.WriteString("当前 foundation 文件已经齐全，但 Architect readiness 未通过。本轮只修复 book_world 结构，不重新设计 premise/characters/world_rules/outline/compass，不进入 zero-init，不写章节，不调用 writer/drafter/editor。\n")
+	b.WriteString("必须派 architect_long，并要求它最多读一次 novel_context；随后只调用一次 save_foundation(type=\"book_world\", scale=\"long\", content=<完整修复后的 book_world JSON>) 落盘。\n")
+	b.WriteString("修复规则：\n")
+	b.WriteString("1. book_world.factions 的每个 relation.target 必须指向已存在 faction 的 id/name/aliases；不得悬空。\n")
+	b.WriteString("2. 每个 faction 必须保留或补齐 clock（segments/progress/consequence/pace）。新增 faction 时必须给 clock。\n")
+	b.WriteString("3. 后续 save_world_tick 可能使用的组织简称、系统名、群聊名或空间简称必须进入对应 faction.aliases；重点覆盖：桥点工作室、内容运营组、门店运营组、自动排班系统、本地亲子品牌、供应商系统、旧百货同事群。\n")
+	b.WriteString("4. 保留当前 book_world 的事实、名称、目标、地点、路线和既有进度钟，只做必要结构修复；如果 relation.target 是缺失势力（如 store_ops），优先新增对应势力，而不是删除关系。\n")
+	b.WriteString("5. 保存后不得继续生成正文或 zero-init；等待宿主做 architect-check。\n")
+	if cause != nil {
+		b.WriteString("\n[当前 readiness 错误]\n")
+		b.WriteString(cause.Error())
+		b.WriteString("\n")
+	}
+	if readiness != "" {
+		b.WriteString("\n[meta/architect_readiness.md]\n")
+		b.WriteString(readiness)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n[当前 book_world.json]\n```json\n")
+	b.WriteString(bookWorld)
+	b.WriteString("\n```\n")
+	return b.String(), nil
+}
+
+func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
+	_ = flags
+	_ = state
+	cfg, bundle, err := loadCfgBundle(opts)
+	if err != nil {
+		return err
+	}
+	st := store.NewStore(cfg.OutputDir)
+	if !tools.ChapterOnePendingFirstWrite(st) {
+		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 第 1 章已完成，跳过 zero-init")
+		return nil
+	}
+	if missing := tools.FoundationCoreMissing(cfg.OutputDir); len(missing) > 0 {
+		return fmt.Errorf("zero-init 阶段必须在 Architect foundation 齐备后执行：missing=%s", strings.Join(missing, ", "))
+	}
+	if ok, reason := architectReadinessState(cfg.OutputDir); !ok {
+		return fmt.Errorf("zero-init 阶段必须在 Architect readiness 通过后执行：%s", reason)
+	}
+	if ok, _ := tools.ZeroInitReadinessState(cfg.OutputDir); ok {
+		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] readiness 已就绪，跳过 zero-init")
+		return pipelineEnsureInitialWorldTick(cfg, bundle)
+	}
+	_, reason := tools.ZeroInitReadinessState(cfg.OutputDir)
+	fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 执行 zero-init：%s\n", reason)
+	if err := zeroInitPipeline(opts, []string{"--dir", cfg.OutputDir, "--reset-simulation-state"}); err != nil {
+		return fmt.Errorf("zero-init 阶段失败: %w", err)
+	}
+	if ok, why := tools.ZeroInitReadinessState(cfg.OutputDir); !ok {
+		return fmt.Errorf("zero-init 后 readiness 仍未就绪：%s", why)
+	}
+	return pipelineEnsureInitialWorldTick(cfg, bundle)
+}
+
+func pipelineEnsureArchitectReadiness(opts cliOptions, outputDir string) error {
+	if missing := tools.FoundationCoreMissing(outputDir); len(missing) > 0 {
+		return fmt.Errorf("Architect readiness 需要先补齐 foundation：missing=%s", strings.Join(missing, ", "))
+	}
+	if ok, _ := architectReadinessState(outputDir); ok {
+		fmt.Fprintln(os.Stderr, "[pipeline:architect] Architect readiness 已通过")
+		return nil
+	}
+	if err := architectCheckPipeline(opts, []string{"--dir", outputDir}); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "[pipeline:architect] Architect readiness 已落盘")
+	return nil
+}
+
+func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) error {
+	st := store.NewStore(cfg.OutputDir)
+	if err := tools.EnsureInitialWorldTickForChapterOne(st); err == nil {
+		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 初始 world_tick 已就绪")
+		return nil
+	}
+	prompt := pipelineInitialWorldTickPrompt(cfg.OutputDir)
+	const maxWorldTickRuns = 3
+	for run := 1; run <= maxWorldTickRuns; run++ {
+		if err := tools.EnsureInitialWorldTickForChapterOne(store.NewStore(cfg.OutputDir)); err == nil {
+			fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 初始 world_tick 已就绪")
+			return nil
+		}
+		if err := pipelineResetInvalidInitialWorldTick(cfg.OutputDir); err != nil {
+			return err
+		}
+		if run == 1 {
+			fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 生成第 1 章前初始 world_tick")
+		} else {
+			fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 第 %d/%d 次恢复初始 world_tick\n", run, maxWorldTickRuns)
+		}
+		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterInitialWorldTick: true}); err != nil {
+			return err
+		}
+	}
+	if err := tools.EnsureInitialWorldTickForChapterOne(store.NewStore(cfg.OutputDir)); err != nil {
+		return fmt.Errorf("zero-init 阶段未完成初始 world_tick：%w", err)
+	}
+	return nil
+}
+
+func pipelineResetInvalidInitialWorldTick(outputDir string) error {
+	st := store.NewStore(outputDir)
+	if issues := tools.InitialWorldTickQualityIssues(st); len(issues) == 0 {
+		return nil
+	}
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil || tick == nil || strings.TrimSpace(tick.TickID) == "" || tick.TickID == "v0-a0" || tick.EventCount <= 0 {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 清理不合格 world_tick，准备重跑：%s\n", strings.Join(tools.InitialWorldTickQualityIssues(st), "；"))
+	if err := st.WorldSim.ResetActivityState(); err != nil {
+		return fmt.Errorf("清理不合格 world_tick 失败: %w", err)
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
+		return fmt.Errorf("重置 world_tick 基线失败: %w", err)
+	}
+	return nil
+}
+
+func pipelineInitialWorldTickPrompt(outputDir string) string {
+	var b strings.Builder
+	b.WriteString("[Pipeline zero-init 初始 world_tick 阶段]\n")
+	b.WriteString("Architect foundation 与 zero-init readiness 已完成；本阶段只补齐第 1 章写作前的离屏世界信息流。\n")
+	b.WriteString("必须派 architect_long 调用 save_world_tick，为第 1 章前生成开局镜头外事件、可见路径、势力/角色 agenda 推进和信息回收路径。\n")
+	b.WriteString("硬约束：events.actors 与 faction_clock_updates.target 只能使用下方角色名、势力 id/name/aliases；工具返回任何 warnings 都不算通过。严禁写古代/官署/主角家族/旧案/黑市/导师这类非本书题材元素。\n")
+	if brief := pipelineWorldTickCanonBrief(outputDir); brief != "" {
+		b.WriteString("\n[本书 canon 锚点]\n")
+		b.WriteString(brief)
+		b.WriteString("\n")
+	}
+	b.WriteString("完成初始 world_tick 后立即停止；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter，严禁进入正文写作。\n")
+	return b.String()
+}
+
+func pipelineWorldTickCanonBrief(outputDir string) string {
+	st := store.NewStore(outputDir)
+	var b strings.Builder
+	if premise, err := st.Outline.LoadPremise(); err == nil && strings.TrimSpace(premise) != "" {
+		b.WriteString("premise 摘要：")
+		b.WriteString(pipelineCompactText(premise, 900))
+		b.WriteString("\n")
+	}
+	if chars, err := st.Characters.Load(); err == nil && len(chars) > 0 {
+		var names []string
+		for _, c := range chars {
+			if strings.TrimSpace(c.Name) != "" {
+				names = append(names, c.Name)
+			}
+		}
+		if len(names) > 0 {
+			b.WriteString("可用角色：")
+			b.WriteString(strings.Join(names, "、"))
+			b.WriteString("\n")
+		}
+	}
+	if world, err := st.World.LoadBookWorld(); err == nil && world != nil && len(world.Factions) > 0 {
+		b.WriteString("可用势力/别名：\n")
+		for _, f := range world.Factions {
+			parts := []string{f.ID, f.Name}
+			parts = append(parts, f.Aliases...)
+			b.WriteString("- ")
+			b.WriteString(strings.Join(nonEmptyPipelineStrings(parts), " / "))
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func nonEmptyPipelineStrings(values []string) []string {
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func pipelineRequirePrewritingReady(outputDir string) error {
+	st := store.NewStore(outputDir)
+	if !tools.ChapterOnePendingFirstWrite(st) {
+		return nil
+	}
+	if missing := tools.FoundationCoreMissing(outputDir); len(missing) > 0 {
+		return fmt.Errorf("write 阶段禁止代办 Architect：请先执行 --pipeline --stages architect（missing=%s）", strings.Join(missing, ", "))
+	}
+	if ok, reason := architectReadinessState(outputDir); !ok {
+		return fmt.Errorf("write 阶段必须在 Architect readiness 通过后执行：请先执行 --pipeline --stages architect（%s）", reason)
+	}
+	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok {
+		return fmt.Errorf("write 阶段必须在 zero-init 完整通过后执行：请先执行 --pipeline --stages zero-init（%s）", reason)
+	}
+	if err := tools.EnsureInitialWorldTickForChapterOne(st); err != nil {
+		return fmt.Errorf("write 阶段必须在 zero-init 完整通过后执行：请先执行 --pipeline --stages zero-init（%w）", err)
+	}
+	return nil
+}
+
 // pipelineWrite 跑创作阶段：已完结则跳过；已有进度则恢复；全新项目用创作指令起新书。
 //
 // 工程卡点与自愈（用户不变量）：
-//  1. 第 1 章从未写完 && foundation 已齐 && 零章初始化未就绪 → 自动进程内执行
-//     --zero-init 并校验 readiness，通过才允许写第 1 章（writerZeroInitGate 双保险）。
+//  1. 第 1 章从未写完时，write 只验收 Architect foundation 与 zero-init readiness；
+//     缺任一项都直接失败，禁止在 Writer 阶段代办前置阶段。
 //  2. Coordinator 因瞬时错误/卡点停止而未达标时，在有界次数内自动续跑，
 //     不再阶段失败等人工重跑。
 func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
@@ -720,14 +1214,14 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		fmt.Fprintf(os.Stderr, "[pipeline:write] RAG 写作前检查失败：%v\n", err)
 		return err
 	}
+	if err := pipelineRequirePrewritingReady(cfg.OutputDir); err != nil {
+		return err
+	}
 	const maxWriteRuns = 4
 	for run := 1; run <= maxWriteRuns; run++ {
 		prog, _ := store.NewStore(cfg.OutputDir).Progress.Load()
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
 			return nil
-		}
-		if err := pipelineEnsureZeroInit(opts, cfg.OutputDir); err != nil {
-			return err
 		}
 		// zero-init（--reset-simulation-state）会切换 progress 的推演线，
 		// 必须重载后再做推演线一致性检查，否则拿旧快照误报不一致。
@@ -735,16 +1229,39 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
 			return err
 		}
-		hasProgress := prog != nil && (strings.TrimSpace(prog.NovelName) != "" || prog.CurrentChapter > 0 || len(prog.CompletedChapters) > 0)
+		needsFresh, err := pipelineNeedsFreshWritingSession(cfg.OutputDir, prog)
+		if err != nil {
+			return err
+		}
 		prompt := ""
-		if !hasProgress {
-			if strings.TrimSpace(state.Prompt) == "" {
-				return fmt.Errorf("write 阶段需要创作指令：用 --prompt/--prompt-file，或在 stages 前加 cocreate")
+		if needsFresh {
+			if err := pipelinePrepareFreshWritingSession(cfg.OutputDir, 1); err != nil {
+				return err
 			}
-			prompt = state.Prompt
-			fmt.Fprintln(os.Stderr, "[pipeline:write] 全新项目，按创作指令起新书")
+			fmt.Fprintln(os.Stderr, "[pipeline:write] 第 1 章从当前 Architect/zero-init 事实启动写作路由")
 		} else if run == 1 {
+			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
+				return err
+			}
+			if err := pipelineClearStalePipelineSteer(store.NewStore(cfg.OutputDir)); err != nil {
+				return err
+			}
+			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+			if pipelineWriteGoalReached(prog, flags.WriteTo) {
+				return nil
+			}
 			fmt.Fprintln(os.Stderr, "[pipeline:write] 检测到已有进度，恢复创作")
+		} else {
+			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
+				return err
+			}
+			if err := pipelineClearStalePipelineSteer(store.NewStore(cfg.OutputDir)); err != nil {
+				return err
+			}
+			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+			if pipelineWriteGoalReached(prog, flags.WriteTo) {
+				return nil
+			}
 		}
 		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterChapter: flags.WriteTo}); err != nil {
 			return err
@@ -758,6 +1275,184 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+func pipelineHasWritingProgress(prog *domain.Progress) bool {
+	if prog == nil {
+		return false
+	}
+	return prog.Phase == domain.PhaseWriting ||
+		prog.CurrentChapter > 0 ||
+		prog.InProgressChapter > 0 ||
+		len(prog.CompletedChapters) > 0 ||
+		len(prog.PendingRewrites) > 0
+}
+
+func pipelineNeedsFreshWritingSession(outputDir string, prog *domain.Progress) (bool, error) {
+	if !pipelineHasWritingProgress(prog) {
+		return true, nil
+	}
+	if prog == nil || prog.Phase != domain.PhaseWriting {
+		return false, nil
+	}
+	if prog.TotalWordCount != 0 || len(prog.CompletedChapters) > 0 || len(prog.PendingRewrites) > 0 {
+		return false, nil
+	}
+	if prog.CurrentChapter != 1 && prog.InProgressChapter != 1 {
+		return false, nil
+	}
+	st := store.NewStore(outputDir)
+	if partial, err := st.Drafts.LoadChapterPlanPartial(1); err == nil && partial != nil {
+		if issues := tools.ChapterPlanIdentityIssues(st, 1, partial); len(issues) > 0 {
+			fmt.Fprintf(os.Stderr, "[pipeline:write] 清理不合格第 1 章 staged plan：%s\n", strings.Join(issues, "；"))
+			return true, nil
+		}
+	}
+	for _, rel := range []string{
+		filepath.Join("drafts", "01.plan.partial.json"),
+		filepath.Join("drafts", "01.plan.json"),
+		filepath.Join("drafts", "01.plan_consistency.json"),
+		filepath.Join("drafts", "01.draft.md"),
+		filepath.Join("chapters", "01.md"),
+	} {
+		_, err := os.Stat(filepath.Join(outputDir, rel))
+		if err == nil {
+			return false, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("检查第 1 章写作产物失败: %w", err)
+		}
+	}
+	return true, nil
+}
+
+func pipelinePrepareFreshWritingSession(outputDir string, chapter int) error {
+	if chapter <= 0 {
+		chapter = 1
+	}
+	st := store.NewStore(outputDir)
+	if err := pipelineClearStalePipelineSteer(st); err != nil {
+		return err
+	}
+	if err := st.Runtime.Reset(); err != nil {
+		return fmt.Errorf("重置 runtime 队列失败: %w", err)
+	}
+	if err := st.Checkpoints.Reset(); err != nil {
+		return fmt.Errorf("重置 checkpoints 失败: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(outputDir, "meta", "sessions")); err != nil {
+		return fmt.Errorf("清理旧会话失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(outputDir, "meta", "sessions", "agents"), 0o755); err != nil {
+		return fmt.Errorf("重建会话目录失败: %w", err)
+	}
+	for _, rel := range []string{
+		filepath.Join("drafts", fmt.Sprintf("%02d.plan.partial.json", chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.plan.json", chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.plan_consistency.json", chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", chapter)),
+		filepath.Join("chapters", fmt.Sprintf("%02d.md", chapter)),
+	} {
+		if err := os.Remove(filepath.Join(outputDir, rel)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("清理旧第 %d 章产物失败: %w", chapter, err)
+		}
+	}
+	if err := st.Progress.StartChapter(chapter); err != nil {
+		return fmt.Errorf("启动第 %d 章写作状态失败: %w", chapter, err)
+	}
+	return nil
+}
+
+func pipelineClearStalePipelineSteer(st *store.Store) error {
+	meta, _ := st.RunMeta.Load()
+	if meta == nil {
+		return nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
+		if err := st.RunMeta.ClearPendingSteer(); err != nil {
+			return fmt.Errorf("清理旧 staged plan 修复指令失败: %w", err)
+		}
+	}
+	return nil
+}
+
+func pipelineFinalizeStagedPlans(outputDir string, writeTo int) error {
+	matches, err := filepath.Glob(filepath.Join(outputDir, "drafts", "*.plan.partial.json"))
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	sort.Strings(matches)
+	st := store.NewStore(outputDir)
+	tool := tools.NewPlanDetailsTool(st)
+	for _, path := range matches {
+		chapter, ok := chapterFromPlanPartialPath(path)
+		if !ok || (writeTo > 0 && chapter > writeTo) {
+			continue
+		}
+		args, _ := json.Marshal(map[string]any{"chapter": chapter, "finalize": true})
+		raw, err := tool.Execute(context.Background(), args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章 staged plan 尚未可收口：%v\n", chapter, err)
+			if setErr := pipelineQueueStagedPlanRepair(st, chapter, err); setErr != nil {
+				return setErr
+			}
+			continue
+		}
+		var result struct {
+			Planned bool `json:"planned"`
+		}
+		_ = json.Unmarshal(raw, &result)
+		if result.Planned {
+			if err := pipelineClearStalePipelineSteer(st); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章 staged plan 已收口为正式计划\n", chapter)
+		}
+	}
+	return nil
+}
+
+func pipelineQueueStagedPlanRepair(st *store.Store, chapter int, cause error) error {
+	meta, _ := st.RunMeta.Load()
+	if meta != nil && strings.TrimSpace(meta.PendingSteer) != "" && !strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
+		return nil
+	}
+	msg := pipelineStagedPlanRepairSteer(chapter, cause.Error())
+	if err := st.RunMeta.SetPendingSteer(msg); err != nil {
+		return fmt.Errorf("写入 staged plan 修复指令失败: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:write] 已排队第 %d 章 staged plan 修复指令，恢复后优先补齐 plan_details\n", chapter)
+	return nil
+}
+
+func pipelineStagedPlanRepairSteer(chapter int, cause string) string {
+	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 只补齐章节计划，不写正文；writer 本轮最多调用 novel_context 一次，禁止反复 craft_recall/novel_context/read_chapter。必须针对下列缺项调用 plan_details(chapter=%d, causal_simulation={...}) 分批补齐：每次只补一组，先不要 finalize=true；建议顺序 batch1=context_sources+offscreen_character_stage（initial_state 已有时只补缺失 action_tendency 等小字段）、batch2=environment_state+causal_beats+decision_points+outcome_shift、batch3=voice_logic+dialogue_scene_blueprints、batch4=character_arc_tests+emotional_logic+relationship_emotion_arcs+dormant_character_policy、batch5=world_background_layers+information_asymmetry+hidden_rule_pressure+social_mood_rumors+ritual_calendar+structural_resources+cosmology_checks+conflict_web+narrative_tension_matrix。全部补完后最后一批再调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
+		chapter, chapter, chapter, chapter, truncateForPipelineSteer(cause, 6000))
+}
+
+func truncateForPipelineSteer(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if limit <= 0 || len([]rune(s)) <= limit {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:limit]) + "..."
+}
+
+func chapterFromPlanPartialPath(path string) (int, bool) {
+	name := filepath.Base(path)
+	const suffix = ".plan.partial.json"
+	if !strings.HasSuffix(name, suffix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(name, suffix))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // pipelineWriteGoalReached 判定 write 阶段目标是否已达成。
@@ -778,30 +1473,6 @@ func pipelineWriteGoalReached(prog *domain.Progress, writeTo int) bool {
 		}
 	}
 	return false
-}
-
-// pipelineEnsureZeroInit 第 1 章前的零章初始化自动编排：
-// foundation 未齐 → 放行（先让 Architect 干活）；readiness 就绪 → 放行；
-// 否则进程内执行 --zero-init（只补缺失 + 切换推演线，不 --overwrite 以免
-// 模板覆盖 Architect 特化资产），并要求 readiness 必须通过。
-func pipelineEnsureZeroInit(opts cliOptions, outputDir string) error {
-	st := store.NewStore(outputDir)
-	if !tools.ChapterOnePendingFirstWrite(st) || !tools.FoundationCoreComplete(outputDir) {
-		return nil
-	}
-	if ok, _ := tools.ZeroInitReadinessState(outputDir); ok {
-		return nil
-	}
-	_, reason := tools.ZeroInitReadinessState(outputDir)
-	fmt.Fprintf(os.Stderr, "[pipeline:write] 零章卡点：%s → 自动执行 --zero-init\n", reason)
-	if err := zeroInitPipeline(opts, []string{"--dir", outputDir, "--reset-simulation-state"}); err != nil {
-		return fmt.Errorf("自动 zero-init 失败（第 1 章前硬卡点）: %w", err)
-	}
-	if ok, why := tools.ZeroInitReadinessState(outputDir); !ok {
-		return fmt.Errorf("zero-init 后 readiness 仍未就绪：%s（处理后重跑 --pipeline 即从 write 阶段继续）", why)
-	}
-	fmt.Fprintln(os.Stderr, "[pipeline:write] 零章初始化就绪 ✓ 继续写第 1 章")
-	return nil
 }
 
 func ensurePipelineSimulationRestartReady(outputDir string, progress *domain.Progress) error {
@@ -829,12 +1500,12 @@ func resolveStages(raw string) ([]string, error) {
 	}
 	var stages []string
 	for _, s := range strings.Split(raw, ",") {
-		s = strings.TrimSpace(s)
+		s = normalizePipelineStageName(s)
 		if s == "" {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / write / review / rewrite / deliver）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / zero-init / write / review / rewrite / deliver）", s)
 		}
 		stages = append(stages, s)
 	}
@@ -842,6 +1513,15 @@ func resolveStages(raw string) ([]string, error) {
 		return nil, fmt.Errorf("--stages 为空")
 	}
 	return stages, nil
+}
+
+func normalizePipelineStageName(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "zeroinit", "zero_init":
+		return "zero-init"
+	default:
+		return strings.ToLower(strings.TrimSpace(s))
+	}
 }
 
 func resolvePipelinePrompt(flags pipelineFlags, opts cliOptions) (string, error) {

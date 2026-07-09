@@ -637,7 +637,7 @@ func TestPlanChapterRejectsMissingPrewriteSimulation(t *testing.T) {
 	}
 }
 
-func TestPlanChapterRejectsMissingWebReferenceCollection(t *testing.T) {
+func TestPlanChapterAllowsMissingWebReferenceCollection(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -662,6 +662,7 @@ func TestPlanChapterRejectsMissingWebReferenceCollection(t *testing.T) {
 		"foreshadow_ledger",
 		"relationship_state",
 		"user_rules/writing_engine",
+		"dialogue_writing",
 	}
 	sim["external_reference_plan"] = []map[string]any{{
 		"query_or_need":         "本章不用网络资料",
@@ -681,9 +682,8 @@ func TestPlanChapterRejectsMissingWebReferenceCollection(t *testing.T) {
 		"hook":              "测试",
 		"causal_simulation": sim,
 	})
-	if _, err := NewPlanChapterTool(st).Execute(context.Background(), args); err == nil ||
-		!strings.Contains(err.Error(), "external_reference_plan.collected_source") {
-		t.Fatalf("expected web reference collection rejection, got %v", err)
+	if _, err := NewPlanChapterTool(st).Execute(context.Background(), args); err != nil {
+		t.Fatalf("missing web reference collection should be a soft planning gap, got %v", err)
 	}
 }
 

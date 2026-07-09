@@ -78,6 +78,13 @@ func main() {
 		}
 		return
 	}
+	if hasArchitectCheckFlag(args) {
+		headlessMode = true
+		if err := architectCheckPipeline(opts, stripRoutingTokens(args, "--architect-check")); err != nil {
+			die("architect-check: %v", err)
+		}
+		return
+	}
 	if hasReviewExistingFlag(args) {
 		headlessMode = true
 		reviewArgs := stripRoutingTokens(args, "--review-existing")
@@ -388,7 +395,7 @@ func hasAnySubcommand(argv []string) bool {
 		switch a {
 		case "service", "skills", "--review-existing", "--rewrite-existing",
 			"--check", "--diag", "--simulate", "--import-sim", "--steer",
-			"--cocreate", "--pipeline", "--writing-assets", "--refresh-progress", "--build-rag", "--zero-init":
+			"--cocreate", "--pipeline", "--architect-check", "--writing-assets", "--refresh-progress", "--build-rag", "--zero-init":
 			return true
 		}
 	}
@@ -446,6 +453,7 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio --writing-assets seed-defaults # 初始化本书基础写法资产")
 	fmt.Fprintln(w, "  novel-studio --refresh-progress [--dir d]  # 回填章节推进/人物变化/下一章计划台账")
 	fmt.Fprintln(w, "  novel-studio --build-rag [--dir d]         # 构建本书 RAG 索引并可探测召回")
+	fmt.Fprintln(w, "  novel-studio --architect-check [--dir d]   # 检查 Architect foundation，通过后才允许 zero-init")
 	fmt.Fprintln(w, "  novel-studio --zero-init [--dir d]         # 新书第一章前的角色/关系/资源推演资产")
 	fmt.Fprintln(w, "  novel-studio eval inspect --cases evals/cases/harness # Harness 检查既有项目产物")
 	fmt.Fprintln(w, "  novel-studio --simulate [--no-diag]         # 分析 simulate/ 语料合成仿写画像")

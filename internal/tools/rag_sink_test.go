@@ -62,3 +62,59 @@ func TestUpsertRAGChunksDropsForbiddenExistingChunks(t *testing.T) {
 		t.Fatalf("expected kept project chunk plus new chunk, got %+v", state.Chunks)
 	}
 }
+
+func TestUpsertRAGChunksDropsSecondAlgorithmDeprecatedEngineChunks(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Outline.SavePremise("《她的第二算法》女性职场成长文，主角许闻溪。"); err != nil {
+		t.Fatalf("SavePremise: %v", err)
+	}
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
+		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
+		Chunks: []domain.RAGChunk{
+			{
+				ID:         "chunk:old-engine",
+				SourcePath: "summaries/01.json",
+				SourceKind: "chapter_summary_facts",
+				Facet:      "plot",
+				Hash:       "old-engine",
+				Text:       "待签纪要和日志窗口会污染下一章。",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+
+	err := UpsertRAGChunks(context.Background(), s, nil, nil, []domain.RAGChunk{
+		{
+			SourcePath: "reviews/01_deepseek_ai_judge.json",
+			SourceKind: "review",
+			Facet:      "review",
+			Text:       "后续用会后记录、后台明细和职场压力替代旧取证词。",
+		},
+		{
+			SourcePath: "reviews/old.json",
+			SourceKind: "review",
+			Facet:      "review",
+			Text:       "日志窗口继续作为隐喻。",
+		},
+	}, domain.RAGIndexConfig{})
+	if err != nil {
+		t.Fatalf("UpsertRAGChunks: %v", err)
+	}
+
+	state, err := s.RAG.LoadIndexState()
+	if err != nil {
+		t.Fatalf("LoadIndexState: %v", err)
+	}
+	for _, chunk := range state.Chunks {
+		if SecondAlgorithmProjectContaminationViolations(s, chunk.Text) != nil {
+			t.Fatalf("deprecated engine chunk was kept: %+v", chunk)
+		}
+	}
+	if len(state.Chunks) != 1 {
+		t.Fatalf("expected only clean chunk, got %+v", state.Chunks)
+	}
+}

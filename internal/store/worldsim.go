@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -27,6 +29,7 @@ const worldEventsPath = "meta/world_events.jsonl"
 
 // AppendWorldEvents 追加一批事件；ID 为空时自动分配（we-<序号>，接续现有条数）。
 // 逐条 Validate，任一非法整体拒绝（写前校验，保证账本内全部合法）。
+// 同一 tick 的同一事件重复提交时跳过，保证 save_world_tick 在恢复/重试时幂等。
 func (s *WorldSimStore) AppendWorldEvents(events []domain.WorldEvent) ([]domain.WorldEvent, error) {
 	if len(events) == 0 {
 		return nil, nil
@@ -35,17 +38,38 @@ func (s *WorldSimStore) AppendWorldEvents(events []domain.WorldEvent) ([]domain.
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]struct{}, len(existing)+len(events))
+	for _, e := range existing {
+		if strings.TrimSpace(e.ID) != "" {
+			seen["id:"+strings.TrimSpace(e.ID)] = struct{}{}
+		}
+		seen["event:"+worldEventDedupKey(e)] = struct{}{}
+	}
+
 	next := len(existing) + 1
+	toWrite := make([]domain.WorldEvent, 0, len(events))
 	for i := range events {
 		if err := events[i].Validate(); err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(events[i].ID) != "" {
+			if _, ok := seen["id:"+strings.TrimSpace(events[i].ID)]; ok {
+				continue
+			}
+		}
+		key := "event:" + worldEventDedupKey(events[i])
+		if _, ok := seen[key]; ok {
+			continue
 		}
 		if events[i].ID == "" {
 			events[i].ID = fmt.Sprintf("we-%06d", next)
 			next++
 		}
+		seen["id:"+strings.TrimSpace(events[i].ID)] = struct{}{}
+		seen[key] = struct{}{}
+		toWrite = append(toWrite, events[i])
 	}
-	for _, e := range events {
+	for _, e := range toWrite {
 		data, err := json.Marshal(e)
 		if err != nil {
 			return nil, err
@@ -55,7 +79,7 @@ func (s *WorldSimStore) AppendWorldEvents(events []domain.WorldEvent) ([]domain.
 			return nil, err
 		}
 	}
-	return events, nil
+	return toWrite, nil
 }
 
 // LoadWorldEvents 读取全部事件；文件缺失返回空。损坏行跳过（append-only 日志的容错语义）。
@@ -85,6 +109,38 @@ func (s *WorldSimStore) LoadWorldEvents() ([]domain.WorldEvent, error) {
 		return events, err
 	}
 	return events, nil
+}
+
+// ResetActivityState 清理活动推演游标与离屏事件流。章节/设定种子不动，
+// 用于 --reset-simulation-state 切换 generation 后重新生成 canon 世界 tick。
+func (s *WorldSimStore) ResetActivityState() error {
+	return s.io.WithWriteLock(func() error {
+		if err := s.io.RemoveFileUnlocked(worldEventsPath); err != nil {
+			return err
+		}
+		return s.io.RemoveFileUnlocked("meta/world_tick.json")
+	})
+}
+
+func worldEventDedupKey(e domain.WorldEvent) string {
+	return strings.Join([]string{
+		strings.TrimSpace(e.TickID),
+		fmt.Sprintf("%d", e.Chapter),
+		strings.TrimSpace(e.Summary),
+		normalizedWorldEventActors(e.Actors),
+	}, "\x1f")
+}
+
+func normalizedWorldEventActors(actors []string) string {
+	out := make([]string, 0, len(actors))
+	for _, actor := range actors {
+		actor = strings.TrimSpace(actor)
+		if actor != "" {
+			out = append(out, actor)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, "|")
 }
 
 // HorizonEvents 返回"已越过地平线"且仍在新鲜窗口内的事件：

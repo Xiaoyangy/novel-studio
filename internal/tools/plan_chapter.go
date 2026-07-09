@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -193,6 +195,12 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	if err := validateChapterPrewriteSimulation(s, plan, isRewritePlan); err != nil {
 		return nil, err
 	}
+	if issues := ChapterPlanIdentityIssues(s, plan.Chapter, plan); len(issues) > 0 {
+		return nil, fmt.Errorf("第 %d 章计划身份锚点不合格：%s: %w", plan.Chapter, strings.Join(issues, "；"), errs.ErrToolPrecondition)
+	}
+	if err := validateProjectContaminationFinal(s, "chapter plan", plan); err != nil {
+		return nil, err
+	}
 
 	// plan 收尾一致性检查：计划是正文的唯一范围依据，收尾前先与本书既定事实对齐。
 	// hard 矛盾挡下 finalize 让 planner 修正；warn 疑点透出并落盘供 drafter 正文阶段核对。
@@ -316,6 +324,220 @@ func decodeChapterPlanArgs(args json.RawMessage) (domain.ChapterPlan, error) {
 	}, nil
 }
 
+// ChapterPlanIdentityIssues catches template-like planning before it reaches
+// draft rendering. It is activated by the project's premise file so generic
+// fixtures and older projects are not reinterpreted.
+func ChapterPlanIdentityIssues(s *store.Store, chapter int, payload any) []string {
+	if !chapterIdentityGuardActive(s) {
+		return nil
+	}
+	var issues []string
+	names := knownCharacterNameSet(s)
+	required := requiredDossierCharacterNames(s, chapter)
+	if len(required) == 0 {
+		for name := range names {
+			required = append(required, name)
+		}
+	}
+	text := strings.Join(flattenPlanStrings(payload), "\n")
+	if len(required) > 0 && !containsAnyLiteral(text, required) {
+		issues = append(issues, fmt.Sprintf("计划文本未出现本章角色实名（需要至少命中：%s），不能用“主角/关键对话对象/后台关联者”占位", strings.Join(required, "、")))
+	}
+	if bad := characterFieldIdentityIssues(payload, names, inferCommitProtagonist(s), projectHasFemaleProtagonist(s)); len(bad) > 0 {
+		issues = append(issues, bad...)
+	}
+	return compactStrings(issues)
+}
+
+func chapterIdentityGuardActive(s *store.Store) bool {
+	data, err := os.ReadFile(filepath.Join(s.Dir(), "premise.md"))
+	if err != nil {
+		return false
+	}
+	text := string(data)
+	return strings.Contains(text, "女频") ||
+		strings.Contains(text, "女性") ||
+		strings.Contains(text, "许闻溪") ||
+		strings.Contains(text, "第二算法")
+}
+
+func projectHasFemaleProtagonist(s *store.Store) bool {
+	data, err := os.ReadFile(filepath.Join(s.Dir(), "premise.md"))
+	if err != nil {
+		return false
+	}
+	text := string(data)
+	return strings.Contains(text, "女频") || strings.Contains(text, "女性") || strings.Contains(text, "女主")
+}
+
+func knownCharacterNameSet(s *store.Store) map[string]struct{} {
+	names := map[string]struct{}{}
+	chars, err := s.Characters.Load()
+	if err != nil {
+		return names
+	}
+	for _, c := range chars {
+		name := strings.TrimSpace(c.Name)
+		if name != "" {
+			names[name] = struct{}{}
+		}
+		for _, alias := range c.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias != "" {
+				names[alias] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+func flattenPlanStrings(v any) []string {
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch vv := x.(type) {
+		case string:
+			if s := strings.TrimSpace(vv); s != "" {
+				out = append(out, s)
+			}
+		case map[string]any:
+			for _, item := range vv {
+				walk(item)
+			}
+		case []any:
+			for _, item := range vv {
+				walk(item)
+			}
+		default:
+			raw, err := json.Marshal(vv)
+			if err != nil || len(raw) == 0 || string(raw) == "null" {
+				return
+			}
+			var decoded any
+			if err := json.Unmarshal(raw, &decoded); err == nil && decoded != nil && !reflect.DeepEqual(decoded, vv) {
+				walk(decoded)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+func containsAnyLiteral(text string, needles []string) bool {
+	for _, needle := range needles {
+		if needle = strings.TrimSpace(needle); needle != "" && strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func characterFieldIdentityIssues(v any, names map[string]struct{}, protagonist string, femaleProtagonist bool) []string {
+	var issues []string
+	var walk func(string, any)
+	walk = func(path string, x any) {
+		switch vv := x.(type) {
+		case map[string]any:
+			if rawName, ok := vv["character"].(string); ok {
+				name := strings.TrimSpace(rawName)
+				if name != "" && name != "none" {
+					switch {
+					case isGenericCharacterPlaceholder(name):
+						issues = append(issues, fmt.Sprintf("%s.character=%q 是模板占位，必须改为 characters.json 里的角色实名", path, name))
+					case len(names) > 0:
+						if _, ok := names[name]; !ok {
+							issues = append(issues, fmt.Sprintf("%s.character=%q 不在角色册中，计划阶段不能用泛称或临时身份代替实名", path, name))
+						}
+					}
+					if femaleProtagonist && protagonist != "" && name == protagonist && hasLikelyMalePronoun(vv) {
+						issues = append(issues, fmt.Sprintf("%s 以女性主角 %s 为主体却出现疑似男性代词，请改成“她”或角色实名", path, protagonist))
+					}
+				}
+			}
+			for key, item := range vv {
+				next := key
+				if path != "" {
+					next = path + "." + key
+				}
+				walk(next, item)
+			}
+		case []any:
+			for i, item := range vv {
+				walk(fmt.Sprintf("%s[%d]", path, i), item)
+			}
+		default:
+			raw, err := json.Marshal(vv)
+			if err != nil || len(raw) == 0 || string(raw) == "null" {
+				return
+			}
+			var decoded any
+			if err := json.Unmarshal(raw, &decoded); err == nil && decoded != nil && !reflect.DeepEqual(decoded, vv) {
+				walk(path, decoded)
+			}
+		}
+	}
+	walk("plan", v)
+	return compactStrings(issues)
+}
+
+func isGenericCharacterPlaceholder(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	exact := map[string]struct{}{
+		"主角":      {},
+		"女主":      {},
+		"男主":      {},
+		"主人公":     {},
+		"关键对话对象":  {},
+		"制度资源控制者": {},
+		"关键对话对象/制度资源控制者": {},
+		"后台关联者":          {},
+		"休眠关键角色":         {},
+		"后台关联者/休眠关键角色":   {},
+		"媒介/第三方":         {},
+	}
+	if _, ok := exact[name]; ok {
+		return true
+	}
+	return strings.Contains(name, "关键对话对象") ||
+		strings.Contains(name, "后台关联者") ||
+		strings.Contains(name, "休眠关键角色") ||
+		strings.Contains(name, "制度资源控制者")
+}
+
+func hasLikelyMalePronoun(v any) bool {
+	text := strings.Join(flattenPlanStrings(v), "\n")
+	for _, pattern := range []string{
+		"他必须", "他会", "他在", "他先", "他不能", "他的", "他不", "他把",
+		"他从", "他没有", "他已经", "他想", "他需要", "他站", "他按", "他删",
+		"他发现", "他拿", "他问", "他接受", "他最", "按他的", "让他",
+	} {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func compactStrings(items []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
 func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, rewrite bool) error {
 	sim := plan.CausalSimulation
 	if !hasChapterCausalSimulation(sim) {
@@ -335,12 +557,6 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	restartActive := restartErr == nil && restartPolicy != nil && restartPolicy.Active
 
 	require(len(sim.ContextSources) > 0, "causal_simulation.context_sources")
-	require(len(sim.WritingNorms) > 0, "causal_simulation.writing_norms_applied")
-	require(hasAntiAIExecutionPlan(sim.AntiAIPlan), "causal_simulation.anti_ai_execution_plan")
-	require(len(sim.ExternalRefs) > 0, "causal_simulation.external_reference_plan")
-	require(hasCollectedExternalReference(sim.ExternalRefs), "causal_simulation.external_reference_plan.collected_source")
-	require(len(sim.TrendLanguage) > 0, "causal_simulation.trend_language_plan")
-	require(len(sim.GroundingDetails) > 0, "causal_simulation.grounding_details")
 	require(len(sim.OffscreenStage) > 0, "causal_simulation.offscreen_character_stage")
 	require(len(sim.EnvironmentState) > 0, "causal_simulation.environment_state")
 	require(len(sim.CausalBeats) > 0, "causal_simulation.causal_beats")
@@ -349,18 +565,11 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	require(len(sim.VoiceLogic) > 0, "causal_simulation.voice_logic")
 	require(len(sim.DialogueBlueprints) > 0, "causal_simulation.dialogue_scene_blueprints")
 	require(len(sim.CharacterArcTests) > 0, "causal_simulation.character_arc_tests")
-	require(hasReaderRewardPlan(sim.ReaderRewardPlan), "causal_simulation.reader_reward_plan")
-	require(hasReaderRetentionPlan(sim.ReaderRetentionPlan), "causal_simulation.reader_retention_plan")
-	require(len(sim.EvidenceChains) > 0, "causal_simulation.evidence_return_chains")
-	require(hasEndingConsequenceContract(sim.EndingContract), "causal_simulation.ending_consequence_contract")
 	require(len(sim.DormantPolicy) > 0, "causal_simulation.dormant_character_policy")
-	require(len(sim.RealitySupport) > 0, "causal_simulation.reality_support_plan")
 	require(len(sim.EmotionalLogic) > 0, "causal_simulation.emotional_logic")
 	require(len(sim.RelationshipArcs) > 0, "causal_simulation.relationship_emotion_arcs")
-	require(len(sim.VisualDesign) > 0, "causal_simulation.visual_design")
-	require(len(sim.CharacterKit) > 0, "causal_simulation.character_kit")
-	// 缺料可见：设计字段必须声明素材来源（craft_recall 路径 / book_facts / no_material），
-	// "没检索到"是可审计事件，不允许 LLM 静默编造。
+	// 轻松大众题材不把资料/装备/视觉/读者奖励矩阵设为硬卡点；这些字段存在时仍校验来源，
+	// 缺失交给 Editor/AI 味审核和正文阶段处理，避免第一章计划被方法论表格拖死。
 	for i, vd := range sim.VisualDesign {
 		require(strings.TrimSpace(vd.MaterialSource) != "", fmt.Sprintf("causal_simulation.visual_design[%d].material_source", i))
 	}
@@ -414,13 +623,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(hasSource("progression", "chapter_progress", "chapter_contract"), "causal_simulation.context_sources(progression/chapter_contract)")
 		require(hasSource("character_continuity", "character_stage", "initial_character_dynamics"), "causal_simulation.context_sources(character_continuity/character_stage)")
 		require(hasSource("resource", "foreshadow", "relationship"), "causal_simulation.context_sources(resource/foreshadow/relationship)")
-		require(hasSource("prewrite_storycraft_plan", "storycraft"), "causal_simulation.context_sources(prewrite_storycraft_plan)")
-		require(hasSource("world_background_plan", "world_background_layers"), "causal_simulation.context_sources(world_background_plan)")
 		require(hasSource("dialogue_writing", "dialogue"), "causal_simulation.context_sources(dialogue_writing)")
-		require(hasSource("web_reference", "web_search", "web_research", "网络"), "causal_simulation.context_sources(web_reference/web_research)")
-	}
-	if plan.Chapter == 1 && !rewrite {
-		require(hasLongformOpeningDesign(sim.LongformOpening), "causal_simulation.longform_opening")
 	}
 
 	for i, state := range sim.InitialState {
@@ -463,6 +666,9 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	}
 	require(hasSideCharacter, "causal_simulation.offscreen_character_stage(non_protagonist)")
 	requiredCharacters := requiredDossierCharacterNames(s, plan.Chapter)
+	if missingCharacters := missingInitialStateCoverage(requiredCharacters, sim.InitialState); len(missingCharacters) > 0 {
+		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.initial_state", missingCharacters))
+	}
 	if missingCharacters := missingStageCoverage(requiredCharacters, sim.OffscreenStage); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.offscreen_character_stage", missingCharacters))
 	}
@@ -471,12 +677,6 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	}
 	if missingCharacters := missingEmotionalLogicCoverage(requiredCharacters, sim.EmotionalLogic); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.emotional_logic", missingCharacters))
-	}
-	if missingCharacters := missingVisualDesignCoverage(requiredCharacters, sim.VisualDesign); len(missingCharacters) > 0 {
-		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.visual_design", missingCharacters))
-	}
-	if missingCharacters := missingRelationshipArcCoverage(requiredCharacters, sim.RelationshipArcs); len(missingCharacters) > 0 {
-		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.relationship_emotion_arcs", missingCharacters))
 	}
 	for i, arc := range sim.CharacterArcTests {
 		prefix := fmt.Sprintf("causal_simulation.character_arc_tests[%d]", i)
@@ -1411,7 +1611,7 @@ func causalSimulationSchema(strict bool) map[string]any {
 		schema.Property("story_result", schema.String("该反馈带来的剧情后果或状态位移")),
 	)
 	causalSimulation := schema.Object(
-		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、审计证据链、升级爽点等")),
+		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、可见事实回收、升级爽点等")),
 		schema.Property("chapter_function", schema.String("本章在全书/卷/弧中的功能；第一章必须写明开局承诺、核心问题和主角初始选择")),
 		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
 		req(schema.Property("writing_norms_applied", schema.Array("本章写作规范执行计划：必须覆盖 writing_engine/user_rules/anti_ai_tone/human_feel_craft/writing_techniques_digest/web_reference_guidelines/longform_ai_detector 中实际可见且相关的规则", writingNormApplication))),

@@ -143,6 +143,24 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 		t.Fatalf("unexpected long-chapter dialogue flag: %+v", flags)
 	}
 
+	longChapterSoftBand := domain.ChapterAIVoiceMetrics{
+		DialogueRatio:  0.217,
+		SentenceCount:  190,
+		ParagraphCount: 60,
+	}
+	if flags := redFlags(longChapterSoftBand, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
+		t.Fatalf("unexpected long-chapter soft-band dialogue flag: %+v", flags)
+	}
+
+	longChapterTooLow := domain.ChapterAIVoiceMetrics{
+		DialogueRatio:  0.19,
+		SentenceCount:  190,
+		ParagraphCount: 60,
+	}
+	if flags := redFlags(longChapterTooLow, nil); !hasRedFlag(flags, "supporting_dialogue_ratio") {
+		t.Fatalf("expected long-chapter dialogue flag below soft band")
+	}
+
 	shortChapter := domain.ChapterAIVoiceMetrics{
 		DialogueRatio:  0.253,
 		SentenceCount:  80,

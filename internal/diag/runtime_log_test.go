@@ -54,6 +54,39 @@ func TestCaptureRuntimeContextRewriteLogs(t *testing.T) {
 	}
 }
 
+func TestCaptureRuntimeLogCountsOnlyCurrentRunWindow(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Join([]string{
+		`time=2026-07-02T11:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.5`,
+		`time=2026-07-02T11:01:00 level=ERROR msg=stale_failure module=event category=ERROR agent=writer`,
+		`time=2026-07-02T11:02:00 level=WARN msg=上下文重写 module=context agent=writer reason=threshold strategy=store_summary committed=true tokens_before=120000 tokens_after=54000 compacted=56 kept=24`,
+		`time=2026-07-02T12:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.5`,
+		`time=2026-07-02T12:01:00 level=WARN msg=current_warning module=usage agent=coordinator`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(logDir, "headless.log"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rc := CaptureRuntime(store.NewStore(dir))
+	if rc.LogErrors != 0 || rc.LogWarns != 1 {
+		t.Fatalf("log counts = error %d warn %d, want error 0 warn 1", rc.LogErrors, rc.LogWarns)
+	}
+	if len(rc.ContextRewrites) != 0 {
+		t.Fatalf("stale context rewrites should be ignored, got %+v", rc.ContextRewrites)
+	}
+	out := string(RenderExport(Report{}, rc))
+	if strings.Contains(out, "error ×1") || strings.Contains(out, "上下文重写") {
+		t.Fatalf("export should not include stale runtime signals:\n%s", out)
+	}
+	if !strings.Contains(out, "logs/headless.log (当前启动窗口尾部)") {
+		t.Fatalf("export should label current run log source:\n%s", out)
+	}
+}
+
 func TestRuntimeFindingContextCompactionCircuitBreaker(t *testing.T) {
 	rc := RuntimeCapture{ContextRewrites: []ContextRewriteStat{
 		{Agent: "coordinator", Strategy: "full_summary", Reason: "circuit_breaker", Count: 2},

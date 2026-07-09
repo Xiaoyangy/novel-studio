@@ -651,6 +651,11 @@ func zeroInitialCharacters(project zeroInitProject) []domain.Character {
 	add(protagonist)
 	for _, c := range project.Characters {
 		if zeroIsProtagonist(c) {
+			add(c)
+		}
+	}
+	for _, c := range project.Characters {
+		if zeroIsProtagonist(c) {
 			continue
 		}
 		if project.FirstCast[strings.TrimSpace(c.Name)] {
@@ -884,7 +889,12 @@ func zeroFirstNonProtagonistName(chars []domain.Character) string {
 
 func zeroIsProtagonist(c domain.Character) bool {
 	role := strings.ToLower(strings.TrimSpace(c.Role))
-	return strings.Contains(role, "主角") ||
+	if strings.Contains(role, "主角团") || strings.Contains(role, "配角") ||
+		strings.Contains(role, "父亲") || strings.Contains(role, "母亲") ||
+		strings.Contains(role, "朋友") || strings.Contains(role, "闺蜜") {
+		return false
+	}
+	return role == "主角" ||
 		strings.Contains(role, "男主") ||
 		strings.Contains(role, "女主") ||
 		strings.Contains(role, "主人公") ||
@@ -1037,7 +1047,7 @@ func renderZeroResourceLedger(ledger domain.ResourceLedger) string {
 }
 
 func renderZeroReviewLessons() string {
-	return "# 初始审核回路\n\n- 第一章写完后必须执行 check_consistency、commit_chapter 机械门禁和 Editor 审核。\n- 若人设、声口、RAG 来源或 AI 味不过关，下一轮推演必须引用审核结论重建 knowledge_ledger、decision_frame、voice_logic 和 review_refinement。\n- 禁止只按审核意见随机润色句子；先修角色系统、场景承载和证据链，再改正文。\n"
+	return "# 初始审核回路\n\n- 第一章写完后必须执行 check_consistency、commit_chapter 机械门禁和 Editor 审核。\n- 若人设、声口、RAG 来源或 AI 味不过关，下一轮推演必须引用审核结论重建 knowledge_ledger、decision_frame、voice_logic 和 review_refinement。\n- 禁止只按审核意见随机润色句子；先修角色系统、场景承载和可见事实，再改正文。\n"
 }
 
 func renderZeroStorycraftPlan(plan zeroPrewriteStorycraftPlan) string {
@@ -1435,6 +1445,26 @@ func zeroCheckTemplateHomogeneity(dir string) []string {
 			dupGoal[g]++
 		}
 	}
+	dupVoiceFields := map[string]map[string]int{
+		"scene_objective":     {},
+		"hidden_subtext":      {},
+		"relationship_stance": {},
+		"diction_and_rhythm":  {},
+	}
+	for _, v := range doc.VoiceLogic {
+		if s := strings.TrimSpace(v.SceneObjective); s != "" {
+			dupVoiceFields["scene_objective"][s]++
+		}
+		if s := strings.TrimSpace(v.HiddenSubtext); s != "" {
+			dupVoiceFields["hidden_subtext"][s]++
+		}
+		if s := strings.TrimSpace(v.RelationshipStance); s != "" {
+			dupVoiceFields["relationship_stance"][s]++
+		}
+		if s := strings.TrimSpace(v.DictionAndRhythm); s != "" {
+			dupVoiceFields["diction_and_rhythm"][s]++
+		}
+	}
 	homogeneous := false
 	for _, n := range dupPrinciple {
 		if n >= 2 {
@@ -1449,6 +1479,15 @@ func zeroCheckTemplateHomogeneity(dir string) []string {
 	if homogeneous {
 		warnings = append(warnings, "initial_character_dynamics 仍是零章模板（≥2 个角色 speech_principle/current_goal 完全相同），Architect 需在正式 plan 前特化角色声口与目标")
 	}
+	for field, counts := range dupVoiceFields {
+		for _, n := range counts {
+			if n >= 3 {
+				warnings = append(warnings, fmt.Sprintf("initial_character_dynamics.%s 同质化（≥3 个角色完全相同），需在 zero-init 特化人物目标/潜台词/关系姿态/语气节奏", field))
+				break
+			}
+		}
+	}
+	warnings = append(warnings, zeroCheckEmotionTemplateHomogeneity(dir)...)
 	var voiceGaps []string
 	for _, v := range doc.VoiceLogic {
 		if strings.TrimSpace(v.SentenceLength) == "" || strings.TrimSpace(v.PunctuationStyle) == "" ||
@@ -1461,6 +1500,59 @@ func zeroCheckTemplateHomogeneity(dir string) []string {
 		warnings = append(warnings, fmt.Sprintf("声口卡 6 细字段（句长/标点/断行/潜台词/沉默动作拍/声口对比）不全的角色：%s", strings.Join(voiceGaps, "、")))
 	}
 	return warnings
+}
+
+func zeroCheckEmotionTemplateHomogeneity(dir string) []string {
+	var warnings []string
+	data, err := os.ReadFile(filepath.Join(dir, "meta", "prewrite_storycraft_plan.json"))
+	if err == nil {
+		var plan zeroPrewriteStorycraftPlan
+		if json.Unmarshal(data, &plan) == nil {
+			warnings = append(warnings, zeroEmotionTemplateWarnings("prewrite_storycraft_plan.emotional_logic", plan.EmotionalLogic)...)
+		}
+	}
+	var chapterPlan domain.ChapterPlan
+	data, err = os.ReadFile(filepath.Join(dir, "drafts", "01.zero_init.plan.json"))
+	if err == nil && json.Unmarshal(data, &chapterPlan) == nil {
+		warnings = append(warnings, zeroEmotionTemplateWarnings("drafts/01.zero_init.plan.causal_simulation.emotional_logic", chapterPlan.CausalSimulation.EmotionalLogic)...)
+	}
+	return warnings
+}
+
+func zeroEmotionTemplateWarnings(label string, items []domain.CharacterEmotionalLogic) []string {
+	if len(items) < 2 {
+		return nil
+	}
+	dupComposite := map[string]int{}
+	dupDefense := map[string]int{}
+	dupAction := map[string]int{}
+	for _, item := range items {
+		if s := strings.TrimSpace(item.CompositeEmotion); s != "" {
+			dupComposite[s]++
+		}
+		if s := strings.TrimSpace(item.DefenseMechanism); s != "" {
+			dupDefense[s]++
+		}
+		if s := strings.TrimSpace(item.EmotionLedAction); s != "" {
+			dupAction[s]++
+		}
+	}
+	for _, n := range dupComposite {
+		if n >= 3 {
+			return []string{label + " 情绪复合项同质化（≥3 个角色完全相同），需回到 Architect/zero-init 特化情绪强度与动机"}
+		}
+	}
+	for _, n := range dupDefense {
+		if n >= 3 {
+			return []string{label + " 防御机制同质化（≥3 个角色完全相同），需按角色职业/关系/权力位置重建"}
+		}
+	}
+	for _, n := range dupAction {
+		if n >= 3 {
+			return []string{label + " 情绪推行动作同质化（≥3 个角色完全相同），不能放行写作"}
+		}
+	}
+	return nil
 }
 
 // zeroCheckPsychCoverage Task 054：core/important 角色缺 psych 画像（warning，psych 保持可选）。

@@ -580,7 +580,7 @@ func (t *ContextTool) architectReferences() map[string]string {
 // novel_context 看到的 ready/missing 与 save_foundation 返回的 foundation_ready
 // 永远一致（长篇 compass 必需项等细节不会漂移）。
 func (t *ContextTool) foundationStatus() map[string]any {
-	missing := t.store.FoundationMissing()
+	missing := FoundationCoreMissing(t.store.Dir())
 	status := map[string]any{"ready": len(missing) == 0}
 	if len(missing) > 0 {
 		status["missing"] = missing

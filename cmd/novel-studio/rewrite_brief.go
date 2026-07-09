@@ -377,6 +377,9 @@ func addAIVoiceAnalysisToPlan(analysis domain.AIVoiceAnalysis, addRed, addYellow
 		if flag.Suggestion != "" {
 			addSuggestion(flag.Suggestion)
 		}
+		if flag.Rule == "supporting_dialogue_ratio" {
+			addSuggestion(fmt.Sprintf("supporting_dialogue_ratio 定量修复：当前 %.2f，目标至少 %.2f；不要只补动作，需净增 120-180 字引号内配角主动话轮，例如夏岚误解/转述、程棠拒绝被支开、苏曼私信追问，并同步删同量说明。", flag.Actual, flag.Limit))
+		}
 		if flag.Replacement != "" {
 			addSuggestion(flag.Replacement)
 		}
@@ -409,7 +412,7 @@ func renderRevisionBrief(plan revisionPlan, reviewMarkdown string) string {
 	}
 
 	b.WriteString("\n## 质量优先边界\n\n")
-	b.WriteString("- 红旗必须通过更好的剧情动作、对话摩擦、证据链、人物选择或规则后果解决。\n")
+	b.WriteString("- 红旗必须通过更好的剧情动作、对话摩擦、可见事实、人物选择或规则后果解决。\n")
 	b.WriteString("- 黄旗只在能提升人物、节奏、信息清晰度或语言质感时采用；若只是为了指标换词，保留原文。\n")
 	b.WriteString("- 禁止注水、乱码、OCR 脏码、随机汉字、冷僻词堆砌、无信息清单、拟声长串或刻意错别字。\n")
 	b.WriteString("- 不新增改变主线事实的人名、组织、合同、授权、证据或能力。\n")
@@ -438,6 +441,10 @@ func writeRevisionBrief(projectDir string, plan revisionPlan) error {
 }
 
 func blockingRevisionChapters(projectDir string, start, end int) ([]int, error) {
+	return revisionChaptersNeedingWork(projectDir, start, end, false)
+}
+
+func revisionChaptersNeedingWork(projectDir string, start, end int, includeYellow bool) ([]int, error) {
 	var chapters []int
 	for ch := start; ch <= end; ch++ {
 		text, err := os.ReadFile(filepath.Join(projectDir, "chapters", fmt.Sprintf("%02d.md", ch)))
@@ -445,7 +452,7 @@ func blockingRevisionChapters(projectDir string, start, end int) ([]int, error) 
 			return nil, fmt.Errorf("读取第 %d 章用于复核红旗失败: %w", ch, err)
 		}
 		plan := buildRevisionPlan(projectDir, ch, string(text), "")
-		if plan.HasRed {
+		if plan.HasRed || (includeYellow && plan.HasYellow) {
 			chapters = append(chapters, ch)
 		}
 	}

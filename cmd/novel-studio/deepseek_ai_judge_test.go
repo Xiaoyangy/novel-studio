@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
 )
 
@@ -74,6 +75,45 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 	}
 	if !artifact.Blocking || artifact.Verdict != "ai_like" || artifact.AIProbabilityPercent != 70 {
 		t.Fatalf("artifact verdict/blocking = %+v", artifact)
+	}
+}
+
+func TestSanitizeDeepSeekAIJudgeForProjectRemovesDeprecatedEngineAdvice(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
+		t.Fatalf("SavePremise: %v", err)
+	}
+	artifact := &deepseekAIJudgeArtifact{
+		Chapter: 1,
+		AuthorVoicePlan: []string{
+			"强化程序员视角，可用版本差异和日志窗口作隐喻。",
+			"保留许闻溪的逻辑判断，但落到职场动作。",
+		},
+		RAGRules:    []string{"关键冲突里少用完整明喻。"},
+		RawResponse: `{"author_voice_plan":["梁渡眼看日志滚动速度。"]}`,
+	}
+
+	sanitizeDeepSeekAIJudgeForProject(st, artifact)
+
+	if len(artifact.AuthorVoicePlan) != 1 || !strings.Contains(artifact.AuthorVoicePlan[0], "许闻溪") {
+		t.Fatalf("expected deprecated advice removed, got %+v", artifact.AuthorVoicePlan)
+	}
+	if len(artifact.ProjectGuardWarnings) != 1 {
+		t.Fatalf("expected project guard warning, got %+v", artifact.ProjectGuardWarnings)
+	}
+	joinedRules := strings.Join(artifact.RAGRules, "\n")
+	if !strings.Contains(joinedRules, "项目门禁") {
+		t.Fatalf("expected safe project guard rag rule, got %+v", artifact.RAGRules)
+	}
+	if strings.Contains(joinedRules, "日志窗口") || strings.Contains(joinedRules, "版本差异") {
+		t.Fatalf("sanitized rag rules must not keep deprecated terms: %+v", artifact.RAGRules)
+	}
+	if artifact.RawResponse != "" {
+		t.Fatalf("raw_response should be dropped when it contains deprecated terms: %q", artifact.RawResponse)
 	}
 }
 

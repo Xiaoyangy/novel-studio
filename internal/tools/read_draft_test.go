@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -67,6 +68,84 @@ func TestReadChapterDraft(t *testing.T) {
 	}
 	if payload.Content == "" {
 		t.Fatal("expected draft content")
+	}
+}
+
+func TestReadChapterDefaultsToInProgressChapter(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Progress.Init("test", 10); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	if err := store.Progress.StartChapter(2); err != nil {
+		t.Fatalf("StartChapter: %v", err)
+	}
+	if err := store.Drafts.SaveDraft(2, "第二章当前草稿。"); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	tool := NewReadChapterTool(store)
+	args, _ := json.Marshal(map[string]any{"source": "draft"})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload struct {
+		Chapter int    `json:"chapter"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.Chapter != 2 {
+		t.Fatalf("expected default chapter 2, got %d", payload.Chapter)
+	}
+	if payload.Content == "" {
+		t.Fatal("expected draft content")
+	}
+}
+
+func TestReadChapterDefaultsToCurrentChapter(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Progress.Save(&domain.Progress{
+		NovelName:      "test",
+		Phase:          domain.PhaseWriting,
+		CurrentChapter: 4,
+		TotalChapters:  10,
+	}); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	if err := store.Drafts.SaveFinalChapter(4, "第四章终稿。"); err != nil {
+		t.Fatalf("SaveFinalChapter: %v", err)
+	}
+
+	tool := NewReadChapterTool(store)
+	args, _ := json.Marshal(map[string]any{"source": "final"})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload struct {
+		Chapter int    `json:"chapter"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.Chapter != 4 {
+		t.Fatalf("expected default chapter 4, got %d", payload.Chapter)
+	}
+	if payload.Content == "" {
+		t.Fatal("expected final content")
 	}
 }
 
@@ -186,6 +265,36 @@ func TestDraftChapterWrite(t *testing.T) {
 	}
 	if progress.Phase != domain.PhaseWriting {
 		t.Fatalf("expected phase writing, got %s", progress.Phase)
+	}
+}
+
+func TestDraftChapterRejectsSecondAlgorithmDeprecatedEngine(t *testing.T) {
+	dir := t.TempDir()
+	store := store.NewStore(dir)
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
+		t.Fatalf("SavePremise: %v", err)
+	}
+	if err := store.Progress.Init("test", 10); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+
+	tool := NewDraftChapterTool(store)
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1,
+		"content": "许闻溪站在后台，梁渡说日志窗口还在，原始包稍后走合规邮件。",
+		"mode":    "write",
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected deprecated engine contamination error")
+	}
+	for _, want := range []string{"旧版硬核取证引擎词", "日志窗口", "原始包", "合规邮件"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to contain %q, got %v", want, err)
+		}
 	}
 }
 

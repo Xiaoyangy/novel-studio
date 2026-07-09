@@ -631,6 +631,12 @@ func renderBookWorld(world domain.BookWorld) string {
 				fmt.Fprintf(&b, "：%s", f.Goal)
 			}
 			b.WriteString("\n")
+			if len(f.Aliases) > 0 {
+				fmt.Fprintf(&b, "  - 别名：%s\n", strings.Join(f.Aliases, "、"))
+			}
+			if f.Clock != nil {
+				fmt.Fprintf(&b, "  - 进度钟：%d/%d；后果：%s\n", f.Clock.Progress, f.Clock.Segments, f.Clock.Consequence)
+			}
 			for _, rel := range f.Relations {
 				fmt.Fprintf(&b, "  - %s → %s：%s\n", rel.Kind, rel.Target, rel.Note)
 			}

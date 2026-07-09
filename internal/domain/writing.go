@@ -19,6 +19,26 @@ type ChapterPlan struct {
 	AdvanceEvents []string `json:"advance_events,omitempty"`
 }
 
+// ChapterDraftPartIndex 记录分片草稿的可恢复状态。
+// 分片只服务写作窗口管理；最终章节仍由 drafts/NN.draft.md -> commit_chapter 提交。
+type ChapterDraftPartIndex struct {
+	Version   int                `json:"version"`
+	Chapter   int                `json:"chapter"`
+	UpdatedAt string             `json:"updated_at,omitempty"`
+	Parts     []ChapterDraftPart `json:"parts,omitempty"`
+}
+
+// ChapterDraftPart 是单个正文片段的索引项。
+type ChapterDraftPart struct {
+	Part        int    `json:"part"`
+	TotalParts  int    `json:"total_parts,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Focus       string `json:"focus,omitempty"`
+	ContentPath string `json:"content_path"`
+	RuneCount   int    `json:"rune_count"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+}
+
 // ChapterContract 是 Writer 和 Editor 共享的章节验收契约。
 // 它定义本章必须完成的推进项、禁止越界项以及审阅关注点。
 type ChapterContract struct {
