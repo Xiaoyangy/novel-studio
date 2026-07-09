@@ -78,7 +78,7 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 func NewWriterStopGuard(st *store.Store) agentcore.StopGuard {
 	return newCheckpointDeltaGuard(st, "writer",
 		[]string{"commit"},
-		"你必须调用 commit_chapter 提交本章后才能结束。draft_chapter 只是保存草稿，不算完成。",
+		"你必须调用 commit_chapter 提交本章后才能结束。draft_chapter / draft_chapter_part / merge_chapter_parts 只是保存草稿，不算完成；分片写完要先合并、回读、check_consistency，再 commit_chapter。",
 	)
 }
 

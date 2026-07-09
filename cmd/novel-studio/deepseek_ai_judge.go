@@ -13,6 +13,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
@@ -91,6 +92,7 @@ type deepseekAIJudgeArtifact struct {
 	DialogueFixPlan      []string                      `json:"dialogue_fix_plan,omitempty"`
 	AuthorVoicePlan      []string                      `json:"author_voice_plan,omitempty"`
 	RAGRules             []string                      `json:"rag_rules,omitempty"`
+	ProjectGuardWarnings []string                      `json:"project_guard_warnings,omitempty"`
 	ParseWarning         string                        `json:"parse_warning,omitempty"`
 	RawResponse          string                        `json:"raw_response,omitempty"`
 	ModelSelection       deepseekAIJudgeModelSelection `json:"model_selection"`
@@ -185,6 +187,46 @@ func runDeepSeekAIJudge(
 	return artifact, nil
 }
 
+func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudgeArtifact) {
+	if st == nil || artifact == nil {
+		return
+	}
+	removed := 0
+	filter := func(values []string) []string {
+		if len(values) == 0 {
+			return values
+		}
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, value)) > 0 {
+				removed++
+				continue
+			}
+			out = append(out, value)
+		}
+		return out
+	}
+	artifact.Reasons = filter(artifact.Reasons)
+	artifact.Evidence = filter(artifact.Evidence)
+	artifact.RevisionPlan = filter(artifact.RevisionPlan)
+	artifact.DialogueFixPlan = filter(artifact.DialogueFixPlan)
+	artifact.AuthorVoicePlan = filter(artifact.AuthorVoicePlan)
+	artifact.RAGRules = filter(artifact.RAGRules)
+	if strings.TrimSpace(artifact.RawResponse) != "" && len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, artifact.RawResponse)) > 0 {
+		removed++
+		artifact.RawResponse = ""
+	}
+	if removed == 0 {
+		return
+	}
+	artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
+		fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书禁用旧引擎冲突的建议。", removed),
+	)
+	artifact.RAGRules = appendUnique(artifact.RAGRules,
+		"项目门禁：禁止把旧版硬核取证术语当作专业隐喻；用职场后果、岗位合并、项目权限、同事求助和会后约谈替代。",
+	)
+}
+
 func saveDeepSeekAIJudge(projectDir string, artifact *deepseekAIJudgeArtifact) error {
 	if artifact == nil {
 		return nil
@@ -235,6 +277,21 @@ func sedimentDeepSeekAIJudgeRAG(
 	return toolspkg.UpsertRAGChunks(ctx, st, embedder, vectorWriter, deepseekAIJudgeRAGChunks(*artifact), domain.RAGIndexConfig{})
 }
 
+func deepSeekExternalAIJudge(artifact *deepseekAIJudgeArtifact) *reviewreport.ExternalAIJudge {
+	if artifact == nil {
+		return nil
+	}
+	return &reviewreport.ExternalAIJudge{
+		Name:                 "DeepSeek 裸正文",
+		Source:               fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", artifact.Chapter),
+		Verdict:              artifact.Verdict,
+		RiskLevel:            artifact.RiskLevel,
+		AIProbabilityPercent: artifact.AIProbabilityPercent,
+		Blocking:             artifact.Blocking,
+		Summary:              artifact.Summary,
+	}
+}
+
 func deepseekAIJudgeRAGChunks(artifact deepseekAIJudgeArtifact) []domain.RAGChunk {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 第 %d 章 DeepSeek 裸正文 AI 判定沉淀\n", artifact.Chapter)
@@ -256,6 +313,7 @@ func deepseekAIJudgeRAGChunks(artifact deepseekAIJudgeArtifact) []domain.RAGChun
 	appendRAGList("修改方案", artifact.RevisionPlan)
 	appendRAGList("对白专项方案", artifact.DialogueFixPlan)
 	appendRAGList("作者声口方案", artifact.AuthorVoicePlan)
+	appendRAGList("项目门禁提示", artifact.ProjectGuardWarnings)
 	appendRAGList("后续 RAG 规避规则", artifact.RAGRules)
 	text := strings.TrimSpace(b.String())
 	if text == "" {
@@ -323,6 +381,7 @@ func writeDeepSeekAIJudgeSectionBody(b *strings.Builder, artifact deepseekAIJudg
 	if strings.TrimSpace(artifact.ParseWarning) != "" {
 		fmt.Fprintf(b, "- 解析/配置提示：%s\n", artifact.ParseWarning)
 	}
+	writeMarkdownListSection(b, "项目门禁提示", artifact.ProjectGuardWarnings)
 	writeMarkdownListSection(b, "AI 味原因", artifact.Reasons)
 	writeMarkdownListSection(b, "短证据", artifact.Evidence)
 	writeMarkdownListSection(b, "修改方案", artifact.RevisionPlan)

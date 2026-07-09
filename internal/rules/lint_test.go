@@ -431,6 +431,26 @@ func TestLint_CadenceSignalsAllowLightUse(t *testing.T) {
 	}
 }
 
+func TestLint_IsolatedSentenceIgnoresPlainTitleAndPureDialogue(t *testing.T) {
+	text := `第一章 讲稿第一句
+
+“到了吗？”
+
+“还差两分钟。”
+
+“你先别签。”
+
+“我看一眼。”
+
+“行。”
+
+许闻溪把讲稿往怀里收了收，侧台的灯从她手背上擦过去。`
+
+	if v := findRule(Lint(text), "isolated_sentence_overuse"); v != nil {
+		t.Fatalf("plain title and pure dialogue should not trigger isolated_sentence_overuse: %+v", v)
+	}
+}
+
 func TestLint_TemplatedDialogueChain(t *testing.T) {
 	text := `# 第一章
 
@@ -585,6 +605,50 @@ func TestLint_HumanFeelStructureAllowsMessyNotesAndBrokenCardText(t *testing.T) 
 		if v := findRule(Lint(text), rule); v != nil {
 			t.Fatalf("unexpected %s violation: %+v", rule, v)
 		}
+	}
+}
+
+func TestLint_BureaucraticRegisterOveruse(t *testing.T) {
+	text := `# 第一章
+
+事由栏很窄，光标在第一格里等着。她敲下：演示记录尾号六二九四，封存回执尾号六三九四，申请核验原始读取链与封存生成记录。
+
+记录员挠了一下眉心。“纪要怎么进？我写编号不一致，原因待核？”
+
+“写到这里为止。”许闻溪把便签折了一道，盖住邱梅那行药量，只露出新补的数字，“别替它找原因。”
+
+笔尖终于落下。记录员刚写完“不一致”，内线窗口弹出乔安的消息：你还在数据室吗？
+
+许闻溪回：只问版本，不写人。`
+
+	v := findRule(Lint(text), "bureaucratic_register_overuse")
+	if v == nil {
+		t.Fatalf("expected bureaucratic_register_overuse violation")
+	}
+	if !strings.Contains(v.Target, "申请核验原始读取链") {
+		t.Fatalf("target should cite formal register evidence, got %q", v.Target)
+	}
+}
+
+func TestLint_BureaucraticRegisterAllowsColloquialPressure(t *testing.T) {
+	text := `# 第一章
+
+事由栏窄得离谱，光标卡在第一格，闪一下，停一下，像在催她快点编个说法。
+
+许闻溪把手腕往外挪了挪，重新敲字：演示记录尾号6294，封存回执尾号6394。申请核原始读取链，核封存记录是谁生成的。
+
+记录员盯着屏幕看了两秒，挠了下眉心。“那纪要呢？就写编号对不上，原因待核？”
+
+“别写原因。”许闻溪把便签折了一道，盖住邱梅那行药量，只露出刚补上的数字，“先写到对不上。”
+
+“可主任要问起来……”
+
+“让他问。”
+
+乔安的消息隔了半天才跳出来：别把我写进去，求你。`
+
+	if v := findRule(Lint(text), "bureaucratic_register_overuse"); v != nil {
+		t.Fatalf("colloquial pressure should not violate: %+v", v)
 	}
 }
 

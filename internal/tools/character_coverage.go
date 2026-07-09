@@ -11,10 +11,10 @@ import (
 // requiredDossierCharacterNames 计算章级覆盖门禁（offscreen stage / arc tests /
 // emotional logic 等）必须覆盖的角色集合（Task 055）：
 //
-//	(dossier/continuity 已有角色) ∪ (characters.json core/important 中"已出场或本章点名"的角色)
+//	核心主线角色 ∪ 已出场角色 ∪ 本章大纲点名角色
 //
-// dossier 只有主角时门禁不再空转；未出场且未点名的角色不强制，避免逼 agent
-// 为没上场的人编台账。chapter ≤ 0 时退化为旧口径（仅 dossier）。
+// dossier 是可检索资产，不等于每章硬覆盖名单；未出场且未点名的角色不强制，
+// 避免逼 agent 为没上场的人编全套心理/视觉/关系矩阵。
 func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 	seen := map[string]struct{}{}
 	var names []string
@@ -30,18 +30,9 @@ func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 		names = append(names, name)
 	}
 
-	if dossiers, err := s.LoadAllCharacterDossiers(); err == nil {
-		for _, dossier := range dossiers {
-			add(dossier.Character)
-		}
-	}
-	if chapter <= 0 {
-		return names
-	}
-
 	chars, err := s.Characters.Load()
-	if err != nil || len(chars) == 0 {
-		return names
+	if err != nil {
+		chars = nil
 	}
 
 	// 已出场：continuity 台账的 first_seen_chapter 有值即视为出过场。
@@ -62,18 +53,58 @@ func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 		}
 	}
 
+	charByName := make(map[string]domain.Character, len(chars))
 	for _, c := range chars {
-		switch strings.TrimSpace(c.Tier) {
-		case "core", "important", "": // tier 空按 important 口径
-		default:
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
 			continue
 		}
-		name := strings.TrimSpace(c.Name)
-		if appeared[name] || mentioned[name] {
+		charByName[name] = c
+		if characterRequiresChapterCoverage(c) || appeared[name] || mentioned[name] {
 			add(name)
 		}
 	}
+	if dossiers, err := s.LoadAllCharacterDossiers(); err == nil {
+		for _, dossier := range dossiers {
+			name := strings.TrimSpace(dossier.Character)
+			if name == "" {
+				continue
+			}
+			if c, ok := charByName[name]; ok {
+				if characterRequiresChapterCoverage(c) || appeared[name] || mentioned[name] {
+					add(name)
+				}
+				continue
+			}
+			if dossierRequiresChapterCoverage(dossier) || appeared[name] || mentioned[name] {
+				add(name)
+			}
+		}
+	}
 	return names
+}
+
+func characterRequiresChapterCoverage(c domain.Character) bool {
+	if strings.TrimSpace(c.Tier) == "core" {
+		return true
+	}
+	return roleRequiresChapterCoverage(c.Role)
+}
+
+func dossierRequiresChapterCoverage(d domain.CharacterDossier) bool {
+	if strings.TrimSpace(d.Tier) == "core" {
+		return true
+	}
+	return roleRequiresChapterCoverage(d.Role)
+}
+
+func roleRequiresChapterCoverage(role string) bool {
+	role = strings.TrimSpace(role)
+	if role == "" || strings.Contains(role, "主角团") {
+		return false
+	}
+	return role == "主角" || role == "男主" || role == "女主" ||
+		strings.Contains(role, "男主") || strings.Contains(role, "女主")
 }
 
 func missingStageCoverage(required []string, records []domain.CharacterStageRecord) []string {
@@ -94,6 +125,20 @@ func missingStageCoverage(required []string, records []domain.CharacterStageReco
 		}
 	}
 	return missing
+}
+
+func missingInitialStateCoverage(required []string, records []domain.CharacterSimulationState) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	present := map[string]struct{}{}
+	for _, record := range records {
+		name := strings.TrimSpace(record.Character)
+		if name != "" {
+			present[name] = struct{}{}
+		}
+	}
+	return missingNames(required, present)
 }
 
 func missingArcTestCoverage(required []string, records []domain.CharacterArcTest) []string {

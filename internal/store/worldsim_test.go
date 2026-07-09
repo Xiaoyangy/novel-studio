@@ -43,6 +43,54 @@ func TestWorldSimStoreEventsRoundtrip(t *testing.T) {
 	}
 }
 
+func TestWorldSimStoreEventsDeduplicateRetries(t *testing.T) {
+	s := NewStore(t.TempDir())
+	event := domain.WorldEvent{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"澄光AI提效项目组", "许闻溪"},
+		Summary:           "AI提效项目组锁定演示版本。",
+		VisibilityChapter: 1,
+	}
+	if saved, err := s.WorldSim.AppendWorldEvents([]domain.WorldEvent{event}); err != nil || len(saved) != 1 {
+		t.Fatalf("first append: saved=%+v err=%v", saved, err)
+	}
+	retry := event
+	retry.Actors = []string{"许闻溪", "澄光AI提效项目组"}
+	if saved, err := s.WorldSim.AppendWorldEvents([]domain.WorldEvent{retry}); err != nil || len(saved) != 0 {
+		t.Fatalf("retry should be idempotent: saved=%+v err=%v", saved, err)
+	}
+	all, err := s.WorldSim.LoadWorldEvents()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected one event after retry, got %d err=%v", len(all), err)
+	}
+}
+
+func TestWorldSimStoreResetActivityStateClearsEventsAndTick(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if _, err := s.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"许闻溪"},
+		Summary:           "旧 generation 的离屏事件。",
+		VisibilityChapter: 1,
+	}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := s.WorldSim.SaveTick(domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1}); err != nil {
+		t.Fatalf("save tick: %v", err)
+	}
+	if err := s.WorldSim.ResetActivityState(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if events, err := s.WorldSim.LoadWorldEvents(); err != nil || len(events) != 0 {
+		t.Fatalf("events should be cleared: %+v err=%v", events, err)
+	}
+	if tick, err := s.WorldSim.LoadTick(); err != nil || tick != nil {
+		t.Fatalf("tick should be cleared: %+v err=%v", tick, err)
+	}
+}
+
 func TestWorldSimStoreHorizonEvents(t *testing.T) {
 	s := NewStore(t.TempDir())
 	_, err := s.WorldSim.AppendWorldEvents([]domain.WorldEvent{

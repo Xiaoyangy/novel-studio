@@ -32,7 +32,16 @@ func (s *RAGStore) AppendCraftRecallLog(entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return s.io.AppendLine("meta/rag/craft_recall_log.jsonl", data)
+	return s.io.WithWriteLock(func() error {
+		if existing, err := s.io.ReadFileUnlocked("meta/rag/craft_recall_log.jsonl"); err == nil && len(existing) > 0 && existing[len(existing)-1] != '\n' {
+			if err := s.io.AppendLineUnlocked("meta/rag/craft_recall_log.jsonl", []byte("\n")); err != nil {
+				return err
+			}
+		} else if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return s.io.AppendLineUnlocked("meta/rag/craft_recall_log.jsonl", append(data, '\n'))
+	})
 }
 
 func (s *RAGStore) SaveIndexState(state domain.RAGIndexState) error {

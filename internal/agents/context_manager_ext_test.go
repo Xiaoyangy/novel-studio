@@ -1,6 +1,17 @@
 package agents
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
+)
+
+type fakeRoleSelection map[string]string
+
+func (f fakeRoleSelection) CurrentSelection(role string) (string, string, bool) {
+	model, ok := f[role]
+	return "test", model, ok
+}
 
 func TestLoadBearingToolClassifier(t *testing.T) {
 	// novel_context 承载世界/角色/计划注入，受保护，不可激进压缩。
@@ -36,5 +47,24 @@ func TestWritingContextProfileForDrafterIsTighter(t *testing.T) {
 	}
 	if drafter.lightTrim.KeepRecent >= 4 {
 		t.Fatalf("drafter light trim KeepRecent = %d, want below default protection window", drafter.lightTrim.KeepRecent)
+	}
+}
+
+func TestResolveRoleContextWindowUsesRoleSelectionBeforeWrappedModelFallback(t *testing.T) {
+	cfg := bootstrap.Config{
+		ContextWindow: 200000,
+		ContextWindows: map[string]int{
+			"gpt-5.5": 400000,
+		},
+	}
+	window, source, model := resolveRoleContextWindow(cfg, fakeRoleSelection{"writer": "gpt-5.5"}, "writer", nil)
+	if window != 400000 {
+		t.Fatalf("window = %d, want role-specific 400000", window)
+	}
+	if source != bootstrap.CtxWindowConfig {
+		t.Fatalf("source = %s, want config", source)
+	}
+	if model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5", model)
 	}
 }

@@ -112,7 +112,7 @@
 - `summary`
 - `places`: 地点数组，每项 `{id,name,kind,description,rules,factions,tags}`
 - `routes`: 路线数组，每项 `{from,to,description,risk}`
-- `factions`: 势力数组，每项 `{id,name,goal,resources,relations,tags}`
+- `factions`: 势力数组，每项 `{id,name,aliases,goal,resources,relations,tags}`。`aliases` 收录正文/推演会自然使用的组织简称、系统名、群聊名或空间简称；relations.target 必须指向已存在 faction 的 id/name/aliases，不得悬空
 - `map_notes`
 
 要求：只保存短篇会反复使用的地点、路线和势力关系，避免百科设定。

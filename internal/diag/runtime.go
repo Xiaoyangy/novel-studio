@@ -327,7 +327,8 @@ func captureLog(dir string, rc *RuntimeCapture) {
 	if !ok {
 		return
 	}
-	rc.Sources = append(rc.Sources, "logs/"+filepath.Base(path)+" (尾部)")
+	tail = currentRunLogWindow(tail)
+	rc.Sources = append(rc.Sources, "logs/"+filepath.Base(path)+" (当前启动窗口尾部)")
 
 	contextRewrites := make(map[string]*ContextRewriteStat)
 	sc := bufio.NewScanner(bytes.NewReader(tail))
@@ -362,6 +363,36 @@ func captureLog(dir string, rc *RuntimeCapture) {
 		}
 	}
 	rc.ContextRewrites = sortedContextRewrites(contextRewrites)
+}
+
+func currentRunLogWindow(tail []byte) []byte {
+	lines := bytes.Split(tail, []byte{'\n'})
+	start := -1
+	for i, line := range lines {
+		if isRunStartLogLine(string(line)) {
+			start = i
+		}
+	}
+	if start < 0 {
+		return tail
+	}
+	return bytes.Join(lines[start:], []byte{'\n'})
+}
+
+func isRunStartLogLine(line string) bool {
+	if !strings.Contains(line, "level=INFO") {
+		return false
+	}
+	switch {
+	case strings.Contains(line, "msg=启动") && strings.Contains(line, "module=boot"):
+		return true
+	case strings.Contains(line, "msg=开始创作") && strings.Contains(line, "module=host"):
+		return true
+	case strings.Contains(line, "msg=恢复创作") && strings.Contains(line, "module=host"):
+		return true
+	default:
+		return false
+	}
 }
 
 func parseContextRewriteLog(line string) (ContextRewriteStat, bool) {

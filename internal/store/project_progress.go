@@ -367,7 +367,7 @@ func protagonistPlannedResult(outline domain.OutlineEntry) string {
 	case containsAny(text, []string{"背叛", "清退", "反杀", "清算"}):
 		return "处理背叛并形成可复用的规则样本"
 	case containsAny(text, []string{"确认", "核验", "发现", "查", "录音", "名单"}):
-		return "补齐证据链或获得下一步行动信息"
+		return "补齐可见事实或获得下一步行动信息"
 	default:
 		return "让核心事件产生可入账变化"
 	}

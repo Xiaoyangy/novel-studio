@@ -591,17 +591,19 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 	}
 	dialogueLimit := dialogueRatioLimitForMetrics(metrics)
 	if metrics.DialogueRatio < dialogueLimit {
-		severity := "warning"
-		if metrics.DialogueRatio < 0.15 {
-			severity = "error"
+		if !(dialogueLimit <= 0.25 && metrics.DialogueRatio >= 0.20) {
+			severity := "warning"
+			if metrics.DialogueRatio < 0.15 {
+				severity = "error"
+			}
+			flags = append(flags, domain.AIVoiceRedFlag{
+				Rule:       "supporting_dialogue_ratio",
+				Severity:   severity,
+				Actual:     metrics.DialogueRatio,
+				Limit:      dialogueLimit,
+				Suggestion: "补一组配角主动误解、打断或拒绝的对话，让信息从冲突里出来。",
+			})
 		}
-		flags = append(flags, domain.AIVoiceRedFlag{
-			Rule:       "supporting_dialogue_ratio",
-			Severity:   severity,
-			Actual:     metrics.DialogueRatio,
-			Limit:      dialogueLimit,
-			Suggestion: "补一组配角主动误解、打断或拒绝的对话，让信息从冲突里出来。",
-		})
 	}
 	if !metrics.ProtagonistWaver {
 		flags = append(flags, domain.AIVoiceRedFlag{

@@ -204,6 +204,38 @@ func TestSaveWorldTickFactionClocks(t *testing.T) {
 	}
 }
 
+func TestSaveWorldTickFactionAliasMatchesActorsAndClockTargets(t *testing.T) {
+	tool, s := newWorldTickTool(t)
+	world := domain.BookWorld{Version: 1, Factions: []domain.WorldFaction{
+		{
+			ID:      "bridgepoint",
+			Name:    "桥点职业转型工作室",
+			Aliases: []string{"桥点工作室"},
+			Goal:    "提供职业转型试点",
+			Clock:   &domain.FactionClock{Segments: 6, Progress: 0, Consequence: "桥点必须选择是否正式合作"},
+		},
+	}}
+	if err := s.World.SaveBookWorld(world); err != nil {
+		t.Fatalf("save world: %v", err)
+	}
+	result := execWorldTick(t, tool, `{
+		"volume":1, "arc":1, "through_chapter": 0,
+		"events": [
+			{"chapter":0,"actors":["桥点工作室"],"summary":"桥点工作室收到供应商侧咨询","visibility_chapter":3,"visibility_path":"转发消息"}
+		],
+		"faction_clock_updates": [
+			{"target":"桥点工作室","ticks":1,"note":"供应商咨询进入工作室"}
+		]
+	}`)
+	if warnings, ok := result["warnings"]; ok {
+		t.Fatalf("alias-backed actor and clock target should not warn: %v", warnings)
+	}
+	back, _ := s.World.LoadBookWorld()
+	if back.Factions[0].Clock.Progress != 1 {
+		t.Fatalf("alias clock target should tick progress to 1, got %d", back.Factions[0].Clock.Progress)
+	}
+}
+
 func TestStoryCalendarRoundtripAndInjection(t *testing.T) {
 	tool, s := newWorldTickTool(t)
 	_ = tool

@@ -1,7 +1,7 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → write → review → rewrite → deliver（默认不含 cocreate）。
+// 阶段：cocreate → architect → zero-init → write → review → rewrite → deliver（默认不含 cocreate）。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -24,12 +24,12 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
 
-// defaultPipelineStages 不含 cocreate：默认假设已有创作指令（--prompt）。
-// 想要先共创澄清，显式 --stages cocreate,write,review,rewrite,deliver。
-var defaultPipelineStages = []string{"write", "review", "rewrite", "deliver"}
+// defaultPipelineStages 不含 cocreate：默认假设已有创作指令（--prompt/brainstorm.md）。
+// 新书必须先显式完成 Architect foundation，再执行 zero-init，最后才允许正文写作。
+var defaultPipelineStages = []string{"architect", "zero-init", "write", "review", "rewrite", "deliver"}
 
 var knownPipelineStages = map[string]bool{
-	"cocreate": true, "write": true, "review": true, "rewrite": true, "deliver": true,
+	"cocreate": true, "architect": true, "zero-init": true, "write": true, "review": true, "rewrite": true, "deliver": true,
 }
 
 type pipelineFlags struct {
@@ -53,7 +53,7 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / write / review / rewrite / deliver（默认 %s）\n\n选项：\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / zero-init / write / review / rewrite / deliver（默认 %s）\n\n选项：\n", strings.Join(defaultPipelineStages, ","))
 		fs.PrintDefaults()
 	}
 	var f pipelineFlags
@@ -198,6 +198,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
 			if err == nil {
 				state.MarkDone(stage, evidence)
+				if err := savePipelineState(statePath, state); err != nil {
+					return fmt.Errorf("保存流水线状态失败: %w", err)
+				}
 				fmt.Fprintf(os.Stderr, "[pipeline] 跳过已完成阶段：%s\n", stage)
 				continue
 			}
@@ -283,6 +286,10 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		}
 		state.Prompt = draft
 		return nil
+	case "architect":
+		return pipelineArchitect(opts, flags, state)
+	case "zero-init":
+		return pipelineZeroInit(opts, flags, state)
 	case "write":
 		return pipelineWrite(opts, flags, state)
 	case "review":

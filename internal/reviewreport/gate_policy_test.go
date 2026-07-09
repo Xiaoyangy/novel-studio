@@ -181,6 +181,45 @@ func TestEditorAcceptWithWarningIssuesIsCompletePass(t *testing.T) {
 	}
 }
 
+func TestBlockingExternalAIJudgeOverridesAcceptedReview(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			AIRatioPercent:     4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Summary:        "编辑通过",
+	}
+
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		Editor:     editor,
+		ExternalAIJudge: &ExternalAIJudge{
+			Name:                 "DeepSeek 裸正文",
+			Verdict:              "mixed",
+			RiskLevel:            "medium",
+			AIProbabilityPercent: 40,
+			Blocking:             true,
+			Summary:              "角色互动过于同步，疑似 AI 润色。",
+		},
+	})
+	for _, want := range []string{"## 是否需要改写：是", "DeepSeek 裸正文：阻断 mixed/medium/40%", "DeepSeek 裸正文 阻断重写", "DeepSeek 裸正文 阻断｜mixed/medium/40%"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "主要问题已清空，可进入下一章") || strings.Contains(md, "## 是否需要改写：否") {
+		t.Fatalf("blocking external judge must not be displayed as complete pass:\n%s", md)
+	}
+}
+
 func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
@@ -258,6 +297,30 @@ func TestChapterWordsBlockingIsNotReportedAsAIVoiceFailure(t *testing.T) {
 	}
 	if strings.Contains(md, "AI味/节奏机械门禁未通过") {
 		t.Fatalf("chapter_words should not use AI/voice failure copy:\n%s", md)
+	}
+}
+
+func TestCombinedAIMechanicalAndHardRuleConclusion(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		RuleViolations: []rules.Violation{
+			{Rule: "micro_action_overuse", Severity: rules.SeverityWarning, Actual: 16},
+			{Rule: "deprecated_story_engine", Target: "日志窗口", Severity: rules.SeverityError, Actual: 1},
+		},
+	}
+
+	if !HasBlockingAIMechanicalGate(payload) || !HasBlockingContractMechanicalGate(payload) {
+		t.Fatalf("expected both AI mechanical and hard rule gates to block")
+	}
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		Editor:     &domain.ReviewEntry{Chapter: 1, Verdict: "accept", Summary: "编辑通过"},
+	})
+	for _, want := range []string{"AI味/节奏机械门禁与篇幅/硬性规则均未通过", "项目硬禁项"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
 	}
 }
 

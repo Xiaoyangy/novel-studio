@@ -441,7 +441,8 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 		return nil, err
 	}
 	aigcReport := aigc.Analyze(content)
-	violations := append(t.checkRules(content, wordCount), aigcViolation(aigcReport)...)
+	violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+	violations = append(violations, aigcViolation(aigcReport)...)
 	violations = append(violations, t.resourcePendingViolations(content)...)
 	a.methodologyCommitExtras.ChapterContent = content
 	violations = append(violations, t.methodologyViolations(a.Chapter, wordCount, a.HookType, a.methodologyCommitExtras)...)
@@ -941,7 +942,8 @@ func (t *CommitChapterTool) executeRewriteCommit(
 		return nil, err
 	}
 	aigcReport := aigc.Analyze(content)
-	violations := append(t.checkRules(content, wordCount), aigcViolation(aigcReport)...)
+	violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+	violations = append(violations, aigcViolation(aigcReport)...)
 	violations = append(violations, t.resourcePendingViolations(content)...)
 	gateBlocked := false
 	if reason := blockingViolationReason(violations); reason != "" {
@@ -1055,6 +1057,10 @@ func (t *CommitChapterTool) resourcePendingViolations(text string) []rules.Viola
 		})
 	}
 	return out
+}
+
+func (t *CommitChapterTool) projectContaminationViolations(text string) []rules.Violation {
+	return SecondAlgorithmProjectContaminationViolations(t.store, text)
 }
 
 func (t *CommitChapterTool) saveFinalAIVoice(chapter int, content string, previousText string) (domain.AIVoiceAnalysis, error) {
@@ -1179,6 +1185,8 @@ func immediateMechanicalGateFailure(v rules.Violation) bool {
 		return v.Severity == rules.SeverityError
 	case "templated_dialogue_chain":
 		return true
+	case "project_contamination", "deprecated_story_engine":
+		return v.Severity == rules.SeverityError
 	default:
 		return false
 	}

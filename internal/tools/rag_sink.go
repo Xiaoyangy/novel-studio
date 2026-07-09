@@ -18,6 +18,7 @@ func upsertRAGChunks(ctx context.Context, st *store.Store, embedder rag.Embedder
 
 func UpsertRAGChunks(ctx context.Context, st *store.Store, embedder rag.Embedder, vectorWriter rag.VectorWriter, chunks []domain.RAGChunk, cfg domain.RAGIndexConfig) error {
 	chunks = normalizeRAGChunks(chunks)
+	chunks = filterProjectContaminatedRAGChunks(st, chunks)
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -34,7 +35,7 @@ func UpsertRAGChunks(ctx context.Context, st *store.Store, embedder rag.Embedder
 	}
 	filtered := state.Chunks[:0]
 	for _, chunk := range state.Chunks {
-		if rag.IsForbiddenChunk(chunk) {
+		if rag.IsForbiddenChunk(chunk) || isProjectContaminatedRAGChunk(st, chunk) {
 			continue
 		}
 		if _, replace := sources[chunk.SourcePath]; replace {
@@ -108,6 +109,28 @@ func normalizeRAGChunks(chunks []domain.RAGChunk) []domain.RAGChunk {
 		out = append(out, chunk)
 	}
 	return out
+}
+
+func filterProjectContaminatedRAGChunks(st *store.Store, chunks []domain.RAGChunk) []domain.RAGChunk {
+	if st == nil || len(chunks) == 0 {
+		return chunks
+	}
+	out := chunks[:0]
+	for _, chunk := range chunks {
+		if isProjectContaminatedRAGChunk(st, chunk) {
+			continue
+		}
+		out = append(out, chunk)
+	}
+	return out
+}
+
+func isProjectContaminatedRAGChunk(st *store.Store, chunk domain.RAGChunk) bool {
+	if st == nil {
+		return false
+	}
+	text := strings.Join([]string{chunk.Text, chunk.Summary, chunk.Context, strings.Join(chunk.Keywords, " ")}, "\n")
+	return len(SecondAlgorithmProjectContaminationViolations(st, text)) > 0
 }
 
 func chunkSourcePaths(chunks []domain.RAGChunk) map[string]struct{} {

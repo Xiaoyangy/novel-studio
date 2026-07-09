@@ -2,6 +2,50 @@
 
 本文档定义 `novel-studio` 后续创作任务的默认工作流：用户给题材、大纲、人物设定或直接说“继续开始创作”时，系统如何启动看板、恢复进度、写作、审核、返工和交付。
 
+## 第一章当前快照
+
+| 项目 | 当前值 |
+|---|---:|
+| 章节 | 第 1 / 70 章 |
+| 终稿字数 | 2610 |
+| 机械 AI 占比 | 4.80% |
+| AI 腔风险分 | 0.0800 |
+| 对话占比 | 34.90% |
+| DeepSeek 裸正文判定 | human_like / low / 8% |
+| 统一审核 | 通过，主要问题已清空 |
+
+```mermaid
+flowchart LR
+  A["Architect"] --> B["zero-init"]
+  B --> C["RAG 构建与污染清理"]
+  C --> D["plan_chapter"]
+  D --> E["draft_chapter / 分片草稿"]
+  E --> F["check_consistency"]
+  F --> G["commit_chapter"]
+  G --> H["机械门禁"]
+  H --> I["DeepSeek 裸正文判定"]
+  I --> J["Editor 八维复审"]
+  J --> K{"是否完全通过"}
+  K -- "否" --> L["rewrite brief / rewrite-existing"]
+  L --> F
+  K -- "是" --> M["刷新 chapter/project/evolution 台账"]
+  M --> N["deliver"]
+```
+
+```mermaid
+flowchart TD
+  R["完整章节正文"] --> G1["codex-local-aigc-v3"]
+  R --> G2["AI voice 检测"]
+  R --> G3["DeepSeek v4 pro / max effort / 裸正文"]
+  R --> G4["Editor 复审"]
+  G1 --> U["统一审核报告 reviews/NN.md"]
+  G2 --> U
+  G3 --> U
+  G4 --> U
+  U -->|任一阻断| P["pending_rewrites"]
+  U -->|全部通过| D["可进入下一章"]
+```
+
 ## 目标
 
 - 写作和审核合成一条闭环，不把审核只放在完本之后。
@@ -117,6 +161,21 @@ cocreate -> write -> review -> rewrite -> export
 ```text
 novel_context -> read_chapter -> plan_chapter -> draft_chapter -> check_consistency -> commit_chapter
 ```
+
+当单章计划复杂、目标字数较长或日志反复出现上下文压力时，正文渲染阶段可以细化为窗口安全分片：
+
+```text
+novel_context -> read_chapter -> plan_chapter -> draft_chapter_part(1..N) -> merge_chapter_parts -> read_chapter(draft) -> check_consistency -> commit_chapter
+```
+
+分片规则：
+
+- 分片只用于降低生成/恢复窗口压力，不改变章节事实边界。
+- `draft_chapter_part` 写入 `drafts/NN.parts/part-XX.md`，索引在 `drafts/NN.parts/index.json`。
+- 恢复时 `novel_context` 注入 `working_memory.chapter_draft_parts`，只给索引、缺失片段和下一步，不把片段正文塞进上下文。
+- 需要核对片段正文时调用 `read_chapter(source=draft_part, chapter=N, part=K)`。
+- `merge_chapter_parts` 合并后才写 `drafts/NN.draft.md`，并进入原有整章 `check_consistency -> commit_chapter`。
+- 分片通过不等于章节通过；机械门禁、AI 味、Editor 审核仍只以完整章节为交付口径。
 
 `commit_chapter` 是章节完成的唯一交接点。只写出草稿不算完成；只有 `chapters/NN.md`、progress 和 checkpoint 都写好，才算本章进入审核。
 

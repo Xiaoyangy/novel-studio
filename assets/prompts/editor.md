@@ -39,7 +39,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 **必须**调用 read_chapter 读取要审阅的章节原文。不能只看摘要就下结论。
 对于普通全局审阅，至少读最近 3-5 章的原文。
 对于任务写明"短篇完稿审阅 / 全文终审 / scope=global 且 chapter=最后一章"时，必须调用 `read_chapter(source="final", from=1, to=最后一章, max_runes=40000)` 读取完整终稿；这是三万字内短篇/单卷项目完成前的最后门禁，不允许只读摘要或最近几章。
-进入具体问题前先做全局体检：段落长度分布、连续段首主语、每千字比喻密度、微动作密度、句长方差。按 `reference_pack.references.fiction_paragraphing` 检查是否有文字墙候选、同段多说话人轮流发言、会议纪要式大段、或为规避大段而造成连续孤句网格。把统计结论放在审阅 comment / summary 最前部；再列保护项（私人道具、口癖、互不信任、好句子），最后才列需要改的句子。
+进入具体问题前先做全局体检：段落长度分布、连续段首主语、每千字比喻密度、微动作密度、句长方差。按 `reference_pack.references.fiction_paragraphing` 检查是否有文字墙候选、同段多说话人轮流发言、流程记录式大段、或为规避大段而造成连续孤句网格。把统计结论放在审阅 comment / summary 最前部；再列保护项（私人道具、口癖、互不信任、好句子），最后才列需要改的句子。
 
 ### 3. 八维结构化审阅
 
@@ -95,7 +95,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 - **全书级固化（style_stats）**：`episodic_memory.style_stats`（如有）是代码对全部已写章节的确定性统计：句式模式类计数（patterns，含章均 per_chapter）、近期高频短语（top_phrases）、跨章逐字重复句（repeated_sentences）、章末形态（ending.short_ratio 为短句收尾章占比）、开篇时间词率（opening_time_rate）、标题格式混用（title_formats）。审阅窗口内每处都"正常"的句式，全书章均几十次就是病——当某模式章均次数明显异常、章末短句占比逼近 1、同一长句跨多章复现、标题格式混用时，必须在 aesthetic（标题问题归 consistency）出 issue 并直接引用统计数字。统计只给事实，是否成病由你按题材与文风裁定。
 - **写法资产（writing_engine）**：`reference_pack.writing_engine` 是当前启用的写法特征池编译结果。审稿时检查正文是否执行 active_rules、是否违背 taboos、是否只机械套用 samples 形成模板感。发现问题归 aesthetic；不要要求照抄样本。
 - **生产链路诊断（production_playbook）**：`reference_pack.references.production_playbook` 用来区分问题层级。表达偏移、AI 腔、样本机械套用归 aesthetic；章节任务未完成归 contract / pacing / continuity；本书世界、资源账本、角色状态被写错归 consistency / continuity；RAG 或拆书资料污染正文时指出来源越权。可用正文加局部 warning 不应直接升级为全书重规划，除非后续任务单或事实资产已经失效。
-- **人工感正向标尺（human_feel_craft）**：`reference_pack.references.human_feel_craft` 是《同桌是只假装高冷的猫》80% 人工度样本文沉淀。审稿时检查正文是否有现场异常、主观误判、物件回扣、短对话/动作拍、现实支架和可复核因果链。缺失时归 aesthetic 或 pacing，并给出“补哪个物件、哪处误判、哪条证据链”的修法；不要要求照抄样本文原句或校园桥段。
+- **人工感正向标尺（human_feel_craft）**：`reference_pack.references.human_feel_craft` 是《同桌是只假装高冷的猫》80% 人工度样本文沉淀。审稿时检查正文是否有现场异常、主观误判、物件回扣、短对话/动作拍、现实支架和可复核因果链。缺失时归 aesthetic 或 pacing，并给出“补哪个物件、哪处误判、哪条可见因果”的修法；不要要求照抄样本文原句或校园桥段。
 - **制度戏不齐整**：摆桌子、排队、立规矩、登记、签条款、分发物资等场景若写成一人一轮、每句都服务主线、流程像打印好的制度，必须在 pacing / aesthetic 出 issue。检查是否有人写、有人犹豫、有人骂、有人追问生活麻烦，是否有临期货、胶带、退烧贴等市井物件打断齐整流程。
 - **表层结构痕迹专项**：必须检查便签/备忘录是否三条平行并列、黑卡/系统提示是否 ToS 式完整列项、童谣是否空对仗、"X得发Y"是否复现过多、相邻对白是否同一骂点重复、猫眼/门缝视角是否能读到对应文字、身体/影子方位是否可成像。命中时归 aesthetic 或 continuity；如果同时是 AI 味信号，在 ai_voice_detection 里同步点名。
 - **因果链专项**：必须检查同一规则链是否先因后果。典型硬伤包括：报身份证后果被闲聊冲散；角色在昵称/门牌/纸面变化出现前先点评变化；非基站电话没有身份核验就相信对面；楼栋楼层混写；栏位、印章、表格等载体比喻形状不匹配；黑卡残字把核心可玩规则全糊掉。命中时优先归 continuity，必要时升级 rewrite。
@@ -171,9 +171,10 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 | `object_response_rhythm_flat` | pacing / ai_voice_detection | severity=warning → 阻断项；物件回应必须不等距，至少一次延迟、一次缺席/静默，允许一次抢拍；缺席没有落实时不得放行 |
 | `dialogue_aphorism_overuse` | character / ai_voice_detection | severity=warning → issue 一条；金句限流扩到主角，双人对手戏检查语域是否可分，连续警句式应答不超过 3 回合 |
 | `templated_dialogue_chain` | aesthetic / ai_voice_detection | severity=warning → issue 一条；点名/叫人、停笔或抬眼、补口径/查字段、第三人追问的三拍对白链命中即改，换成目标冲突、误读、拒写、打断、物件承压或信息延迟 |
+| `bureaucratic_register_overuse` | aesthetic / ai_voice_detection | severity=warning → issue 一条；制度/纪要/表单词连续驱动场景时，要求把信息拆进人物口语、担责压力、误读、拒写、私人消息打断和动作，不要写成规范性文章 |
 | `serial_device_repetition` | hook / pacing | severity=warning → issue 一条；登记每章开头/结尾装置类型，同一装置连续使用不超过 2 章，章尾显字 3/3 必须换装置 |
 | `catalog_stuffing` | aesthetic / ai_voice_detection | severity=warning/error → issue 一条；连续 8 个以上物件、铺名、冷僻词或标签名视为清单灌水，不能因 AIGC 数值低而放行 |
-| `catalog_stuffing_run` | pacing / aesthetic / ai_voice_detection | severity=error → verdict 至少 rewrite；连续多段清单说明正文在用堆词抬 TTR，必须改成动作、对话摩擦、规则代价或证据链 |
+| `catalog_stuffing_run` | pacing / aesthetic / ai_voice_detection | severity=error → verdict 至少 rewrite；连续多段清单说明正文在用堆词抬 TTR，必须改成动作、对话摩擦、规则代价或可见事实 |
 
 `aigc_report` 是本地确定性检测结果，引擎 `codex-local-aigc-v3`。最终交付看 `effective_gate_percent` / 门禁采用值；短章或约 3000 字章节按整章单检测片段处理时，不得用普通 `blended_aigc_percent` 覆盖 raw 值、segment floor 或主要问题。最终 AI 占比由三层合成：近年检测器代理层、朱雀四维综合、既有 AI 味启发式；其中 `human_anchor` 用于降低高质量人工类型文的曲线、风格计量和分片误判。只有 `human_anchor.final_cap_allowed=true` 且无脏码、无真重复、AI voice 与 Editor 均通过时，`human_anchor_final_cap_percent` 才能作为门禁采用值；报告仍必须展示 raw segment floor 供复核。脏码、真重复和工程词泄漏不享受锚点上限。
 

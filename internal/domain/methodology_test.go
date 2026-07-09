@@ -15,6 +15,20 @@ func TestPhysicsAxiomsIsEmpty(t *testing.T) {
 	}
 }
 
+func TestBookWorldValidateFactionRelationsAcceptsAliases(t *testing.T) {
+	w := BookWorld{Factions: []WorldFaction{
+		{ID: "operations_center", Name: "运营中心", Aliases: []string{"内容运营组"}},
+		{ID: "ai_efficiency_team", Name: "AI提效项目组", Relations: []FactionRelation{{Target: "内容运营组", Kind: "implementation_pressure"}}},
+	}}
+	if issues := w.ValidateFactionRelations(); len(issues) != 0 {
+		t.Fatalf("relation target matching faction alias should pass, got %v", issues)
+	}
+	w.Factions[1].Relations[0].Target = "门店运营组"
+	if issues := w.ValidateFactionRelations(); len(issues) != 1 {
+		t.Fatalf("dangling relation target should be reported, got %v", issues)
+	}
+}
+
 func TestInfoGraphBuildAndValidate(t *testing.T) {
 	ledgers := map[string]CharacterKnowledgeLedger{
 		"林昭": {KnownFacts: []string{"A"}, FalseBeliefs: []string{"B 是真相"}, ForbiddenKnowledge: []string{"C"}},

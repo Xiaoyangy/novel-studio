@@ -23,12 +23,23 @@ type MechanicalGatePayload struct {
 }
 
 type UnifiedMarkdownInput struct {
-	Chapter        int
-	GeneratedAt    string
-	Mechanical     *MechanicalGatePayload
-	AIVoice        *domain.AIVoiceAnalysis
-	Editor         *domain.ReviewEntry
-	EditorMarkdown string
+	Chapter         int
+	GeneratedAt     string
+	Mechanical      *MechanicalGatePayload
+	AIVoice         *domain.AIVoiceAnalysis
+	ExternalAIJudge *ExternalAIJudge
+	Editor          *domain.ReviewEntry
+	EditorMarkdown  string
+}
+
+type ExternalAIJudge struct {
+	Name                 string
+	Source               string
+	Verdict              string
+	RiskLevel            string
+	AIProbabilityPercent int
+	Blocking             bool
+	Summary              string
 }
 
 func WriteUnifiedMarkdown(root string, in UnifiedMarkdownInput) error {
@@ -99,7 +110,8 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 		mechanicalStatus = "有警告"
 	}
 	editorStatus := editorStatus(in.Editor)
-	needRewrite := unifiedNeedRewrite(in.Mechanical, in.AIVoice, in.Editor)
+	externalStatus := externalAIJudgeStatus(in.ExternalAIJudge)
+	needRewrite := unifiedNeedRewrite(in.Mechanical, in.AIVoice, in.ExternalAIJudge, in.Editor)
 	diagnosis := unifiedDiagnosis(in)
 
 	var b strings.Builder
@@ -113,8 +125,11 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 
 	b.WriteString("## 门禁结论\n\n")
 	fmt.Fprintf(&b, "- 机械门禁：%s\n", mechanicalStatus)
+	if in.ExternalAIJudge != nil {
+		fmt.Fprintf(&b, "- %s：%s\n", externalAIJudgeName(in.ExternalAIJudge), externalStatus)
+	}
 	fmt.Fprintf(&b, "- Editor 复审：%s\n", editorStatus)
-	fmt.Fprintf(&b, "- 统一结论：%s\n", unifiedConclusion(in.Mechanical, in.AIVoice, in.Editor))
+	fmt.Fprintf(&b, "- 统一结论：%s\n", unifiedConclusion(in.Mechanical, in.AIVoice, in.ExternalAIJudge, in.Editor))
 	if in.Editor != nil && len(in.Editor.AffectedChapters) > 0 {
 		fmt.Fprintf(&b, "- 受影响章节：%s\n", ints(in.Editor.AffectedChapters))
 	}
@@ -139,7 +154,7 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 	}
 
 	b.WriteString("\n## 结论\n\n")
-	fmt.Fprintf(&b, "- %s\n", unifiedConclusion(in.Mechanical, in.AIVoice, in.Editor))
+	fmt.Fprintf(&b, "- %s\n", unifiedConclusion(in.Mechanical, in.AIVoice, in.ExternalAIJudge, in.Editor))
 	return b.String()
 }
 
@@ -175,7 +190,10 @@ func editorStatus(entry *domain.ReviewEntry) string {
 	}
 }
 
-func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, editor *domain.ReviewEntry) string {
+func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, external *ExternalAIJudge, editor *domain.ReviewEntry) string {
+	if hasBlockingExternalAIJudge(external) {
+		return "是"
+	}
 	if AcceptedWarningOnlyGate(mechanical, aiVoice, editor) {
 		return "可选"
 	}
@@ -207,14 +225,22 @@ func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoi
 	return "待定"
 }
 
-func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, editor *domain.ReviewEntry) string {
+func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, external *ExternalAIJudge, editor *domain.ReviewEntry) string {
+	if hasBlockingExternalAIJudge(external) {
+		return fmt.Sprintf("%s 阻断重写；Writer 必须先按裸正文 AI 判定修复整章节奏、对白功能化、动作标签和作者声口后再复审。", externalAIJudgeName(external))
+	}
 	if AcceptedWarningOnlyGate(mechanical, aiVoice, editor) {
 		return "Editor 已通过，机械/AI voice/Editor 仅剩 warning；本章不能称为完全通过，交付前需清空主要问题，是否进入下一章由当前批处理策略决定。"
 	}
-	if HasBlockingAIMechanicalGate(mechanical) {
+	aiMechanicalBlocked := HasBlockingAIMechanicalGate(mechanical)
+	contractBlocked := HasBlockingContractMechanicalGate(mechanical)
+	if aiMechanicalBlocked && contractBlocked {
+		return "AI味/节奏机械门禁与篇幅/硬性规则均未通过，进入返工队列；Writer 必须同时修复 AI 味、结构节奏、篇幅合同和项目硬禁项后再提交复审。"
+	}
+	if aiMechanicalBlocked {
 		return "AI味/节奏机械门禁未通过，进入返工队列；Writer 必须先修复 AI 味、段首/短句、动作/物件响应或高风险维度后再提交复审。"
 	}
-	if HasBlockingContractMechanicalGate(mechanical) {
+	if contractBlocked {
 		return "篇幅/硬性规则机械门禁未通过，进入返工队列；这不是 AI 味结论。Writer 应先判断是否必须满足本章篇幅合同，确需压缩时只做局部删减和合并，不要整章重写。"
 	}
 	if HasBlockingAIVoice(aiVoice) {
@@ -240,6 +266,12 @@ func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoic
 }
 
 func unifiedDiagnosis(in UnifiedMarkdownInput) string {
+	if hasBlockingExternalAIJudge(in.ExternalAIJudge) {
+		if strings.TrimSpace(in.ExternalAIJudge.Summary) != "" {
+			return strings.TrimSpace(in.ExternalAIJudge.Summary)
+		}
+		return externalAIJudgeName(in.ExternalAIJudge) + " 判定存在阻断项，当前章不能直接放行。"
+	}
 	if AcceptedWarningOnlyGate(in.Mechanical, in.AIVoice, in.Editor) {
 		if in.Editor != nil && strings.TrimSpace(in.Editor.Summary) != "" {
 			return strings.TrimSpace(in.Editor.Summary) + "；仍有主要问题未清空，非完全通过。"
@@ -268,6 +300,32 @@ func unifiedDiagnosis(in UnifiedMarkdownInput) string {
 		return "机械门禁已完成，等待 Editor 给出结构和审美复审。"
 	}
 	return "尚未生成审核结果。"
+}
+
+func externalAIJudgeStatus(judge *ExternalAIJudge) string {
+	if judge == nil {
+		return "待生成"
+	}
+	status := "通过"
+	if judge.Blocking {
+		status = "阻断"
+	}
+	parts := []string{status}
+	if judge.Verdict != "" || judge.RiskLevel != "" || judge.AIProbabilityPercent > 0 {
+		parts = append(parts, fmt.Sprintf("%s/%s/%d%%", emptyDash(judge.Verdict), emptyDash(judge.RiskLevel), judge.AIProbabilityPercent))
+	}
+	return strings.Join(parts, " ")
+}
+
+func externalAIJudgeName(judge *ExternalAIJudge) string {
+	if judge == nil || strings.TrimSpace(judge.Name) == "" {
+		return "外部 AI 判定"
+	}
+	return strings.TrimSpace(judge.Name)
+}
+
+func hasBlockingExternalAIJudge(judge *ExternalAIJudge) bool {
+	return judge != nil && judge.Blocking
 }
 
 func hasEditorOpenIssues(entry *domain.ReviewEntry) bool {
@@ -420,6 +478,16 @@ func unifiedIssues(in UnifiedMarkdownInput) []string {
 			}
 			out = append(out, label)
 		}
+	}
+	if hasBlockingExternalAIJudge(in.ExternalAIJudge) {
+		label := externalAIJudgeName(in.ExternalAIJudge) + " 阻断"
+		if in.ExternalAIJudge.Verdict != "" || in.ExternalAIJudge.RiskLevel != "" || in.ExternalAIJudge.AIProbabilityPercent > 0 {
+			label += fmt.Sprintf("｜%s/%s/%d%%", emptyDash(in.ExternalAIJudge.Verdict), emptyDash(in.ExternalAIJudge.RiskLevel), in.ExternalAIJudge.AIProbabilityPercent)
+		}
+		if strings.TrimSpace(in.ExternalAIJudge.Summary) != "" {
+			label += "｜" + strings.TrimSpace(in.ExternalAIJudge.Summary)
+		}
+		out = append(out, label)
 	}
 	if in.Editor != nil {
 		for _, issue := range in.Editor.Issues {

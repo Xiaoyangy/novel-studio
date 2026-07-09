@@ -298,6 +298,27 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	} else if draftErr != nil {
 		warn("chapter_draft", draftErr)
 	}
+	if parts, partsErr := t.store.Drafts.LoadDraftPartIndex(chapter); partsErr == nil && parts != nil && len(parts.Parts) > 0 {
+		totalParts := 0
+		for _, part := range parts.Parts {
+			if part.TotalParts > totalParts {
+				totalParts = part.TotalParts
+			}
+			if part.Part > totalParts {
+				totalParts = part.Part
+			}
+		}
+		envelope.Working["chapter_draft_parts"] = map[string]any{
+			"exists":       true,
+			"index":        parts,
+			"missing":      missingDraftParts(parts, totalParts),
+			"next_step":    "若整章草稿尚未存在，继续补齐 missing 分片；所有分片完成后调用 merge_chapter_parts，再 read_chapter(source=draft) + check_consistency + commit_chapter。",
+			"read_policy":  "需要查看某片正文时调用 read_chapter(source=draft_part, chapter=N, part=K)；不要要求 novel_context 注入全文分片。",
+			"merge_policy": "分片只降低写作窗口压力，不替代整章审核；合并后必须按完整章节重新自审。",
+		}
+	} else if partsErr != nil {
+		warn("chapter_draft_parts", partsErr)
+	}
 
 	if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
 		envelope.Working["ai_voice_redflags"] = analysis
@@ -1346,6 +1367,10 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "逐条核对正文中的精确数量、清单和实际内容，不确定就改成模糊但准确的表达。")
 		case "pending_resource_as_fact":
 			focus = append(focus, "把待确认资源改成猜测、提案或谈判状态；确需成为事实时先让 commit_chapter 入账。")
+		case "project_contamination":
+			focus = append(focus, "删除跨项目污染词，回到本书的许闻溪/澄光生活/溪流助手/岗位合并/桥点职业转型事实；参考素材只能转译成写法，不能搬进正文。")
+		case "deprecated_story_engine":
+			focus = append(focus, "旧版硬核取证引擎已禁用：不要写系统留痕、原始材料、正式邮件、会务核查或技术追查；改写成女性职场成长压力，如公开羞辱、岗位被合并、同事求助、会后约谈和权限/项目被暂停。")
 		case "micro_action_overuse":
 			focus = append(focus, "微动作只保留承载道具、伏笔或人物关系的少数几处，其余改成对话摩擦、环境反应、留白或删除。")
 		case "dramatic_negation_overuse":
@@ -1384,6 +1409,8 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "普通对白里的分号会显得书面；改成停顿、省略、打断、追问或两句口语。")
 		case "stiff_trade_dialogue":
 			focus = append(focus, "讲价/互怼对白不能像合同条款或广告口号；改成有停顿、有关系、有算盘的普通人口语。")
+		case "bureaucratic_register_overuse":
+			focus = append(focus, "制度/纪要/表单词过密时，不要继续补规范说明；把信息拆进人物口语、担责压力、误读、拒写、私人消息打断和具体动作。专业词可以保留在表格/屏幕里，人物说话要短、怕事、有口头反应。")
 		case "structured_note_triplet":
 			focus = append(focus, "便签和备忘录不要三条工整并列；改成划掉、补字、挤在行尾、写半截、回看物件后暂不下结论的现场痕迹。")
 		case "card_tos_block":

@@ -26,6 +26,31 @@ func TestCheckChapterPlanConsistencyForbiddenRequiredContradiction(t *testing.T)
 	}
 }
 
+func TestCheckChapterPlanConsistencyRequiresOutlineTitle(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1,
+		Title:   "失业饭桌",
+	}}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "只许把钱花在青山县",
+	}
+	hard, _ := checkChapterPlanConsistency(st, plan)
+	if len(hard) == 0 {
+		t.Fatal("plan.title 偏离 outline.title 应产生 hard 错误")
+	}
+	if !strings.Contains(hard[0], "章节标题与大纲不一致") {
+		t.Fatalf("hard 错误措辞不对: %v", hard)
+	}
+}
+
 func TestChapterPlanScopeCheckFlagsForbiddenHit(t *testing.T) {
 	plan := domain.ChapterPlan{
 		Chapter:  1,
@@ -44,5 +69,25 @@ func TestChapterPlanScopeCheckFlagsForbiddenHit(t *testing.T) {
 	_, flags2 := chapterPlanScopeCheck(plan, "他一路北行，风雪渐大。")
 	if len(flags2) != 0 {
 		t.Fatalf("未触犯不应 flag: %v", flags2)
+	}
+}
+
+func TestChapterPlanScopeCheckFlagsTitleMismatch(t *testing.T) {
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "失业饭桌",
+	}
+
+	_, flags := chapterPlanScopeCheck(plan, "第一章 欠费单\n\n林澈放下筷子。")
+	if len(flags) == 0 {
+		t.Fatal("正文标题偏离 plan.title 应被 flag")
+	}
+	if !strings.Contains(flags[0], "正文标题与计划标题不一致") {
+		t.Fatalf("flag 措辞不对: %v", flags)
+	}
+
+	_, flags = chapterPlanScopeCheck(plan, "# 第一章 失业饭桌\n\n林澈放下筷子。")
+	if len(flags) != 0 {
+		t.Fatalf("等价标题不应 flag: %v", flags)
 	}
 }

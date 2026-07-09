@@ -480,6 +480,76 @@ func TestCommitChapterQueuesPolishOnHighAIGC(t *testing.T) {
 	}
 }
 
+func TestCommitChapterQueuesPolishOnSecondAlgorithmDeprecatedEngine(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
+		t.Fatalf("SavePremise: %v", err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	text := "许闻溪站在发布会侧台，听见有人说日志窗口还在，原始包稍后走合规邮件。"
+	if err := s.Drafts.SaveDraft(1, text); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	tool := NewCommitChapterTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"chapter":                 1,
+		"summary":                 "旧版证据链污染样章",
+		"characters":              []string{"许闻溪", "梁渡"},
+		"key_events":              []string{"旧版术语进入正文"},
+		"character_stage_records": testCharacterStageRecords("许闻溪", "梁渡"),
+	})
+	raw, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload struct {
+		Flow           string `json:"flow"`
+		RuleViolations []struct {
+			Rule     string `json:"rule"`
+			Target   string `json:"target"`
+			Severity string `json:"severity"`
+		} `json:"rule_violations"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	found := map[string]bool{}
+	for _, v := range payload.RuleViolations {
+		if v.Rule == "deprecated_story_engine" && v.Severity == "error" {
+			found[v.Target] = true
+		}
+	}
+	for _, want := range []string{"日志窗口", "原始包", "合规邮件"} {
+		if !found[want] {
+			t.Fatalf("expected deprecated_story_engine %q, got %+v", want, payload.RuleViolations)
+		}
+	}
+	if payload.Flow != string(domain.FlowPolishing) {
+		t.Fatalf("flow = %q, want polishing", payload.Flow)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil {
+		t.Fatalf("LoadProgress: %v", err)
+	}
+	if progress.Flow != domain.FlowPolishing || len(progress.PendingRewrites) != 1 || progress.PendingRewrites[0] != 1 {
+		t.Fatalf("expected chapter 1 queued for polishing, progress=%+v", progress)
+	}
+	rawGate, err := os.ReadFile(filepath.Join(dir, "reviews", "01_ai_gate.json"))
+	if err != nil {
+		t.Fatalf("ReadFile ai gate: %v", err)
+	}
+	if !strings.Contains(string(rawGate), "deprecated_story_engine") {
+		t.Fatalf("expected ai gate to include deprecated_story_engine:\n%s", rawGate)
+	}
+}
+
 func assertChapterRAGChunk(t *testing.T, s *store.Store, chapter int, want string, wantCount int) {
 	t.Helper()
 	state, err := s.RAG.LoadIndexState()

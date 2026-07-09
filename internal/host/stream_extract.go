@@ -19,10 +19,12 @@ import (
 // header（streamHeaderFallback）保持一致；改成普通文字会落到正文路径用终端
 // 默认色画掉，title 不再醒目。
 var toolDisplays = map[string]toolDisplay{
-	"draft_chapter": {nakedKey: "content"},
+	"draft_chapter":      {nakedKey: "content"},
+	"draft_chapter_part": {nakedKey: "content"},
 
 	"plan_chapter":        {header: "✻ 规划"},
 	"edit_chapter":        {header: "✻ 打磨"},
+	"merge_chapter_parts": {header: "✻ 合并草稿"},
 	"commit_chapter":      {header: "✻ 章节提交"},
 	"save_review":         {header: "✻ 审阅"},
 	"save_arc_summary":    {header: "✻ 弧摘要"},

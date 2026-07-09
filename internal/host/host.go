@@ -266,11 +266,11 @@ func (h *Host) StartPrepared(promptText string) error {
 	if err := h.budget.Refuse(); err != nil {
 		return err
 	}
-	if err := h.store.Checkpoints.Reset(); err != nil {
-		return fmt.Errorf("reset checkpoints: %w", err)
+	if err := h.resetStartRuntimeState(); err != nil {
+		return err
 	}
-	if err := h.store.Progress.Init("", 0); err != nil {
-		return fmt.Errorf("init progress: %w", err)
+	if err := h.ensureStartProgressInitialized(); err != nil {
+		return err
 	}
 
 	slog.Info("开始创作", "module", "host", "prompt_len", len(promptText))
@@ -293,6 +293,30 @@ func (h *Host) StartPrepared(promptText string) error {
 	h.router.Dispatch()
 
 	go h.waitDone()
+	return nil
+}
+
+func (h *Host) resetStartRuntimeState() error {
+	if err := h.store.Checkpoints.Reset(); err != nil {
+		return fmt.Errorf("reset checkpoints: %w", err)
+	}
+	if err := h.store.Runtime.Reset(); err != nil {
+		return fmt.Errorf("reset runtime: %w", err)
+	}
+	return nil
+}
+
+func (h *Host) ensureStartProgressInitialized() error {
+	progress, err := h.store.Progress.Load()
+	if err != nil {
+		return fmt.Errorf("load progress: %w", err)
+	}
+	if progress != nil {
+		return nil
+	}
+	if err := h.store.Progress.Init("", 0); err != nil {
+		return fmt.Errorf("init progress: %w", err)
+	}
 	return nil
 }
 

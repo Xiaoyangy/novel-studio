@@ -66,6 +66,22 @@ type writingContextProfile struct {
 	commitOnProject         bool
 }
 
+type roleSelection interface {
+	CurrentSelection(role string) (provider, model string, explicit bool)
+}
+
+func resolveRoleContextWindow(cfg bootstrap.Config, selections roleSelection, role string, fallback agentcore.ChatModel) (int, bootstrap.ContextWindowSource, string) {
+	modelName := ""
+	if selections != nil {
+		_, modelName, _ = selections.CurrentSelection(role)
+	}
+	if strings.TrimSpace(modelName) == "" && fallback != nil {
+		modelName = bootstrap.ModelName(fallback)
+	}
+	window, source := cfg.ResolveContextWindow(modelName)
+	return window, source, modelName
+}
+
 func writingContextProfileFor(agentTag string) writingContextProfile {
 	profile := writingContextProfile{
 		keepRecentTokens:      32000,
@@ -225,6 +241,8 @@ func BuildCoordinator(
 		craftRecall,
 		webResearch,
 		tools.NewDraftChapterTool(store),
+		tools.NewDraftChapterPartTool(store),
+		tools.NewMergeChapterPartsTool(store),
 		tools.NewEditChapterTool(store),
 		tools.NewCheckConsistencyTool(store),
 		commitChapter,
@@ -333,10 +351,11 @@ func BuildCoordinator(
 	restore := &ctxpack.WriterRestorePack{}
 	restore.Refresh(store)
 
-	// writerContextFactory 推演/渲染两阶段共用的上下文管理器工厂（同模型同窗口）。
+	// writerContextFactory 推演/渲染两阶段共用的上下文管理器工厂（同角色同窗口）。
 	writerContextFactory := func(agentTag string) func(agentcore.ChatModel) agentcore.ContextManager {
 		return func(model agentcore.ChatModel) agentcore.ContextManager {
-			window, _ := cfg.ResolveContextWindow(bootstrap.ModelName(model))
+			role := agentToRole(agentTag)
+			window, _, _ := resolveRoleContextWindow(cfg, models, role, model)
 			profile := writingContextProfileFor(agentTag)
 			return newContextManager(contextManagerConfig{
 				Model:            model,
@@ -381,7 +400,7 @@ func BuildCoordinator(
 		Model:               writerModel,
 		SystemPrompt:        writerPrompt,
 		Tools:               writerTools,
-		MaxTurns:            cfg.ResolveMaxTurns("writer", 300),
+		MaxTurns:            cfg.ResolveMaxTurns("writer", 40),
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
 		ToolsAreIdempotent:  true,

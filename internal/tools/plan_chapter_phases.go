@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
@@ -89,6 +91,12 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 		"causal_simulation": existingSim,
 		"rewrite":           isRewritePlan,
 		"updated_at":        time.Now().Format(time.RFC3339),
+	}
+	if err := validateProjectContaminationFree(t.store, "plan_structure", partial); err != nil {
+		return nil, err
+	}
+	if issues := ChapterPlanIdentityIssues(t.store, chapter, partial); len(issues) > 0 {
+		return nil, fmt.Errorf("第 %d 章计划身份锚点不合格：%s: %w", chapter, strings.Join(issues, "；"), errs.ErrToolPrecondition)
 	}
 	if err := t.store.Drafts.SaveChapterPlanPartial(chapter, partial); err != nil {
 		return nil, fmt.Errorf("save chapter plan partial: %w: %w", errs.ErrStoreWrite, err)
@@ -177,52 +185,242 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if merged == nil {
 		merged = map[string]any{}
 	}
-	maps.Copy(merged, a.CausalSimulation)
+	if len(a.CausalSimulation) == 0 && !a.Finalize {
+		return nil, fmt.Errorf("plan_details 空提交无效：必须提交非空 causal_simulation 补丁，不能只查看进度。当前缺口：%s。下一步只补最靠前的缺口分组: %w",
+			strings.Join(planDetailsGapSummary(t.store, a.Chapter, partial, merged), "；"),
+			errs.ErrToolArgs,
+		)
+	}
+	mergeCausalSimulationPatch(merged, a.CausalSimulation)
 	partial["causal_simulation"] = merged
 	partial["updated_at"] = time.Now().Format(time.RFC3339)
+	if err := validateProjectContaminationFree(t.store, "plan_details", partial); err != nil {
+		return nil, err
+	}
+	if issues := ChapterPlanIdentityIssues(t.store, a.Chapter, partial); len(issues) > 0 {
+		return nil, fmt.Errorf("第 %d 章计划身份锚点不合格：%s: %w", a.Chapter, strings.Join(issues, "；"), errs.ErrToolPrecondition)
+	}
 	if err := t.store.Drafts.SaveChapterPlanPartial(a.Chapter, partial); err != nil {
 		return nil, fmt.Errorf("save chapter plan partial: %w: %w", errs.ErrStoreWrite, err)
 	}
 
 	if !a.Finalize {
+		if result, finalized, err := t.autoFinalizePartialIfComplete(a.Chapter, partial, merged); finalized || err != nil {
+			return result, err
+		}
 		return json.Marshal(map[string]any{
-			"staged":         "details",
-			"chapter":        a.Chapter,
-			"fields_present": sortedKeys(merged),
-			"next_step":      "继续 plan_details 提交剩余字段；全部就绪后最后一批传 finalize=true",
+			"staged":              "details",
+			"chapter":             a.Chapter,
+			"fields_present":      sortedKeys(merged),
+			"gap_summary":         planDetailsGapSummary(t.store, a.Chapter, partial, merged),
+			"next_step":           "继续 plan_details 提交剩余字段；每次只补一个 recommended_batches 分组；全部就绪后最后一批再传 finalize=true；若字段已齐，本工具会自动收口为正式 plan",
+			"recommended_batches": planDetailsRecommendedBatches(),
 		})
 	}
 
-	// finalize：拼回完整 plan_chapter 参数并走同一条校验/落盘路径。
+	return t.finalizePartial(a.Chapter, partial, merged)
+}
+
+func mergeCausalSimulationPatch(dst, patch map[string]any) {
+	for key, value := range patch {
+		if mergedArray, ok := mergeArrayObjectsByCharacter(dst[key], value); ok {
+			dst[key] = mergedArray
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func mergeArrayObjectsByCharacter(existing, incoming any) ([]any, bool) {
+	inItems, ok := incoming.([]any)
+	if !ok {
+		return nil, false
+	}
+	hasCharacter := false
+	for _, item := range inItems {
+		if m, ok := item.(map[string]any); ok {
+			if s, _ := m["character"].(string); strings.TrimSpace(s) != "" {
+				hasCharacter = true
+				break
+			}
+		}
+	}
+	if !hasCharacter {
+		return nil, false
+	}
+	out := []any{}
+	index := map[string]int{}
+	if exItems, ok := existing.([]any); ok {
+		for _, item := range exItems {
+			out = append(out, item)
+			if m, ok := item.(map[string]any); ok {
+				if s, _ := m["character"].(string); strings.TrimSpace(s) != "" {
+					index[strings.TrimSpace(s)] = len(out) - 1
+				}
+			}
+		}
+	}
+	for _, item := range inItems {
+		m, ok := item.(map[string]any)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		name, _ := m["character"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			out = append(out, item)
+			continue
+		}
+		if pos, ok := index[name]; ok {
+			if old, ok := out[pos].(map[string]any); ok {
+				next := map[string]any{}
+				maps.Copy(next, old)
+				maps.Copy(next, m)
+				out[pos] = next
+				continue
+			}
+		}
+		index[name] = len(out)
+		out = append(out, item)
+	}
+	return out, true
+}
+
+func (t *PlanDetailsTool) autoFinalizePartialIfComplete(chapter int, partial, merged map[string]any) (json.RawMessage, bool, error) {
+	plan, err := chapterPlanFromPartial(chapter, partial, merged)
+	if err != nil {
+		return nil, false, nil
+	}
+	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, chapter)
+	if err != nil || skipped != nil {
+		return skipped, err == nil && skipped != nil, err
+	}
+	if err := validateChapterPrewriteSimulation(t.store, plan, isRewritePlan); err != nil {
+		return nil, false, nil
+	}
+	if hardIssues, _ := checkChapterPlanConsistency(t.store, plan); len(hardIssues) > 0 {
+		return nil, false, nil
+	}
+	result, err := t.finalizePartial(chapter, partial, merged)
+	if err != nil {
+		return nil, true, err
+	}
+	return result, true, nil
+}
+
+func (t *PlanDetailsTool) finalizePartial(chapter int, partial, merged map[string]any) (json.RawMessage, error) {
+	plan, err := chapterPlanFromPartial(chapter, partial, merged)
+	if err != nil {
+		return nil, fmt.Errorf("invalid merged plan: %w: %w", errs.ErrToolArgs, err)
+	}
+	// 重新核对门禁：分批期间队列/完成态可能已变化。
+	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, chapter)
+	if err != nil || skipped != nil {
+		return skipped, err
+	}
+	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan)
+	if err != nil {
+		return nil, planDetailsFinalizeRepairError(chapter, merged, err)
+	}
+	if err := t.store.Drafts.DeleteChapterPlanPartial(chapter); err != nil {
+		return nil, fmt.Errorf("cleanup chapter plan partial: %w: %w", errs.ErrStoreWrite, err)
+	}
+	return result, nil
+}
+
+func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause error) error {
+	return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%v。已保存字段：%s。修复协议：不要一次性重发所有字段，也不要立刻 finalize=true；下一轮只补 recommended_batches 中最靠前且未完成的一组，保留已保存字段，最后一组补完后再传 finalize=true。recommended_batches=%s: %w",
+		chapter,
+		cause,
+		strings.Join(sortedKeys(merged), ", "),
+		strings.Join(planDetailsRecommendedBatches(), " | "),
+		errs.ErrToolPrecondition,
+	)
+}
+
+func planDetailsRecommendedBatches() []string {
+	return []string{
+		"batch1_context_and_stage: context_sources + offscreen_character_stage；若 initial_state 已有，只补缺失 action_tendency 等小字段，不重发超大 initial_state",
+		"batch2_scene_causality: environment_state + causal_beats + decision_points + outcome_shift",
+		"batch3_voice_dialogue: voice_logic + dialogue_scene_blueprints",
+		"batch4_character_emotion: character_arc_tests + emotional_logic + relationship_emotion_arcs + dormant_character_policy",
+		"batch5_world_pressure: world_background_layers + information_asymmetry + hidden_rule_pressure + social_mood_rumors + ritual_calendar + structural_resources + cosmology_checks + conflict_web + narrative_tension_matrix",
+	}
+}
+
+func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[string]any) []string {
+	var gaps []string
+	for _, field := range []string{
+		"context_sources",
+		"offscreen_character_stage",
+		"environment_state",
+		"causal_beats",
+		"decision_points",
+		"outcome_shift",
+		"voice_logic",
+		"dialogue_scene_blueprints",
+		"character_arc_tests",
+		"dormant_character_policy",
+		"emotional_logic",
+		"relationship_emotion_arcs",
+		"world_background_layers",
+		"information_asymmetry",
+		"hidden_rule_pressure",
+		"social_mood_rumors",
+		"ritual_calendar",
+		"structural_resources",
+		"cosmology_checks",
+		"conflict_web",
+		"narrative_tension_matrix",
+	} {
+		if _, ok := merged[field]; !ok {
+			gaps = append(gaps, "missing "+field)
+		}
+	}
+	plan, err := chapterPlanFromPartial(chapter, partial, merged)
+	if err == nil {
+		required := requiredDossierCharacterNames(s, chapter)
+		if missing := missingInitialStateCoverage(required, plan.CausalSimulation.InitialState); len(missing) > 0 {
+			gaps = append(gaps, formatMissingCharacterCoverage("initial_state", missing))
+		}
+		for _, state := range plan.CausalSimulation.InitialState {
+			if strings.TrimSpace(state.Character) != "" && strings.TrimSpace(state.ActionTendency) == "" {
+				gaps = append(gaps, fmt.Sprintf("initial_state(%s).action_tendency", state.Character))
+			}
+		}
+		if missing := missingArcTestCoverage(required, plan.CausalSimulation.CharacterArcTests); len(missing) > 0 {
+			gaps = append(gaps, formatMissingCharacterCoverage("character_arc_tests", missing))
+		}
+		if missing := missingEmotionalLogicCoverage(required, plan.CausalSimulation.EmotionalLogic); len(missing) > 0 {
+			gaps = append(gaps, formatMissingCharacterCoverage("emotional_logic", missing))
+		}
+	}
+	if len(gaps) == 0 {
+		return []string{"字段看似齐备；如 finalize 仍失败，请按错误中的具体子字段补最小补丁"}
+	}
+	return compactStrings(gaps)
+}
+
+// chapterPlanFromPartial 拼回完整 plan_chapter 参数，供显式 finalize 与自动收口共用。
+func chapterPlanFromPartial(chapter int, partial, merged map[string]any) (domain.ChapterPlan, error) {
 	structure, _ := partial["structure"].(map[string]any)
 	if structure == nil {
 		structure = map[string]any{}
 	}
 	full := make(map[string]any, len(structure)+1)
 	maps.Copy(full, structure)
-	full["chapter"] = a.Chapter
+	full["chapter"] = chapter
 	full["causal_simulation"] = merged
 	raw, err := json.Marshal(full)
 	if err != nil {
-		return nil, fmt.Errorf("merge chapter plan: %w", err)
+		return domain.ChapterPlan{}, fmt.Errorf("merge chapter plan: %w", err)
 	}
 	plan, err := decodeChapterPlanArgs(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid merged plan: %w: %w", errs.ErrToolArgs, err)
+		return domain.ChapterPlan{}, err
 	}
-	// 重新核对门禁：分批期间队列/完成态可能已变化。
-	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, a.Chapter)
-	if err != nil || skipped != nil {
-		return skipped, err
-	}
-	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan)
-	if err != nil {
-		return nil, err
-	}
-	if err := t.store.Drafts.DeleteChapterPlanPartial(a.Chapter); err != nil {
-		return nil, fmt.Errorf("cleanup chapter plan partial: %w: %w", errs.ErrStoreWrite, err)
-	}
-	return result, nil
+	return plan, nil
 }
 
 func intFromAny(v any) int {

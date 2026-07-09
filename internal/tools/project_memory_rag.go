@@ -299,7 +299,7 @@ func projectMemoryRAGChunks(st *store.Store, chapter int) ([]domain.RAGChunk, er
 			SourceKind: "review",
 			Facet:      "review",
 			Context:    "初始审核回路 | initial_review_lessons",
-			Summary:    "第一章审核失败后要把结论回灌到角色系统、声口逻辑、场景承载和证据链，而不是只润色句子。",
+			Summary:    "第一章审核失败后要把结论回灌到角色系统、声口逻辑、场景承载和可见事实，而不是只润色句子。",
 			Keywords:   []string{"审核回路", "审核失败", "重推演", "voice_logic", "review_refinement", "AI味"},
 			MaxRunes:   1000,
 		},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
@@ -228,7 +229,7 @@ func (t *SaveWorldTickTool) Execute(_ context.Context, args json.RawMessage) (js
 				matched := false
 				for i := range world.Factions {
 					f := &world.Factions[i]
-					if f.Name != upd.Target && f.ID != upd.Target {
+					if !worldFactionMatches(*f, upd.Target) {
 						continue
 					}
 					matched = true
@@ -291,34 +292,51 @@ func (t *SaveWorldTickTool) knownActorSet() map[string]struct{} {
 	known := make(map[string]struct{})
 	if chars, err := t.store.Characters.Load(); err == nil {
 		for _, c := range chars {
-			if c.Name != "" {
-				known[c.Name] = struct{}{}
-			}
+			addKnownActor(known, c.Name)
 			for _, alias := range c.Aliases {
-				if alias != "" {
-					known[alias] = struct{}{}
-				}
+				addKnownActor(known, alias)
 			}
 		}
 	}
 	if entries, err := t.store.Cast.Load(); err == nil {
 		for _, e := range entries {
-			if e.Name != "" {
-				known[e.Name] = struct{}{}
-			}
+			addKnownActor(known, e.Name)
 		}
 	}
 	if world, err := t.store.World.LoadBookWorld(); err == nil && world != nil {
 		for _, f := range world.Factions {
-			if f.Name != "" {
-				known[f.Name] = struct{}{}
-			}
-			if f.ID != "" {
-				known[f.ID] = struct{}{}
+			for _, name := range worldFactionActorNames(f) {
+				addKnownActor(known, name)
 			}
 		}
 	}
 	return known
+}
+
+func worldFactionMatches(f domain.WorldFaction, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, name := range worldFactionActorNames(f) {
+		if strings.TrimSpace(name) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func worldFactionActorNames(f domain.WorldFaction) []string {
+	names := []string{f.ID, f.Name}
+	names = append(names, f.Aliases...)
+	return names
+}
+
+func addKnownActor(known map[string]struct{}, value string) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		known[value] = struct{}{}
+	}
 }
 
 // compactProgressTextTool 事件摘要截断（警告文案用）。

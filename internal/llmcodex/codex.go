@@ -19,11 +19,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/llm"
+)
+
+const (
+	// Codex CLI 自身会在模型实际窗口前做更保守的 room 检查；章节 RAG/计划很容易超过它。
+	// 这里在进入 CLI 前做硬预算，避免 subagent 已有 1M 外窗但 codex exec 仍直接拒绝。
+	codexPromptRuneBudget         = 90_000
+	codexPerMessageTextRuneBudget = 45_000
+	codexToolArgsRuneBudget       = 18_000
 )
 
 // CodexModel 实现 agentcore.ChatModel，经 codex CLI 调 GPT（订阅）。
@@ -150,19 +159,19 @@ func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentco
 // buildProsePrompt 用整段对话上下文（含 novel_context 的计划、craft_recall 的手法）构造
 // 自由文本渲染提示：只输出正文本身。反 AI 硬要求随正文质量合同下沉到这里再强调一遍。
 func buildProsePrompt(messages []agentcore.Message) string {
-	var b strings.Builder
+	var dialog strings.Builder
 	for _, msg := range messages {
 		if text := strings.TrimSpace(msg.TextContent()); text != "" {
-			fmt.Fprintf(&b, "[%s]\n%s\n\n", string(msg.GetRole()), text)
+			fmt.Fprintf(&dialog, "[%s]\n%s\n\n", string(msg.GetRole()), compactCodexText(text, codexPerMessageTextRuneBudget))
 		}
 		for _, tc := range msg.ToolCalls() {
-			fmt.Fprintf(&b, "[%s 调用 %s]\n%s\n\n", string(msg.GetRole()), tc.Name, string(tc.Args))
+			fmt.Fprintf(&dialog, "[%s 调用 %s]\n%s\n\n", string(msg.GetRole()), tc.Name, compactCodexText(string(tc.Args), codexToolArgsRuneBudget))
 		}
 	}
-	b.WriteString("## 现在渲染正文\n严格依据上面的写前推演计划、检索到的手法，以及 system 消息里列出的**全部写作与审核规则**（字数区间、禁用词/疲劳词、AI 味红线、章节契约范围），把本章写成完整正文并逐条自检达标。**只输出正文本身**，不要输出 JSON、不要解释、不要复述计划。\n" +
+	suffix := "## 现在渲染正文\n严格依据上面的写前推演计划、检索到的手法，以及 system 消息里列出的**全部写作与审核规则**（字数区间、禁用词/疲劳词、AI 味红线、章节契约范围），把本章写成完整正文并逐条自检达标。**只输出正文本身**，不要输出 JSON、不要解释、不要复述计划。\n" +
 		"【格式】正常小说排版，不是 Markdown：首行是纯文本章节标题（如「第一章 欠费单」，不要加 # 或任何符号）；正文段落之间空一行；全程禁止使用 # * - > 反引号 星号 等任何 Markdown 标记。\n" +
-		"【反 AI 味硬要求】句长长短交替（不要整章中短句同一节奏）；用字多样、不整章复述同一个具象名词（换称/代指/部件名）；段首不重复（不要连续多段以同一主语起句）；单句成段全章≤4 且绝不连续；对白要断续、有隐瞒、被追问才挤出下一条信息（禁止一口气罗列清单/姓名+房号+背景）；抽象判断之后必落到动作、物件、感官或对白后果；配角对白要有主动误解/打断/拒绝/讨价的冲突。")
-	return b.String()
+		"【反 AI 味硬要求】句长长短交替（不要整章中短句同一节奏）；用字多样、不整章复述同一个具象名词（换称/代指/部件名）；段首不重复（不要连续多段以同一主语起句）；单句成段全章≤4 且绝不连续；对白要断续、有隐瞒、被追问才挤出下一条信息（禁止一口气罗列清单/姓名+房号+背景）；抽象判断之后必落到动作、物件、感官或对白后果；配角对白要有主动误解/打断/拒绝/讨价的冲突。"
+	return assembleBudgetedPrompt("", dialog.String(), suffix)
 }
 
 // estimateUsage 给出 token 用量的估算——codex exec 不回报 token 数，不填会触发
@@ -211,35 +220,75 @@ func (m *CodexModel) GenerateStream(ctx context.Context, messages []agentcore.Me
 
 // buildCodexPrompt 把对话+工具序列化成 codex 的单条提示。
 func buildCodexPrompt(messages []agentcore.Message, tools []agentcore.ToolSpec) string {
-	var b strings.Builder
-	b.WriteString("你在一个函数调用式的创作流程中充当推理引擎。阅读下面的对话与可用工具，" +
+	var prefix strings.Builder
+	prefix.WriteString("你在一个函数调用式的创作流程中充当推理引擎。阅读下面的对话与可用工具，" +
 		"决定下一步：要么调用一个工具，要么给出最终文本。严格只输出符合 output schema 的 JSON，" +
 		"不要执行任何 shell 命令、不要读写文件、不要产出多余解释。\n\n")
 	if len(tools) > 0 {
-		b.WriteString("## 可用工具\n")
+		prefix.WriteString("## 可用工具\n")
 		for _, t := range tools {
 			params, _ := json.Marshal(t.Parameters)
-			fmt.Fprintf(&b, "- %s：%s\n  参数 schema：%s\n", t.Name, t.Description, string(params))
+			fmt.Fprintf(&prefix, "- %s：%s\n  参数 schema：%s\n", t.Name, t.Description, string(params))
 		}
-		b.WriteString("\n")
+		prefix.WriteString("\n")
 	}
-	b.WriteString("## 对话\n")
+	prefix.WriteString("## 对话\n")
+	var dialog strings.Builder
 	for _, msg := range messages {
 		role := string(msg.GetRole())
 		if text := strings.TrimSpace(msg.TextContent()); text != "" {
-			fmt.Fprintf(&b, "[%s]\n%s\n\n", role, text)
+			fmt.Fprintf(&dialog, "[%s]\n%s\n\n", role, compactCodexText(text, codexPerMessageTextRuneBudget))
 		}
 		for _, tc := range msg.ToolCalls() {
-			fmt.Fprintf(&b, "[%s 调用工具 %s]\n参数：%s\n\n", role, tc.Name, string(tc.Args))
+			fmt.Fprintf(&dialog, "[%s 调用工具 %s]\n参数：%s\n\n", role, tc.Name, compactCodexText(string(tc.Args), codexToolArgsRuneBudget))
 		}
 		// tool 结果：Message 里 tool 角色的文本即结果内容。
 	}
-	b.WriteString("## 你的输出\n只输出 output schema 规定的 JSON 对象，不要用任何内置工具/检索/浏览器：" +
+	suffix := "## 你的输出\n只输出 output schema 规定的 JSON 对象，不要用任何内置工具/检索/浏览器：" +
 		"要调用工具时 action=\"tool_call\"、tool_name 填工具名、arguments_json 填该工具参数对象的 JSON 字符串、text=null；" +
 		"要给最终文本时 action=\"final\"、text 填内容、tool_name=null、arguments_json=null。\n" +
 		"特别地：调用 draft_chapter 写正文时，arguments_json 的 content 字段**只填一句占位符**（例如「[待渲染]」）即可，" +
-		"真正的整章正文会在随后单独以自由文本渲染——不要在这里把上千字正文塞进 JSON 字符串（会拖慢并损伤正文质量）。")
-	return b.String()
+		"真正的整章正文会在随后单独以自由文本渲染——不要在这里把上千字正文塞进 JSON 字符串（会拖慢并损伤正文质量）。"
+	return assembleBudgetedPrompt(prefix.String(), dialog.String(), suffix)
+}
+
+func assembleBudgetedPrompt(prefix, dialog, suffix string) string {
+	before := utf8.RuneCountInString(prefix) + utf8.RuneCountInString(dialog) + utf8.RuneCountInString(suffix)
+	budget := codexPromptRuneBudget - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
+	if budget < 12_000 {
+		budget = 12_000
+	}
+	dialog = compactCodexText(dialog, budget)
+	after := utf8.RuneCountInString(prefix) + utf8.RuneCountInString(dialog) + utf8.RuneCountInString(suffix)
+	if before > after {
+		slog.Info("codex prompt 已压缩",
+			"module", "codex", "runes_before", before, "runes_after", after, "budget", codexPromptRuneBudget)
+	}
+	return prefix + dialog + suffix
+}
+
+func compactCodexText(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if limit <= 0 || utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	if limit < 128 {
+		limit = 128
+	}
+	runes := []rune(s)
+	marker := fmt.Sprintf("\n\n[... Codex 入参压缩：省略 %d 字；保留首尾以维持上下文 ...]\n\n", len(runes)-limit)
+	markerRunes := []rune(marker)
+	available := limit - len(markerRunes)
+	if available < 32 {
+		available = 32
+		markerRunes = []rune("\n\n[...省略...]\n\n")
+	}
+	head := available / 2
+	tail := available - head
+	if head+tail > len(runes) {
+		return s
+	}
+	return string(runes[:head]) + string(markerRunes) + string(runes[len(runes)-tail:])
 }
 
 // buildResponseSchema 生成 codex --output-schema：约束成"工具调用或最终文本"。
@@ -268,6 +317,34 @@ type codexResponse struct {
 	Text          string `json:"text"`
 }
 
+var codexToolCallSeq atomic.Uint64
+
+func nextCodexToolCallID(toolName string) string {
+	seq := codexToolCallSeq.Add(1)
+	return fmt.Sprintf("codex-%s-%d", sanitizeToolCallIDPart(toolName), seq)
+}
+
+func sanitizeToolCallIDPart(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "tool"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "tool"
+	}
+	return out
+}
+
 // parseCodexResponse 把 codex 的结构化输出解析成 agentcore 消息。
 func parseCodexResponse(raw string, _ []agentcore.ToolSpec) (agentcore.Message, error) {
 	raw = strings.TrimSpace(stripCodeFence(raw))
@@ -281,7 +358,7 @@ func parseCodexResponse(raw string, _ []agentcore.ToolSpec) (agentcore.Message, 
 		if len(args) == 0 || !json.Valid(args) {
 			args = json.RawMessage("{}")
 		}
-		tc := agentcore.ToolCall{ID: "codex-" + r.ToolName, Name: r.ToolName, Args: args}
+		tc := agentcore.ToolCall{ID: nextCodexToolCallID(r.ToolName), Name: r.ToolName, Args: args}
 		return agentcore.Message{
 			Role:       agentcore.RoleAssistant,
 			Content:    []agentcore.ContentBlock{{Type: agentcore.ContentToolCall, ToolCall: &tc}},
@@ -318,7 +395,7 @@ func (m *CodexModel) runCodex(ctx context.Context, prompt string, schema map[str
 	if reasoning == "" {
 		reasoning = "xhigh" // 用 gpt-5.5 最高推理档，质量优先（用户明确要求）；比 medium 慢但正文质量显著更好
 	}
-	args := []string{"exec", prompt,
+	args := []string{"exec", "-",
 		"-o", outPath,
 		"--skip-git-repo-check",
 		"--sandbox", "read-only",
@@ -338,8 +415,8 @@ func (m *CodexModel) runCodex(ctx context.Context, prompt string, schema map[str
 		args = append(args, "-m", m.model)
 	}
 	cmd := exec.CommandContext(ctx, m.binary, args...)
-	// 关闭 stdin：codex exec 会"读 stdin 追加输入"，不关会挂起等输入。
-	cmd.Stdin = nil
+	// 超长章节上下文不能放在 argv 中，使用 stdin 避免触发系统参数长度限制。
+	cmd.Stdin = strings.NewReader(prompt)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

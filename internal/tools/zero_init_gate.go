@@ -107,17 +107,27 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 	return true, ""
 }
 
+// FoundationCoreMissing 返回 Architect 核心 foundation 尚缺的项。
+// 这是 Architect → zero-init → Writer 三段门禁的共享口径。
+func FoundationCoreMissing(dir string) []string {
+	var missing []string
+	for _, rel := range []string{"premise.md", "characters.json", "world_rules.json", "book_world.json", "world_codex.json", filepath.Join("meta", "compass.json")} {
+		if !nonEmptyRegularFile(filepath.Join(dir, rel)) {
+			missing = append(missing, filepath.ToSlash(rel))
+		}
+	}
+	if !nonEmptyRegularFile(filepath.Join(dir, "layered_outline.json")) &&
+		!nonEmptyRegularFile(filepath.Join(dir, "outline.json")) {
+		missing = append(missing, "layered_outline.json|outline.json")
+	}
+	return missing
+}
+
 // FoundationCoreComplete 报告 Architect 的核心 foundation 是否已齐。
 // 用于区分"该派 architect 补设定"与"该做零章初始化"两种未就绪。
 // world_codex 也算核心：StopGuard 在它缺失时不放行收工，逼 Coordinator 派 architect 补齐。
 func FoundationCoreComplete(dir string) bool {
-	for _, rel := range []string{"premise.md", "characters.json", "world_rules.json", "book_world.json", "world_codex.json", filepath.Join("meta", "compass.json")} {
-		if !nonEmptyRegularFile(filepath.Join(dir, rel)) {
-			return false
-		}
-	}
-	return nonEmptyRegularFile(filepath.Join(dir, "layered_outline.json")) ||
-		nonEmptyRegularFile(filepath.Join(dir, "outline.json"))
+	return len(FoundationCoreMissing(dir)) == 0
 }
 
 func nonEmptyRegularFile(path string) bool {

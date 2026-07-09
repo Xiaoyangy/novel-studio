@@ -136,6 +136,7 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]any, []string) {
 	scope := map[string]any{
 		"chapter":         plan.Chapter,
+		"title":           plan.Title,
 		"goal":            plan.Goal,
 		"conflict":        plan.Conflict,
 		"hook":            plan.Hook,
@@ -148,6 +149,11 @@ func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]
 
 	// 确定性越界筛查：forbidden_move 的关键短语若出现在正文，提示可能触犯（供复核，非定论）。
 	var flags []string
+	if planTitle := strings.TrimSpace(plan.Title); planTitle != "" {
+		if heading := firstChapterHeading(content); heading != "" && !chapterTitleEquivalent(heading, planTitle) {
+			flags = append(flags, fmt.Sprintf("正文标题与计划标题不一致：正文首行=%q，plan.title=%q —— 本章标题必须继承计划/大纲", heading, planTitle))
+		}
+	}
 	for _, fm := range plan.Contract.ForbiddenMoves {
 		for _, kw := range distinctiveKeywords(fm) {
 			if strings.Contains(content, kw) {
@@ -157,6 +163,17 @@ func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]
 		}
 	}
 	return scope, flags
+}
+
+func firstChapterHeading(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimLeft(line, "#"))
+	}
+	return ""
 }
 
 // distinctiveKeywords 从一条禁止项里抽取可用于原文命中的片段。禁止项常写成自然语句

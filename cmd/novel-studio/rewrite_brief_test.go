@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/rules"
+	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
 func TestParseRewriteFlagsBriefOnly(t *testing.T) {
@@ -51,7 +52,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
   "scope": "chapter",
   "verdict": "rewrite",
   "issues": [
-    {"type": "aesthetic", "severity": "error", "description": "清单灌水", "evidence": "长串物件", "suggestion": "改成交易动作和证据链。"}
+    {"type": "aesthetic", "severity": "error", "description": "清单灌水", "evidence": "长串物件", "suggestion": "改成交易动作和可见事实。"}
   ],
   "dimensions": [
     {"dimension": "aesthetic", "score": 50, "verdict": "fail", "comment": "堆词破坏读感"}
@@ -70,7 +71,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	if !plan.HasRed {
 		t.Fatalf("expected red plan, got %+v", plan)
 	}
-	for _, want := range []string{"catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：≤5%", "禁止注水", "改成交易动作和证据链"} {
+	for _, want := range []string{"catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：≤5%", "禁止注水", "改成交易动作和可见事实"} {
 		if !strings.Contains(plan.Brief, want) {
 			t.Fatalf("brief missing %q:\n%s", want, plan.Brief)
 		}
@@ -303,6 +304,78 @@ func TestRewritePatchBoundsClampToProjectChapterWords(t *testing.T) {
 	}
 	if err := validatePatchRewriteWithBounds(original, strings.Repeat("江", 3350), bounds); err != nil {
 		t.Fatalf("expected rewrite within project bounds to pass, got %v", err)
+	}
+}
+
+func TestValidateRewritePreflightBlocksSecondAlgorithmDeprecatedEngine(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Outline.SavePremise("《她的第二算法》女性职场成长文，主角许闻溪。"); err != nil {
+		t.Fatalf("SavePremise: %v", err)
+	}
+	err := validateRewritePreflight(st, 1, "许闻溪看见日志窗口还开着，工作群里跳出会后纪要。")
+	if err == nil {
+		t.Fatal("expected deprecated story engine preflight failure")
+	}
+	got := err.Error()
+	for _, want := range []string{"deprecated_story_engine", "日志", "纪要"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in error, got %s", want, got)
+		}
+	}
+}
+
+func TestValidateRewritePreflightAllowsNonBlockingMechanicalWarnings(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	text := "电脑屏幕还亮着，客户表停在最后一行，备注栏里下午没删的批注还在。"
+	if err := validateRewritePreflight(st, 1, text); err != nil {
+		t.Fatalf("non-blocking mechanical warning should not fail preflight: %v", err)
+	}
+}
+
+func TestValidateRewritePreflightBlocksAIVoiceWarningsWhenPolishing(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	text := strings.Repeat("许闻溪把确认单压回文件夹，侧台的声音一层一层涌上来。", 80)
+	err := validateRewritePreflight(st, 1, text, true)
+	if err == nil {
+		t.Fatal("expected AI voice warning to fail polish preflight")
+	}
+	if !strings.Contains(err.Error(), "ai_voice:supporting_dialogue_ratio") {
+		t.Fatalf("expected supporting dialogue preflight failure, got %v", err)
+	}
+}
+
+func TestNormalizeRewriteParagraphingForGateMergesNarrativeIsolatedParagraphs(t *testing.T) {
+	text := `第一章 讲稿第一句
+
+侧台的冷气贴着许闻溪的手背往上爬。
+
+台上的溪流助手换了一种漂亮腔调。
+
+导播台有人催主讲准备。
+
+许闻溪抬头看见大屏已经换页。
+
+夏岚踩着倒数走过来。
+
+那张确认单的签名线空着。
+
+梁渡把折过的便签推到讲稿边。
+
+程棠在记录位上把手机扣到桌面。
+
+倒计时归零，黑帘外的光漏进来。`
+
+	normalized, changed := normalizeRewriteParagraphingForGate(text)
+	if !changed {
+		t.Fatal("expected isolated narrative paragraphs to be merged")
+	}
+	for _, v := range rules.Lint(normalized) {
+		if v.Rule == "isolated_sentence_overuse" {
+			t.Fatalf("normalized text should pass isolated_sentence_overuse gate: %+v\n%s", v, normalized)
+		}
 	}
 }
 

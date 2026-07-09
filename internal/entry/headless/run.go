@@ -14,14 +14,17 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/host"
 	"github.com/chenhongyang/novel-studio/internal/logger"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 type Options struct {
-	Prompt           string
-	StopAfterChapter int
-	Stdin            io.Reader
-	Stdout           io.Writer
-	Stderr           io.Writer
+	Prompt                    string
+	StopAfterChapter          int
+	StopAfterFoundation       bool
+	StopAfterInitialWorldTick bool
+	Stdin                     io.Reader
+	Stdout                    io.Writer
+	Stderr                    io.Writer
 }
 
 // Run 以无界面模式运行会话内核，直接消费 Engine 事件与流式输出。
@@ -89,13 +92,13 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return fmt.Errorf("headless 模式需要 --prompt，或输出目录 %q 下已有可恢复会话", eng.Dir())
 		}
 		fmt.Fprintf(stderr, "headless 恢复: %s (%s)\n", eng.Dir(), label)
-		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter)
+		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterFoundation, opts.StopAfterInitialWorldTick)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter)
+	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterFoundation, opts.StopAfterInitialWorldTick)
 }
 
-func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter int) error {
+func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter int, stopAfterFoundation bool, stopAfterInitialWorldTick bool) error {
 	stopRequested := false
 	for {
 		select {
@@ -107,6 +110,16 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 			if !stopRequested && shouldStopAfterChapter(eng.Dir(), stopAfterChapter) {
 				stopRequested = true
 				fmt.Fprintf(stderr, "[headless] 已完成到第 %d 章，按 --write-to 暂停写作\n", stopAfterChapter)
+				eng.Abort()
+			}
+			if !stopRequested && stopAfterFoundation && shouldStopAfterFoundationReady(eng.Dir()) {
+				stopRequested = true
+				fmt.Fprintln(stderr, "[headless] Architect foundation 已齐，按 pipeline 阶段暂停")
+				eng.Abort()
+			}
+			if !stopRequested && stopAfterInitialWorldTick && shouldStopAfterInitialWorldTickReady(eng.Dir()) {
+				stopRequested = true
+				fmt.Fprintln(stderr, "[headless] 初始 world_tick 已齐，按 pipeline 阶段暂停")
 				eng.Abort()
 			}
 		case delta, ok := <-eng.Stream():
@@ -136,6 +149,14 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 			return drainPending(eng, stdout, stderr, roundHasContent)
 		}
 	}
+}
+
+func shouldStopAfterFoundationReady(dir string) bool {
+	return tools.FoundationCoreComplete(dir)
+}
+
+func shouldStopAfterInitialWorldTickReady(dir string) bool {
+	return tools.EnsureInitialWorldTickForChapterOne(store.NewStore(dir)) == nil
 }
 
 func shouldStopAfterChapter(dir string, chapter int) bool {

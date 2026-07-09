@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,244 @@ func TestVerifyPipelineWriteStageRequiresProgressChapterAndCheckpoint(t *testing
 	}
 	if len(evidence.Checkpoints) != 1 {
 		t.Fatalf("expected one checkpoint evidence, got %+v", evidence.Checkpoints)
+	}
+}
+
+func TestChapterFromPlanPartialPath(t *testing.T) {
+	chapter, ok := chapterFromPlanPartialPath(filepath.Join("drafts", "01.plan.partial.json"))
+	if !ok || chapter != 1 {
+		t.Fatalf("expected chapter 1, got chapter=%d ok=%v", chapter, ok)
+	}
+	if _, ok := chapterFromPlanPartialPath(filepath.Join("drafts", "01.plan.json")); ok {
+		t.Fatal("final plan file must not parse as partial")
+	}
+}
+
+func TestPipelineHasWritingProgressIgnoresFreshRestartSeed(t *testing.T) {
+	fresh := &domain.Progress{
+		NovelName:      "她的第二算法",
+		Phase:          domain.PhaseInit,
+		TotalChapters:  70,
+		Layered:        true,
+		GenerationID:   "simulation-test",
+		GenerationMode: "simulation_restart_from_seed",
+	}
+	if pipelineHasWritingProgress(fresh) {
+		t.Fatalf("fresh simulation restart seed should start a new writing session, got progress=%+v", fresh)
+	}
+	for _, p := range []*domain.Progress{
+		{Phase: domain.PhaseWriting},
+		{CurrentChapter: 1},
+		{InProgressChapter: 1},
+		{CompletedChapters: []int{1}},
+		{PendingRewrites: []int{1}},
+	} {
+		if !pipelineHasWritingProgress(p) {
+			t.Fatalf("expected writing progress for %+v", p)
+		}
+	}
+}
+
+func TestPipelinePrepareFreshWritingSessionPreservesSeedAndClearsRuntime(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.ResetForSimulationRestart("她的第二算法", 70, "simulation-test"); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress.Layered = true
+	progress.CurrentVolume = 1
+	progress.CurrentArc = 1
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runtime.AppendQueue(domain.RuntimeQueueItem{
+		Kind:     domain.RuntimeQueueControl,
+		Priority: domain.RuntimePriorityControl,
+		Summary:  "stale architect dispatch",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.GlobalScope(), "architect", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RunMeta.SetPendingSteer("Pipeline staged-plan repair：旧计划修复指令"); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "meta", "sessions", "agents", "writer-ch01.jsonl"), `{"role":"assistant","content":"stale"}`)
+	mustWriteFile(t, filepath.Join(dir, "drafts", "01.plan.partial.json"), `{"chapter":1,"stale":true}`)
+	mustWriteFile(t, filepath.Join(dir, "drafts", "01.plan.json"), `{"chapter":1}`)
+	mustWriteFile(t, filepath.Join(dir, "drafts", "01.draft.md"), "旧草稿")
+
+	if err := pipelinePrepareFreshWritingSession(dir, 1); err != nil {
+		t.Fatalf("prepare fresh writing session: %v", err)
+	}
+	progress, err = st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Phase != domain.PhaseWriting || progress.CurrentChapter != 1 || progress.InProgressChapter != 1 {
+		t.Fatalf("progress not moved to chapter 1 writing: %+v", progress)
+	}
+	if progress.GenerationID != "simulation-test" || progress.TotalChapters != 70 || !progress.Layered {
+		t.Fatalf("seed metadata should be preserved: %+v", progress)
+	}
+	queue, err := st.Runtime.LoadQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("runtime queue should be reset, got %+v", queue)
+	}
+	if got := store.NewStore(dir).Checkpoints.All(); len(got) != 0 {
+		t.Fatalf("checkpoints should be reset, got %+v", got)
+	}
+	meta, err := st.RunMeta.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil && meta.PendingSteer != "" {
+		t.Fatalf("pipeline staged-plan pending steer should be cleared, got %q", meta.PendingSteer)
+	}
+	for _, rel := range []string{
+		filepath.Join("meta", "sessions", "agents", "writer-ch01.jsonl"),
+		filepath.Join("drafts", "01.plan.partial.json"),
+		filepath.Join("drafts", "01.plan.json"),
+		filepath.Join("drafts", "01.draft.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+			t.Fatalf("expected stale artifact %s removed, err=%v", rel, err)
+		}
+	}
+}
+
+func TestPipelineNeedsFreshWritingSessionHandlesEmptyWritingShell(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.ResetForSimulationRestart("她的第二算法", 70, "simulation-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.StartChapter(1); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	needsFresh, err := pipelineNeedsFreshWritingSession(dir, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needsFresh {
+		t.Fatalf("empty first-chapter writing shell should restart fresh: %+v", progress)
+	}
+
+	mustWriteFile(t, filepath.Join(dir, "drafts", "01.plan.partial.json"), `{"chapter":1}`)
+	needsFresh, err = pipelineNeedsFreshWritingSession(dir, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsFresh {
+		t.Fatal("staged plan artifact should be treated as resumable progress")
+	}
+}
+
+func TestPipelineNeedsFreshWritingSessionResetsInvalidStagedPlan(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.ResetForSimulationRestart("她的第二算法", 70, "simulation-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.StartChapter(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "许闻溪", Role: "主角", Tier: "core"},
+		{Name: "梁渡", Role: "重要配角 / 感情线男主", Tier: "core"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "premise.md"), "女频女性职场成长文，主角许闻溪。")
+	mustWriteFile(t, filepath.Join(dir, "drafts", "01.plan.partial.json"), `{"structure":{"chapter":1,"goal":"推进主角面对异常现场","conflict":"外部阻力","hook":"留下悬念"},"causal_simulation":{"initial_state":[{"character":"主角","current_goal":"稳住"}]}}`)
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	needsFresh, err := pipelineNeedsFreshWritingSession(dir, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needsFresh {
+		t.Fatal("invalid staged plan should be cleared by fresh writing session")
+	}
+}
+
+func TestPipelineAutoRepairBookWorldStructureAddsDanglingFactionAndAliases(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveBookWorld(domain.BookWorld{
+		Version: 1,
+		Factions: []domain.WorldFaction{{
+			ID:   "operations_center",
+			Name: "运营中心",
+			Relations: []domain.FactionRelation{{
+				Target: "store_ops",
+				Kind:   "frontline_partner",
+				Note:   "依赖门店执行与反馈。",
+			}},
+			Clock: &domain.FactionClock{Segments: 6, Progress: 1, Consequence: "运营中心完成一次人员缩编"},
+		}, {
+			ID:    "bridgepoint",
+			Name:  "桥点职业转型工作室",
+			Clock: &domain.FactionClock{Segments: 6, Progress: 0, Consequence: "桥点进入正式合作选择"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	repaired, err := pipelineAutoRepairBookWorldStructure(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired {
+		t.Fatal("expected auto repair to change book_world")
+	}
+	world, err := st.World.LoadBookWorld()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issues := world.ValidateFactionRelations(); len(issues) != 0 {
+		t.Fatalf("relations should be valid after repair, got %v", issues)
+	}
+	var storeOps *domain.WorldFaction
+	for i := range world.Factions {
+		if world.Factions[i].ID == "store_ops" {
+			storeOps = &world.Factions[i]
+		}
+	}
+	if storeOps == nil || storeOps.Clock == nil {
+		t.Fatalf("store_ops faction with clock should be added: %+v", world.Factions)
+	}
+	if got := strings.Join(storeOps.Aliases, " "); !strings.Contains(got, "门店运营组") {
+		t.Fatalf("store_ops aliases should include 门店运营组, got %+v", storeOps.Aliases)
+	}
+	if got := strings.Join(world.Factions[1].Aliases, " "); !strings.Contains(got, "桥点工作室") {
+		t.Fatalf("bridgepoint aliases should include 桥点工作室, got %+v", world.Factions[1].Aliases)
 	}
 }
 
@@ -264,6 +503,23 @@ func TestVerifyPipelineRewriteStageAllowsCleanChaptersWithoutBackup(t *testing.T
 	}
 }
 
+func TestVerifyPipelineRewriteStageAcceptsResolvedRewriteBackup(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。周行舟问：“还要核哪一项？”他指了指押金条：“先核这个，别添别的。”")
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md.pre-rewrite.md"), "改写前正文")
+
+	evidence, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
+	if err != nil {
+		t.Fatalf("resolved rewrite should accept pre-rewrite backup: %v", err)
+	}
+	if got := strings.Join(evidence.Artifacts, " "); !strings.Contains(got, "chapters/01.md.pre-rewrite.md") {
+		t.Fatalf("expected pre-rewrite artifact, got %+v", evidence.Artifacts)
+	}
+	if got := strings.Join(evidence.Checkpoints, " "); strings.Contains(got, "rewrite-not-needed") {
+		t.Fatalf("resolved rewrite should not claim rewrite-not-needed without checkpoint: %+v", evidence.Checkpoints)
+	}
+}
+
 func TestVerifyPipelineRewriteStageBriefOnlyRequiresBriefNotBackup(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。")
@@ -397,6 +653,52 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 	}
 	if got := strings.Join(args["rewrite"], " "); got != "--from 3 --to 8 --budget 5m0s --role coordinator --max-rounds 4 --polish-warnings --brief-only" {
 		t.Fatalf("rewrite args = %q", got)
+	}
+}
+
+func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("她的第二算法", 70); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "许闻溪把讲稿翻到最后一页。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 13, "crisis", "quest"); err != nil {
+		t.Fatal(err)
+	}
+	generatedAt := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
+	mustWriteFile(t, filepath.Join(dir, "meta", "first_chapter_generation_readiness.json"), fmt.Sprintf(`{"ready":true,"generated_at":%q}`, generatedAt))
+	mustWriteFile(t, filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"), "ready")
+	mustWriteFile(t, filepath.Join(dir, "meta", "ch01_zero_init_plan.md"), "plan")
+	if _, err := st.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"AI提效项目组"},
+		Summary:           "AI提效项目组把溪流助手列入运营中心试点。",
+		VisibilityChapter: 1,
+	}}); err != nil {
+		t.Fatalf("AppendWorldEvents: %v", err)
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1}); err != nil {
+		t.Fatalf("SaveTick: %v", err)
+	}
+
+	evidence, err := verifyPipelineStage("zero-init", dir, pipelineFlags{}, &domain.PipelineState{})
+	if err != nil {
+		t.Fatalf("verify zero-init: %v", err)
+	}
+	if evidence.Message != "zero-init ready" {
+		t.Fatalf("message=%q, want zero-init ready", evidence.Message)
+	}
+	for _, want := range []string{"meta/first_chapter_generation_readiness.json", "meta/world_tick.json", "meta/world_events.jsonl"} {
+		if !slices.Contains(evidence.Artifacts, want) {
+			t.Fatalf("zero-init evidence missing %s: %+v", want, evidence.Artifacts)
+		}
 	}
 }
 

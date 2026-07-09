@@ -160,6 +160,20 @@ func TestParseBuildRAGFlagsAllowsDisablingChapterBackfill(t *testing.T) {
 	}
 }
 
+func TestEffectiveRAGEmbeddingBuildConcurrencySerializesLocalGGUF(t *testing.T) {
+	got := effectiveRAGEmbeddingBuildConcurrency(bootstrap.RAGEmbeddingConfig{
+		LocalGGUF:        "models/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf",
+		BuildConcurrency: 4,
+	})
+	if got != 1 {
+		t.Fatalf("local GGUF embedding should be serialized, got %d", got)
+	}
+	got = effectiveRAGEmbeddingBuildConcurrency(bootstrap.RAGEmbeddingConfig{BuildConcurrency: 4})
+	if got != 4 {
+		t.Fatalf("remote embedding concurrency should be preserved, got %d", got)
+	}
+}
+
 func TestEnsureDefaultRAGIndexSanitizesExistingReferenceChunks(t *testing.T) {
 	root := t.TempDir()
 	outputDir := filepath.Join(root, "output", "novel")
@@ -196,6 +210,62 @@ func TestEnsureDefaultRAGIndexSanitizesExistingReferenceChunks(t *testing.T) {
 	}
 	if len(state.Chunks) != 1 || state.Chunks[0].ID != "good" {
 		t.Fatalf("expected only project chunk to remain, got %+v", state.Chunks)
+	}
+}
+
+func TestEnsureDefaultRAGIndexSanitizesExistingVectorStore(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "output", "novel")
+	st := store.NewStore(outputDir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	mustWriteRAGTestFile(t, filepath.Join(outputDir, "characters.json"), `[{"name":"许闻溪"}]`)
+	goodChunk := rag.NormalizeChunk(domain.RAGChunk{
+		ID:         "good",
+		SourcePath: "summaries/01.json",
+		SourceKind: "chapter_summary_facts",
+		Text:       "许闻溪在发布会后拒绝空白确认单。",
+	})
+	badChunk := rag.NormalizeChunk(domain.RAGChunk{
+		ID:         "bad",
+		SourcePath: "summaries/00.json",
+		SourceKind: "chapter_summary_facts",
+		Text:       "许闻溪追查算法审计证据链。",
+	})
+	if err := st.RAG.SaveIndexState(domain.RAGIndexState{
+		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
+		Chunks: []domain.RAGChunk{goodChunk, badChunk},
+	}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+	if err := st.RAG.SaveVectorStore(domain.RAGVectorStore{
+		Config: domain.RAGIndexConfig{VectorStore: "local_json"},
+		Points: []domain.RAGVectorPoint{
+			{ID: "good", Hash: goodChunk.Hash, Vector: []float32{0.1}, Chunk: goodChunk},
+			{ID: "bad", Hash: badChunk.Hash, Vector: []float32{0.2}, Chunk: badChunk},
+			{ID: "orphan", Hash: "not-in-index", Vector: []float32{0.3}, Chunk: domain.RAGChunk{ID: "orphan", Text: "旧索引孤点"}},
+		},
+	}); err != nil {
+		t.Fatalf("SaveVectorStore: %v", err)
+	}
+
+	if err := ensureDefaultRAGIndex(outputDir); err != nil {
+		t.Fatalf("ensureDefaultRAGIndex: %v", err)
+	}
+	state, err := st.RAG.LoadIndexState()
+	if err != nil {
+		t.Fatalf("LoadIndexState: %v", err)
+	}
+	if len(state.Chunks) != 1 || state.Chunks[0].ID != "good" {
+		t.Fatalf("expected only clean index chunk, got %+v", state.Chunks)
+	}
+	vectorStore, err := st.RAG.LoadVectorStore()
+	if err != nil {
+		t.Fatalf("LoadVectorStore: %v", err)
+	}
+	if vectorStore == nil || len(vectorStore.Points) != 1 || vectorStore.Points[0].ID != "good" {
+		t.Fatalf("expected only clean vector point, got %+v", vectorStore)
 	}
 }
 

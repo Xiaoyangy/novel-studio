@@ -26,6 +26,7 @@ type zeroInitFlags struct {
 	MaxChunk             int
 	MaxFiles             int
 	WithEmbeddings       bool
+	NoEmbeddings         bool
 	EmbeddingProvider    string
 	EmbeddingModel       string
 	EmbeddingBaseURL     string
@@ -114,7 +115,7 @@ type zeroInitRAGStats struct {
 // zeroReadinessSchemaVersion readiness 文件的 schema 版本。消费方（pipeline 写前检查、
 // 外部 agent）读到缺 schema_version 或 < 当前值的 readiness 一律视为 not ready——
 // 防止旧版生成器的 ready:true 被误信（清跑项目事故根因）。
-const zeroReadinessSchemaVersion = 2
+const zeroReadinessSchemaVersion = 3
 
 type zeroInitReadiness struct {
 	Ready            bool             `json:"ready"`
@@ -152,6 +153,7 @@ func parseZeroInitFlags(argv []string) (zeroInitFlags, []string, error) {
 	fs.IntVar(&f.MaxChunk, "max-chunk-runes", f.MaxChunk, "单个 RAG chunk 的最大字符数")
 	fs.IntVar(&f.MaxFiles, "max-files", f.MaxFiles, "最多索引文件数")
 	fs.BoolVar(&f.WithEmbeddings, "with-embeddings", false, "同时写入 embeddings/Qdrant；未指定时只在配置已启用 embedding 时执行")
+	fs.BoolVar(&f.NoEmbeddings, "no-embeddings", false, "只构建本地词法 RAG，不继承配置中的 embedding/Qdrant（测试或离线环境使用）")
 	fs.StringVar(&f.EmbeddingProvider, "embedding-provider", "", "embedding provider；为空时使用 rag.embedding.provider 或顶层 provider")
 	fs.StringVar(&f.EmbeddingModel, "embedding-model", "", "embedding 模型；为空时使用 rag.embedding.model 或 text-embedding-3-small")
 	fs.StringVar(&f.EmbeddingBaseURL, "embedding-base-url", "", "embedding OpenAI 兼容 base_url；为空时继承 provider.base_url")
@@ -228,7 +230,7 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 		return err
 	}
 	if !readiness.Ready {
-		return fmt.Errorf("零章资产已生成但未就绪：missing=%v issues=%v", readiness.Missing, readiness.Issues)
+		return fmt.Errorf("零章资产已生成但未就绪：missing=%v issues=%v warnings=%v", readiness.Missing, readiness.Issues, readiness.Warnings)
 	}
 	fmt.Fprintf(os.Stderr, "[zero-init] 已生成零章写前梳理：%s\n", filepath.Join(dir, "meta", "ch01_zero_init_plan.md"))
 	if ragStats.Enabled {
@@ -255,6 +257,9 @@ func loadZeroInitProject(st *store.Store, dir string) (zeroInitProject, error) {
 	missing := st.FoundationMissing()
 	if len(missing) > 0 {
 		return zeroInitProject{}, fmt.Errorf("零章初始化缺少基础设定：%s；请先用 --pipeline 让 architect/save_foundation 落盘 foundation", strings.Join(missing, ", "))
+	}
+	if ok, reason := architectReadinessState(dir); !ok {
+		return zeroInitProject{}, fmt.Errorf("零章初始化前必须先完成 Architect：%s", reason)
 	}
 	premise, err := st.Outline.LoadPremise()
 	if err != nil {
@@ -307,7 +312,7 @@ func loadZeroInitProject(st *store.Store, dir string) (zeroInitProject, error) {
 }
 
 func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool) error {
-	if project.BookWorld == nil || overwrite {
+	if project.BookWorld == nil {
 		world := zeroInitBookWorld(*project)
 		project.BookWorld = &world
 		if err := writeZeroJSON(filepath.Join(dir, "book_world.json"), world, overwrite); err != nil {
@@ -341,10 +346,11 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 	}
 
 	dynamics := zeroInitDynamics(*project)
-	if err := writeZeroJSON(filepath.Join(dir, "meta", "initial_character_dynamics.json"), dynamics, overwrite); err != nil {
+	refreshDynamics := overwrite || zeroShouldWriteArtifact(dir, false, "meta/initial_character_dynamics.json", "meta/initial_character_dynamics.md") || len(zeroCheckDynamicsCoverage(dir)) > 0
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "initial_character_dynamics.json"), dynamics, refreshDynamics); err != nil {
 		return err
 	}
-	if err := writeZeroText(filepath.Join(dir, "meta", "initial_character_dynamics.md"), renderZeroDynamics(dynamics), overwrite); err != nil {
+	if err := writeZeroText(filepath.Join(dir, "meta", "initial_character_dynamics.md"), renderZeroDynamics(dynamics), refreshDynamics); err != nil {
 		return err
 	}
 	resourceLedger := zeroInitResourceLedger(*project)
@@ -355,10 +361,10 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 		return err
 	}
 	relationship := zeroInitRelationshipState(*project, dynamics.Characters)
-	if err := writeZeroJSON(filepath.Join(dir, "relationship_state.initial.json"), relationship, overwrite); err != nil {
+	if err := writeZeroJSON(filepath.Join(dir, "relationship_state.initial.json"), relationship, overwrite || refreshDynamics); err != nil {
 		return err
 	}
-	if err := writeZeroText(filepath.Join(dir, "relationship_state.initial.md"), renderZeroGenericDoc("零章初始关系契约", relationship), overwrite); err != nil {
+	if err := writeZeroText(filepath.Join(dir, "relationship_state.initial.md"), renderZeroGenericDoc("零章初始关系契约", relationship), overwrite || refreshDynamics); err != nil {
 		return err
 	}
 	foreshadow := zeroInitForeshadow(*project)
@@ -378,7 +384,7 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 	if err := writeZeroText(filepath.Join(dir, "meta", "character_return_plan.md"), renderZeroGenericDoc("人物回归与续用规划", returnPlan), overwrite); err != nil {
 		return err
 	}
-	crowdPolicy := zeroInitCrowdPolicy()
+	crowdPolicy := zeroInitCrowdPolicy(*project)
 	if err := writeZeroJSON(filepath.Join(dir, "meta", "crowd_role_policy.json"), crowdPolicy, overwrite); err != nil {
 		return err
 	}
@@ -386,7 +392,7 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 		return err
 	}
 	storycraft := zeroInitStorycraftPlan(*project, dynamics)
-	refreshStorycraft := overwrite || zeroShouldWriteArtifact(dir, false, "meta/prewrite_storycraft_plan.json", "meta/prewrite_storycraft_plan.md") || !zeroExistingStorycraftReady(dir)
+	refreshStorycraft := overwrite || refreshDynamics || zeroShouldWriteArtifact(dir, false, "meta/prewrite_storycraft_plan.json", "meta/prewrite_storycraft_plan.md") || !zeroExistingStorycraftReady(dir)
 	if err := writeZeroJSON(filepath.Join(dir, "meta", "prewrite_storycraft_plan.json"), storycraft, refreshStorycraft); err != nil {
 		return err
 	}
@@ -402,7 +408,7 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 		return err
 	}
 	plan := zeroInitChapterPlan(*project, dynamics, crowdPolicy, storycraft, worldBackground)
-	refreshPlan := overwrite || zeroShouldWriteArtifact(dir, false, "drafts/01.zero_init.plan.json") || !zeroExistingPlanReady(dir)
+	refreshPlan := overwrite || refreshDynamics || zeroShouldWriteArtifact(dir, false, "drafts/01.zero_init.plan.json") || !zeroExistingPlanReady(dir)
 	if err := writeZeroJSON(filepath.Join(dir, "drafts", "01.zero_init.plan.json"), plan, refreshPlan); err != nil {
 		return err
 	}
@@ -460,7 +466,12 @@ func rebuildZeroInitRAG(opts cliOptions, dir string, flags zeroInitFlags) (zeroI
 		EmbeddingAPIKey:    flags.EmbeddingAPIKey,
 		EmbeddingAPIKeyEnv: flags.EmbeddingAPIKeyEnv,
 	})
-	if _, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, override); enabled {
+	if !flags.NoEmbeddings {
+		_, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, override)
+		if !enabled {
+			resetRAGTrace(dir)
+			return stats, nil
+		}
 		embeddingResult, vectorStore, err := buildRAGEmbeddings(context.Background(), cfg, override, result.State.Chunks)
 		if err != nil {
 			return zeroInitRAGStats{}, err
@@ -519,6 +530,10 @@ func zeroInitRAGSources(outputDir string) []string {
 }
 
 func zeroInitManifest(project zeroInitProject) map[string]any {
+	crowdRoleRule := "捧场/凑数角色默认不命名、不入关键人物台账、不承担关键解谜、救场或反杀；一旦携带新信息、做关键选择、建立债务或后续要回归，必须升级为关键角色并补齐动态字段。"
+	if zeroIsSecondAlgorithmProject(project) {
+		crowdRoleRule = "捧场/凑数角色默认不命名、不入关键人物台账、不承担关键判断、救场或替女主发声；一旦携带新信息、做关键选择、建立亏欠/承诺或后续要回归，必须升级为关键角色并补齐动态字段。"
+	}
 	return map[string]any{
 		"version":                        1,
 		"scope":                          "zero_chapter_prewrite",
@@ -542,11 +557,15 @@ func zeroInitManifest(project zeroInitProject) map[string]any {
 			"reason":                "第一章开写前只能召回本项目 foundation 和零章推演资产，旧正文、旧资源账、旧人物连续性、审稿、备份、实验稿或参考库都不能当成新推演事实。",
 		},
 		"review_refinement_required": true,
-		"crowd_role_rule":            "捧场/凑数角色默认不命名、不入关键人物台账、不承担关键解谜、救场或反杀；一旦携带新信息、做关键选择、建立债务或后续要回归，必须升级为关键角色并补齐动态字段。",
+		"crowd_role_rule":            crowdRoleRule,
 	}
 }
 
 func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationRestartPolicy {
+	legacyUse := "旧数据只用于抽取题材基调、世界候选、人物原型、爽点/雷点和写法经验；旧章节中发生过的事件、资源变化、人物经历、债务、死亡和关系进展默认不进入新 canon。"
+	if zeroIsSecondAlgorithmProject(project) {
+		legacyUse = "旧数据只用于抽取题材基调、人物原型、成长爽点/雷点和写法经验；旧章节中发生过的事件、资源变化、人物经历、关系进展、离职/调岗等状态默认不进入新 canon。"
+	}
 	return domain.SimulationRestartPolicy{
 		Version:              1,
 		Project:              project.Name,
@@ -555,7 +574,7 @@ func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationR
 		GenerationID:         project.GenerationID,
 		GeneratedAt:          project.GeneratedAt,
 		CanonicalStart:       "chapter-001-start",
-		LegacyUse:            "旧数据只用于抽取题材基调、世界候选、人物原型、爽点/雷点和写法经验；旧章节中发生过的事件、资源变化、人物经历、债务、死亡和关系进展默认不进入新 canon。",
+		LegacyUse:            legacyUse,
 		StoryStatePolicy:     "新正文事实从 world_foundation.story_start 开始，由 plan_chapter 的因果推演、draft_chapter 正文证据、check_consistency 审核和 commit_chapter 台账回填共同确认。",
 		CharacterStatePolicy: "每个角色的具体经历、资源、关系、位置和性格变化随本 generation_id 的章节推演重新生成；旧角色卡只提供背景种子，不能直接继承旧章节经历。",
 		ResourcePolicy:       "旧 resource_ledger/state_changes 只可作为风险清单参考；新资源必须在 initial_resource_ledger、resource_ledger 或章节 commit 中重新入账，pending 与已确认分开。",
@@ -588,14 +607,33 @@ func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationR
 
 func applyZeroInitSimulationRestartState(dir string, project *zeroInitProject) error {
 	st := store.NewStore(dir)
-	total := len(project.Outline)
-	if total <= 0 {
-		total = 0
-	}
-	if progress, err := st.Progress.Load(); err == nil && progress != nil && progress.TotalChapters > total {
-		total = progress.TotalChapters
+	total, layered := zeroInitRestartChapterPlan(st, project)
+	if !layered {
+		if progress, err := st.Progress.Load(); err == nil && progress != nil && progress.TotalChapters > total {
+			total = progress.TotalChapters
+		}
 	}
 	if err := st.Progress.ResetForSimulationRestart(project.Name, total, project.GenerationID); err != nil {
+		return err
+	}
+	if layered {
+		progress, err := st.Progress.Load()
+		if err != nil {
+			return err
+		}
+		if progress != nil {
+			progress.Layered = true
+			progress.CurrentVolume = 1
+			progress.CurrentArc = 1
+			if err := st.Progress.Save(progress); err != nil {
+				return err
+			}
+		}
+	}
+	if err := st.WorldSim.ResetActivityState(); err != nil {
+		return err
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
 		return err
 	}
 	state := map[string]any{
@@ -603,7 +641,8 @@ func applyZeroInitSimulationRestartState(dir string, project *zeroInitProject) e
 		"generation_id":    project.GenerationID,
 		"mode":             "simulation_restart_from_seed",
 		"applied_at":       time.Now().Format(time.RFC3339),
-		"progress_policy":  "已清空活动 completed_chapters/word_count/pending_rewrites/current_chapter；旧章节文件未删除，只能作为背景种子。",
+		"progress_policy":  "已清空活动 completed_chapters/word_count/pending_rewrites/current_chapter；total_chapters 以 Architect 分层大纲为准；旧章节文件未删除，只能作为背景种子。",
+		"worldsim_policy":  "已清空旧 generation 的 meta/world_events.jsonl 与 world_tick，并重置到 v0-a0；第 1 章写作前必须由 pipeline zero-init 重新 save_world_tick。",
 		"next_required":    "正式写作必须从第 1 章重新 plan_chapter -> draft_chapter -> check_consistency -> commit_chapter。",
 		"legacy_material":  []string{"chapters/", "drafts/", "summaries/", "旧 meta 台账"},
 		"canonical_source": []string{"meta/simulation_restart_policy.*", "meta/world_foundation.*", "meta/characters/*/dossier.*"},
@@ -614,10 +653,51 @@ func applyZeroInitSimulationRestartState(dir string, project *zeroInitProject) e
 	return writeZeroText(filepath.Join(dir, "meta", "simulation_restart_state.md"), renderZeroGenericDoc("推演重启状态", state), true)
 }
 
+func zeroInitRestartChapterPlan(st *store.Store, project *zeroInitProject) (int, bool) {
+	if st != nil {
+		if layered, err := st.Outline.LoadLayeredOutline(); err == nil {
+			if total := domain.TotalChapters(layered); total > 0 {
+				return total, true
+			}
+		}
+	}
+	if project != nil && len(project.Outline) > 0 {
+		return len(project.Outline), false
+	}
+	return 0, false
+}
+
 func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 	first := project.FirstChapter
+	second := zeroIsSecondAlgorithmProject(project)
 	cityName := zeroFirstNonEmpty(zeroKnownCityName(project), "开局城市")
 	openingName := zeroFirstNonEmpty(zeroFirstScene(first), "第一章主场景")
+	openingDescription := "第一章用于证明世界规则会真实施压的现场；章末必须记录地点状态变化。"
+	nearbyDescription := "开局现场周边可被正文触碰的现实生活节点，如便利店、物业、小超市、医院、车站或同楼层住户；只在剧情需要时命名细化。"
+	routeRisk := "除非角色已获得快速移动、附身或规则授权能力，否则移动时间应接近现实世界，不允许配角随叫随到。"
+	lifeRouteRisk := "路线状态会随章节推进改变；关闭、污染、被占用或新增规则都要回填 book_world/timeline。"
+	openingGoal := "在第一章通过可见规则、物件或空间边界迫使主角做选择。"
+	openingResources := []string{"现场压力", "规则反馈", "信息差"}
+	mapNotes := []string{
+		"第一章只展示会改变选择的规则和环境证据，不提前解释全书谜底。",
+		"地点/物件必须承担信息、压力或状态变化，不能只做氛围背景。",
+		"所有角色在正文引入后都要绑定当前位置、行动目标和可用交通；跨地点见面必须服从路线与耗时。",
+		"新地点、新势力、路线封锁、角色死亡/失踪/转移都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
+	}
+	if second {
+		openingDescription = "第一章用于证明AI提效和岗位变化会真实施压的现场；章末必须记录地点、材料、关系或状态变化。"
+		nearbyDescription = "开局现场周边可被正文触碰的现实生活节点，如培训课、社区商户、医院、地铁站、家中电话或下班路；只在剧情需要时命名细化。"
+		routeRisk = "除非角色有明确时间安排和交通路径，否则移动时间应接近现实世界，不允许配角随叫随到。"
+		lifeRouteRisk = "路线状态会随章节推进改变；会议延迟、培训名额、客户反馈、通勤或照护安排变化都要回填 book_world/timeline。"
+		openingGoal = "在第一章通过会议、材料、消息、客户反馈或空间边界迫使许闻溪做选择。"
+		openingResources = []string{"现场压力", "组织反馈", "信息差"}
+		mapNotes = []string{
+			"第一章只展示会改变选择的职场/生活证据，不提前解释完整行业背景。",
+			"地点、材料、消息和人群反应必须承担信息、压力或状态变化，不能只做氛围背景。",
+			"所有角色在正文引入后都要绑定当前位置、行动目标和可用时间；跨地点见面必须服从路线与耗时。",
+			"新地点、新势力、会议结果、岗位状态、关系降温/靠近、客户反馈或家庭照护变化都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
+		}
+	}
 	places := []domain.WorldPlace{
 		{
 			ID:          "city-core",
@@ -632,7 +712,7 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 			ID:          "opening-place",
 			Name:        openingName,
 			Kind:        "opening",
-			Description: "第一章用于证明世界规则会真实施压的现场；章末必须记录地点状态变化。",
+			Description: openingDescription,
 			Rules:       zeroWorldRuleTexts(project.WorldRules, 3),
 			Factions:    []string{"protagonist-side", "opening-pressure"},
 			Tags:        []string{"zero_init", "opening", "must_track_state_change"},
@@ -641,7 +721,7 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 			ID:          "nearby-life-node",
 			Name:        "第一章相邻生活节点",
 			Kind:        "support",
-			Description: "开局现场周边可被正文触碰的现实生活节点，如便利店、物业、小超市、医院、车站或同楼层住户；只在剧情需要时命名细化。",
+			Description: nearbyDescription,
 			Rules:       []string{"未在正文引入前只作为路线和生活支架，不提前变成既成设定。"},
 			Tags:        []string{"zero_init", "adjacent", "life_detail"},
 		},
@@ -651,13 +731,13 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 			From:        "city-core",
 			To:          "opening-place",
 			Description: "开局城市到第一章现场的现实路线；交通工具、步行、电梯、门禁和夜间限制必须按当前世界阶段计算耗时。",
-			Risk:        "除非角色已获得快速移动、附身或规则授权能力，否则移动时间应接近现实世界，不允许配角随叫随到。",
+			Risk:        routeRisk,
 		},
 		{
 			From:        "opening-place",
 			To:          "nearby-life-node",
 			Description: "第一章现场到相邻生活节点的短程路线，用于承载补给、求助、消息传递或配角迟到/缺席的时间成本。",
-			Risk:        "路线状态会随章节推进改变；关闭、污染、被占用或新增规则都要回填 book_world/timeline。",
+			Risk:        lifeRouteRisk,
 		},
 	}
 	factions := []domain.WorldFaction{{
@@ -666,27 +746,34 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 		Goal:      "在第一章建立可持续行动目标，并让读者看见其最低证据标准和行动边界。",
 		Resources: []string{"角色经验", "有限信息", "第一章现场证据"},
 		Tags:      []string{"zero_init"},
+		Clock: &domain.FactionClock{
+			Segments:    6,
+			Progress:    0,
+			Consequence: "主角方完成开局小弧目标，并把一次选择转化为后续可推进的行动线。",
+			Pace:        "每弧 1 段；重大选择或公开成果可 2 段",
+		},
 	}}
 	factions = append(factions, domain.WorldFaction{
 		ID:        "opening-pressure",
 		Name:      zeroOpeningPressureName(project),
-		Goal:      "在第一章通过可见规则、物件或空间边界迫使主角做选择。",
-		Resources: []string{"现场压力", "规则反馈", "信息差"},
+		Goal:      openingGoal,
+		Resources: openingResources,
 		Tags:      []string{"zero_init", "pressure"},
+		Clock: &domain.FactionClock{
+			Segments:    6,
+			Progress:    1,
+			Consequence: "开局压力完成一次阶段推进，并把后果转化为下一章必须处理的外部事件。",
+			Pace:        "每弧 1 段；主角退让或组织动作加速时 2 段",
+		},
 	})
 	return domain.BookWorld{
-		Version:  1,
-		Name:     project.Name,
-		Summary:  "由 premise、world_rules、characters 和第一章大纲自动生成的零章动态世界资产；需在 architect 或人工确认后继续细化城市地图、地点状态、路线耗时和势力变化。",
-		Places:   places,
-		Routes:   routes,
-		Factions: factions,
-		MapNotes: []string{
-			"第一章只展示会改变选择的规则和环境证据，不提前解释全书谜底。",
-			"地点/物件必须承担信息、压力或状态变化，不能只做氛围背景。",
-			"所有角色在正文引入后都要绑定当前位置、行动目标和可用交通；跨地点见面必须服从路线与耗时。",
-			"新地点、新势力、路线封锁、角色死亡/失踪/转移都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
-		},
+		Version:      1,
+		Name:         project.Name,
+		Summary:      "由 premise、world_rules、characters 和第一章大纲自动生成的零章动态世界资产；需在 architect 或人工确认后继续细化城市地图、地点状态、路线耗时和势力变化。",
+		Places:       places,
+		Routes:       routes,
+		Factions:     factions,
+		MapNotes:     mapNotes,
 		LastSyncedAt: project.GeneratedAt,
 	}
 }
@@ -713,6 +800,7 @@ func zeroKnownCityName(project zeroInitProject) string {
 
 func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	second := zeroIsSecondAlgorithmProject(project)
 	laws := make([]domain.WorldIronLaw, 0, len(project.WorldRules)+5)
 	for i, rule := range project.WorldRules {
 		name := zeroFirstNonEmpty(rule.Category, fmt.Sprintf("world-rule-%02d", i+1))
@@ -725,12 +813,20 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 			AppliesTo: []string{"all_characters", "all_locations"},
 		})
 	}
+	knowledgeBoundary := "没有通信、证据、目击者、账单、台账传回或明确能力时，主角不能知道配角经历。"
+	travelBoundary := "除非角色获得快速移动、附身、传送凭证或规则授权，不得瞬移、随叫随到或无成本赶场。"
+	resourceRule := "资产、欠条、能力、交通凭证、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。"
+	if second {
+		knowledgeBoundary = "没有通信、证据、目击者、会议记录、工单/消息传回或明确权限时，主角不能知道配角经历。"
+		travelBoundary = "除非角色有明确交通路径、时间安排或线上沟通渠道，不得瞬移、随叫随到或无成本赶场。"
+		resourceRule = "岗位权限、发言机会、客户反馈、培训名额、排班时间、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。"
+	}
 	laws = append(laws,
 		domain.WorldIronLaw{
 			ID:        "foundation-knowledge-boundary",
 			Name:      "主角信息边界",
 			Rule:      "正文主视角只能呈现主角看见、听见、接到通信或通过证据推断的信息；配角时间线不等于主角已知事实。",
-			Boundary:  "没有通信、证据、目击者、账单、台账传回或明确能力时，主角不能知道配角经历。",
+			Boundary:  knowledgeBoundary,
 			Evidence:  "zero-init policy",
 			AppliesTo: []string{"protagonist", "side_characters"},
 		},
@@ -738,7 +834,7 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 			ID:        "foundation-travel-time",
 			Name:      "现实交通耗时",
 			Rule:      "角色跨地点移动默认按 book_world 路线和现实城市耗时计算。",
-			Boundary:  "除非角色获得快速移动、附身、传送凭证或规则授权，不得瞬移、随叫随到或无成本赶场。",
+			Boundary:  travelBoundary,
 			Evidence:  "book_world.routes",
 			AppliesTo: []string{"all_characters"},
 		},
@@ -753,7 +849,7 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 		domain.WorldIronLaw{
 			ID:        "foundation-resource-ledger",
 			Name:      "资源入账",
-			Rule:      "资产、欠条、能力、交通凭证、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。",
+			Rule:      resourceRule,
 			Boundary:  "未入账资源不得解决冲突；pending 资源必须保留对价、风险或审核尾巴。",
 			Evidence:  "resource_ledger",
 			AppliesTo: []string{"resources", "transactions"},
@@ -770,12 +866,16 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 	var baselines []domain.LocationBaseline
 	if project.BookWorld != nil {
 		for _, place := range project.BookWorld.Places {
+			updatePolicy := "地点状态、规则封锁、死亡/失踪、资产确权或交通变化必须回填 book_world/timeline/character_stage。"
+			if second {
+				updatePolicy = "地点状态、会议结果、岗位入口、客户反馈、关系姿态、家庭照护或交通变化必须回填 book_world/timeline/character_stage。"
+			}
 			baselines = append(baselines, domain.LocationBaseline{
 				ID:            place.ID,
 				Name:          place.Name,
 				StatusAtStart: zeroFirstNonEmpty(place.Description, "故事开始前状态未细化，首次进入正文前需补足。"),
 				OpenQuestions: place.Rules,
-				UpdatePolicy:  "地点状态、规则封锁、死亡/失踪、资产确权或交通变化必须回填 book_world/timeline/character_stage。",
+				UpdatePolicy:  updatePolicy,
 			})
 		}
 	}
@@ -798,6 +898,10 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 			Source:           "zero-init",
 		},
 	}
+	knowledgePolicy := "主角视角不是世界全知视角；RAG 可召回世界后台和配角档案，但正文只能通过通信、证据、目击、账单或能力把信息传给主角。"
+	if second {
+		knowledgePolicy = "主角视角不是世界全知视角；RAG 可召回组织后台和配角档案，但正文只能通过通信、证据、目击、会议记录、工单、客户反馈或明确权限把信息传给主角。"
+	}
 	return domain.WorldFoundation{
 		Version: 1,
 		Project: project.Name,
@@ -808,21 +912,25 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 			Description:  zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title, "故事从第一章核心事件开始。"),
 		},
 		IronLaws:             laws,
-		RuleChangeConditions: zeroRuleChangeConditions(laws),
+		RuleChangeConditions: zeroRuleChangeConditions(project, laws),
 		PastTimeline:         past,
 		CityBaseline:         baselines,
-		KnowledgePolicy:      "主角视角不是世界全知视角；RAG 可召回世界后台和配角档案，但正文只能通过通信、证据、目击、账单或能力把信息传给主角。",
+		KnowledgePolicy:      knowledgePolicy,
 		GeneratedAt:          project.GeneratedAt,
 		Sources:              []string{"premise.md", "world_rules.json", "book_world.json", "characters.json", "outline.json"},
 	}
 }
 
-func zeroRuleChangeConditions(laws []domain.WorldIronLaw) []domain.RuleChangeCondition {
+func zeroRuleChangeConditions(project zeroInitProject, laws []domain.WorldIronLaw) []domain.RuleChangeCondition {
 	var out []domain.RuleChangeCondition
+	allowedBy := []string{"明确能力", "交易凭证", "账单/合同确认", "章节事件后果", "审阅通过后的状态回填"}
+	if zeroIsSecondAlgorithmProject(project) {
+		allowedBy = []string{"明确权限", "项目凭证", "会议记录或合同确认", "章节事件后果", "审阅通过后的状态回填"}
+	}
 	for _, law := range laws {
 		out = append(out, domain.RuleChangeCondition{
 			RuleID:        law.ID,
-			AllowedBy:     []string{"明确能力", "交易凭证", "账单/合同确认", "章节事件后果", "审阅通过后的状态回填"},
+			AllowedBy:     allowedBy,
 			ProofNeeded:   "正文可见触发 + 资源/关系/状态代价 + 对应 ledger 更新",
 			UpdateTargets: []string{"world_foundation(仅新增例外说明)", "book_world", "timeline", "state_changes", "resource_ledger", "character_dossiers", "side_character_journeys"},
 		})
@@ -833,6 +941,7 @@ func zeroRuleChangeConditions(laws []domain.WorldIronLaw) []domain.RuleChangeCon
 func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossier {
 	var out []domain.CharacterDossier
 	protagonist := zeroProtagonist(project.Characters)
+	second := zeroIsSecondAlgorithmProject(project)
 	for _, c := range project.Characters {
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
@@ -847,13 +956,25 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 		counterpart := zeroCounterpartForCharacter(project, c)
 		relationships := []domain.CharacterRelationNote{}
 		if counterpart != "" {
+			debtOrTrust := "未新增正文债务或信任"
+			if second {
+				debtOrTrust = "未新增正文亏欠、承诺或信任"
+			}
 			relationships = append(relationships, domain.CharacterRelationNote{
 				Other:              counterpart,
 				HowMet:             "零章根据角色卡/大纲推导，正式正文若建立新关系必须补相识场景。",
 				CurrentTie:         "试探/未结盟基线",
-				DebtOrTrust:        "未新增正文债务或信任",
+				DebtOrTrust:        debtOrTrust,
 				KnownToProtagonist: isProtagonist,
 			})
+		}
+		channels := []string{"同场对话", "电话/消息(若世界阶段允许)", "物件/账单/目击者传回"}
+		failureModes := []string{"无信号", "规则干扰", "角色被困", "交通耗时", "信息未传回"}
+		status := "存活/状态待正文确认"
+		if second {
+			channels = []string{"同场对话", "电话/消息(若世界阶段允许)", "会议记录/工单/客户反馈/目击者传回"}
+			failureModes = []string{"无信号", "话术过滤", "角色自保", "交通耗时", "信息未传回"}
+			status = "工作/生活状态待正文确认"
 		}
 		out = append(out, domain.CharacterDossier{
 			Version:   1,
@@ -903,9 +1024,9 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 			Relationships: relationships,
 			CommunicationBoundary: domain.CommunicationBoundary{
 				CanContactProtagonist: isProtagonist || project.FirstCast[name],
-				Channels:              []string{"同场对话", "电话/消息(若世界阶段允许)", "物件/账单/目击者传回"},
+				Channels:              channels,
 				Delay:                 "默认存在现实延迟；无通信或证据时主角不知道该角色线。",
-				FailureModes:          []string{"无信号", "规则干扰", "角色被困", "交通耗时", "信息未传回"},
+				FailureModes:          failureModes,
 				InfoAllowed:           "只能传递该角色知道且有渠道传出的信息。",
 			},
 			KnowledgeBoundary: "只知道角色卡、自己经历、通信中获得的信息；不知道主角内心、后台规则和其他配角未传回的时间线。",
@@ -913,7 +1034,7 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 			CurrentAtStoryStart: domain.CharacterStartState{
 				Time:                "第一章开场",
 				Location:            location,
-				Status:              "存活/状态待正文确认",
+				Status:              status,
 				CurrentAction:       "按自身开局目标行动或被自身场景压力困住。",
 				Pressure:            zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章开局压力"),
 				NextIndependentMove: zeroNextIndependentMove(c, firstMention, project),
@@ -1043,12 +1164,57 @@ func writeZeroWorldSimAssets(dir string, project zeroInitProject, overwrite bool
 	}
 
 	// 世界 tick 零点：让首次弧边界推演有游标基准。
-	if zeroShouldWriteArtifact(dir, overwrite, "meta/world_tick.json") {
-		if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
-			return err
-		}
+	if err := zeroEnsureWorldTickSeed(st, overwrite); err != nil {
+		return err
 	}
 	return nil
+}
+
+func zeroEnsureWorldTickSeed(st *store.Store, overwrite bool) error {
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil {
+		return err
+	}
+	events, err := st.WorldSim.LoadWorldEvents()
+	if err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		if tick != nil && strings.TrimSpace(tick.TickID) != "" && tick.TickID != "v0-a0" && tick.EventCount > 0 {
+			return nil
+		}
+		return st.WorldSim.SaveTick(zeroWorldTickFromEvents(events))
+	}
+	if tick != nil && strings.TrimSpace(tick.TickID) != "" && !overwrite {
+		return nil
+	}
+	if zeroShouldWriteArtifact(st.Dir(), overwrite, "meta/world_tick.json") {
+		return st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0})
+	}
+	return nil
+}
+
+func zeroWorldTickFromEvents(events []domain.WorldEvent) domain.WorldTick {
+	tickID := "v1-a1"
+	through := 0
+	for _, event := range events {
+		if strings.TrimSpace(event.TickID) != "" {
+			tickID = strings.TrimSpace(event.TickID)
+		}
+		if event.Chapter > through {
+			through = event.Chapter
+		}
+	}
+	tick := domain.WorldTick{
+		TickID:         tickID,
+		ThroughChapter: through,
+		EventCount:     len(events),
+	}
+	if _, err := fmt.Sscanf(tickID, "v%d-a%d", &tick.Volume, &tick.Arc); err != nil {
+		tick.Volume = 0
+		tick.Arc = 0
+	}
+	return tick
 }
 
 // writeZeroMethodologyArtifacts Task 056：把 world_background_plan 里的世界背景层

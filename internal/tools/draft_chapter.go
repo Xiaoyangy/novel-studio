@@ -99,6 +99,15 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 
 	switch a.Mode {
 	case "append":
+		existing, _ := t.store.Drafts.LoadDraft(a.Chapter)
+		combined := existing
+		if combined != "" && a.Content != "" {
+			combined += "\n\n"
+		}
+		combined += a.Content
+		if err := validateProjectContaminationFinal(t.store, "draft_chapter", combined); err != nil {
+			return nil, err
+		}
 		if err := t.store.Drafts.AppendDraft(a.Chapter, a.Content); err != nil {
 			return nil, fmt.Errorf("append draft: %w", err)
 		}
@@ -127,6 +136,9 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 			"next_step":          "草稿已成功保存。不要再次调用 draft_chapter 重写同一章；立即 read_chapter(source=draft) 回读草稿，再调用 check_consistency。若无硬伤，必须调用 commit_chapter 提交终稿。",
 		})
 	default: // write
+		if err := validateProjectContaminationFinal(t.store, "draft_chapter", a.Content); err != nil {
+			return nil, err
+		}
 		if err := t.store.Drafts.SaveDraft(a.Chapter, a.Content); err != nil {
 			return nil, fmt.Errorf("save draft: %w", err)
 		}

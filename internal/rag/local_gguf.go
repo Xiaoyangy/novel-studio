@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +70,7 @@ func EnsureLocalGGUFServer(ctx context.Context, cfg LocalGGUFConfig) error {
 		"--host", "127.0.0.1",
 		"--port", fmt.Sprint(cfg.Port),
 	)
+	detachQdrantCommand(cmd)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -104,7 +106,9 @@ func localGGUFHealthy(baseURL string) bool {
 // localGGUFEmbedder 包装 OpenAIEmbedder：输入补 <|endoftext|>，输出 L2 归一化。
 type localGGUFEmbedder struct {
 	inner *OpenAIEmbedder
+	cfg   LocalGGUFConfig
 	model string
+	mu    sync.Mutex
 }
 
 // NewLocalGGUFEmbedder 构建指向本地 llama-server 的 embedder。
@@ -121,7 +125,7 @@ func NewLocalGGUFEmbedder(cfg LocalGGUFConfig, model string) (Embedder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &localGGUFEmbedder{inner: inner, model: model}, nil
+	return &localGGUFEmbedder{inner: inner, cfg: cfg, model: model}, nil
 }
 
 func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -132,9 +136,32 @@ func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 	if !strings.HasSuffix(text, "<|endoftext|>") {
 		text += "<|endoftext|>"
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	vec, err := e.inner.Embed(ctx, text)
+	if err == nil {
+		l2Normalize(vec)
+		return vec, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	firstErr := err
+	if err := EnsureLocalGGUFServer(ctx, e.cfg); err != nil {
+		return nil, fmt.Errorf("local gguf embedding failed and restart failed: %w (original: %v)", err, firstErr)
+	}
+	inner, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
+		BaseURL: e.cfg.baseURL() + "/v1",
+		Model:   e.model,
+		Timeout: e.cfg.Timeout,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rebuild local gguf embedder: %w (original: %v)", err, firstErr)
+	}
+	e.inner = inner
+	vec, err = e.inner.Embed(ctx, text)
+	if err != nil {
+		return nil, fmt.Errorf("local gguf embedding failed after restart: %w (original: %v)", err, firstErr)
 	}
 	l2Normalize(vec)
 	return vec, nil

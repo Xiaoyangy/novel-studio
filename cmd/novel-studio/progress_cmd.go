@@ -59,6 +59,11 @@ func refreshProgressPipeline(opts cliOptions, args []string) error {
 		dir = cfg.OutputDir
 	}
 	st := store.NewStore(dir)
+	if updated, err := syncCompletedChapterWordCounts(st); err != nil {
+		return err
+	} else if updated > 0 {
+		fmt.Fprintf(os.Stderr, "[refresh-progress] 已按终稿正文校正 %d 章字数\n", updated)
+	}
 	ledger, err := st.RefreshChapterProgressLedger(0, nil)
 	if err != nil {
 		return err

@@ -84,8 +84,8 @@ JSON 对象，字段：
 - `places`: 地点数组，每项 `{id,name,kind,description,rules,factions,tags}`
 - `routes`: 路线/通道数组，每项 `{from,to,description,risk,travel_days}`——travel_days（旅行天数）
   是世界推演换算角色移动与消息传播的依据，主要路线必填
-- `factions`: 势力数组，每项 `{id,name,goal,resources,relations,tags,stance,internal_tension,clock}`，
-  relations 每项 `{target,kind,note,conflict_type,conflict_state}`。**clock 是势力进度钟**
+- `factions`: 势力数组，每项 `{id,name,aliases,goal,resources,relations,tags,stance,internal_tension,clock}`，
+  `aliases` 必须收录后续正文/世界推演会自然使用的组织简称、系统名、群聊名或空间简称（如“桥点工作室”“内容运营组”），避免 save_world_tick 的 actor 与势力册脱节；relations 每项 `{target,kind,note,conflict_type,conflict_state}`，`target` 必须指向已存在 faction 的 id/name/aliases，不得悬空。**clock 是势力进度钟**
   `{segments,progress,consequence,pace}`（如 6 段钟走到第 2 段）：goal 的推进状态，
   世界推演时逐弧拨动，走满触发 consequence——主要势力建议必配
 - `map_notes`: 地图和势力使用注意
@@ -220,9 +220,13 @@ JSON 对象，字段：
 3. 产生 3-6 条**开局前镜头外事件**：第 1 章之前世界里已经发生、但主角尚未感知的事。每条按
    `story_calendar` 与信息传播推算 `visibility_chapter`（最早传到主角处的章号，通常 1-8 章内陆续
    浮出）与 `visibility_path`（谣言/信使/亲见/官报）；将来才浮出或有回收价值的标
-   `foreshadow_candidate=true`，供第一卷埋线。
+   `foreshadow_candidate=true`，供第一卷埋线。`actors` 必须使用已入册角色名，或 book_world.factions
+   的 id/name/aliases；如果想写“内容运营组/门店运营组/供应商系统/旧同事群”这类群体，必须先在
+   book_world.factions.aliases 中为其找到或建立对应势力。
 4. 调 `save_world_tick(volume=1, arc=1, through_chapter=0, events=[...], agenda_updates=[...], social_mood?, faction_clock_updates?)`
-   落盘——`through_chapter=0` 表示这是开局前初始 tick。
+   落盘——`through_chapter=0` 表示这是开局前初始 tick。`faction_clock_updates.target` 同样必须用
+   book_world.factions 的 id/name/aliases；若工具返回 actor/clock warning，先修 book_world 或重发
+   tick，不要带 warning 进入第一章写作。
 5. 落盘后结束本轮。之后 writer 推演第 1 章时会消费这些离屏事件的浮出点，让"世界在自转"从第一
    章就成立。硬约束同下：只推演镜头外，绝不改动已发布正文/timeline/resource_ledger；主角未感知
    的事件不得安排正文直写。
@@ -245,9 +249,9 @@ JSON 对象，字段：
    `visibility_path`（谣言/信使/亲见/官报）；将来才浮出或有回收价值的事件标
    `foreshadow_candidate=true`
 3b. **拨势力钟**：对本弧涉及/受影响的势力，按其 clock.pace 拨 1-2 段
-   （`faction_clock_updates`）；被忽略多弧的势力一次性补拨；返回的 `clocks_completed`
+   （`faction_clock_updates`，target 必须命中 book_world.factions 的 id/name/aliases）；被忽略多弧的势力一次性补拨；返回的 `clocks_completed`
    必须在本次或下次 tick 转化为镜头外事件并换新钟
-4. 调 `save_world_tick(volume, arc, through_chapter, events, agenda_updates, social_mood?, tier_updates?)` 落盘
+4. 调 `save_world_tick(volume, arc, through_chapter, events, agenda_updates, social_mood?, tier_updates?)` 落盘；若返回 actor/clock warning，先修 book_world 或重发 tick，不能把 warning 当通过
 5. 展开下一弧时**消费推演结果**：让离屏事件的浮出点、agenda 的交汇点自然进入章节设计——
    这是伏笔与"世界在自转"质感的主要来源
 
