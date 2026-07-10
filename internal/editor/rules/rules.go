@@ -15,7 +15,7 @@ import (
 
 const (
 	FigurativeDensityLimit = 0.25
-	DialogueRatioLimit     = 0.30
+	DialogueRatioLimit     = 0.12
 )
 
 var aphorismPatterns = []struct {
@@ -33,7 +33,7 @@ var aphorismPatterns = []struct {
 var (
 	figurativeRe = regexp.MustCompile(`(像|好像|仿佛|宛如|如同|似|倒像)`)
 	quoteRe      = regexp.MustCompile(`[“「][^”」]{1,240}[”」]`)
-	waverRe      = regexp.MustCompile(`(手[^。！？!?；;\n]{0,12}(抖|发颤)|指尖[^。！？!?；;\n]{0,12}(麻|抖|发冷)|犹豫|迟疑|没把握|不确定|差点|想躲|不敢|害怕|怕|退了半步|声音[^。！？!?；;\n]{0,12}(抖|发紧))`)
+	waverRe      = regexp.MustCompile(`(?:犹豫|迟疑|没把握|不确定|差点|想躲|不敢|害怕|怕|改口|话到嘴边|没答|没有回答|没说完|说到一半|答非所问|先说了[^。！？!?；;\n]{0,12}又改成)`)
 	conflictRe   = regexp.MustCompile(`(质问|反问|逼问|对峙|拦住|证据|签字|审问|威胁|赔偿|交代|摊牌)`)
 	atmosphereRe = regexp.MustCompile(`(雨|雾|风|冷|潮|灰尘|霉味|灯|影|钟声|走廊|窗|门缝|古堡|墓园|月光)`)
 	hookRe       = regexp.MustCompile(`(下一秒|下一刻|下一章|第三响|谁|还没|没有结束|露出|钥匙|名单|照片|来信|遗书|信封|短信|血|契约|吗[？?]|[？！]{1,2})`)
@@ -42,7 +42,7 @@ var (
 	openingGoldRe    = regexp.MustCompile(`(命运|黑暗|自由|勇敢|恐惧|孤独|残缺|真相|世界|人心|从来|真正|原来|不是[^。！？!?；;\n]{0,20}而是|才会|终究|总会)`)
 	actionSensoryRe  = regexp.MustCompile(`(说|问|答|喊|推|拉|握|攥|摸|碰|退|走|站|坐|听|闻|嗅|疼|冷|热|雨|风|门|灯|血|气味|脚步|钟声|指尖|手套|杯|纸|钥匙)`)
 	purposeAnswerRe  = regexp.MustCompile(`我(?:从一开始|一开始|本来|原本|早就)[^。！？!?；;\n”」]{0,18}(?:为|为了|冲着|奔着)[^。！？!?；;\n”」]{0,20}(?:来|来的)|我就是[^。！？!?；;\n”」]{0,20}来的`)
-	hesitationRe     = regexp.MustCompile(`(停|顿|沉默|迟疑|犹豫|隔了[^。！？!?；;\n]{0,8}(拍|秒)|半晌|一会儿|张了张嘴|咽|吞|攥|摸|指尖|呼吸|低头|侧耳|先[^。！？!?；;\n]{0,12}(看|摸|握|攥|低头|侧耳))`)
+	hesitationRe     = regexp.MustCompile(`(?:沉默|迟疑|犹豫|改口|话到嘴边|没答|没有回答|答非所问|反问|只说了?半句|没说完|说到一半|隔了[^。！？!?；;\n]{0,8}(?:拍|秒)|半晌|一会儿)`)
 	endingQuestionRe = regexp.MustCompile(`[？?]\s*$`)
 	endingGoldRe     = regexp.MustCompile(`(?:命运|人生|世界|人心|救赎|自由|勇敢|孤独|残缺|意义|真正|所谓|原来|终究|从来|难道|谁又能|又有谁|还算|才是|最终的答案|真正的答案|最终的选择|真正的选择)[^。！？!?；;\n]{0,48}[？?]\s*$`)
 	endingSentenceRe = regexp.MustCompile(`[^。！？!?；;\n]+[。！？!?]?`)
@@ -103,7 +103,11 @@ func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMet
 func RoughnessScore(metrics domain.ChapterAIVoiceMetrics) float64 {
 	score := 1.0
 	score -= math.Max(0, metrics.FigurativeDensity-FigurativeDensityLimit) * 1.6
-	score += math.Min(metrics.DialogueRatio, 0.55) * 1.2
+	if metrics.DialogueRatio >= 0.08 && metrics.DialogueRatio <= 0.35 {
+		score += 0.10
+	} else if metrics.DialogueRatio > 0.45 {
+		score -= math.Min((metrics.DialogueRatio-0.45)*0.8, 0.20)
+	}
 	if metrics.ProtagonistWaver {
 		score += 0.18
 	} else {
@@ -368,8 +372,8 @@ func instantPurposeAnswerFlags(paragraphs []string) []domain.AIVoiceRedFlag {
 				Paragraph:   i + 1,
 				Sentence:    sentenceIndexContaining(p, quote),
 				Evidence:    truncateRunes(quote, 80),
-				Suggestion:  "主角回答来意不能秒答成宣言，先加一拍迟疑、改口或摸物件，再给不完整回答。",
-				Replacement: "她先停一下，摸到袖口里的物件，再说出半句目的。",
+				Suggestion:  "主角回答来意不能秒答成宣言；让他改口、反问、只答半句、答非所问或明确拒答，再由对方追问。不要用摸物件/停手动作充当通行证。",
+				Replacement: "她先答了另一件事。对方追问后，她才把真正目的说出半句。",
 			})
 		}
 	}
@@ -593,10 +597,9 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 	}
 	dialogueLimit := dialogueRatioLimitForMetrics(metrics)
 	if metrics.DialogueRatio < dialogueLimit {
-		if !(dialogueLimit <= 0.25 && metrics.DialogueRatio >= 0.20) &&
-			!dialogueRatioNearMiss(metrics.DialogueRatio, dialogueLimit) {
+		if !dialogueRatioNearMiss(metrics.DialogueRatio, dialogueLimit) {
 			severity := "warning"
-			if metrics.DialogueRatio < 0.15 {
+			if metrics.DialogueRatio < 0.04 {
 				severity = "error"
 			}
 			flags = append(flags, domain.AIVoiceRedFlag{
@@ -654,7 +657,7 @@ func dialogueRatioLimitForMetrics(metrics domain.ChapterAIVoiceMetrics) float64 
 
 func dialogueRatioLimitForSize(totalChars, sentenceCount, paragraphCount int) float64 {
 	if totalChars >= 3600 || sentenceCount >= 180 || paragraphCount >= 55 {
-		return 0.25
+		return 0.10
 	}
 	return DialogueRatioLimit
 }

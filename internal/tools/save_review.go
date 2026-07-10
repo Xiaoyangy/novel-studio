@@ -174,21 +174,34 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 	if err := t.writeUnifiedChapterReview(r, aiVoice); err != nil {
 		return nil, fmt.Errorf("save unified review: %w", err)
 	}
+	rewriteBriefPath := ""
+	if finalVerdict == "rewrite" || finalVerdict == "polish" {
+		var err error
+		rewriteBriefPath, err = refreshRewriteBriefFromReview(t.store, r, finalVerdict)
+		if err != nil {
+			return nil, fmt.Errorf("refresh rewrite brief: %w", err)
+		}
+	}
 
 	if finalVerdict == "rewrite" || finalVerdict == "polish" {
 		flow := domain.FlowRewriting
 		if finalVerdict == "polish" {
 			flow = domain.FlowPolishing
 		}
-		if err := t.store.Progress.SetPendingRewrites(affected, r.Summary); err != nil {
-			return nil, fmt.Errorf("set pending rewrites: %w", err)
-		}
-		if err := t.store.Progress.SetFlow(flow); err != nil {
-			return nil, fmt.Errorf("set flow %s: %w", flow, err)
+		if err := t.store.Progress.SetPendingRewritesAndFlow(affected, r.Summary, flow); err != nil {
+			return nil, fmt.Errorf("set pending rewrites and flow %s: %w", flow, err)
 		}
 	} else {
-		if err := t.store.Progress.SetFlow(domain.FlowWriting); err != nil {
-			return nil, fmt.Errorf("set flow writing: %w", err)
+		// A fresh accept may supersede an earlier false-positive rewrite verdict.
+		// Drain only the accepted chapter and preserve any other queued rewrites.
+		if finalVerdict == "accept" && r.Scope == "chapter" && progress != nil && slices.Contains(progress.PendingRewrites, r.Chapter) {
+			if err := t.store.Progress.CompleteRewrite(r.Chapter); err != nil {
+				return nil, fmt.Errorf("complete accepted rewrite %d: %w", r.Chapter, err)
+			}
+		} else if progress == nil || len(progress.PendingRewrites) == 0 {
+			if err := t.store.Progress.SetFlow(domain.FlowWriting); err != nil {
+				return nil, fmt.Errorf("set flow writing: %w", err)
+			}
 		}
 	}
 
@@ -201,7 +214,8 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		nextChapter = latest.NextChapter()
 	}
 
-	writingFeedbackEntries, writingFeedbackFeatures, err := t.store.WritingAssets.ApplyReviewFeedback(r, finalVerdict, escalationReason)
+	learningReview := reviewEntryForLearning(t.store, r)
+	writingFeedbackEntries, writingFeedbackFeatures, err := t.store.WritingAssets.ApplyReviewFeedback(learningReview, finalVerdict, escalationReason)
 	if err != nil {
 		return nil, fmt.Errorf("sync writing feedback: %w", err)
 	}
@@ -291,7 +305,7 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 	if _, err := t.store.Checkpoints.AppendArtifact(scope, "review", artifact); err != nil {
 		return nil, fmt.Errorf("checkpoint review: %w", err)
 	}
-	ragIndexed, ragErr := t.sedimentReviewRAG(ctx, r, finalVerdict, affected, escalationReason)
+	ragIndexed, ragErr := t.sedimentReviewRAG(ctx, learningReview, finalVerdict, affected, escalationReason)
 	projectMemoryRAGIndexed := false
 	var projectMemoryRAGErr error
 	if finalVerdict == "accept" && r.Scope == "chapter" {
@@ -319,6 +333,7 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		"writing_feedback":           writingFeedbackPath,
 		"writing_feedback_entries":   writingFeedbackEntries,
 		"writing_feedback_features":  writingFeedbackFeatures,
+		"rewrite_brief":              rewriteBriefPath,
 		"rag_indexed":                ragIndexed || projectMemoryRAGIndexed,
 		"rag_error":                  joinErrorStrings(ragErr, projectMemoryRAGErr),
 		"review_rag_indexed":         ragIndexed,
@@ -340,6 +355,36 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		result["review_round_note"] = fmt.Sprintf("本章已进入第 %d 轮审阅仍未通过：先对照 reviews/%02d.history.jsonl 确认本轮 issue 与前几轮是否同类；同类=返工无效，必须先 craft_recall(dialogue/methodology/scene_situation) 查人物刻画、情感叙事、对白摩擦、段落节奏或 AI 检测方法，召回弱/无料时先 web_research 查资料并沉淀到 meta/writing-techniques、web_reference_brief 或 review RAG，再决定 polish 局部修/带备注放行/升级用户；不同类=标准可能在漂移，收敛到最初契约", reviewRound, r.Chapter)
 	}
 	return json.Marshal(result)
+}
+
+func reviewEntryForLearning(st *store.Store, r domain.ReviewEntry) domain.ReviewEntry {
+	if st == nil {
+		return r
+	}
+	snapshot, err := st.UserRules.Load()
+	if err != nil || snapshot == nil || !domain.SystemCompanionVoiceRequested(snapshot.Preferences) {
+		return r
+	}
+	filtered := r
+	filtered.Issues = nil
+	for _, issue := range r.Issues {
+		text := strings.Join([]string{issue.Description, issue.Evidence, issue.Suggestion}, "\n")
+		if domain.SystemCompanionFeedbackContradicts(text) {
+			continue
+		}
+		filtered.Issues = append(filtered.Issues, issue)
+	}
+	filtered.Dimensions = nil
+	for _, dimension := range r.Dimensions {
+		if domain.SystemCompanionFeedbackContradicts(dimension.Comment) {
+			continue
+		}
+		filtered.Dimensions = append(filtered.Dimensions, dimension)
+	}
+	if domain.SystemCompanionFeedbackContradicts(filtered.Summary) {
+		filtered.Summary = ""
+	}
+	return filtered
 }
 
 func (t *SaveReviewTool) sedimentReviewRAG(ctx context.Context, r domain.ReviewEntry, finalVerdict string, affected []int, escalationReason string) (bool, error) {

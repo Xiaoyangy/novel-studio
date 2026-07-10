@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -72,31 +73,49 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 		args     draftArgs
 		score    domain.SamplingCandidate
 	}
-	candidates := make([]candidate, 0, candidateCount)
 	sampleCount := candidateCount
 	if isRewriteSamplingRequest(messages) {
 		sampleCount = 1
 	}
-	for i := 1; i <= sampleCount; i++ {
-		resp, err := m.Base.Generate(ctx, messages, tools, opts...)
-		if err != nil {
-			if i == 1 {
-				return nil, err
-			}
-			break
+	type sampleResult struct {
+		response *agentcore.LLMResponse
+		err      error
+	}
+	results := make([]sampleResult, sampleCount)
+	var wg sync.WaitGroup
+	for i := range sampleCount {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index].response, results[index].err = m.Base.Generate(ctx, messages, tools, opts...)
+		}(i)
+	}
+	wg.Wait()
+
+	// Preserve the old first-sample contract: if the primary sample is an error
+	// or a non-draft control response, return it instead of hiding it behind a
+	// successful speculative candidate.
+	if results[0].err != nil {
+		return nil, results[0].err
+	}
+	if _, _, ok := findDraftCall(results[0].response.Message); !ok {
+		return results[0].response, nil
+	}
+
+	candidates := make([]candidate, 0, sampleCount)
+	for i, result := range results {
+		if result.err != nil || result.response == nil {
+			continue
 		}
-		call, args, ok := findDraftCall(resp.Message)
+		call, args, ok := findDraftCall(result.response.Message)
 		if !ok {
-			if i == 1 {
-				return resp, nil
-			}
 			continue
 		}
 		candidates = append(candidates, candidate{
-			response: resp,
+			response: result.response,
 			call:     call,
 			args:     args,
-			score:    editrules.CandidateFromText(i, args.Chapter, args.Content),
+			score:    editrules.CandidateFromText(i+1, args.Chapter, args.Content),
 		})
 	}
 	if len(candidates) == 0 {

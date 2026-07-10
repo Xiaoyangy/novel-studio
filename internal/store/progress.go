@@ -399,6 +399,34 @@ func (s *ProgressStore) SetPendingRewrites(chapters []int, reason string) error 
 	})
 }
 
+// SetPendingRewritesAndFlow 原子更新返工队列与返工模式。用户或 Editor 可把
+// polish 升级为 rewrite，也可在复审后把 rewrite 降为 polish；校验失败时不留下半状态。
+func (s *ProgressStore) SetPendingRewritesAndFlow(chapters []int, reason string, flow domain.FlowState) error {
+	if flow != domain.FlowRewriting && flow != domain.FlowPolishing {
+		return fmt.Errorf("返工 flow 必须是 rewriting 或 polishing，实际=%s: %w", flow, errs.ErrToolArgs)
+	}
+	return s.io.WithWriteLock(func() error {
+		p, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if p == nil {
+			return nil
+		}
+		normalized, err := normalizePendingRewrites(chapters, p.CompletedChapters)
+		if err != nil {
+			return err
+		}
+		if err := domain.ValidateFlowTransition(p.Flow, flow); err != nil {
+			return err
+		}
+		p.PendingRewrites = normalized
+		p.RewriteReason = reason
+		p.Flow = flow
+		return s.saveUnlocked(p)
+	})
+}
+
 // ValidatePendingRewrites 校验章节列表是否可进入返工队列，不修改状态。
 func (s *ProgressStore) ValidatePendingRewrites(chapters []int) error {
 	s.io.mu.RLock()

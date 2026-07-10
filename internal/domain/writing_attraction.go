@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -63,6 +64,38 @@ func SystemCompanionVoiceRequested(text string) bool {
 	return false
 }
 
+// SystemCompanionFeedbackContradicts 判断审核建议是否把用户明确要求的陪伴型系统
+// 反向改成冷硬、静默或纯任务机器人。审核原件可保留，但这类建议不能进入后续 RAG。
+func SystemCompanionFeedbackContradicts(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || !strings.Contains(text, "系统") {
+		return false
+	}
+	for _, aligned := range []string{
+		"不能把系统写成冷硬", "不要把系统写成冷硬", "禁止系统保持静默",
+		"不能拒绝交流", "不得改成纯任务机器人", "不能改成纯任务机器人",
+	} {
+		if strings.Contains(text, aligned) {
+			return false
+		}
+	}
+	for _, contradiction := range []string{
+		"系统口吻偏暖", "系统调性偏软", "减少系统拟人", "弱化系统拟人",
+		"系统不予回应", "系统不回应", "系统保持静默", "系统界面保持静默",
+		"冷硬的规则重申", "强化系统冷硬", "强化‘系统’冷硬", "强化“系统”冷硬",
+		"系统提示语的语气，保持冷感", "系统提示语保持冷感", "去掉'^_^'", "去掉\"^_^\"",
+		"纯文本进度条式通知", "改用纯文本进度条",
+		"保持‘规则优先’口吻", "保持“规则优先”口吻", "避免系统代偿情绪",
+		"减少系统玩笑", "减少系统拟人化玩笑", "系统只用冷硬", "系统保持冷硬",
+		"增加措辞刻板或断联", "系统发送一条乱码或重复提示",
+	} {
+		if strings.Contains(text, contradiction) {
+			return true
+		}
+	}
+	return false
+}
+
 func CompleteTrendLanguagePlan(items []TrendLanguagePlan) bool {
 	if len(items) == 0 {
 		return false
@@ -92,6 +125,31 @@ func HasActiveTrendLanguagePlan(items []TrendLanguagePlan) bool {
 		return true
 	}
 	return false
+}
+
+// TrendLanguagePlanProblems catches semantic misuse that an exact item match
+// cannot see. In this project "呱，" is a network discourse opener followed by
+// a complete line, never an animal sound or a standalone vocal action.
+func TrendLanguagePlanProblems(items []TrendLanguagePlan) []string {
+	var problems []string
+	for i, item := range items {
+		value := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’")
+		if !strings.HasPrefix(value, "呱") {
+			continue
+		}
+		usage := strings.Join([]string{item.SceneFunction, item.CharacterCarrier, item.UsageBudget}, "\n")
+		badSound := strings.Contains(usage, "拟声") &&
+			!strings.Contains(usage, "不是拟声") && !strings.Contains(usage, "禁止拟声") &&
+			!strings.Contains(usage, "禁止写成拟声") && !strings.Contains(usage, "避免拟声") &&
+			!strings.Contains(usage, "不得写成拟声")
+		if badSound {
+			problems = append(problems, fmt.Sprintf("trend_language_plan[%d] 把‘呱，’解释成拟声；必须写成网络语气词起手并后接完整吐槽", i))
+		}
+		if !strings.Contains(usage, "完整") && !strings.Contains(usage, "后接") {
+			problems = append(problems, fmt.Sprintf("trend_language_plan[%d] 未明确‘呱，’后接完整台词", i))
+		}
+	}
+	return problems
 }
 
 func CompleteReaderEntertainmentPlan(plan ReaderEntertainmentPlan) bool {

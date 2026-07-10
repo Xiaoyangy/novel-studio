@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -43,6 +44,54 @@ type reviewFlags struct {
 	Start, End     int           // --from / --to 起止章号（1-based，闭区间）
 }
 
+const (
+	editorReviewCacheBranch          = "editor"
+	deepseekAIJudgeCacheBranch       = "deepseek"
+	editorReviewProtocolVersion      = "review-existing/editor/v2"
+	reviewExistingCacheDirectoryName = "cache"
+)
+
+// reviewExistingCachePolicy is the complete identity of one model request. The
+// cache key is the SHA-256 of this struct's canonical JSON representation.
+type reviewExistingCachePolicy struct {
+	Branch                     string `json:"branch"`
+	ReviewProtocolVersion      string `json:"review_protocol_version"`
+	Chapter                    int    `json:"chapter"`
+	BodySHA256                 string `json:"body_sha256"`
+	Provider                   string `json:"provider"`
+	Model                      string `json:"model"`
+	SystemPromptSHA256         string `json:"system_prompt_sha256"`
+	PremiseSHA256              string `json:"premise_sha256,omitempty"`
+	UserRulesSHA256            string `json:"user_rules_sha256,omitempty"`
+	ChapterReviewContextSHA256 string `json:"chapter_review_context_sha256,omitempty"`
+	AIVoiceContextSHA256       string `json:"ai_voice_context_sha256,omitempty"`
+	ReasoningEffort            string `json:"reasoning_effort,omitempty"`
+	UserPayloadKind            string `json:"user_payload_kind,omitempty"`
+}
+
+type editorReviewCacheArtifact struct {
+	Chapter     int                       `json:"chapter"`
+	GeneratedAt string                    `json:"generated_at"`
+	CacheKey    string                    `json:"cache_key"`
+	CachePolicy reviewExistingCachePolicy `json:"cache_policy"`
+	Markdown    string                    `json:"markdown"`
+}
+
+type editorReviewBranchResult struct {
+	Review        string
+	CacheArtifact *editorReviewCacheArtifact
+	CacheHit      bool
+	CacheLoadErr  error
+	Err           error
+}
+
+type deepseekAIJudgeBranchResult struct {
+	Artifact     *deepseekAIJudgeArtifact
+	CacheHit     bool
+	CacheLoadErr error
+	Err          error
+}
+
 func parseReviewFlags(argv []string) (reviewFlags, []string, error) {
 	fs := flag.NewFlagSet("review-existing", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -54,7 +103,7 @@ func parseReviewFlags(argv []string) (reviewFlags, []string, error) {
 	var f reviewFlags
 	f.Budget = 90 * time.Second
 	fs.StringVar(&f.ReviewExisting, "review-existing", "", "项目根目录（缺省当前目录）")
-	fs.DurationVar(&f.Budget, "budget", f.Budget, "每章 Editor 调用硬时间预算")
+	fs.DurationVar(&f.Budget, "budget", f.Budget, "每章并行审核总墙钟预算（Editor 与 Reviewer 共用截止时间）")
 	fs.IntVar(&f.Start, "from", 0, "起始章号（含），0 = 自动")
 	fs.IntVar(&f.End, "to", 0, "结束章号（含），0 = 自动")
 	if err := fs.Parse(argv); err != nil {
@@ -138,6 +187,12 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	// 读 premise 拼 context
 	premise, _ := st.Outline.LoadPremise()
+	userRulesContext := ""
+	if snapshot, loadErr := st.UserRules.Load(); loadErr == nil && snapshot != nil {
+		if raw, marshalErr := json.MarshalIndent(snapshot.Payload(), "", "  "); marshalErr == nil {
+			userRulesContext = string(raw)
+		}
+	}
 
 	// 找所有 chapters/
 	chaptersDir := filepath.Join(eng.Dir(), "chapters")
@@ -163,6 +218,7 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	// ForRole 对未显式配置的角色回退到默认模型，始终返回可用实例。
 	model := eng.Models().ForRole("editor")
+	editorProvider, editorName, _ := eng.Models().CurrentSelection("editor")
 	reviewerModel := eng.Models().ForRole("reviewer")
 	reviewerProvider, reviewerName, reviewerExplicit := eng.Models().CurrentSelection("reviewer")
 	reviewerSelection := deepseekAIJudgeModelSelection{
@@ -180,10 +236,10 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			failureCount++
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 评审中（预算 %s）...\n", chNum, flags.Budget)
-		bodyHash := reviewreport.BodySHA256(string(body))
+		frozenBody := string(append([]byte(nil), body...))
+		bodyHash := reviewreport.BodySHA256(frozenBody)
 		history, _ := st.AIVoice.LoadAllChapterMetrics()
-		analysis := editrules.AnalyzeChapter(chNum, string(body), history)
+		analysis := editrules.AnalyzeChapter(chNum, frozenBody, reviewHistoryExcludingChapter(history, chNum))
 		analysis.BodySHA256 = bodyHash
 		if err := st.AIVoice.SaveChapterMetrics(analysis.Metrics, false); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 指标写入失败：%v\n", chNum, err)
@@ -191,25 +247,77 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		if err := st.AIVoice.SaveRedFlags(analysis); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d redflags 写入失败：%v\n", chNum, err)
 		}
-		mechanical, err := saveMechanicalGateForExistingChapter(st, chNum, string(body))
+		mechanical, err := saveMechanicalGateForExistingChapter(st, chNum, frozenBody)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 机械门禁写入失败：%v\n", chNum, err)
 		}
-		review, err := callEditorOnChapter(model, premise, chNum, string(body), analysis, flags.Budget)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 评审失败：%v\n", chNum, err)
+		chapterReviewContext := buildEditorChapterReviewContext(st, chNum)
+		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor(%s/%s) + DeepSeek(%s/%s) 并行评审中（预算 %s）...\n",
+			chNum, editorProvider, editorName, reviewerProvider, reviewerName, flags.Budget)
+		editorBranch, deepseekBranch := runReviewExistingBranchesConcurrently(
+			func() editorReviewBranchResult {
+				return loadOrGenerateEditorReview(
+					eng.Dir(), model, editorProvider, editorName,
+					premise, userRulesContext, chapterReviewContext,
+					chNum, frozenBody, analysis, flags.Budget,
+				)
+			},
+			func() deepseekAIJudgeBranchResult {
+				return loadOrGenerateDeepSeekAIJudge(
+					eng.Dir(), reviewerModel, reviewerSelection,
+					chNum, frozenBody, flags.Budget,
+				)
+			},
+		)
+
+		if editorBranch.CacheLoadErr != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor 缓存无效，已回源模型：%v\n", chNum, editorBranch.CacheLoadErr)
+		}
+		if deepseekBranch.CacheLoadErr != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 缓存无效，已回源模型：%v\n", chNum, deepseekBranch.CacheLoadErr)
+		}
+
+		// Generate is concurrent, but every cache and review artifact write stays in
+		// this serial section. Persist a successful branch even if its peer failed,
+		// so a retry only calls the missing model.
+		var cacheSaveErrors []string
+		if editorBranch.Err == nil && !editorBranch.CacheHit {
+			if err := saveEditorReviewCache(eng.Dir(), editorBranch.CacheArtifact); err != nil {
+				cacheSaveErrors = append(cacheSaveErrors, "Editor: "+err.Error())
+			}
+		}
+		if deepseekBranch.Err == nil && !deepseekBranch.CacheHit {
+			if err := saveDeepSeekAIJudgeCache(eng.Dir(), deepseekBranch.Artifact); err != nil {
+				cacheSaveErrors = append(cacheSaveErrors, "DeepSeek: "+err.Error())
+			}
+		}
+		if editorBranch.CacheHit {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor cache hit（%s）\n", chNum, shortReviewCacheKey(editorBranch.CacheArtifact.CacheKey))
+		}
+		if deepseekBranch.CacheHit {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek cache hit（%s）\n", chNum, shortReviewCacheKey(deepseekBranch.Artifact.CacheKey))
+		}
+		if editorBranch.Err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor 评审失败：%v\n", chNum, editorBranch.Err)
+		}
+		if deepseekBranch.Err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定失败：%v\n", chNum, deepseekBranch.Err)
+		}
+		if editorBranch.Err != nil || deepseekBranch.Err != nil || len(cacheSaveErrors) > 0 {
+			if len(cacheSaveErrors) > 0 {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 模型缓存写入失败：%s\n", chNum, strings.Join(cacheSaveErrors, "；"))
+			}
 			failureCount++
 			continue
 		}
+
+		review := editorBranch.Review
 		entry := structuredReviewFromMarkdown(chNum, review)
 		entry.BodySHA256 = bodyHash
-		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定中（reviewer=%s/%s effort=max）...\n", chNum, reviewerProvider, reviewerName)
-		deepseekJudge, err := runDeepSeekAIJudge(reviewerModel, reviewerSelection, chNum, string(body), flags.Budget)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定失败：%v\n", chNum, err)
-			failureCount++
-			continue
+		if removed := sanitizeEditorReviewForProject(st, chNum, frozenBody, analysis, &entry); len(removed) > 0 {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 已移除 %d 条与正文机械事实或批准 plan 冲突的 Editor 建议：%s\n", chNum, len(removed), strings.Join(removed, "；"))
 		}
+		deepseekJudge := deepseekBranch.Artifact
 		sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
 		if err := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定写入失败：%v\n", chNum, err)
@@ -298,6 +406,226 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "[review-existing] 完成\n")
 	return nil
+}
+
+func reviewHistoryExcludingChapter(history []domain.ChapterAIVoiceMetrics, chapter int) []domain.ChapterAIVoiceMetrics {
+	if len(history) == 0 {
+		return nil
+	}
+	out := make([]domain.ChapterAIVoiceMetrics, 0, len(history))
+	for _, metrics := range history {
+		if metrics.Chapter != chapter {
+			out = append(out, metrics)
+		}
+	}
+	return out
+}
+
+func runReviewExistingBranchesConcurrently(
+	editor func() editorReviewBranchResult,
+	deepseek func() deepseekAIJudgeBranchResult,
+) (editorReviewBranchResult, deepseekAIJudgeBranchResult) {
+	var editorResult editorReviewBranchResult
+	var deepseekResult deepseekAIJudgeBranchResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		editorResult = editor()
+	}()
+	go func() {
+		defer wg.Done()
+		deepseekResult = deepseek()
+	}()
+	wg.Wait()
+	return editorResult, deepseekResult
+}
+
+func newEditorReviewCachePolicy(
+	provider, model, premise, userRules, chapterReviewContext string,
+	chapter int,
+	chapterBody, aiVoiceContext string,
+) reviewExistingCachePolicy {
+	return reviewExistingCachePolicy{
+		Branch:                     editorReviewCacheBranch,
+		ReviewProtocolVersion:      editorReviewProtocolVersion,
+		Chapter:                    chapter,
+		BodySHA256:                 reviewreport.BodySHA256(chapterBody),
+		Provider:                   provider,
+		Model:                      model,
+		SystemPromptSHA256:         reviewExistingSHA256(editorSystemPrompt),
+		PremiseSHA256:              reviewExistingSHA256(premise),
+		UserRulesSHA256:            reviewExistingSHA256(userRules),
+		ChapterReviewContextSHA256: reviewExistingSHA256(chapterReviewContext),
+		AIVoiceContextSHA256:       reviewExistingSHA256(aiVoiceContext),
+	}
+}
+
+func loadOrGenerateEditorReview(
+	projectDir string,
+	model agentcore.ChatModel,
+	provider, modelName, premise, userRules, chapterReviewContext string,
+	chapter int,
+	chapterBody string,
+	analysis domain.AIVoiceAnalysis,
+	budget time.Duration,
+) editorReviewBranchResult {
+	aiVoiceContext := editorAIVoiceReviewPayload(analysis, chapterBody)
+	policy := newEditorReviewCachePolicy(
+		provider, modelName, premise, userRules, chapterReviewContext,
+		chapter, chapterBody, aiVoiceContext,
+	)
+	cached, loadErr := loadEditorReviewCache(projectDir, policy)
+	if loadErr == nil && cached != nil {
+		return editorReviewBranchResult{
+			Review:        cached.Markdown,
+			CacheArtifact: cached,
+			CacheHit:      true,
+		}
+	}
+
+	review, err := callEditorOnChapter(
+		model, premise, userRules, chapterReviewContext,
+		chapter, chapterBody, analysis, budget,
+	)
+	if err != nil {
+		return editorReviewBranchResult{CacheLoadErr: loadErr, Err: err}
+	}
+	artifact := &editorReviewCacheArtifact{
+		Chapter:     chapter,
+		GeneratedAt: time.Now().Format(time.RFC3339),
+		CacheKey:    reviewExistingCacheKey(policy),
+		CachePolicy: policy,
+		Markdown:    review,
+	}
+	return editorReviewBranchResult{
+		Review:        review,
+		CacheArtifact: artifact,
+		CacheLoadErr:  loadErr,
+	}
+}
+
+func editorAIVoiceReviewPayload(analysis domain.AIVoiceAnalysis, chapterBody string) string {
+	stable := analysis
+	stable.GeneratedAt = ""
+	stable.Metrics.GeneratedAt = ""
+	stable.Metrics.AIVoiceScoreHistory = append([]domain.AIVoiceScorePoint(nil), analysis.Metrics.AIVoiceScoreHistory...)
+	for i := range stable.Metrics.AIVoiceScoreHistory {
+		stable.Metrics.AIVoiceScoreHistory[i].At = ""
+	}
+	payload := map[string]any{
+		"ai_voice_analysis":           stable,
+		"mechanical_prose_violations": rules.Lint(chapterBody),
+		"mechanical_prose_usage":      "逐条复核；abstract_system_reassurance、opaque_procedure_jargon、dialogue_action_lead_repetition 和 templated_dialogue_chain 命中时不得 accept。",
+	}
+	raw, _ := json.MarshalIndent(payload, "", "  ")
+	return string(raw)
+}
+
+func loadEditorReviewCache(projectDir string, expected reviewExistingCachePolicy) (*editorReviewCacheArtifact, error) {
+	key := reviewExistingCacheKey(expected)
+	path := reviewExistingCachePath(projectDir, editorReviewCacheBranch, key)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 Editor 缓存 %s: %w", path, err)
+	}
+	var artifact editorReviewCacheArtifact
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		return nil, fmt.Errorf("解析 Editor 缓存 %s: %w", path, err)
+	}
+	if err := validateEditorReviewCacheArtifact(&artifact, expected); err != nil {
+		return nil, fmt.Errorf("校验 Editor 缓存 %s: %w", path, err)
+	}
+	return &artifact, nil
+}
+
+func saveEditorReviewCache(projectDir string, artifact *editorReviewCacheArtifact) error {
+	if artifact == nil {
+		return fmt.Errorf("Editor 缓存 artifact 为空")
+	}
+	if err := validateEditorReviewCacheArtifact(artifact, artifact.CachePolicy); err != nil {
+		return err
+	}
+	path := reviewExistingCachePath(projectDir, editorReviewCacheBranch, artifact.CacheKey)
+	return writeReviewExistingCacheJSON(path, artifact)
+}
+
+func validateEditorReviewCacheArtifact(artifact *editorReviewCacheArtifact, expected reviewExistingCachePolicy) error {
+	if artifact == nil {
+		return fmt.Errorf("artifact 为空")
+	}
+	if expected.Branch != editorReviewCacheBranch {
+		return fmt.Errorf("branch=%q, want %q", expected.Branch, editorReviewCacheBranch)
+	}
+	if artifact.CachePolicy != expected {
+		return fmt.Errorf("cache policy mismatch")
+	}
+	expectedKey := reviewExistingCacheKey(expected)
+	if artifact.CacheKey != expectedKey {
+		return fmt.Errorf("cache_key=%q, want %q", artifact.CacheKey, expectedKey)
+	}
+	if artifact.Chapter != expected.Chapter {
+		return fmt.Errorf("chapter=%d, want %d", artifact.Chapter, expected.Chapter)
+	}
+	if strings.TrimSpace(artifact.GeneratedAt) == "" {
+		return fmt.Errorf("generated_at 为空")
+	}
+	if strings.TrimSpace(artifact.Markdown) == "" {
+		return fmt.Errorf("markdown 为空")
+	}
+	return nil
+}
+
+func reviewExistingCacheKey(policy reviewExistingCachePolicy) string {
+	raw, _ := json.Marshal(policy)
+	return reviewExistingSHA256(string(raw))
+}
+
+func reviewExistingSHA256(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum)
+}
+
+func reviewExistingCachePath(projectDir, branch, key string) string {
+	return filepath.Join(projectDir, "reviews", reviewExistingCacheDirectoryName, branch, key+".json")
+}
+
+func writeReviewExistingCacheJSON(path string, value any) error {
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".review-cache-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func shortReviewCacheKey(key string) string {
+	if len(key) <= 12 {
+		return key
+	}
+	return key[:12]
 }
 
 func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body string) (*reviewreport.MechanicalGatePayload, error) {
@@ -456,6 +784,200 @@ func structuredReviewFromMarkdown(chapter int, md string) domain.ReviewEntry {
 	return entry
 }
 
+func buildEditorChapterReviewContext(st *store.Store, chapter int) string {
+	if st == nil || chapter <= 0 {
+		return ""
+	}
+	plan, err := st.Drafts.LoadChapterPlan(chapter)
+	if err != nil || plan == nil {
+		return ""
+	}
+	payload := struct {
+		Chapter             int                              `json:"chapter"`
+		Title               string                           `json:"title,omitempty"`
+		Contract            domain.ChapterContract           `json:"contract,omitempty"`
+		WorldSimulationID   string                           `json:"world_simulation_id,omitempty"`
+		ProtagonistDecision string                           `json:"protagonist_decision,omitempty"`
+		ReviewChecks        []string                         `json:"review_checks,omitempty"`
+		TrendLanguage       []domain.TrendLanguagePlan       `json:"trend_language_plan,omitempty"`
+		Entertainment       domain.ReaderEntertainmentPlan   `json:"reader_entertainment_plan,omitempty"`
+		EndingContract      domain.EndingConsequenceContract `json:"ending_consequence_contract,omitempty"`
+	}{
+		Chapter:             plan.Chapter,
+		Title:               plan.Title,
+		Contract:            plan.Contract,
+		WorldSimulationID:   plan.CausalSimulation.WorldSimulationID,
+		ProtagonistDecision: plan.CausalSimulation.ProtagonistDecision,
+		ReviewChecks:        plan.CausalSimulation.AntiAIPlan.ReviewChecks,
+		TrendLanguage:       plan.CausalSimulation.TrendLanguage,
+		Entertainment:       plan.CausalSimulation.EntertainmentPlan,
+		EndingContract:      plan.CausalSimulation.EndingContract,
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, analysis domain.AIVoiceAnalysis, entry *domain.ReviewEntry) []string {
+	if entry == nil {
+		return nil
+	}
+	var plan *domain.ChapterPlan
+	if st != nil {
+		plan, _ = st.Drafts.LoadChapterPlan(chapter)
+	}
+	violations := rules.Lint(body)
+	hasViolation := func(rule string) bool {
+		for _, violation := range violations {
+			if violation.Rule == rule {
+				return true
+			}
+		}
+		return false
+	}
+
+	var removed []string
+	filtered := make([]domain.ConsistencyIssue, 0, len(entry.Issues))
+	for _, issue := range entry.Issues {
+		text := strings.Join([]string{issue.Description, issue.Evidence, issue.Suggestion}, "\n")
+		switch {
+		case analysis.Metrics.ProtagonistWaver && reviewClaimsMissingProtagonistWaver(text):
+			removed = append(removed, "主角迟疑已由动作证据命中")
+			continue
+		case reviewClaimsSystemMessageOverpacked(text) && !hasViolation("system_message_overpacked"):
+			removed = append(removed, "独立系统消息被错误拼接")
+			continue
+		case reviewRejectsApprovedTrendCarrier(text, body, plan):
+			removed = append(removed, "热梗承载人违背批准 plan")
+			continue
+		case reviewRejectsStandaloneChatEmoticon(text) && hasStandaloneSystemChatEmoticon(body):
+			removed = append(removed, "独立系统私聊颜文字被误判为正式条款")
+			continue
+		default:
+			filtered = append(filtered, issue)
+		}
+	}
+	entry.Issues = filtered
+	if analysis.Metrics.ProtagonistWaver {
+		if reviewClaimsMissingProtagonistWaver(entry.Summary) {
+			entry.Summary = fmt.Sprintf("第 %d 章合同与八维评分达到通过线；主角迟疑已有正文动作证据。", chapter)
+		}
+		for i := range entry.Dimensions {
+			if reviewClaimsMissingProtagonistWaver(entry.Dimensions[i].Comment) {
+				entry.Dimensions[i].Comment = "主角存在可识别的动作迟疑与风险复核，本维度按当前规则指标通过。"
+			}
+		}
+	}
+	return uniqueNonEmptyStrings(removed)
+}
+
+func reviewClaimsMissingProtagonistWaver(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	if strings.Contains(text, "protagonist_waver_missing") || strings.Contains(text, "主角动摇缺失") {
+		return true
+	}
+	mentionsWaver := strings.Contains(text, "真实迟疑") || strings.Contains(text, "认知层面的摇摆") || strings.Contains(text, "判断失误")
+	claimsMissing := strings.Contains(text, "缺少") || strings.Contains(text, "缺乏") || strings.Contains(text, "没有") || strings.Contains(text, "不足") || strings.Contains(text, "未出现")
+	return mentionsWaver && claimsMissing
+}
+
+func reviewClaimsSystemMessageOverpacked(text string) bool {
+	if !strings.Contains(text, "系统消息") {
+		return false
+	}
+	for _, marker := range []string{"一次塞入过多", "过多功能", "同时承担", "一条消息"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewRejectsApprovedTrendCarrier(text, body string, plan *domain.ChapterPlan) bool {
+	if plan == nil || !strings.Contains(text, "呱") {
+		return false
+	}
+	rejectsCarrier := false
+	for _, marker := range []string{"落地方位错误", "配角口中", "承载人错误", "换给主角", "削弱记忆点"} {
+		if strings.Contains(text, marker) {
+			rejectsCarrier = true
+			break
+		}
+	}
+	if !rejectsCarrier {
+		return false
+	}
+	for _, item := range plan.CausalSimulation.TrendLanguage {
+		if !strings.Contains(item.Item, "呱") || strings.TrimSpace(item.CharacterCarrier) == "" {
+			continue
+		}
+		for _, name := range []string{"赵航", "林澈", "沈知遥", "系统"} {
+			if strings.Contains(item.CharacterCarrier, name) && strings.Contains(text, name) &&
+				strings.Contains(body, name) && (strings.Contains(body, "“呱，") || strings.Contains(body, "\"呱，")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func reviewRejectsStandaloneChatEmoticon(text string) bool {
+	return strings.Contains(text, "颜文字") &&
+		(strings.Contains(text, "位置风险") || strings.Contains(text, "正式系统") || strings.Contains(text, "正式条款"))
+}
+
+func hasStandaloneSystemChatEmoticon(body string) bool {
+	for _, rawLine := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if !strings.HasPrefix(line, "【") || !strings.HasSuffix(line, "】") {
+			continue
+		}
+		hasEmoticon := false
+		for _, marker := range []string{"^_^", "^-^", ":)", "：）", "(￣", "(＾"} {
+			if strings.Contains(line, marker) {
+				hasEmoticon = true
+				break
+			}
+		}
+		if !hasEmoticon {
+			continue
+		}
+		formal := false
+		for _, marker := range []string{"任务", "额度", "时限", "核验", "规则", "限制", "剩余", "解锁"} {
+			if strings.Contains(line, marker) {
+				formal = true
+				break
+			}
+		}
+		if !formal {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func defaultReviewDimensions() []domain.DimensionScore {
 	dims := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
 	for _, name := range reviewDimensionNames {
@@ -511,7 +1033,14 @@ func reviewVerdictFromMarkdown(md string, dimensions []domain.DimensionScore) st
 				return "rewrite"
 			}
 		}
-		return "polish"
+		for _, dim := range dimensions {
+			if dim.Score < 80 {
+				return "polish"
+			}
+		}
+		// 原始报告偶尔会在八维全部通过时仍写“需要改写”。此时问题只作为
+		// 后续写作建议沉淀，不能把已通过章节拖入无意义返工。
+		return "accept"
 	}
 	return "accept"
 }
@@ -598,7 +1127,7 @@ func stripMarkdownCell(s string) string {
 
 // editorSystemPrompt 复用八维评审框架（与 assets/prompts/editor.md 同源，但去掉
 // 工具调用约束，直接要 markdown 输出——更适合 CLI 无 TTY 场景）。
-const editorSystemPrompt = `你是一位资深网文编辑，专门审稿"都市反转爽文 / 男频短篇 / 番茄爆款"。
+const editorSystemPrompt = `你是一位资深中文网文编辑，负责男频长篇连载的章级审核。具体题材、人物关系和风格承诺以用户消息里的项目规则为准。
 
 ## 你的任务
 阅读用户提交的章节正文，按下面八个维度逐项评审，每项打分 0-5（0 完美，5 严重问题）。
@@ -606,7 +1135,7 @@ const editorSystemPrompt = `你是一位资深网文编辑，专门审稿"都市
 
 ## 八个评审维度
 1. **设定一致性**：人物性格 / 已知事实 / 能力边界有没有与前文矛盾？
-2. **角色行为**：主角行为是否合乎人设？反派是否脸谱化过头？苏曼视角切得自然吗？
+2. **角色行为**：主角行为是否合乎人设？配角是否有自己的目标和理由？人物知识边界与视角是否自然？
 3. **节奏**：信息密度、情绪起伏、钩子位置是否到位？
 4. **叙事连贯**：与上一章衔接、视角切换、时间线是否清楚？
 5. **伏笔**：本章埋下的伏笔是否清晰？是否回扣了前文伏笔？
@@ -640,19 +1169,24 @@ const editorSystemPrompt = `你是一位资深网文编辑，专门审稿"都市
 ` + "```" + `
 
 ## 注意
+- 项目规则是最高优先级。不得把用户明确要求的系统人格、感情路线、轻松基调、热梗预算或题材方向当成缺点，也不得提出反向修改；只能优化它们的落地节奏、长度和人物声口。
+- 若项目规则要求系统会聊天、吐槽、撑腰并始终支持主角，禁止建议把系统改成冷硬、静默、断联或纯任务机器人。
+- 逐段朗读对白。角色轮流精准问答、句句完整、一次讲齐金额/时限/售后/责任，连续三段“某人做动作：台词”，或频繁用“答完/问完/说完后另一人才……”调度，均属于短剧腔和流程腔。系统必须回答主角刚问的具体问题；“钱没跑、陪你换条路、规矩不撤、先喘半口气”这类客服式空话直接判改写。
+- “补测、核验、用途说明、临时固定、采购凭证、测试记录”等术语出现时，普通读者必须当场看懂哪里会坏、谁会吃亏、下一步做什么。每次换地点还要能回答上一场余波、主角为什么现在去、抵达后的首个阻力；只写锁屏、下楼、到了某地属于因果断裂。
+- 热梗与颜文字是候选和使用上限，不是逐章门禁。正文没用不构成问题；用了才核对角色、语境和句法。“呱，……”若被选中，后面要接完整吐槽，不能写成“呱了一声”。生硬时要求删除，不得迁移到别处硬塞。
 - 不要复述章节内容，只指出问题。
 - 引用原文必须用「」包裹，标明位置（章节序号 / 段落大意）。
 - 不要寒暄、不要解释，直接进入评审。
 `
 
 // callEditorOnChapter 调用 Editor 模型出评审 markdown。
-func callEditorOnChapter(model agentcore.ChatModel, premise string, chNum int, chapterBody string, analysis domain.AIVoiceAnalysis, budget time.Duration) (string, error) {
+func callEditorOnChapter(model agentcore.ChatModel, premise, userRules, chapterReviewContext string, chNum int, chapterBody string, analysis domain.AIVoiceAnalysis, budget time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	redFlagJSON, _ := json.MarshalIndent(analysis, "", "  ")
-	userMsg := fmt.Sprintf("## 故事前提（供参考）\n%s\n\n## AI 腔 red flag JSON（必须读取）\n```json\n%s\n```\n\n## 本章正文（ch%02d）\n%s",
-		truncateForContext(premise, 2000), string(redFlagJSON), chNum, chapterBody)
+	redFlagJSON := editorAIVoiceReviewPayload(analysis, chapterBody)
+	userMsg := fmt.Sprintf("## 项目用户规则（最高优先级）\n```json\n%s\n```\n\n## 本章已批准写前 plan（合同事实，不得反向建议）\n```json\n%s\n```\n\n## 故事前提（供参考）\n%s\n\n## AI 腔 red flag JSON（必须读取）\n```json\n%s\n```\n\n## 本章正文（ch%02d）\n%s",
+		truncateForContext(userRules, 6000), truncateForContext(chapterReviewContext, 8000), truncateForContext(premise, 2000), redFlagJSON, chNum, chapterBody)
 
 	resp, err := model.Generate(ctx,
 		[]agentcore.Message{

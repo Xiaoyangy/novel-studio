@@ -20,7 +20,6 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/chenhongyang/novel-studio/internal/userrules"
-	writerprompts "github.com/chenhongyang/novel-studio/internal/writer/prompts"
 	writersampler "github.com/chenhongyang/novel-studio/internal/writer/sampler"
 	"github.com/voocel/agentcore"
 	corecontext "github.com/voocel/agentcore/context"
@@ -35,11 +34,22 @@ func agentToRole(name string) string {
 	if strings.HasPrefix(name, "architect_") {
 		return "architect"
 	}
-	if name == "drafter" {
+	if name == "drafter" || name == "draft_finalizer" || name == "world_simulator" {
 		// 渲染阶段与推演阶段共用 writer 角色的模型/推理强度配置。
 		return "writer"
 	}
 	return name
+}
+
+func worldSimulatorShouldStopAfterToolResult(toolName string, result json.RawMessage) bool {
+	if toolName != "simulate_chapter_world" {
+		return false
+	}
+	var r struct {
+		Simulated bool `json:"simulated"`
+	}
+	_ = json.Unmarshal(result, &r)
+	return r.Simulated
 }
 
 // plannerShouldStopAfterToolResult 推演阶段收敛信号：章节计划落盘（plan_chapter
@@ -88,7 +98,20 @@ func writingContextProfileFor(agentTag string) writingContextProfile {
 		toolKeepRecent:        8,
 		storeKeepRecentTokens: 32000,
 	}
-	if agentTag == "drafter" {
+	switch agentTag {
+	case "writer":
+		profile.keepRecentTokens = 16000
+		profile.toolKeepRecent = 3
+		profile.storeKeepRecentTokens = 16000
+		profile.storeSummaryTokenBudget = 5000
+		profile.lightTrim = corecontext.LightTrimConfig{KeepRecent: 3, TextThreshold: 3200, PreserveHead: 1000, PreserveTail: 700}
+	case "world_simulator":
+		profile.keepRecentTokens = 8000
+		profile.toolKeepRecent = 2
+		profile.storeKeepRecentTokens = 8000
+		profile.storeSummaryTokenBudget = 3000
+		profile.lightTrim = corecontext.LightTrimConfig{KeepRecent: 2, TextThreshold: 2200, PreserveHead: 700, PreserveTail: 500}
+	case "drafter":
 		profile.keepRecentTokens = 12000
 		profile.toolKeepRecent = 2
 		profile.storeKeepRecentTokens = 12000
@@ -104,11 +127,26 @@ func writingContextProfileFor(agentTag string) writingContextProfile {
 	return profile
 }
 
+func cappedMaxTurns(configured, ceiling int) int {
+	if configured <= 0 || configured > ceiling {
+		return ceiling
+	}
+	return configured
+}
+
+const worldSimulatorSystemPrompt = `你是全角色世界推演器，只负责在章节 POV plan 之前推进单一世界。
+
+执行协议：
+1. 只调用一次 novel_context(chapter=N, profile="world_simulation")，读取 simulation_characters、角色状态、世界状态、当前章大纲、用户规则、rewrite_source 和 gaps。
+2. 只调用 simulate_chapter_world。按 gaps 分批补角色，每批最多8名；同名角色不要重复提交。
+3. 每个实名角色都基于自己的目标、压力、资源、关系和知识边界列出至少两个可选项，作出决定，写明理由、行动、现实耗时、完成度、即时结果、后续状态和至少一个 butterfly_effect。
+4. 复杂经营、装修、审批、施工、招商等按现实时间跨章推进。角色看不到的信息不得提前写进其知识边界。
+5. 返工章逐条提交 rewrite_fact_coverage，保留终稿事实链；最后补完整 protagonist_projection 并 finalize=true。
+6. 工具返回 simulated=true 后立即停止。不得生成或尝试 plan_structure、plan_details、正文、审阅，也不输出总结。`
+
 // subagentMaxRetries 给所有 SubAgentConfig 与 Coordinator 统一的 LLM retry 上限。
-// 退避策略：指数退避（受 maxDelay 上限约束），优先服从 server Retry-After。
-// 配合 ToolsAreIdempotent=true 让 stream-idle / 503 / 短暂网络抖动这类 retryable
-// 错误能在 subagent 层就近重试，而不是把整个 subagent 抛回 coordinator 重派发。
-// 项目铁律一保证写类工具走 checkpoint+digest 幂等，重试是安全的。
+// 退避策略优先服从 server Retry-After。写工具图统一声明为非幂等，因此重试只会
+// 发生在尚未产生工具副作用的调用边界，不会在落盘后重放整个 turn。
 const subagentMaxRetries = 7
 
 // UsageRecorder 是 BuildCoordinator 可选的用量回调；签名与 OnMessage 一致，
@@ -239,6 +277,13 @@ func BuildCoordinator(
 		tools.NewPlanStructureTool(store),
 		tools.NewPlanDetailsTool(store),
 	}
+	// Dedicated world-simulation repair agent. The model repeatedly ignored a
+	// textual "do not call plan_details" instruction, so this role receives a
+	// capability-level tool set that makes the invalid transition impossible.
+	worldSimulatorTools := []agentcore.Tool{
+		contextTool,
+		tools.NewSimulateChapterWorldTool(store),
+	}
 	drafterTools := []agentcore.Tool{
 		contextTool,
 		readChapter,
@@ -247,6 +292,13 @@ func BuildCoordinator(
 		tools.NewDraftChapterTool(store),
 		tools.NewDraftChapterPartTool(store),
 		tools.NewMergeChapterPartsTool(store),
+		tools.NewEditChapterTool(store),
+		tools.NewCheckConsistencyTool(store),
+		commitChapter,
+	}
+	draftFinalizerTools := []agentcore.Tool{
+		contextTool,
+		readChapter,
 		tools.NewEditChapterTool(store),
 		tools.NewCheckConsistencyTool(store),
 		commitChapter,
@@ -323,7 +375,7 @@ func BuildCoordinator(
 		MaxTurns:           cfg.ResolveMaxTurns("architect", 15),
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      architectThinking,
-		ToolsAreIdempotent: true,
+		ToolsAreIdempotent: false,
 		OnMessage:          onMsg,
 		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
 			r := decodeSaveFoundationResult(toolName, result)
@@ -340,17 +392,13 @@ func BuildCoordinator(
 		MaxTurns:            cfg.ResolveMaxTurns("architect", 20),
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       architectThinking,
-		ToolsAreIdempotent:  true,
+		ToolsAreIdempotent:  false,
 		OnMessage:           onMsg,
 		StopAfterToolResult: architectLongShouldStopAfterToolResult,
 		StopGuardFactory:    architectStopGuardFactory,
 	}
 
-	writerPrompt := bundle.Prompts.Writer
-	if style, ok := bundle.Styles[cfg.Style]; ok {
-		writerPrompt += "\n\n" + style
-	}
-	writerPrompt += "\n\n" + writerprompts.AntiAIVoice()
+	plannerPrompt := bundle.Prompts.Planner
 
 	restore := &ctxpack.WriterRestorePack{}
 	restore.Refresh(store)
@@ -402,18 +450,35 @@ func BuildCoordinator(
 		Name:                "writer",
 		Description:         "章节推演师：把大纲/世界/角色推演成完整的写前计划并落盘",
 		Model:               writerModel,
-		SystemPrompt:        writerPrompt,
+		SystemPrompt:        plannerPrompt,
 		Tools:               writerTools,
-		MaxTurns:            cfg.ResolveMaxTurns("writer", 40),
+		MaxTurns:            cappedMaxTurns(cfg.ResolveMaxTurns("writer", 30), 30),
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
-		ToolsAreIdempotent:  true,
+		ToolsAreIdempotent:  false,
 		StopAfterToolResult: plannerShouldStopAfterToolResult,
 		OnMessage:           onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
 			return reminder.NewPlannerStopGuard(store)
 		},
 		ContextManagerFactory: writerContextFactory("writer"),
+	}
+	worldSimulator := subagent.Config{
+		Name:                "world_simulator",
+		Description:         "全角色世界推演修复器：只补角色决定、蝴蝶效应、返工事实覆盖和主视角投影，不生成 POV plan",
+		Model:               writerModel,
+		SystemPrompt:        worldSimulatorSystemPrompt,
+		Tools:               worldSimulatorTools,
+		MaxTurns:            cappedMaxTurns(cfg.ResolveMaxTurns("writer", 16), 16),
+		MaxRetries:          subagentMaxRetries,
+		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
+		ToolsAreIdempotent:  false,
+		StopAfterToolResult: worldSimulatorShouldStopAfterToolResult,
+		OnMessage:           onMsg,
+		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
+			return reminder.NewWorldSimulatorStopGuard(store)
+		},
+		ContextManagerFactory: writerContextFactory("world_simulator"),
 	}
 
 	// 正文渲染阶段（drafter）：起干净会话，只读已定稿计划 + 精要写法上下文，
@@ -424,16 +489,34 @@ func BuildCoordinator(
 		Model:              writerModel,
 		SystemPrompt:       bundle.Prompts.Drafter,
 		Tools:              drafterTools,
-		MaxTurns:           cfg.ResolveMaxTurns("writer", 300),
+		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("writer", 80), 80),
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
-		ToolsAreIdempotent: true,
+		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
 			return reminder.NewWriterStopGuard(store)
 		},
 		ContextManagerFactory: writerContextFactory("drafter"),
+	}
+	draftFinalizer := subagent.Config{
+		Name:        "draft_finalizer",
+		Description: "草稿验收者：恢复已有且晚于当前 plan 的草稿，只做局部修复、检查和提交，不重新生成整章",
+		Model:       writerModel,
+		SystemPrompt: bundle.Prompts.Drafter + "\n\n你处于草稿恢复验收阶段。必须先读取 source=draft。" +
+			"工具集中没有 draft_chapter；只在发现明确硬伤时用 edit_chapter 做最小替换，然后 check_consistency 并 commit_chapter。",
+		Tools:              draftFinalizerTools,
+		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("writer", 30), 30),
+		MaxRetries:         subagentMaxRetries,
+		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
+		ToolsAreIdempotent: false,
+		StopAfterTools:     []string{"commit_chapter"},
+		OnMessage:          onMsg,
+		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
+			return reminder.NewWriterStopGuard(store)
+		},
+		ContextManagerFactory: writerContextFactory("draft_finalizer"),
 	}
 
 	editor := subagent.Config{
@@ -445,7 +528,7 @@ func BuildCoordinator(
 		MaxTurns:           cfg.ResolveMaxTurns("editor", 20),
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      resolvedRoleThinking(editorModel, cfg, "editor"),
-		ToolsAreIdempotent: true,
+		ToolsAreIdempotent: false,
 		OnMessage:          onMsg,
 		// 仅摘要类终态产物命中即停；save_review 不再硬停——StopAfterTool 退出会绕过
 		// StopGuard（agentcore loop.go），若 save_review 硬停，"被派生成弧摘要却先复核"
@@ -459,7 +542,7 @@ func BuildCoordinator(
 		},
 	}
 
-	subagentTool := subagent.New(architectShort, architectLong, writer, drafter, editor)
+	subagentTool := subagent.New(architectShort, architectLong, writer, worldSimulator, drafter, draftFinalizer, editor)
 
 	coordinatorEngine := newContextManager(contextManagerConfig{
 		Model:            coordinatorModel,
@@ -481,7 +564,7 @@ func BuildCoordinator(
 		agentcore.WithTools(subagentTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc), tools.NewReopenBookTool(store)),
 		agentcore.WithMaxTurns(100_000),
 		agentcore.WithOnMessage(coordinatorOnMessage),
-		agentcore.WithToolsAreIdempotent(true),
+		agentcore.WithToolsAreIdempotent(false),
 		// subagent 是流程主通道；真实错误应显式返回给 Host，而不是在单次 run 内永久禁用工具。
 		agentcore.WithMaxToolErrors(0),
 		agentcore.WithMaxRetries(subagentMaxRetries),
@@ -490,6 +573,7 @@ func BuildCoordinator(
 		agentcore.WithMiddlewares(flowBoundaryMiddleware(onFlowBoundary)),
 		// phase=complete 时硬拦截 subagent 派发，防止 Writer 死循环。
 		agentcore.WithToolGate(combineToolGates(
+			singleSubagentModeGate(),
 			completePhaseGate(store),
 			writerExpandedChapterGate(store),
 			writerZeroInitGate(store),
@@ -518,6 +602,8 @@ func BuildCoordinator(
 			if role == "writer" {
 				// drafter 与 writer 共用推理强度配置，联动切换。
 				subagentTool.SetThinkingLevel("drafter", level)
+				subagentTool.SetThinkingLevel("world_simulator", level)
+				subagentTool.SetThinkingLevel("draft_finalizer", level)
 			}
 		}
 	}
@@ -578,6 +664,33 @@ func combineToolGates(gates ...agentcore.ToolGate) agentcore.ToolGate {
 	}
 }
 
+// singleSubagentModeGate protects the project's single-writer state machine.
+// Parallel work is performed inside frozen-input components (draft sampling,
+// external review), never by generic subagents sharing Progress/Checkpoints.
+func singleSubagentModeGate() agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" {
+			return nil, nil
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(req.Call.Args, &raw); err != nil {
+			return nil, nil
+		}
+		for _, forbidden := range []string{"tasks", "chain", "team_name"} {
+			if _, exists := raw[forbidden]; exists {
+				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 只允许 subagent 的单任务 agent+task 模式；并行/链式/team 会破坏单世界状态的单写者顺序"}, nil
+			}
+		}
+		if value, exists := raw["background"]; exists {
+			var background bool
+			if json.Unmarshal(value, &background) == nil && background {
+				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 禁止后台 subagent 写共享故事状态；请使用同步 agent+task"}, nil
+			}
+		}
+		return nil, nil
+	}
+}
+
 // HARNESS-METADATA: name=writer_expanded_chapter_gate class=business_logic
 func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
@@ -588,7 +701,7 @@ func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 			Agent string `json:"agent"`
 			Task  string `json:"task"`
 		}
-		if err := json.Unmarshal(req.Call.Args, &args); err != nil || (args.Agent != "writer" && args.Agent != "drafter") {
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || !isWritingAgentName(args.Agent) {
 			return nil, nil
 		}
 		chapter := chapterFromTask(args.Task)
@@ -622,7 +735,7 @@ func writerZeroInitGate(st *store.Store) agentcore.ToolGate {
 			Agent string `json:"agent"`
 			Task  string `json:"task"`
 		}
-		if err := json.Unmarshal(req.Call.Args, &args); err != nil || (args.Agent != "writer" && args.Agent != "drafter") {
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || !isWritingAgentName(args.Agent) {
 			return nil, nil
 		}
 		chapter := chapterFromTask(args.Task)
@@ -652,6 +765,10 @@ func writerZeroInitGate(st *store.Store) agentcore.ToolGate {
 		slog.Info("第 1 章门禁通过：world_codex / 零章 readiness / 初始 world_tick 均就绪，放行", "module", "agents.gate")
 		return nil, nil
 	}
+}
+
+func isWritingAgentName(name string) bool {
+	return name == "writer" || name == "world_simulator" || name == "drafter" || name == "draft_finalizer"
 }
 
 // expandArcWorldTickGate 弧/卷边界硬卡点：world_tick 落后正文时拒绝 expand_arc/append_volume。

@@ -13,32 +13,34 @@ const blockingAIGCDimensionThreshold = 40.0
 const supportingDialogueRatioNearMissTolerance = 0.005
 
 var blockingMechanicalRules = map[string]bool{
-	"aigc_ratio":                   true,
-	"external_aigc_ratio":          true,
-	"micro_action_overuse":         true,
-	"dramatic_negation_overuse":    true,
-	"paragraph_start_repetition":   true,
-	"isolated_sentence_overuse":    true,
-	"object_response_overuse":      true,
-	"object_response_rhythm_flat":  true,
-	"dialogue_semicolon_formality": true,
-	"templated_dialogue_chain":     true,
-	"form_notice_semicolon_chain":  true,
-	"semicolon_overuse":            true,
-	"stiff_trade_dialogue":         true,
-	"structured_note_triplet":      true,
-	"card_tos_block":               true,
-	"empty_parallel_chant":         true,
-	"de_fa_adjective_repetition":   true,
-	"duplicate_dialogue_point":     true,
-	"impossible_body_geometry":     true,
-	"impossible_line_of_sight":     true,
-	"causal_evidence_order":        true,
-	"identity_effect_delayed":      true,
-	"building_floor_mismatch":      true,
-	"anomalous_phone_unverified":   true,
-	"form_image_mismatch":          true,
-	"card_core_rule_overblurred":   true,
+	"aigc_ratio":                      true,
+	"external_aigc_ratio":             true,
+	"micro_action_overuse":            true,
+	"dramatic_negation_overuse":       true,
+	"paragraph_start_repetition":      true,
+	"isolated_sentence_overuse":       true,
+	"object_response_overuse":         true,
+	"dialogue_semicolon_formality":    true,
+	"templated_dialogue_chain":        true,
+	"abstract_system_reassurance":     true,
+	"opaque_procedure_jargon":         true,
+	"dialogue_action_lead_repetition": true,
+	"form_notice_semicolon_chain":     true,
+	"semicolon_overuse":               true,
+	"stiff_trade_dialogue":            true,
+	"structured_note_triplet":         true,
+	"card_tos_block":                  true,
+	"empty_parallel_chant":            true,
+	"de_fa_adjective_repetition":      true,
+	"duplicate_dialogue_point":        true,
+	"impossible_body_geometry":        true,
+	"impossible_line_of_sight":        true,
+	"causal_evidence_order":           true,
+	"identity_effect_delayed":         true,
+	"building_floor_mismatch":         true,
+	"anomalous_phone_unverified":      true,
+	"form_image_mismatch":             true,
+	"card_core_rule_overblurred":      true,
 }
 
 var blockingAIVoiceWarningRules = map[string]bool{
@@ -178,8 +180,11 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 	if len(BlockingAIGCDimensionReasons(mechanical.AIGCReport)) > 0 {
 		return false
 	}
+	// Editor 已确认合同与八维均通过、整章 AIGC 采用值也低于阈值时，
+	// 风格统计 warning 只作为下一章观察项。只有 error 级机械事实仍能推翻 accept；
+	// 否则 isolated_sentence 等启发式指标会让同一章在不同建议间无限返工。
 	for _, violation := range mechanical.RuleViolations {
-		if IsBlockingMechanicalViolation(violation) {
+		if violation.Severity == rules.SeverityError {
 			return false
 		}
 	}

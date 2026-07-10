@@ -159,9 +159,11 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 	issues := unifiedIssues(in)
 	writeListOrDash(&b, issues)
 
-	if strings.TrimSpace(in.EditorMarkdown) != "" && len(issues) > 0 {
+	// 机械 warning 不应把已经被结构化裁决丢弃的 Editor 假问题重新带回报告。
+	// 只有仍属 open 的 Editor issue 才附原始摘录。
+	if strings.TrimSpace(in.EditorMarkdown) != "" && hasEditorOpenIssues(in.Editor) {
 		b.WriteString("\n## Editor 原始报告摘录\n\n")
-		b.WriteString(truncateRunes(stripEditorAuxiliarySections(strings.TrimSpace(in.EditorMarkdown), len(issues) == 0), 2200))
+		b.WriteString(truncateRunes(stripEditorAuxiliarySections(strings.TrimSpace(in.EditorMarkdown), false), 2200))
 		b.WriteString("\n")
 	}
 
@@ -261,7 +263,7 @@ func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoic
 		return fmt.Sprintf("%s 阻断重写；Writer 必须先按裸正文 AI 判定修复整章节奏、对白功能化、动作标签和作者声口后再复审。", externalAIJudgeName(external))
 	}
 	if AcceptedWarningOnlyGate(mechanical, aiVoice, editor) {
-		return "Editor 已通过，机械/AI voice/Editor 仅剩 warning；本章不能称为完全通过，交付前需清空主要问题，是否进入下一章由当前批处理策略决定。"
+		return "Editor 已通过，机械/AI voice 仅剩风格 warning；本章已接受，无需返工，可继续下一章。"
 	}
 	aiMechanicalBlocked := HasBlockingAIMechanicalGate(mechanical)
 	contractBlocked := HasBlockingContractMechanicalGate(mechanical)
@@ -305,9 +307,9 @@ func unifiedDiagnosis(in UnifiedMarkdownInput) string {
 	}
 	if AcceptedWarningOnlyGate(in.Mechanical, in.AIVoice, in.Editor) {
 		if in.Editor != nil && strings.TrimSpace(in.Editor.Summary) != "" {
-			return strings.TrimSpace(in.Editor.Summary) + "；仍有主要问题未清空，非完全通过。"
+			return strings.TrimSpace(in.Editor.Summary) + "；剩余 warning 为非阻断观察项。"
 		}
-		return "Editor 已通过，机械/AI voice/Editor 仅剩可选打磨项；仍有主要问题未清空，非完全通过。"
+		return "Editor 已通过，机械/AI voice 仅剩非阻断观察项。"
 	}
 	if HasBlockingAIMechanicalGate(in.Mechanical) {
 		return "AI味、段首/短句、动作/物件响应或高风险维度存在阻断项，当前章不能直接放行。"

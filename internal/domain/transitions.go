@@ -72,9 +72,9 @@ func CanTransitionFlow(from, to FlowState) bool {
 	case FlowReviewing:
 		return to == FlowWriting || to == FlowRewriting || to == FlowPolishing || to == FlowSteering
 	case FlowRewriting:
-		return to == FlowWriting || to == FlowSteering
+		return to == FlowWriting || to == FlowPolishing || to == FlowSteering
 	case FlowPolishing:
-		return to == FlowWriting || to == FlowSteering
+		return to == FlowWriting || to == FlowRewriting || to == FlowSteering
 	case FlowSteering:
 		return to == FlowWriting || to == FlowReviewing || to == FlowRewriting || to == FlowPolishing
 	default:

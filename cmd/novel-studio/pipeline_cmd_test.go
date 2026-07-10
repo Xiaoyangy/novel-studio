@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/assets"
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -284,6 +286,23 @@ func TestPipelineFinalizeStagedPlanKeepsRepairSteerOnFailure(t *testing.T) {
 	meta, _ = st.RunMeta.Load()
 	if meta == nil || meta.PendingSteer == "" {
 		t.Fatal("a repeated failed preflight must not clear the pending repair steer")
+	}
+}
+
+func TestPipelineWorldSimulationFailureQueuesSimulationOnlyRepair(t *testing.T) {
+	steer := pipelineWorldSimulationRepairSteer(1, "全角色世界推演不完整：missing character decision: 老丁")
+	for _, want := range []string{
+		"Pipeline world-simulation repair", "只允许调用 simulate_chapter_world", "严禁调用 plan_structure、plan_details", "simulated=true",
+	} {
+		if !strings.Contains(steer, want) {
+			t.Fatalf("world simulation repair steer missing %q: %s", want, steer)
+		}
+	}
+	if !pipelineFailureNeedsWorldSimulation("chapter_world_simulation invalid") {
+		t.Fatal("world simulation failures must use the dedicated repair route")
+	}
+	if pipelineFailureNeedsWorldSimulation("missing causal_simulation.voice_logic") {
+		t.Fatal("ordinary plan gaps must stay on staged plan repair")
 	}
 }
 
@@ -715,6 +734,67 @@ func TestPipelineStateDoneEvidenceCanBeCleared(t *testing.T) {
 	}
 	if got := state.Evidence["review"].Status; got != "stale" {
 		t.Fatalf("evidence status = %s, want stale", got)
+	}
+}
+
+func TestLoadPipelineStateInvalidatesExplicitPromptChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pipeline.json")
+	previous := &domain.PipelineState{
+		Stages:      []string{"architect", "zero-init"},
+		Completed:   []string{"architect"},
+		Prompt:      "旧创作指令",
+		InputDigest: "sha256:runtime-a",
+	}
+	if err := savePipelineState(path, previous); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadOrInitPipelineState(path, previous.Stages, "新创作指令", "sha256:runtime-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Completed) != 0 || state.Prompt != "新创作指令" {
+		t.Fatalf("prompt drift must reset completed stages: %+v", state)
+	}
+}
+
+func TestLoadPipelineStateInvalidatesRuntimePromptFingerprintChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pipeline.json")
+	previous := &domain.PipelineState{
+		Stages:      []string{"architect", "zero-init"},
+		Completed:   []string{"architect"},
+		Prompt:      "创作指令",
+		InputDigest: "sha256:runtime-a",
+	}
+	if err := savePipelineState(path, previous); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadOrInitPipelineState(path, previous.Stages, "", "sha256:runtime-b", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Completed) != 0 || state.Prompt != previous.Prompt || state.InputDigest != "sha256:runtime-b" {
+		t.Fatalf("runtime drift must reset while preserving prompt: %+v", state)
+	}
+}
+
+func TestPipelineRunInputDigestBindsBrainstormArtifact(t *testing.T) {
+	project := t.TempDir()
+	outputDir := filepath.Join(project, "output", "novel")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brainstormPath := filepath.Join(project, "brainstorm.md")
+	if err := os.WriteFile(brainstormPath, []byte("第一版脑爆"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := bootstrap.Config{OutputDir: outputDir, Provider: "openai", ModelName: "gpt-5.6-sol", Style: "default"}
+	first := pipelineRunInputDigest(cfg, assets.Load("default"))
+	if err := os.WriteFile(brainstormPath, []byte("第二版脑爆"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := pipelineRunInputDigest(cfg, assets.Load("default"))
+	if first == second {
+		t.Fatal("brainstorm drift must invalidate the pipeline input digest")
 	}
 }
 

@@ -1375,6 +1375,51 @@ func (contextTestEmbedder) Embed(_ context.Context, _ string) ([]float32, error)
 	return []float32{1, 0}, nil
 }
 
+type contextCountingEmbedder struct{ calls *int }
+
+func (e contextCountingEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	*e.calls++
+	return []float32{1, 0}, nil
+}
+
+func TestContextToolCachesIdenticalRAGRecallAndTrace(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "返乡开店", CoreEvent: "青山县门店装修"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 8); err != nil {
+		t.Fatal(err)
+	}
+	chunk := rag.NormalizeChunk(domain.RAGChunk{
+		SourcePath: "meta/project_progress.md", SourceKind: "ledger", Facet: "progress",
+		Summary: "青山县门店装修进入收尾。", Text: "返乡开店，招牌和货架同步推进。",
+	})
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{Chunks: []domain.RAGChunk{chunk}, UpdatedAt: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	tool := NewContextTool(s, References{}, "default").WithRAGEmbedder(contextCountingEmbedder{calls: &calls})
+	for range 2 {
+		if _, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("identical recall should embed once, got %d", calls)
+	}
+	traceBody, err := os.ReadFile(filepath.Join(dir, "meta", "rag", "retrieval_trace.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(traceBody)), "\n") + 1; lines != 1 {
+		t.Fatalf("cache hit must not append a duplicate trace, got %d lines", lines)
+	}
+}
+
 type contextTestSearcher struct {
 	hits []rag.VectorSearchHit
 }

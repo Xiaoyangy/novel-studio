@@ -25,6 +25,7 @@ type ChapterRewriteSource struct {
 	BodySHA256    string   `json:"body_sha256"`
 	WordCount     int      `json:"word_count"`
 	BriefPath     string   `json:"brief_path"`
+	BriefSHA256   string   `json:"brief_sha256"`
 	PreserveFacts []string `json:"preserve_facts,omitempty"`
 }
 

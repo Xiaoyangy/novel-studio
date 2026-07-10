@@ -8,6 +8,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	qualityrules "github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -61,6 +62,15 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 	result["content"] = content
 	result["word_count"] = wordCount
+	result["prose_rendering_check"] = map[string]any{
+		"violations": proseRenderingViolations(content),
+		"scene_transition_questions": []string{
+			"上一场留下的哪一个压力，迫使或吸引主角作出下一步选择？",
+			"正文是否写清主角为什么现在去下一地点，而不只是锁屏、下楼或到达？",
+			"抵达后的第一个阻力是否与这个选择有关？",
+		},
+		"usage": "violations 必须在 commit 前修复；换场三问逐场朗读，任一地点跳转答不出就补角色因果或删场景。",
+	}
 	wordContract := inspectChapterWordContract(t.store, content)
 	result["chapter_words_contract"] = wordContract
 	var hardGateViolations []string
@@ -124,12 +134,7 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		}
 		attractionEvidence := inspectChapterAttractionEvidence(*plan, content)
 		result["reader_attraction_check"] = attractionEvidence
-		result["reader_attraction_check_usage"] = "逐项核对 opening_beat、humor_beat_targets、immediate_payoffs 是否已在页面形成事件与人物反应；trend_language_plan 要由指定角色自然说出，不能只出现相似词"
-		if attractionRequirementsForChapter(t.store, a.Chapter).Trend && !attractionEvidence.TrendPassed {
-			hardGateViolations = append(hardGateViolations, fmt.Sprintf(
-				"trend_language_plan: 正文未原样兑现任何已规划短梗（候选：%s）；须按 character_carrier 放进有上下文的人物对白/系统交流/群聊反应",
-				strings.Join(attractionEvidence.TrendItems, "、")))
-		}
+		result["reader_attraction_check_usage"] = "逐项核对 opening_beat、humor_beat_targets、immediate_payoffs 是否已在页面形成事件与人物反应；trend_language_plan 是可选素材和使用上限，不是逐章原句门禁。正文用了才核对角色、语境和句法，生硬时应删除"
 	}
 	if warnings, _ := t.store.Drafts.LoadChapterPlanConsistencyWarnings(a.Chapter); len(warnings) > 0 {
 		result["plan_consistency_warnings"] = warnings
@@ -147,6 +152,25 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 
 	return json.Marshal(result)
+}
+
+func proseRenderingViolations(content string) []qualityrules.Violation {
+	wanted := map[string]struct{}{
+		"abstract_system_reassurance":     {},
+		"opaque_procedure_jargon":         {},
+		"dialogue_action_lead_repetition": {},
+		"templated_dialogue_chain":        {},
+		"bureaucratic_register_overuse":   {},
+		"dialogue_aphorism_overuse":       {},
+		"system_message_overpacked":       {},
+	}
+	var out []qualityrules.Violation
+	for _, violation := range qualityrules.Lint(content) {
+		if _, ok := wanted[violation.Rule]; ok {
+			out = append(out, violation)
+		}
+	}
+	return out
 }
 
 // chapterPlanScopeCheck 返回本章计划的范围契约摘要 + 机器可查的越界疑点（flags）。

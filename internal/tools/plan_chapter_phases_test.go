@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -153,6 +154,55 @@ func TestIdentityGuardUsesExplicitProtagonistGenderAndRecentCast(t *testing.T) {
 		if _, ok := names[name]; !ok {
 			t.Fatalf("expected %s in project identity set: %+v", name, names)
 		}
+	}
+}
+
+func TestPlanIdentityAllowsRequestedCompanionSystemWithoutAddingItToCast(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Characters.Save([]domain.Character{{Name: "林澈", Role: "主角", Tier: "core"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Structured:  rules.Structured{Genre: "都市脑洞轻松搞笑爽文"},
+		Preferences: "系统会和男主交流解闷，不是一个纯下达任务的机器人，并且始终支持主角。",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"title": "第一章",
+		"causal_simulation": map[string]any{
+			"voice_logic": []any{
+				map[string]any{"character": "林澈", "surface_voice": "嘴上镇定"},
+				map[string]any{"character": "系统", "surface_voice": "短促接话"},
+			},
+		},
+	}
+	issues := ChapterPlanIdentityIssues(st, 1, payload)
+	if joined := strings.Join(issues, "\n"); strings.Contains(joined, `character="系统"`) {
+		t.Fatalf("requested companion system should be a valid speaking entity: %v", issues)
+	}
+	if _, ok := knownCharacterNameSet(st)["系统"]; ok {
+		t.Fatal("system must not be persisted as a human cast identity")
+	}
+}
+
+func TestPlanIdentityRejectsUnrequestedSystemEntity(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Characters.Save([]domain.Character{{Name: "林澈", Role: "主角", Tier: "core"}}); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"title": "第一章",
+		"causal_simulation": map[string]any{
+			"voice_logic": []any{
+				map[string]any{"character": "林澈", "surface_voice": "正常说话"},
+				map[string]any{"character": "系统", "surface_voice": "发任务"},
+			},
+		},
+	}
+	issues := ChapterPlanIdentityIssues(st, 1, payload)
+	if joined := strings.Join(issues, "\n"); !strings.Contains(joined, `character="系统"`) {
+		t.Fatalf("unrequested system entity must still be rejected: %v", issues)
 	}
 }
 

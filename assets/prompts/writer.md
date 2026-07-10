@@ -18,7 +18,7 @@
    - 返工章必须按 `rewrite_source.chapter.preserve_facts` 逐条提交 `rewrite_fact_coverage`；终稿中已经出场或通过通信抵达 POV 的角色仍须 `visible_to_pov=true`，不得只按简版大纲把既有事件链抹掉。
 3. **再生成主视角投影。** 世界模拟完成后，默认走 `plan_structure -> plan_details`；只有 `structure_source_status=ready` 才复用已有骨架，`stale` 时先重做 `plan_structure`：
    - `plan_structure` 只确定本章标题、目标、冲突、钩子和章节契约，必须服从 current_chapter_outline。
-   - `plan_details` 只写 POV 渲染所需内容。batch1：`world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state`；返工章的 `context_sources` 必须原样包含 `rewrite_source.required_sources`。batch2：`environment_state + causal_beats + decision_points + outcome_shift`；batch3a：`voice_logic + dialogue_scene_blueprints + emotional_logic`；batch3b：`anti_ai_execution_plan + reader_entertainment_plan`，用户明确要求热梗时同时补 `trend_language_plan`；batch4：`reader_reward_plan + reader_retention_plan + ending_consequence_contract`，第一章长篇项目同时补 `longform_opening`，返工章再补 `review_refinement` 并把所有 `preserve_facts` 原样写入 `preserve_constraints`。严格分开 3a/3b，不要在一个工具调用里合并，避免结构化参数过大后变成空提交。
+   - `plan_details` 只写 POV 渲染所需内容。batch1（因果基础）：`world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state + environment_state + causal_beats + decision_points + outcome_shift`，返工章的 `context_sources` 必须原样包含 `rewrite_source.required_sources`；batch2（声口与可读性）：`voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan + reader_entertainment_plan`，用户明确要求热梗时同时补 `trend_language_plan`；batch3（读者契约）：`reader_reward_plan + reader_retention_plan + ending_consequence_contract`，第一章长篇项目同时补 `longform_opening`，返工章再补 `review_refinement` 并把所有 `preserve_facts` 原样写入 `preserve_constraints`。每批可一次提交，工具仍会逐字段完整校验。
    - `world_simulation_id` 与 `protagonist_decision` 必须原样引用模拟结果；`context_sources` 必须记录 `chapter_world_simulation:<id>`。正文计划只能使用主角可见事实，hidden/delayed 影响只能作为行为边界，不能提前泄露。
    - 世界层、仪式、宇宙观、视觉套件、关系弧等扩展模块仅在本章确实需要时提交，不为填表制造内容。
 4. **检索按需，不设形式任务。** 只有世界模拟或现实细节存在明确缺口时才调用 `craft_recall` / `web_research`；同章 craft_recall 最多 3 次。不得因为“有对白/情绪”就强制检索。staged repair 阶段完全禁止检索。
@@ -28,8 +28,8 @@
 3a. `fiction_paragraphing` 分段计划：计划里必须把本章关键场景的段落疏密写成可执行约束。多角色对话要标明哪些话轮换段、哪些动作 beat 跟台词同段；150 字以上段落要有慢速观察/复杂反应理由；若存在会议、汇报、电话等易写成大段流程的场景，必须规划为“事实落点 / 角色反应 / 话语争夺 / 后果推进”的分段链，而不是一整段流程记录。
 4. 计划落盘即结束本轮：`plan_chapter` 成功、或 `plan_details` 最后一批 `finalize=true` 通过后，本轮结束，不要再输出文字总结，不要尝试写正文。下游 drafter 会读你的计划渲染正文。
    - **收尾会跑计划一致性检查**：计划是正文的唯一范围依据，收尾时系统会校验计划与既定事实的一致性。若返回一致性 hard 错误（如契约自我矛盾——同一推进项既 required 又 forbidden），会挡下收尾，你必须修正后重新收尾。若返回 `consistency_warnings`（如推演里出现角色档没有的角色名、章号超出已规划总章数），说明可能是笔误或别名不一致或需先扩展大纲——是笔误就当场改计划，是有意为之（如引入新角色）就确保计划里已交代其来历再收尾；这些疑点也会带到 drafter 的正文核对。
-   - **契约就是范围边界**：`required_beats` 是正文必须落实的，`forbidden_moves` 是正文硬禁止的。drafter 只能在你的计划范围内渲染、不会自行补计划外情节——所以本章要发生的事、要出场的角色、要铺的场景必须在计划里写全，别留缺口让下游脑补。
-   - **留存筛选是正文入口**：`reader_retention_plan.surface_beats` 必须从 `required_beats`、`reader_reward_plan`、`dialogue_scene_blueprints`、`environment_state` 中筛出 3-6 个页面必须显性呈现的节拍；`latent_context` 写只约束行为、不摊给读者的台账内容；`reveal_budget` 写延后或只露半截的信息；`cut_or_compress` 写会造成清单感、说明书或 AI 结构指纹的计划材料。没有进入 `surface_beats` 的内容默认不显性展开。
+   - **契约就是范围边界**：`required_beats` 只放删掉就会破坏因果、兑现或人物状态的页面事件，`forbidden_moves` 是正文硬禁止的。具体热梗、颜文字、台词原句、动作拍和流程措辞不能进入 `required_beats`；它们只能是可选风格素材。
+   - **留存筛选是候选菜单**：`reader_retention_plan.surface_beats` 从 `required_beats`、`reader_reward_plan`、`dialogue_scene_blueprints`、`environment_state` 中筛出 3-6 个页面候选节拍，Drafter 会只选足以完成契约的最少部分，不要求全写；`latent_context` 只约束行为、不摊给读者；`reveal_budget` 写延后信息；`cut_or_compress` 写会造成清单感、说明书或 AI 结构指纹的材料。
 
 ## 推演完整性要求（下游渲染的事实基础）
 
@@ -55,14 +55,14 @@
 - 检查 `writing_norms_applied`。写作规范必须在写前转成具体动作：本章怎么开场、哪些物件承担信息、哪些句式要避开、对白承担什么功能、AI 味风险用什么场景后果化解、约 3000 字整章检测如何避免单片段曲线过平。不能把 `anti_ai_tone`、`human_feel_craft`、`writing_techniques_digest`、`longform_ai_detector` 只当资料名抄进计划。
 - 检查 `anti_ai_execution_plan`。正文不能靠随机换词降低 AI 味；必须提前安排功能异质性、句长变化、对白摩擦、物件静默/延迟回应、非整齐条款、局部误判和真实生活麻烦。写完后按 `review_checks` 单独自审。
 - 检查 `external_reference_plan` 与 `grounding_details`。网络资料和 RAG 只能转化为可见细节、制度压力、界面痕迹、生活动作、角色职业/资源支撑、交通耗时或角色误判；不得把网页摘要、热词盘点或弱召回内容写成旁白事实。需要最新资料时默认检索近 30-90 天仍在流通的热门生活/平台/行业语境；避开涉政、灾难、社会冲突、刑案、公共安全事故和其他敏感事件，不用真实敏感热点制造戏剧性。没有检索或项目简报过期时，先补 `meta/web_reference_brief.*` 或当轮检索证据，再调用 `plan_chapter`；正式计划不能用占位话术冒充最新。
-- 检查 `trend_language_plan`。热梗/流行语必须有角色载体、场景功能和使用预算；若 `web_reference_brief` 有“本章热梗落点”小节，`item` 只能从该小节原样选择，`source_context` 必须明确引用该简报，严禁凭模型偏好擅自换梗。优先由群体角色、手机外放、群聊、物业/客服口吻或配角半句反应承载。恐怖规则、主角关键判断、章末钩子和叙述旁白默认不用热梗。
+- 检查 `trend_language_plan`。热梗/流行语必须有角色载体、场景功能和使用上限；它是候选，不是逐章必用项。若 `web_reference_brief` 有“本章热梗落点”小节，候选只能从该小节选择，严禁凭模型偏好擅自换梗。优先由群体角色、手机外放、群聊或配角半句反应承载；主角关键判断、章末钩子和叙述旁白默认不用。
 - 检查 `reader_entertainment_plan`。轻松搞笑/爽文项目每章必须先定：前200字的具体冲突或尴尬、至少两个机制不同的喜剧节拍、至少两个页面即时兑现、要压缩掉的流程说明、系统/搭档/朋友的一次性格化回应。热梗只能占其中一个笑点，不能拿两句流行语冒充整章喜剧设计。
 - 用户若把系统定义为会交流解闷、接话吐槽且始终支持主角，`companion_voice_beat` 必须正面兑现；`anti_ai_execution_plan` 只能限制菜单式解释、过密弹窗和万能剧透，不能反向写成“系统不接话/不吐槽/不是聊天伙伴”。用户系统性格高于通用反 AI 偏好。
 - 第一章长篇项目必须补全 `longform_opening`，把最短追读理由、连载发动机、长线承诺、解释预算和第一章页面证据写实；“系统绑定了”“以后会变有钱”不是页面证据。
 - 检查 `offscreen_character_stage`、`side_character_journeys` 和 `chapter_world_deltas`。所有已有独立 dossier 的角色和关键角色在本章时间线上都必须有环境、行动、压力、误判、决策和下一步潜势；非主角必须有位置、状态、交通/耗时/见面限制、性格变化、死亡/失踪/异化状态与传回主角计划。正文可以不展示，但提交时要回填 `character_stage_records`，系统会自动沉淀到 `meta/side_character_journeys/NNN.*` 和 `meta/chapter_world_deltas/NNN.*`。这不是让所有人抢戏，而是保证他们后续出现时带着自己的遭遇和变化，不像临时被召唤出来。
 - 检查 `initial_state`。角色是持续变化的系统，不是静态标签；每个关键角色本章会做什么，必须从当前目标、压力、资源、关系、秘密、误判、知识账本、决策框架、关系契约、情绪评价、长期弧线、能力阶段、能力边界、合理会犯的错、纠错触发和行动倾向推出来。写之前先问：这个角色现在最想要什么，最怕失去什么，手上有什么，欠谁什么，误以为什么，不能暴露什么，此刻还不会什么/会错判什么，按既有经验会先做什么，行动前最低证据是什么；本章结束后哪些状态需要回填。除非本书明确是幕后全知文或开局满级人设，主角不能一开始就像最终形态，不能把规则、收益和代价一次判断全对。
 - 如果章节需要“团队里凑数的人”“围观者”“后勤组”“捧场反应”，优先写入 `causal_simulation.crowd_roles`，不要把他们当关键角色塞进 `initial_state`。`crowd_roles` 必须说明群体名、人数、场景功能、反应策略、台词预算、命名策略、连续性策略和退出条件。默认不命名、不进长期人物台账、不承担关键解谜/救场/反杀；一旦某人携带新信息、做关键选择、建立关系债务或后续要回归，就必须升级为关键角色并补完整 `initial_state` 动态字段。
-- 检查 `voice_logic`。人物说话必须从性格来源和本章压力推出：先决定这个角色在这场对话里想拿到什么、藏什么、知道什么、和对方是什么关系，再决定词汇、句长、标点、断行、动作拍和潜台词。`sentence_length`、`punctuation_style`、`line_break_style`、`subtext_strategy`、`silence_or_action_beat` 和 `voice_contrast` 必须可执行；每组对白至少承担一个具体功能：推进冲突、暴露性格、交换或隐藏信息、改变关系、埋伏笔、让角色做选择。主角对白不能只靠冷脸短句或漂亮判断；配角也不能为了喂设定突然懂规则。计划里要写清哪些连续对白可以省略说话标签，靠声口、上一句问题、动作位置和关系压力辨认；不要把小说规划成“人物：台词”或每行“某某说/问/答”的剧本。
+- 检查 `voice_logic`。人物说话必须从性格来源和本章压力推出：先决定这个角色在这场对话里想拿到什么、藏什么、知道什么、和对方是什么关系，再决定词汇、句长、标点和潜台词。`silence_or_action_beat` 只写动作预算与禁区，不得给每轮台词安排动作；每组对白至少承担一个具体功能。计划里要允许连续裸对白、打断、漏答、答非所问、群体反应和无人接话，不要规划成“人物：台词”、每行“某某说/问/答”或“某人做动作：台词”的剧本。
 - 检查 `dialogue_scene_blueprints`。关键对话必须先选模式：谈判/压价、审问/套话、求助/转嫁、告白/告解、互怼/调情、压力下汇报、回避/冷处理、沉默压迫、误会升级、制度话术等都应有不同逻辑。再决定开场策略：对白先行、动作先行、物件先行、沉默先行、误会先行、记忆后被打断、环境声先行。正文要执行 `objective_tactics`：每个角色在这一场想赢什么、用什么策略、被谁反制、情绪从哪里漏出、这一拍造成什么变化。动作拍密度要有预算：只保留会改变空间、遮掩信息、暴露情绪、打断台词或触发规则的动作，普通停顿交给断句、沉默和无人接话。记忆桥只补当前对白必需内容；退出拍必须是具体动作、物件变化、关系冷场或未完成选择，不能用 UI 选项、突然一声响或抽象金句。
 - 检查 `review_refinement`。返工章要把审核反馈当作新一轮推演输入，而不是句子润色清单：先按 failure_modes 定位问题，再按 localized_targets 改场景/台词/物件承载，同时保护 preserve_constraints 中已通过的剧情资产。写完后用 acceptance_checks 自审；若同一失败原因达到 iteration_limit 或 stop_condition，停止整章重写，改用局部 edit、上游大纲调整或把阻断点反馈给 coordinator/editor。
 - 百万字长篇第一章必须检查 `longform_opening`：开篇不只要有当章危机，还要证明这本书有可持续的连载发动机、可反复兑现的奖励循环、跨卷可升级的承诺、清楚的揭示预算和读者流失风险控制。第一章只埋种子，不提前解释答案。
@@ -110,10 +110,13 @@
 - **标点情绪自检**：按中文标点规范使用点号和标号。句号用于真正落定，问号用于真疑问/反问，叹号用于强烈感叹或短促突发声音，冒号用于提示下文，分号用于同层级规则或多重复句，破折号用于突然中断/转折/拖长，省略号用于迟疑、未尽或断续。每次改标点都朗读一遍，确认能听出人物声口和情绪。
 - **标点终检不可跳过**：正文生成后必须单独过一遍标点，不能因为内容已重写或 AIGC 已通过就默认合格。重点查四类：焦急/求助台词是否被句号切平；确认单、工作群消息、备忘录等纸面/屏幕文本是否像真实排版，而不是一行分号清单；叙述段是否为了显得紧张而机械短句化；非条款的正文分号是否过多。命中时先改标点和少量句式，再跑审核。
 - **人味对白自检**：人物互怼、讲价、求救和临场反应要像普通人说话。不要把对白写成广告词、合同条款或口号式对仗，例如“按进价给我算；不讲兄弟价”。把它改成有关系、有算盘、有停顿的口语：“你要是能撑到明早，我给你留两箱。钱照算，少跟我讲交情。”动作 beat 必须改变关系、暴露情绪或推动局面，不能只给一句漂亮话收尾。
+- **朗读与短剧腔终检**：把关键对白连续朗读一遍。若每个人都精准回答上一句、顺手补齐下一条流程，或每句后都跟“某某问/某某答完/她才如何”的舞台调度，就重写。让角色只处理眼下最急的利益，允许漏答、打岔、改口、重复半句和被环境打断；售后、责任、金额、时限不要由一人一次说全。
 - **制度场景口语化自检**：现代职场/系统/医院/平台场景可以有确认单、工作群记录、稿号、权限、后台明细，但计划里不能只列流程和结论。`dialogue_scene_blueprints` 要先设计人物压力：谁怕担责、谁不想被记名、谁想把原因写死、谁只敢口头提醒、谁用私人消息求别写进去。正文里专业句留给屏幕/表格/纸面，人物说话要短、绕、卡顿、改口或带口头反应。
 - **纸面/屏幕格式**：确认单、工作群消息、活动通稿和便签要先像真实载体：标题、栏位、涂改、缺字、补字、行距、错位。确需列项时用换行分项或角色逐行读到，不要用“纸面写着：A；B；C；D”一次性报幕。文本可以不完整、被打断、后来补一行，这比打印式完整清单更有人味。
 - **便签和备忘录不齐整**：人在受惊、赶时间、边看边想时不会写出三条平行风控手册。便签可以划掉、写半截、挤字、改口、旁边加问号或“先记着”；三条以上工整并列会被当成 AI 结构痕迹。规则必须从现场物件和犹豫里长出来，不要一次性排好。
 - **系统提示不写说明书**：系统、屏幕、工作群不要连续列“仅限/须有/当前状态/截止时间”这类完整条款。优先写残字、糊字、空白、读不全、后来补出的字，让读者从现场推规则；只有真实业务载体才允许少量清晰列项。
+- **系统消息一次一事**：拒绝、安慰、解释、任务、奖励拆开处理，不得在一个 `【】` 里连说四五句。陪伴型系统先用一句有性格的人话回应，再视需要给一行数据；用户允许颜文字时只在系统私聊/群聊/手机消息中每章 0-2 次，正文旁白和正式条款不用。
+- **热梗用了才服从简报**：不要求具体短梗逐章出现；一旦选择使用，就按来源语境和角色载体落地。简报写 `呱，……` 时，逗号后必须接完整吐槽或反应；“呱了一声”、单独“呱”均算误用。
 - **童谣和儿歌要像小孩嘴里跑出来**：保留有规则内容的重复，如“门认名，名认账”，但不要追加空对仗三连。小孩会背错、卡壳、问大人后面是什么、混进数字和不通顺的词；越像完整修辞，越像 AI。
 - **句式复现终检**：专门查“X得发Y”（发潮、发虚、发沉、发乌、发黄、发紧、发硬等）、相邻对白同一骂点、每段末尾两拍收束。全章同型表达超过四处时只留最有质感的一两处，其余换成具体状态、动作或删掉。
 - **空间和视角可信**：无论题材是否允许超常现象，镜头都要可信。角色只能看见当前站位、遮挡、光线和载体允许看见的内容；身体、物件、门窗、道路与视线的位置要能成像，不能出现互相打架的方位。

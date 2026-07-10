@@ -3,7 +3,9 @@ package sampler
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/voocel/agentcore"
 )
@@ -12,9 +14,12 @@ type fakeModel struct {
 	responses []*agentcore.LLMResponse
 	calls     int
 	thinking  []agentcore.ThinkingLevel
+	mu        sync.Mutex
 }
 
 func (m *fakeModel) Generate(_ context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.thinking = append(m.thinking, agentcore.ResolveCallConfig(opts).ThinkingLevel)
 	resp := m.responses[m.calls]
 	m.calls++
@@ -95,8 +100,49 @@ func TestSamplerSelectsRoughestDraft(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing sampling metadata: %+v", args)
 	}
-	if int(sampling["selected_index"].(float64)) != 2 {
-		t.Fatalf("selected_index = %v, want 2", sampling["selected_index"])
+	if selected := int(sampling["selected_index"].(float64)); selected < 1 || selected > 3 {
+		t.Fatalf("selected_index = %v, want 1..3", sampling["selected_index"])
+	}
+}
+
+type concurrentProbeModel struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	nextID    int
+}
+
+func (m *concurrentProbeModel) Generate(_ context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	m.mu.Lock()
+	m.active++
+	if m.active > m.maxActive {
+		m.maxActive = m.active
+	}
+	m.nextID++
+	id := m.nextID
+	m.mu.Unlock()
+	time.Sleep(25 * time.Millisecond)
+	m.mu.Lock()
+	m.active--
+	m.mu.Unlock()
+	return draftResponse(string(rune('a'+id-1)), 1, "候选正文。"), nil
+}
+
+func (*concurrentProbeModel) GenerateStream(context.Context, []agentcore.Message, []agentcore.ToolSpec, ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	panic("not used")
+}
+func (*concurrentProbeModel) SupportsTools() bool { return true }
+
+func TestSamplerGeneratesCandidatesConcurrently(t *testing.T) {
+	base := &concurrentProbeModel{}
+	model := New(base)
+	if _, err := model.Generate(context.Background(), []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("next_step: 请调用 draft_chapter 写章节草稿正文")}},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if base.maxActive < 2 {
+		t.Fatalf("expected speculative candidates to overlap, maxActive=%d", base.maxActive)
 	}
 }
 
@@ -119,9 +165,12 @@ func draftResponse(id string, chapter int, content string) *agentcore.LLMRespons
 type scriptedJudge struct {
 	answers []string
 	calls   int
+	mu      sync.Mutex
 }
 
 func (s *scriptedJudge) Generate(_ context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	a := s.answers[s.calls%len(s.answers)]
 	s.calls++
 	msg := agentcore.Message{Role: agentcore.RoleAssistant, Content: []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: a}}}

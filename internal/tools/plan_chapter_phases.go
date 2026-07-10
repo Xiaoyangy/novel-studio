@@ -570,11 +570,9 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 
 func planDetailsRecommendedBatches() []string {
 	return []string{
-		"batch1_scope_and_state: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state（只需覆盖主角）",
-		"batch2_scene_causality: environment_state + causal_beats + decision_points + outcome_shift",
-		"batch3a_voice_and_dialogue: voice_logic + dialogue_scene_blueprints + emotional_logic",
-		"batch3b_style_and_entertainment: anti_ai_execution_plan + reader_entertainment_plan；显式要求热梗时同时补 trend_language_plan",
-		"batch4_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；第一章长篇项目同时补 longform_opening；返工章同时补 review_refinement",
+		"batch1_causal_foundation: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state + environment_state + causal_beats + decision_points + outcome_shift（initial_state 只需覆盖主角）",
+		"batch2_voice_and_entertainment: voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan + reader_entertainment_plan；显式要求热梗时同时补 trend_language_plan",
+		"batch3_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；第一章长篇项目同时补 longform_opening；返工章同时补 review_refinement",
 	}
 }
 

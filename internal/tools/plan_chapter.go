@@ -381,6 +381,12 @@ func ChapterPlanIdentityIssues(s *store.Store, chapter int, payload any) []strin
 	}
 	var issues []string
 	names := knownCharacterNameSet(s)
+	// The companion system is an explicitly requested speaking entity, not a
+	// human cast member. Keep it out of characters.json while allowing its
+	// voice plan only for projects whose user rules actually request one.
+	if planSystemEntityAllowed(s) {
+		names["系统"] = struct{}{}
+	}
 	required := requiredDossierCharacterNames(s, chapter)
 	if len(required) == 0 {
 		for name := range names {
@@ -413,6 +419,18 @@ func ChapterPlanIdentityIssues(s *store.Store, chapter int, payload any) []strin
 		issues = append(issues, visibleCharacterOutlineScopeIssues(s, chapter, payload)...)
 	}
 	return compactStrings(issues)
+}
+
+func planSystemEntityAllowed(s *store.Store) bool {
+	if s == nil {
+		return false
+	}
+	snapshot, err := s.UserRules.Load()
+	if err != nil || snapshot == nil {
+		return false
+	}
+	source := snapshot.Structured.Genre + "\n" + snapshot.Preferences
+	return domain.SystemCompanionVoiceRequested(source)
 }
 
 func visibleCharacterOutlineScopeIssues(s *store.Store, chapter int, payload any) []string {
@@ -729,6 +747,9 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 			allowed := chapterTrendLanguageBriefItems(s, plan.Chapter)
 			require(false, fmt.Sprintf("causal_simulation.trend_language_plan(project_brief_grounding: item只允许原样使用=%s; source_context必须写meta/web_reference_brief.md)", strings.Join(allowed, " | ")))
 		}
+		if problems := domain.TrendLanguagePlanProblems(sim.TrendLanguage); len(problems) > 0 {
+			require(false, "causal_simulation.trend_language_plan(semantic_usage: "+strings.Join(problems, " | ")+")")
+		}
 	}
 	if attraction.Entertainment {
 		require(domain.CompleteReaderEntertainmentPlan(sim.EntertainmentPlan), "causal_simulation.reader_entertainment_plan")
@@ -842,7 +863,6 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(voice.HiddenSubtext != "", prefix+".hidden_subtext")
 		require(voice.KnowledgeBoundary != "", prefix+".knowledge_boundary")
 		require(voice.DictionAndRhythm != "", prefix+".diction_and_rhythm")
-		require(voice.SilenceOrAction != "", prefix+".silence_or_action_beat")
 		require(len(voice.DialogueFunctions) > 0, prefix+".dialogue_functions")
 		require(len(voice.ForbiddenMoves) > 0, prefix+".forbidden_moves")
 	}
@@ -861,7 +881,6 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 			require(turn.Speaker != "", turnPrefix+".speaker")
 			require(turn.SurfaceLineFunction != "", turnPrefix+".surface_line_function")
 			require(turn.NewInformation != "" || turn.PowerMove != "", turnPrefix+".new_information/power_move")
-			require(turn.ActionBeat != "", turnPrefix+".action_beat")
 			require(turn.NextPressure != "", turnPrefix+".next_pressure")
 		}
 	}
@@ -1270,13 +1289,13 @@ func focusedCausalSimulationSchema() map[string]any {
 	)
 	retentionBeat := schema.Object(
 		schema.Property("plan_source", schema.String("对应计划来源")),
-		schema.Property("must_show", schema.String("正文必须展示的事件")).Required(),
+		schema.Property("must_show", schema.String("若选中此候选拍，正文展示的事件；不代表所有候选都必须写")).Required(),
 		schema.Property("reader_payoff", schema.String("读者获得什么")).Required(),
 		schema.Property("scene_vehicle", schema.String("用什么场景承载")).Required(),
 		schema.Property("proof_on_page", schema.String("页面证据")),
 	)
 	retentionPlan := schema.Object(
-		schema.Property("surface_beats", schema.Array("正文显性节拍", retentionBeat)).Required(),
+		schema.Property("surface_beats", schema.Array("正文候选节拍；只选足以完成 required_beats 的最少部分", retentionBeat)).Required(),
 		schema.Property("latent_context", schema.Array("只留后台的上下文", schema.String(""))),
 		schema.Property("reveal_budget", schema.Array("延后解释的内容", schema.String(""))),
 		schema.Property("cut_or_compress", schema.Array("删除或压缩内容", schema.String(""))).Required(),
@@ -1428,7 +1447,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("punctuation_style", schema.String("标点风格：问号、顿号、省略、破折或句号的使用边界；避免统一 AI 节奏")),
 		schema.Property("line_break_style", schema.String("断行风格：什么情绪、停顿、动作或信息需要独立成段")),
 		schema.Property("subtext_strategy", schema.String("潜台词策略：想要、害怕、隐瞒或试探如何藏进条件、反问、动作或沉默")),
-		schema.Property("silence_or_action_beat", schema.String("关键对白之间用什么沉默、动作、视线、物件或手部反应承接")),
+		schema.Property("silence_or_action_beat", schema.String("可选预算：只有会改变权力、遮掩信息、打断台词或影响现场结果时才安排沉默/动作；禁止给每句对白机械配动作")),
 		schema.Property("voice_contrast", schema.String("与主角/同场角色相比，此人声口如何区分：词汇、句长、反应速度、信息处理习惯")),
 		schema.Property("action_beat_policy", schema.String("对白之间应如何用动作、沉默、误判、物件反应承载潜台词")),
 		schema.Property("dialogue_functions", schema.Array("本章对白必须承担的功能：推进冲突、暴露性格、交换/隐藏信息、改变关系、埋伏笔等", schema.String(""))),
@@ -1442,7 +1461,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("hidden_subtext", schema.String("这句话没明说的恐惧、索取、隐瞒、试探或权力动作")).Required(),
 		schema.Property("new_information", schema.String("这一轮给读者或角色新增的具体信息；没有新增时说明由动作/沉默替代")),
 		schema.Property("power_move", schema.String("权力变化：谁在压迫、退让、转移责任、求助或抢回主动权")),
-		schema.Property("action_beat", schema.String("台词前后承接的动作、停顿、视线、物件或空间变化")).Required(),
+		schema.Property("action_beat", schema.String("可选。仅记录会改变权力、遮掩信息、打断话头或影响现场结果的动作；普通轮次留空，禁止为了字段完整给每句台词配动作")),
 		schema.Property("next_pressure", schema.String("这一轮之后推进到的下一个压力点")).Required(),
 	)
 	dialogueAudiencePresence := schema.Object(
@@ -1658,14 +1677,14 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 	)
 	retentionSurfaceBeat := schema.Object(
 		schema.Property("plan_source", schema.String("来自哪个计划字段或章节契约，例如 required_beats[0]/dialogue_scene_blueprints/security-review")).Required(),
-		schema.Property("must_show", schema.String("正文必须让读者看见的动作、对白、物件变化、选择或后果；不是解释性摘要")).Required(),
+		schema.Property("must_show", schema.String("若 Drafter 选择这一候选拍，读者实际看见的动作、对白、物件变化、选择或后果；不是解释性摘要。字段名为兼容旧数据保留，不代表所有候选都必须写")).Required(),
 		schema.Property("reader_payoff", schema.String("这一拍给读者的即时收益：确认、悬念、误判、爽点、关系变化、规则代价等")).Required(),
 		schema.Property("scene_vehicle", schema.String("用哪个场景/物件/冲突载体承载，禁止只写成计划说明")).Required(),
 		schema.Property("proof_on_page", schema.String("正文里可核对的页面证据，例如某句打断、某个动作、某个物件状态变化")).Required(),
 		schema.Property("function_shift", schema.String("这一拍在段落功能上制造的换挡：事故/争执/沉默/证据迟到/生活打断/后果入账等，避免全章同一叙述曲线")),
 	)
 	readerRetentionPlan := schema.Object(
-		schema.Property("surface_beats", schema.Array("从全量计划中筛出的 3-6 个必须显性写到页面的留存节拍；计划是素材池，不是全部写出清单", retentionSurfaceBeat)).Required(),
+		schema.Property("surface_beats", schema.Array("从全量计划中筛出的 3-6 个页面候选节拍；Drafter 只选足以完成 required_beats 的最少部分，禁止全部照抄", retentionSurfaceBeat)).Required(),
 		schema.Property("latent_context", schema.Array("只留在台账/角色逻辑里的内容：可约束行为，但本章不显性解释、不让旁白摊开", schema.String(""))).Required(),
 		schema.Property("reveal_budget", schema.Array("本章必须延后、只露半截或只通过证据暗示的信息；避免把大纲答案一次讲完", schema.String(""))).Required(),
 		schema.Property("cut_or_compress", schema.Array("若正文出现会变成结构化清单、说明书或 AI 味的计划材料；应删除、合并进动作或压成半句", schema.String(""))).Required(),

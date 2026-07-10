@@ -86,8 +86,12 @@ func TestWritingPromptsRemainProjectNeutral(t *testing.T) {
 	if !strings.Contains(bundle.Prompts.Writer, "章节目标以本轮 task 为最高优先级") {
 		t.Fatal("writer prompt must pin every planning tool to the task chapter")
 	}
+	if !strings.Contains(bundle.Prompts.Planner, "章节号以本轮 task 为最高优先级") {
+		t.Fatal("planner prompt must pin every planning tool to the task chapter")
+	}
 
 	combined := strings.Join([]string{
+		bundle.Prompts.Planner,
 		bundle.Prompts.Writer,
 		bundle.Prompts.Drafter,
 		bundle.Prompts.Editor,

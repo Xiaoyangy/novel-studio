@@ -1,6 +1,11 @@
 package flow
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -14,6 +19,10 @@ import (
 func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool) bool {
 	plan, err := store.Drafts.LoadChapterPlan(chapter)
 	if err != nil || plan == nil {
+		return false
+	}
+	if simulation, simErr := store.LoadChapterWorldSimulation(chapter); simErr != nil ||
+		(simulation != nil && strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID)) {
 		return false
 	}
 	var preferenceText string
@@ -41,12 +50,21 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if !isRewrite {
 		return true
 	}
-	for _, src := range plan.CausalSimulation.ContextSources {
-		if strings.Contains(src, "rewrite_brief") {
-			return true
-		}
+	body, err := store.Drafts.LoadChapterText(chapter)
+	if err != nil || strings.TrimSpace(body) == "" {
+		return false
 	}
-	return false
+	briefPath := fmt.Sprintf("reviews/%02d_rewrite_brief.md", chapter)
+	brief, err := os.ReadFile(filepath.Join(store.Dir(), filepath.FromSlash(briefPath)))
+	if err != nil || len(brief) == 0 {
+		return false
+	}
+	bodySum := sha256.Sum256([]byte(body))
+	briefSum := sha256.Sum256(brief)
+	bodyToken := fmt.Sprintf("rewrite_source:chapters/%02d.md#sha256=%x", chapter, bodySum)
+	briefToken := fmt.Sprintf("rewrite_brief:%s#sha256=%x", briefPath, briefSum)
+	return slices.Contains(plan.CausalSimulation.ContextSources, bodyToken) &&
+		slices.Contains(plan.CausalSimulation.ContextSources, briefToken)
 }
 
 // LoadState 从 Store 读取 Route 所需的全部事实。
@@ -72,10 +90,12 @@ func LoadState(store *storepkg.Store) State {
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, target)
 		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
+		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, next)
 		loadNextActionPlanStage(store, next, &s)
 		loadNextActionOutline(store, next, &s)
 	}
@@ -104,6 +124,28 @@ func LoadState(store *storepkg.Store) State {
 	return s
 }
 
+func chapterDraftReadyForFinalize(store *storepkg.Store, chapter int) bool {
+	if store == nil || chapter <= 0 {
+		return false
+	}
+	draft, err := store.Drafts.LoadDraft(chapter)
+	if err != nil || strings.TrimSpace(draft) == "" {
+		return false
+	}
+	scope := domain.ChapterScope(chapter)
+	plan := store.Checkpoints.LatestByStep(scope, "plan")
+	if plan == nil {
+		return false
+	}
+	latestDraftSeq := int64(0)
+	for _, step := range []string{"draft", "edit"} {
+		if cp := store.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > latestDraftSeq {
+			latestDraftSeq = cp.Seq
+		}
+	}
+	return latestDraftSeq > plan.Seq
+}
+
 func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {
 	if store == nil || state == nil || chapter <= 0 {
 		return
@@ -111,8 +153,11 @@ func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {
 	if partial, err := store.Drafts.LoadChapterPlanPartial(chapter); err == nil && partial != nil {
 		state.NextActionPlanPartial = true
 	}
-	if meta, err := store.RunMeta.Load(); err == nil && meta != nil && strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
-		state.NextActionPlanRepairTask = strings.TrimSpace(meta.PendingSteer)
+	if meta, err := store.RunMeta.Load(); err == nil && meta != nil {
+		steer := strings.TrimSpace(meta.PendingSteer)
+		if strings.HasPrefix(steer, "Pipeline staged-plan repair") || strings.HasPrefix(steer, "Pipeline world-simulation repair") {
+			state.NextActionPlanRepairTask = steer
+		}
 	}
 }
 

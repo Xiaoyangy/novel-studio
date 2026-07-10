@@ -87,7 +87,7 @@ func TestWritePromptManifest(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("manifest 非法 JSON: %v", err)
 	}
-	if len(back) != 5 {
-		t.Fatalf("manifest 应含 5 个核心 prompt，实际 %d", len(back))
+	if len(back) != 6 {
+		t.Fatalf("manifest 应含 6 个核心 prompt，实际 %d", len(back))
 	}
 }

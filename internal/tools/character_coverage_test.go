@@ -18,6 +18,7 @@ func TestRequiredDossierCharacterNamesCoversWholeSimulationCast(t *testing.T) {
 		{Name: "沈知遥", Role: "女主", Tier: "core"},
 		{Name: "叶南栀", Role: "主角团配角", Tier: "important"},
 		{Name: "周曼", Role: "配角", Tier: "important"},
+		{Name: "梁广财", Aliases: []string{"二姨夫"}, Role: "农户合作社代表", Tier: "secondary"},
 	}
 	if err := st.Characters.Save(chars); err != nil {
 		t.Fatal(err)
@@ -27,12 +28,22 @@ func TestRequiredDossierCharacterNamesCoversWholeSimulationCast(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := st.Cast.Save([]domain.CastEntry{
+		{Name: "赵航", BriefRole: "嘴欠表弟", LastSeenChapter: 1},
+		{Name: "老丁", BriefRole: "五金店老板", LastSeenChapter: 1},
+		{Name: "二姨夫", BriefRole: "饭桌长辈", LastSeenChapter: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	names := requiredDossierCharacterNames(st, 1)
-	for _, want := range []string{"林澈", "沈知遥", "叶南栀", "周曼"} {
+	for _, want := range []string{"林澈", "沈知遥", "叶南栀", "周曼", "梁广财", "赵航", "老丁"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("expected %s in required names: %v", want, names)
 		}
+	}
+	if slices.Contains(names, "二姨夫") {
+		t.Fatalf("character alias must not become a second world actor: %v", names)
 	}
 }
 

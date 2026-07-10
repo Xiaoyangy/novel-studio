@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -36,11 +37,13 @@ func loadChapterRewriteSource(s *store.Store, chapter int) (*domain.ChapterRewri
 	}
 	brief := string(briefRaw)
 	sum := sha256.Sum256([]byte(body))
+	briefSum := sha256.Sum256(briefRaw)
 	source := &domain.ChapterRewriteSource{
 		BodyPath:      bodyPath,
 		BodySHA256:    hex.EncodeToString(sum[:]),
 		WordCount:     utf8.RuneCountInString(body),
 		BriefPath:     briefPath,
+		BriefSHA256:   hex.EncodeToString(briefSum[:]),
 		PreserveFacts: rewriteBriefPreserveFacts(brief),
 	}
 	return source, body, brief, nil
@@ -77,6 +80,26 @@ func rewriteBriefPreserveFacts(markdown string) []string {
 	return facts
 }
 
+var rewriteLiteralPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`开头用[‘“「"]([^’”」"]+)[’”」"]`),
+}
+
+// rewriteBriefRequiredLiterals extracts phrases the user explicitly requires
+// verbatim as placement/copy contracts. Meme examples and "must say this"
+// dialogue are intentionally excluded: turning them into literal gates made
+// characters recite review notes even when the scene no longer supported them.
+func rewriteBriefRequiredLiterals(markdown string) []string {
+	var literals []string
+	for _, pattern := range rewriteLiteralPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(markdown, -1) {
+			if len(match) > 1 {
+				literals = appendUniqueString(literals, strings.TrimSpace(match[1]))
+			}
+		}
+	}
+	return literals
+}
+
 func rewriteSourceToken(source *domain.ChapterRewriteSource) string {
 	if source == nil {
 		return ""
@@ -88,14 +111,15 @@ func rewriteBriefToken(source *domain.ChapterRewriteSource) string {
 	if source == nil {
 		return ""
 	}
-	return "rewrite_brief:" + source.BriefPath
+	return fmt.Sprintf("rewrite_brief:%s#sha256=%s", source.BriefPath, source.BriefSHA256)
 }
 
 func rewriteSourceEqual(a, b *domain.ChapterRewriteSource) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.BodyPath != b.BodyPath || a.BodySHA256 != b.BodySHA256 || a.WordCount != b.WordCount || a.BriefPath != b.BriefPath {
+	if a.BodyPath != b.BodyPath || a.BodySHA256 != b.BodySHA256 || a.WordCount != b.WordCount ||
+		a.BriefPath != b.BriefPath || a.BriefSHA256 != b.BriefSHA256 {
 		return false
 	}
 	return stringSlicesEqual(a.PreserveFacts, b.PreserveFacts)

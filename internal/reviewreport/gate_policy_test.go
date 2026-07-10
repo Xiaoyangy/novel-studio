@@ -48,6 +48,22 @@ func TestBlockingMechanicalWarningsAndHighRiskDimensions(t *testing.T) {
 	}
 }
 
+func TestRendererReadabilityViolationsAlwaysBlockUnifiedGate(t *testing.T) {
+	for _, rule := range []string{
+		"abstract_system_reassurance",
+		"opaque_procedure_jargon",
+		"dialogue_action_lead_repetition",
+	} {
+		payload := &MechanicalGatePayload{RuleViolations: []rules.Violation{{Rule: rule, Severity: rules.SeverityWarning}}}
+		if !HasBlockingMechanicalGate(payload) {
+			t.Fatalf("%s should remain blocking even at warning severity", rule)
+		}
+		if AcceptedWarningOnlyGate(payload, nil, &domain.ReviewEntry{Verdict: "accept", ContractStatus: "met"}) {
+			t.Fatalf("%s must not downgrade to optional after editor accept", rule)
+		}
+	}
+}
+
 func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
@@ -96,16 +112,83 @@ func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 		AIVoice:    voice,
 		Editor:     editor,
 	})
-	for _, want := range []string{"## 是否需要改写：可选", "机械门禁：有警告", "仅剩 warning"} {
+	for _, want := range []string{"## 是否需要改写：可选", "机械门禁：有警告", "仅剩风格 warning"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("unified markdown missing %q:\n%s", want, md)
 		}
 	}
-	if strings.Contains(md, "本章可进入下一章") {
-		t.Fatalf("accepted warning-only gate must not be displayed as a complete pass:\n%s", md)
+	if !strings.Contains(md, "可继续下一章") {
+		t.Fatalf("accepted warning-only gate should allow the pipeline to continue:\n%s", md)
 	}
 	if strings.Contains(md, "进入返工队列") {
 		t.Fatalf("accepted warning-only gate should not force rewrite:\n%s", md)
+	}
+}
+
+func TestAcceptedCleanChapterTreatsFlatObjectRhythmAsAdvisory(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+		RuleViolations: []rules.Violation{{
+			Rule:     "object_response_rhythm_flat",
+			Severity: rules.SeverityWarning,
+			Actual:   4,
+			Limit:    "物件回应至少一次延迟、一次缺席",
+		}},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Dimensions: []domain.DimensionScore{{
+			Dimension: "aesthetic",
+			Score:     88,
+			Verdict:   "pass",
+		}},
+	}
+
+	if IsBlockingMechanicalViolation(payload.RuleViolations[0]) {
+		t.Fatal("warning-only flat object rhythm should remain advisory")
+	}
+	if !AcceptedWarningOnlyGate(payload, nil, editor) {
+		t.Fatal("expected low-AIGC editor accept with advisory rhythm warning to pass")
+	}
+	if got := RewriteDisposition(payload, nil, nil, editor); got != "可选" {
+		t.Fatalf("RewriteDisposition = %q, want 可选", got)
+	}
+}
+
+func TestAcceptedLowAIGCChapterTreatsStyleWarningsAsAdvisory(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+		RuleViolations: []rules.Violation{
+			{Rule: "isolated_sentence_overuse", Severity: rules.SeverityWarning, Actual: 28},
+			{Rule: "dramatic_negation_overuse", Severity: rules.SeverityWarning, Actual: 3},
+		},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Dimensions: []domain.DimensionScore{{
+			Dimension: "ai_voice_detection",
+			Score:     80,
+			Verdict:   "pass",
+		}},
+	}
+
+	if !AcceptedWarningOnlyGate(payload, nil, editor) {
+		t.Fatal("low-AIGC accepted chapter must not loop on style-only warnings")
+	}
+	if got := RewriteDisposition(payload, nil, nil, editor); got != "可选" {
+		t.Fatalf("RewriteDisposition = %q, want 可选", got)
 	}
 }
 
@@ -411,6 +494,34 @@ func TestUnifiedMarkdownStripsEditorRewriteSuggestions(t *testing.T) {
 	}
 	if !strings.Contains(md, "## 结论") {
 		t.Fatalf("unified markdown stripped too much:\n%s", md)
+	}
+}
+
+func TestUnifiedMarkdownDoesNotResurrectAcceptedEditorIssuesBecauseOfMechanicalWarnings(t *testing.T) {
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter: 1,
+		Mechanical: &MechanicalGatePayload{
+			Chapter:    1,
+			AIGCReport: aigc.Report{AIGCPercent: 4.8, BlendedAIGCPercent: 4.8},
+			RuleViolations: []rules.Violation{{
+				Rule: "isolated_sentence_overuse", Severity: rules.SeverityWarning, Actual: 28,
+			}},
+		},
+		Editor: &domain.ReviewEntry{
+			Chapter: 1, Verdict: "accept", ContractStatus: "met",
+			Dimensions: []domain.DimensionScore{{Dimension: "aesthetic", Score: 90, Verdict: "pass"}},
+			Issues: []domain.ConsistencyIssue{{
+				Type: "aesthetic", Severity: "warning", Description: "已裁定为可选的建议。",
+			}},
+		},
+		EditorMarkdown: "# ch01 评审\n\n## 主要问题（按严重度排序）\n1. 不应复活的原始假问题。\n\n## 结论\n通过。",
+	})
+
+	if strings.Contains(md, "Editor 原始报告摘录") || strings.Contains(md, "不应复活") {
+		t.Fatalf("accepted editor advice must stay out of the unified report:\n%s", md)
+	}
+	if !strings.Contains(md, "机械门禁 warning｜isolated_sentence_overuse") {
+		t.Fatalf("mechanical observation should remain visible:\n%s", md)
 	}
 }
 

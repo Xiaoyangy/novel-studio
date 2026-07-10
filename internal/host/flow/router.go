@@ -11,6 +11,7 @@ package flow
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	storepkg "github.com/chenhongyang/novel-studio/internal/store"
@@ -55,6 +56,9 @@ type State struct {
 	// 普通“从头重做计划”提示，否则 Planner 会重复已完成批次。
 	NextActionPlanPartial    bool
 	NextActionPlanRepairTask string
+	// 当前 plan 之后已经生成过 draft 时，恢复流程只做局部验收与提交，
+	// 不应再次整章抽样覆盖。
+	NextActionDraftReady bool
 
 	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
 	// 避免大上下文裁剪把当前章标题/核心事件挤掉。
@@ -111,10 +115,20 @@ func Route(s State) *Instruction {
 				if task == "" {
 					task = fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 plan.partial。只调用 novel_context(chapter=%d) 一次，然后严格按 chapter_plan_stage.gap_summary 用 plan_details 提交最小缺口补丁；禁止重跑 simulate_chapter_world、plan_structure，禁止重发已完成字段，最后 finalize=true", ch, ch)
 				}
+				reason := fmt.Sprintf("第 %d 章 staged plan 只需最小补丁修复", ch)
+				if strings.HasPrefix(strings.TrimSpace(task), "Pipeline world-simulation repair") {
+					reason = fmt.Sprintf("第 %d 章必须先完成全角色世界推演", ch)
+					return &Instruction{
+						Agent:   "world_simulator",
+						Task:    task,
+						Reason:  reason,
+						Chapter: ch,
+					}
+				}
 				return &Instruction{
 					Agent:   "writer",
 					Task:    task,
-					Reason:  fmt.Sprintf("第 %d 章 staged plan 只需最小补丁修复", ch),
+					Reason:  reason,
 					Chapter: ch,
 				}
 			}
@@ -135,6 +149,14 @@ func Route(s State) *Instruction {
 				Agent:   "writer",
 				Task:    task,
 				Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划需先纳入 rewrite_brief 重推演", len(p.PendingRewrites)),
+				Chapter: ch,
+			}
+		}
+		if s.NextActionDraftReady {
+			return &Instruction{
+				Agent:   "draft_finalizer",
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，只对明确硬伤使用 edit_chapter；随后 check_consistency 并 commit_chapter。禁止重新整章生成", ch),
+				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
 				Chapter: ch,
 			}
 		}
@@ -243,6 +265,14 @@ func Route(s State) *Instruction {
 			Agent:   "writer",
 			Task:    task,
 			Reason:  "下一章计划待推演",
+			Chapter: next,
+		}
+	}
+	if s.NextActionDraftReady {
+		return &Instruction{
+			Agent:   "draft_finalizer",
+			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，只对明确硬伤使用 edit_chapter；随后 check_consistency 并 commit_chapter。禁止重新整章生成", next),
+			Reason:  "已有绑定当前 plan 的草稿，恢复时只需验收提交",
 			Chapter: next,
 		}
 	}

@@ -92,7 +92,7 @@ Each blueprint must also include the original fields:
 - `pov_state`, `inner_question`, `memory_bridge`, `identity_grounding`.
 - `dialogue_objective`, `interlocutor_agenda`, `protagonist_response_strategy`.
 - `objective_tactics`: what each character wants right now, what tactic they use, how the other party counters, where emotion leaks, and what changes. In group scenes each tactic also carries a `faction`.
-- `turn_progression`: two or more turns. Every turn must carry surface function, hidden subtext, action beat, and the next pressure.
+- `turn_progression`: two or more pressure/information turns. Every turn must carry surface function, hidden subtext, and the next pressure. `action_beat` is optional and is present only when an action changes power, hides information, interrupts speech, or affects the physical outcome.
 - `directness_policy`, `silence_policy`, `info_release_policy`, `exposition_budget`, `escalation_pattern`, `beat_density`, `subtext_source`, `subtext_and_power_shift`.
 - `exit_beat`: a concrete field change, object state, body action, relationship coldness, or unfinished choice.
 
@@ -118,6 +118,9 @@ Do not use the blueprint as:
 - a menu of options shown to readers;
 - a replacement for character dossiers, world rules, or chapter contracts;
 - a route around POV limits.
+- a paragraph-by-paragraph script. The draft profile strips `turn_progression` and action choreography into a smaller `render_packet`; the Drafter receives scene purpose and voice constraints, not a sequence to transcribe.
+
+Three consecutive dialogue paragraphs beginning with a character action and then a colon/quote are a renderer failure, even if every individual action came from a valid blueprint. Once space and speakers are grounded, use tagless lines, neutral tags, interruption, partial answers, group reaction, or silence. Each location change must also expose the POV character's reason for going there; editing words such as "then" or "went downstairs" do not supply causality.
 
 If a scene works better without dialogue first, choose `action_first`, `object_first`, `silence_first`, `misunderstanding_first`, or another `opening_strategy` and explain why. Key dialogues must be planned before drafting, so the writer cannot drift into exposition-first prose or identical voices.
 

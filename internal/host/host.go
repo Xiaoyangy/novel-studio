@@ -174,12 +174,16 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	}
 	h.router = flow.NewDispatcher(coordinator, store)
 	router = h.router
-	// 重复指令告警：纯 telemetry，挂机时"模型可能在原地打转"值得喊人看一眼。
+	// 重复指令先告警；若同一任务连续三次且 checkpoint 没有推进，立即熔断。
 	// 事件流与 notify 成对发出——notify 只是屏内事件的离屏副本（架构 §2.3）。
 	h.router.SetOnRepeat(func(agent, task string, n int) {
 		body := fmt.Sprintf("同一指令已第 %d 次下达（%s）：%s", n, agent, task)
 		h.emitEvent(Event{Time: time.Now(), Category: "SYSTEM", Summary: "指令重复: " + body, Level: "warn"})
 		h.notifier.Send(notify.Notification{Kind: "repeat", Level: "warn", Title: "novel-studio: 指令重复", Body: body})
+	})
+	h.router.SetOnStall(func(agent, task string, n int) {
+		reason := fmt.Sprintf("流水线已熔断：同一指令连续 %d 次且 checkpoint 无推进（%s）：%s", n, agent, task)
+		h.abortWithEvent(reason, "error")
 	})
 	h.router.SetOnWriterDispatch(func(int) {
 		h.refreshWriterRestore()

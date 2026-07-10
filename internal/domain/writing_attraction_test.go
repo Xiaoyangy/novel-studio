@@ -17,6 +17,43 @@ func TestProjectStyleRequests(t *testing.T) {
 	}
 }
 
+func TestSystemCompanionFeedbackContradiction(t *testing.T) {
+	for _, text := range []string{
+		"系统口吻偏暖，建议强化系统冷硬感。",
+		"系统不予回应，只做冷硬的规则重申，减少系统拟人化玩笑。",
+		"建议系统发送一条乱码或重复提示，制造断联感。",
+		"调整系统提示语的语气，保持冷感，如去掉'^_^'，改用纯文本进度条式通知。",
+	} {
+		if !SystemCompanionFeedbackContradicts(text) {
+			t.Fatalf("expected contradiction: %q", text)
+		}
+	}
+	for _, text := range []string{
+		"系统保持短促接话，但不要连续抛三个梗。",
+		"不能把系统写成冷硬静默的任务机器人。",
+		"沈知遥的问话可以少一句解释。",
+	} {
+		if SystemCompanionFeedbackContradicts(text) {
+			t.Fatalf("unexpected contradiction: %q", text)
+		}
+	}
+}
+
+func TestTrendLanguagePlanRejectsGuaAsSoundEffect(t *testing.T) {
+	bad := []TrendLanguagePlan{{
+		Item: "呱，", CharacterCarrier: "赵航", SceneFunction: "用一拍突兀的拟声制造停顿，随后反击", UsageBudget: "一次",
+	}}
+	if problems := TrendLanguagePlanProblems(bad); len(problems) == 0 {
+		t.Fatal("呱， must not be planned as a sound effect")
+	}
+	good := []TrendLanguagePlan{{
+		Item: "呱，", CharacterCarrier: "赵航以网络语气词起手", SceneFunction: "后接完整吐槽，打断亲戚说教，禁止写成拟声动作", UsageBudget: "一次",
+	}}
+	if problems := TrendLanguagePlanProblems(good); len(problems) != 0 {
+		t.Fatalf("valid discourse opener was rejected: %v", problems)
+	}
+}
+
 func TestChapterAttractionPlanReady(t *testing.T) {
 	plan := ChapterPlan{Chapter: 1, CausalSimulation: ChapterCausalSimulation{
 		TrendLanguage: []TrendLanguagePlan{{

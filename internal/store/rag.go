@@ -166,7 +166,7 @@ func (s *RAGStore) fileStamp(rel string) (ragFileStamp, error) {
 }
 
 func (s *RAGStore) readStableIndexState(initial ragFileStamp) (*domain.RAGIndexState, ragFileStamp, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		var state domain.RAGIndexState
 		if err := s.io.ReadJSON("meta/rag/index_state.json", &state); err != nil {
 			return nil, ragFileStamp{}, err
@@ -175,7 +175,7 @@ func (s *RAGStore) readStableIndexState(initial ragFileStamp) (*domain.RAGIndexS
 		if err != nil {
 			return nil, ragFileStamp{}, err
 		}
-		if final == initial || attempt == 1 {
+		if final == initial {
 			return &state, final, nil
 		}
 		initial = final
@@ -184,7 +184,7 @@ func (s *RAGStore) readStableIndexState(initial ragFileStamp) (*domain.RAGIndexS
 }
 
 func (s *RAGStore) readStableVectorStore(initial ragFileStamp) (*domain.RAGVectorStore, ragFileStamp, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		var state domain.RAGVectorStore
 		if err := s.io.ReadJSON("meta/rag/vector_store.json", &state); err != nil {
 			return nil, ragFileStamp{}, err
@@ -193,7 +193,7 @@ func (s *RAGStore) readStableVectorStore(initial ragFileStamp) (*domain.RAGVecto
 		if err != nil {
 			return nil, ragFileStamp{}, err
 		}
-		if final == initial || attempt == 1 {
+		if final == initial {
 			return &state, final, nil
 		}
 		initial = final

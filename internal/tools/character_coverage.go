@@ -10,14 +10,19 @@ import (
 
 // requiredDossierCharacterNames 是全角色模拟和提交回填的覆盖名单。
 //
-// 单世界模型要求 characters.json 中每个实名角色都持续做自己的选择；dossier
-// 中尚未同步回角色册的人也不能静默丢失。chapter 参数保留给现有调用签名。
+// 单世界模型要求 characters.json、人物 dossier 和 cast ledger 中每个实名角色
+// 都持续做自己的选择；写作期新增的配角也不能静默退出世界。chapter 参数保留
+// 给现有调用签名。
 func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 	_ = chapter
 	seen := map[string]struct{}{}
+	canonical := canonicalCharacterIdentityMap(s)
 	var names []string
 	add := func(name string) {
 		name = strings.TrimSpace(name)
+		if resolved := canonical[name]; resolved != "" {
+			name = resolved
+		}
 		if name == "" {
 			return
 		}
@@ -35,6 +40,11 @@ func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 	if dossiers, err := s.LoadAllCharacterDossiers(); err == nil {
 		for _, dossier := range dossiers {
 			add(dossier.Character)
+		}
+	}
+	if cast, err := s.Cast.RecentActive(200); err == nil {
+		for _, entry := range cast {
+			add(entry.Name)
 		}
 	}
 	return names
@@ -84,12 +94,91 @@ func chapterOutlineCharacterNames(s *store.Store, chapter int) []string {
 }
 
 func rewriteVisibleCharacterNames(s *store.Store, body string, preserveFacts []string) []string {
-	chars, err := s.Characters.Load()
-	if err != nil || len(chars) == 0 {
-		return nil
-	}
 	text := body + "\n" + strings.Join(preserveFacts, "\n")
-	return compactStrings(matchOutlineCharacters(text, chars))
+	canonical := canonicalCharacterIdentityMap(s)
+	var names []string
+	if chars, err := s.Characters.Load(); err == nil {
+		names = append(names, matchOutlineCharacters(text, chars)...)
+	}
+	if cast, err := s.Cast.RecentActive(200); err == nil {
+		for _, entry := range cast {
+			name := entry.Name
+			if resolved := canonical[name]; resolved != "" {
+				name = resolved
+			}
+			if strings.Contains(text, entry.Name) {
+				names = append(names, name)
+				continue
+			}
+			for _, alias := range entry.Aliases {
+				if strings.Contains(text, alias) {
+					names = append(names, name)
+					break
+				}
+			}
+		}
+	}
+	return compactStrings(names)
+}
+
+// canonicalCharacterIdentityMap resolves relationship labels, nicknames and
+// cast-ledger aliases to one world identity. Architect character aliases win;
+// a cast entry that repeats one of those aliases must not become a second actor.
+func canonicalCharacterIdentityMap(s *store.Store) map[string]string {
+	resolved := map[string]string{}
+	if s == nil {
+		return resolved
+	}
+	if chars, err := s.Characters.Load(); err == nil {
+		for _, character := range chars {
+			name := strings.TrimSpace(character.Name)
+			if name == "" {
+				continue
+			}
+			resolved[name] = name
+			for _, alias := range character.Aliases {
+				if alias = strings.TrimSpace(alias); alias != "" {
+					resolved[alias] = name
+				}
+			}
+		}
+	}
+	if dossiers, err := s.LoadAllCharacterDossiers(); err == nil {
+		for _, dossier := range dossiers {
+			name := strings.TrimSpace(dossier.Character)
+			if name == "" {
+				continue
+			}
+			if resolved[name] == "" {
+				resolved[name] = name
+			}
+			canonical := resolved[name]
+			for _, alias := range dossier.Aliases {
+				if alias = strings.TrimSpace(alias); alias != "" && resolved[alias] == "" {
+					resolved[alias] = canonical
+				}
+			}
+		}
+	}
+	if cast, err := s.Cast.Load(); err == nil {
+		for _, entry := range cast {
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				continue
+			}
+			canonical := resolved[name]
+			if canonical == "" {
+				canonical = name
+				resolved[name] = canonical
+			}
+			for _, alias := range entry.Aliases {
+				if alias = strings.TrimSpace(alias); alias != "" && resolved[alias] == "" {
+					resolved[alias] = canonical
+				}
+			}
+		}
+	}
+	return resolved
 }
 func outlineRoleAuthorizesCharacter(outlineText, role string) bool {
 	switch {

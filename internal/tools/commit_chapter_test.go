@@ -801,6 +801,18 @@ func TestBlockingViolationReasonIncludesTemplatedDialogueChain(t *testing.T) {
 	}
 }
 
+func TestImmediateMechanicalGateBlocksRendererReadabilityFailures(t *testing.T) {
+	for _, rule := range []string{
+		"abstract_system_reassurance",
+		"opaque_procedure_jargon",
+		"dialogue_action_lead_repetition",
+	} {
+		if !immediateMechanicalGateFailure(rules.Violation{Rule: rule, Severity: rules.SeverityWarning}) {
+			t.Fatalf("%s should block before review", rule)
+		}
+	}
+}
+
 func TestAIGCViolationUsesBlendedGateForSegmentFloorOnlyRisk(t *testing.T) {
 	violations := aigcViolation(aigc.Report{
 		Engine:                 aigc.Engine,
@@ -1047,6 +1059,56 @@ func TestCommitChapterReplayAfterPartialCommitDoesNotDuplicateWorldState(t *test
 	}
 	if cp := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "commit"); cp == nil {
 		t.Fatal("commit checkpoint should be written")
+	}
+}
+
+func TestCommitChapterCompletedProgressResumesQualityBeforeClearingPending(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatal(err)
+	}
+	body := "# 第一章\n\n林墨回到县城，先把门店钥匙接了过来。"
+	if err := s.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(body)), "desire", "quest"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Signals.SavePendingCommit(domain.PendingCommit{
+		Chapter: 1,
+		Stage:   domain.CommitStageStateApplied,
+		Summary: "已写状态但质量门禁尚未落盘",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewCommitChapterTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"chapter":         1,
+		"summary":         "林墨回县城接下门店",
+		"characters":      []string{"林墨"},
+		"key_events":      []string{"接下门店"},
+		"hook_type":       "desire",
+		"dominant_strand": "quest",
+	})
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("resume completed commit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "reviews", "01_ai_gate.json")); err != nil {
+		t.Fatalf("quality artifact must exist before pending is cleared: %v", err)
+	}
+	if pending, _ := s.Signals.LoadPendingCommit(); pending != nil {
+		t.Fatalf("pending commit should clear only after all recovery stages: %+v", pending)
+	}
+	if cp := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "commit"); cp == nil {
+		t.Fatal("commit checkpoint missing after recovery")
 	}
 }
 

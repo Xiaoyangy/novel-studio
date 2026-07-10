@@ -7,6 +7,9 @@ const (
 	CommitStageStarted        CommitStage = "started"
 	CommitStageStateApplied   CommitStage = "state_applied"
 	CommitStageProgressMarked CommitStage = "progress_marked"
+	CommitStageQualityChecked CommitStage = "quality_checked"
+	CommitStageCheckpointed   CommitStage = "checkpointed"
+	CommitStageRAGIndexed     CommitStage = "rag_indexed"
 	CommitStageSignalSaved    CommitStage = "signal_saved"
 )
 

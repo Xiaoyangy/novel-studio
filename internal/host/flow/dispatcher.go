@@ -1,8 +1,12 @@
 package flow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -17,29 +21,26 @@ type Dispatcher struct {
 
 	enabled atomic.Bool // 由 Host 控制是否派发（启动完成前应关）
 
-	// 重复追踪：记住最近一次派发的 Agent+Task 与连续下达次数。
-	// 同一指令重复计算（子代理返回后状态未推进，Route 重算结果不变）不静默吞掉，
-	// 而是带次数事实重发——"路由结果连续 N 次相同"是只有 Host 能观测到的事实；
-	// 若沉默，Coordinator 会陷入"禁止自行决定下一步"（coordinator.md）与
-	// "禁止停机"（StopGuard）的双重矛盾，自由发挥即 #24 类 freelance 死循环。
-	// 裁定权仍在 LLM：重发消息只附事实与核对许可，不设阈值、不熔断（架构 §10.13）。
-	// 消息因带次数而互不相同，不会把字面相同的指令重复压进 steeringQ。
-	lastMu   sync.Mutex
-	lastSent *Instruction
-	repeats  int
+	// 重复追踪同时记录 durable progress token。相同任务只要落了新 checkpoint
+	// 或更新 simulation/plan/draft partial，就视为仍在分步推进；否则按阈值熔断。
+	lastMu            sync.Mutex
+	lastSent          *Instruction
+	lastProgressToken string
+	repeats           int
 
-	// onRepeat 是纯 telemetry 回调（无人值守告警用），在同一指令第 repeatNotifyAt
-	// 次下达时触发一次；不反向影响派发，派发逻辑对它的存在无感知。
+	// onRepeat 是提前告警；onStall 在确认无 durable progress 后触发 Host 中止。
 	onRepeat func(agent, task string, n int)
+	onStall  func(agent, task string, n int)
 
 	// onWriterDispatch 是同步旁路刷新钩子。Host 用它在 writer 指令已经通过章节校验、
 	// 且 Progress.InProgressChapter 已更新后刷新 Writer restore pack；不参与路由裁定。
 	onWriterDispatch func(chapter int)
 }
 
-// repeatNotifyAt 写死不进配置：它不是控制流阈值（不触发任何动作，只是"喊人"），
-// 调它没有收益；进配置反而暗示可调出行为差异。
-const repeatNotifyAt = 3
+const (
+	repeatNotifyAt = 2
+	stallAbortAt   = 3
+)
 
 // NewDispatcher 创建 Dispatcher。
 func NewDispatcher(coordinator *agentcore.Agent, store *storepkg.Store) *Dispatcher {
@@ -61,7 +62,14 @@ func (d *Dispatcher) Dispatch() {
 	if inst == nil {
 		return
 	}
-	n := d.trackRepeat(inst)
+	progressToken := d.durableProgressToken(inst)
+	n, stalled := d.trackRepeat(inst, progressToken)
+	if stalled {
+		if n == stallAbortAt && d.onStall != nil {
+			d.onStall(inst.Agent, inst.Task, n)
+		}
+		return
+	}
 	// Writer 任务：在派发同一刻把章节标为进行中，UI 右侧大纲立即反映"▸ 进行中"，
 	// 不用等 plan_chapter 真正执行（plan_chapter 会再调一次 StartChapter，幂等）。
 	if inst.Agent == "writer" && inst.Chapter > 0 && d.store != nil {
@@ -97,31 +105,68 @@ func (d *Dispatcher) SetOnRepeat(cb func(agent, task string, n int)) {
 	d.onRepeat = cb
 }
 
+// SetOnStall 注册无 durable progress 时的熔断回调。须在派发开始前调用一次。
+func (d *Dispatcher) SetOnStall(cb func(agent, task string, n int)) {
+	d.onStall = cb
+}
+
 // SetOnWriterDispatch registers a synchronous observer fired after a writer
 // dispatch has been validated and pre-marked in progress.
 func (d *Dispatcher) SetOnWriterDispatch(cb func(chapter int)) {
 	d.onWriterDispatch = cb
 }
 
-// trackRepeat 记录连续相同指令的下达次数并返回当前次数（1 = 新指令）。
-// 用 Agent+Task 相等性（不比 Reason，因为 Reason 是给人看的辅助文本）。
-// 次数恰好到 repeatNotifyAt 时在锁外触发一次 onRepeat（键变更重计数后重新武装）。
-func (d *Dispatcher) trackRepeat(next *Instruction) int {
+// trackRepeat 记录相同指令在同一 durable progress token 上的连续次数。
+// Agent、Task 或 token 任一变化都会重新计数；返回 stalled=true 时调用方
+// 必须停止派发。Reason 是展示文本，不参与相等性。
+func (d *Dispatcher) trackRepeat(next *Instruction, progressToken string) (n int, stalled bool) {
 	d.lastMu.Lock()
-	if d.lastSent != nil && d.lastSent.Agent == next.Agent && d.lastSent.Task == next.Task {
+	if d.lastSent != nil &&
+		d.lastSent.Agent == next.Agent &&
+		d.lastSent.Task == next.Task &&
+		d.lastProgressToken == progressToken {
 		d.repeats++
 	} else {
 		cp := *next
 		d.lastSent = &cp
+		d.lastProgressToken = progressToken
 		d.repeats = 1
 	}
-	n := d.repeats
+	n = d.repeats
+	stalled = n >= stallAbortAt
 	d.lastMu.Unlock()
 
 	if n == repeatNotifyAt && d.onRepeat != nil {
 		d.onRepeat(next.Agent, next.Task, n)
 	}
-	return n
+	return n, stalled
+}
+
+func (d *Dispatcher) durableProgressToken(inst *Instruction) string {
+	if d.store == nil {
+		return ""
+	}
+	var token string
+	if cp := d.store.Checkpoints.LatestGlobal(); cp != nil {
+		token = fmt.Sprintf("cp:%d:%s", cp.Seq, cp.Digest)
+	}
+	if inst == nil || inst.Chapter <= 0 {
+		return token
+	}
+	for _, rel := range []string{
+		filepath.Join("meta", "chapter_simulations", fmt.Sprintf("%03d.partial.json", inst.Chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.plan.partial.json", inst.Chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", inst.Chapter)),
+		filepath.Join("drafts", fmt.Sprintf("%02d.parts", inst.Chapter), "index.json"),
+	} {
+		body, err := os.ReadFile(filepath.Join(d.store.Dir(), rel))
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(body)
+		token += "|" + filepath.ToSlash(rel) + ":" + hex.EncodeToString(sum[:8])
+	}
+	return token
 }
 
 // ResetRepeat 清空重复追踪。Resume / 新 Start 时 Host 调用，
@@ -130,5 +175,6 @@ func (d *Dispatcher) ResetRepeat() {
 	d.lastMu.Lock()
 	defer d.lastMu.Unlock()
 	d.lastSent = nil
+	d.lastProgressToken = ""
 	d.repeats = 0
 }

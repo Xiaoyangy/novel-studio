@@ -17,7 +17,10 @@ import (
 	"github.com/voocel/agentcore"
 )
 
-const deepseekAIJudgeReasoningEffort = agentcore.ThinkingMax
+const (
+	deepseekAIJudgeReasoningEffort       = agentcore.ThinkingMax
+	deepseekAIJudgeReviewProtocolVersion = "review-existing/deepseek-ai-judge/v1"
+)
 
 const deepseekAIJudgeSystemPrompt = `你是中文小说 AI 写作痕迹审核员。你会收到一整章小说正文；用户消息只包含正文，不包含说明、标题解释、检测要求或元数据。请把它当作约 3000 字整段检测场景，判断是否像 AI 写作，并给出可执行修改方案。
 
@@ -71,6 +74,8 @@ type deepseekAIJudgeModelOutput struct {
 type deepseekAIJudgeArtifact struct {
 	Chapter              int                           `json:"chapter"`
 	GeneratedAt          string                        `json:"generated_at"`
+	CacheKey             string                        `json:"cache_key"`
+	CachePolicy          reviewExistingCachePolicy     `json:"cache_policy"`
 	Provider             string                        `json:"provider,omitempty"`
 	Model                string                        `json:"model,omitempty"`
 	ReviewerExplicit     bool                          `json:"reviewer_explicit"`
@@ -96,6 +101,124 @@ type deepseekAIJudgeArtifact struct {
 	ModelSelection       deepseekAIJudgeModelSelection `json:"model_selection"`
 }
 
+func newDeepSeekAIJudgeCachePolicy(selection deepseekAIJudgeModelSelection, chapter int, chapterBody string) reviewExistingCachePolicy {
+	return reviewExistingCachePolicy{
+		Branch:                deepseekAIJudgeCacheBranch,
+		ReviewProtocolVersion: deepseekAIJudgeReviewProtocolVersion,
+		Chapter:               chapter,
+		BodySHA256:            reviewreport.BodySHA256(chapterBody),
+		Provider:              selection.Provider,
+		Model:                 selection.Model,
+		SystemPromptSHA256:    reviewExistingSHA256(deepseekAIJudgeSystemPrompt),
+		ReasoningEffort:       string(deepseekAIJudgeReasoningEffort),
+		UserPayloadKind:       "chapter_body_only",
+	}
+}
+
+func loadOrGenerateDeepSeekAIJudge(
+	projectDir string,
+	model agentcore.ChatModel,
+	selection deepseekAIJudgeModelSelection,
+	chapter int,
+	chapterBody string,
+	budget time.Duration,
+) deepseekAIJudgeBranchResult {
+	policy := newDeepSeekAIJudgeCachePolicy(selection, chapter, chapterBody)
+	cached, loadErr := loadDeepSeekAIJudgeCache(projectDir, policy)
+	if loadErr == nil && cached != nil {
+		// Explicitness describes this invocation's role selection, not the cached
+		// model response identity. Keep final artifact metadata current on a hit.
+		cached.ReviewerExplicit = selection.Explicit
+		cached.ModelSelection = selection
+		return deepseekAIJudgeBranchResult{Artifact: cached, CacheHit: true}
+	}
+	artifact, err := runDeepSeekAIJudge(model, selection, chapter, chapterBody, budget)
+	return deepseekAIJudgeBranchResult{
+		Artifact:     artifact,
+		CacheLoadErr: loadErr,
+		Err:          err,
+	}
+}
+
+func loadDeepSeekAIJudgeCache(projectDir string, expected reviewExistingCachePolicy) (*deepseekAIJudgeArtifact, error) {
+	key := reviewExistingCacheKey(expected)
+	path := reviewExistingCachePath(projectDir, deepseekAIJudgeCacheBranch, key)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 DeepSeek 缓存 %s: %w", path, err)
+	}
+	var artifact deepseekAIJudgeArtifact
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		return nil, fmt.Errorf("解析 DeepSeek 缓存 %s: %w", path, err)
+	}
+	if err := validateDeepSeekAIJudgeCacheArtifact(&artifact, expected); err != nil {
+		return nil, fmt.Errorf("校验 DeepSeek 缓存 %s: %w", path, err)
+	}
+	return &artifact, nil
+}
+
+func saveDeepSeekAIJudgeCache(projectDir string, artifact *deepseekAIJudgeArtifact) error {
+	if artifact == nil {
+		return fmt.Errorf("DeepSeek 缓存 artifact 为空")
+	}
+	if err := validateDeepSeekAIJudgeCacheArtifact(artifact, artifact.CachePolicy); err != nil {
+		return err
+	}
+	path := reviewExistingCachePath(projectDir, deepseekAIJudgeCacheBranch, artifact.CacheKey)
+	return writeReviewExistingCacheJSON(path, artifact)
+}
+
+func validateDeepSeekAIJudgeCacheArtifact(artifact *deepseekAIJudgeArtifact, expected reviewExistingCachePolicy) error {
+	if err := validateDeepSeekAIJudgeArtifactIdentity(artifact, expected); err != nil {
+		return err
+	}
+	if strings.TrimSpace(artifact.RawResponse) == "" {
+		return fmt.Errorf("raw_response 为空，不能作为模型响应缓存")
+	}
+	return nil
+}
+
+func validateDeepSeekAIJudgeArtifactIdentity(artifact *deepseekAIJudgeArtifact, expected reviewExistingCachePolicy) error {
+	if artifact == nil {
+		return fmt.Errorf("artifact 为空")
+	}
+	if expected.Branch != deepseekAIJudgeCacheBranch {
+		return fmt.Errorf("branch=%q, want %q", expected.Branch, deepseekAIJudgeCacheBranch)
+	}
+	if artifact.CachePolicy != expected {
+		return fmt.Errorf("cache policy mismatch")
+	}
+	expectedKey := reviewExistingCacheKey(expected)
+	if artifact.CacheKey != expectedKey {
+		return fmt.Errorf("cache_key=%q, want %q", artifact.CacheKey, expectedKey)
+	}
+	if artifact.Chapter != expected.Chapter {
+		return fmt.Errorf("chapter=%d, want %d", artifact.Chapter, expected.Chapter)
+	}
+	if artifact.BodySHA256 != expected.BodySHA256 {
+		return fmt.Errorf("body_sha256=%q, want %q", artifact.BodySHA256, expected.BodySHA256)
+	}
+	if artifact.Provider != expected.Provider || artifact.Model != expected.Model {
+		return fmt.Errorf("provider/model=%s/%s, want %s/%s", artifact.Provider, artifact.Model, expected.Provider, expected.Model)
+	}
+	if artifact.ModelSelection.Provider != expected.Provider || artifact.ModelSelection.Model != expected.Model {
+		return fmt.Errorf("model_selection=%s/%s, want %s/%s", artifact.ModelSelection.Provider, artifact.ModelSelection.Model, expected.Provider, expected.Model)
+	}
+	if artifact.ReasoningEffort != expected.ReasoningEffort {
+		return fmt.Errorf("reasoning_effort=%q, want %q", artifact.ReasoningEffort, expected.ReasoningEffort)
+	}
+	if !artifact.RawBodyOnly || artifact.UserPayloadKind != expected.UserPayloadKind {
+		return fmt.Errorf("payload identity mismatch")
+	}
+	if strings.TrimSpace(artifact.GeneratedAt) == "" {
+		return fmt.Errorf("generated_at 为空")
+	}
+	return nil
+}
+
 func runDeepSeekAIJudge(
 	model agentcore.ChatModel,
 	selection deepseekAIJudgeModelSelection,
@@ -106,7 +229,8 @@ func runDeepSeekAIJudge(
 	if strings.TrimSpace(chapterBody) == "" {
 		return nil, fmt.Errorf("第 %d 章正文为空，无法做 DeepSeek 裸正文 AI 判定", chapter)
 	}
-	if budget < 180*time.Second {
+	cachePolicy := newDeepSeekAIJudgeCachePolicy(selection, chapter, chapterBody)
+	if budget <= 0 {
 		budget = 180 * time.Second
 	}
 
@@ -132,6 +256,8 @@ func runDeepSeekAIJudge(
 	artifact := &deepseekAIJudgeArtifact{
 		Chapter:          chapter,
 		GeneratedAt:      time.Now().Format(time.RFC3339),
+		CacheKey:         reviewExistingCacheKey(cachePolicy),
+		CachePolicy:      cachePolicy,
 		Provider:         selection.Provider,
 		Model:            selection.Model,
 		ReviewerExplicit: selection.Explicit,
@@ -188,7 +314,12 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 	if st == nil || artifact == nil {
 		return
 	}
-	removed := 0
+	companionSystem := false
+	if snapshot, err := st.UserRules.Load(); err == nil && snapshot != nil {
+		companionSystem = domain.SystemCompanionVoiceRequested(snapshot.Preferences)
+	}
+	chapterPlan, _ := st.Drafts.LoadChapterPlan(artifact.Chapter)
+	removedProject, removedUserRules, removedTrendRules := 0, 0, 0
 	filter := func(values []string) []string {
 		if len(values) == 0 {
 			return values
@@ -196,7 +327,15 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		out := make([]string, 0, len(values))
 		for _, value := range values {
 			if len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, value)) > 0 {
-				removed++
+				removedProject++
+				continue
+			}
+			if companionSystem && domain.SystemCompanionFeedbackContradicts(value) {
+				removedUserRules++
+				continue
+			}
+			if deepSeekTrendAdviceContradictsPlan(chapterPlan, value) {
+				removedTrendRules++
 				continue
 			}
 			out = append(out, value)
@@ -209,24 +348,79 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 	artifact.DialogueFixPlan = filter(artifact.DialogueFixPlan)
 	artifact.AuthorVoicePlan = filter(artifact.AuthorVoicePlan)
 	artifact.RAGRules = filter(artifact.RAGRules)
-	if strings.TrimSpace(artifact.RawResponse) != "" && len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, artifact.RawResponse)) > 0 {
-		removed++
-		artifact.RawResponse = ""
+	if companionSystem && domain.SystemCompanionFeedbackContradicts(artifact.Summary) {
+		removedUserRules++
+		artifact.Summary = "AI 痕迹结论保留；与用户系统人格硬设定冲突的风格建议已从后续写作输入中移除。"
 	}
-	if removed == 0 {
-		return
+	if strings.TrimSpace(artifact.RawResponse) != "" {
+		if len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, artifact.RawResponse)) > 0 {
+			removedProject++
+			artifact.RawResponse = ""
+		} else if companionSystem && domain.SystemCompanionFeedbackContradicts(artifact.RawResponse) {
+			removedUserRules++
+			artifact.RawResponse = ""
+		} else if deepSeekTrendAdviceContradictsPlan(chapterPlan, artifact.RawResponse) {
+			removedTrendRules++
+			artifact.RawResponse = ""
+		}
 	}
-	artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
-		fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书禁用旧引擎冲突的建议。", removed),
-	)
-	artifact.RAGRules = appendUnique(artifact.RAGRules,
-		"项目门禁：禁止把旧版硬核取证术语当作专业隐喻；用职场后果、岗位合并、项目权限、同事求助和会后约谈替代。",
-	)
+	if removedProject > 0 {
+		artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
+			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书禁用旧引擎冲突的建议。", removedProject),
+		)
+		artifact.RAGRules = appendUnique(artifact.RAGRules,
+			"项目门禁：禁止把旧版硬核取证术语当作专业隐喻；用职场后果、岗位合并、项目权限、同事求助和会后约谈替代。",
+		)
+	}
+	if removedUserRules > 0 {
+		artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
+			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书系统人格硬设定冲突的建议。", removedUserRules),
+		)
+		artifact.RAGRules = appendUnique(artifact.RAGRules,
+			"用户硬设定：系统必须能短促接话、吐槽、撑腰并始终支持林澈；可控制频率和长度，不得改成冷硬静默的任务机器人。",
+		)
+	}
+	if removedTrendRules > 0 {
+		artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
+			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本章热梗句法或承载人 plan 冲突的建议。", removedTrendRules),
+		)
+		artifact.RAGRules = appendUnique(artifact.RAGRules,
+			"本章热梗门禁：已批准的‘呱，’必须保持逗号起手并后接完整吐槽，承载人以 chapter plan 为准；不得改成‘呱——’、拟声动作或另换角色。",
+		)
+	}
+}
+
+func deepSeekTrendAdviceContradictsPlan(plan *domain.ChapterPlan, text string) bool {
+	if plan == nil || !strings.Contains(text, "呱") {
+		return false
+	}
+	approvedGua := false
+	for _, item := range plan.CausalSimulation.TrendLanguage {
+		value := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’")
+		if strings.HasPrefix(value, "呱，") || strings.HasPrefix(value, "呱,") {
+			approvedGua = true
+			break
+		}
+	}
+	if !approvedGua {
+		return false
+	}
+	for _, contradiction := range []string{
+		"呱——", "呱—", "拖长音", "呱了一声", "单独一个‘呱’", "单独一个“呱”", "改成拟声", "改为拟声",
+	} {
+		if strings.Contains(text, contradiction) {
+			return true
+		}
+	}
+	return false
 }
 
 func saveDeepSeekAIJudge(projectDir string, artifact *deepseekAIJudgeArtifact) error {
 	if artifact == nil {
 		return nil
+	}
+	if err := validateDeepSeekAIJudgeArtifactIdentity(artifact, artifact.CachePolicy); err != nil {
+		return fmt.Errorf("DeepSeek artifact cache identity invalid: %w", err)
 	}
 	reviewsDir := filepath.Join(projectDir, "reviews")
 	if err := os.MkdirAll(reviewsDir, 0o755); err != nil {
@@ -368,6 +562,7 @@ func renderDeepSeekAIJudgeUnifiedSection(artifact deepseekAIJudgeArtifact) strin
 
 func writeDeepSeekAIJudgeSectionBody(b *strings.Builder, artifact deepseekAIJudgeArtifact) {
 	fmt.Fprintf(b, "- 模型：%s/%s（reviewer_explicit=%t）\n", valueOrDash(artifact.Provider), valueOrDash(artifact.Model), artifact.ReviewerExplicit)
+	fmt.Fprintf(b, "- 缓存策略：%s（cache_key=%s）\n", valueOrDash(artifact.CachePolicy.ReviewProtocolVersion), valueOrDash(artifact.CacheKey))
 	fmt.Fprintf(b, "- reasoning_effort：%s\n", artifact.ReasoningEffort)
 	fmt.Fprintf(b, "- 输入口径：完整章节正文裸传（raw_body_only=%t，sha256=%s）\n", artifact.RawBodyOnly, artifact.BodySHA256)
 	fmt.Fprintf(b, "- 判定：%s / %s / %d%%\n", valueOrDash(artifact.Verdict), valueOrDash(artifact.RiskLevel), artifact.AIProbabilityPercent)

@@ -71,6 +71,32 @@ func TestNarrativeHumanAnchorAllowsFinalCapForStrongScenes(t *testing.T) {
 	}
 }
 
+func TestHumanAnchorDoesNotRewardDialogueAndActionStuffing(t *testing.T) {
+	base := Stats{
+		Hanzi:               1800,
+		SentenceCV:          0.68,
+		ParagraphCV:         0.62,
+		DialogueRatio:       0.22,
+		ConcreteDensityPerK: 12,
+		ActionDensityPerK:   8,
+		SensoryDensityPerK:  5,
+		AbstractDensityPerK: 2,
+		ClicheTotalPerK:     2,
+	}
+	stuffed := base
+	stuffed.DialogueRatio = 0.58
+	stuffed.ActionDensityPerK = 32
+	sentences := []float64{8, 24, 11, 19, 7, 28, 13, 17}
+	natural := humanAnchorStats("桌边有人争执，窗外雨声压住半句话。", base, sentences, map[string]float64{}, map[string]any{})
+	staged := humanAnchorStats("“问。”他抬眼。“答。”她停手。", stuffed, sentences, map[string]float64{}, map[string]any{})
+	if floatFromAny(staged["score"]) >= floatFromAny(natural["score"]) {
+		t.Fatalf("stuffed score %.2f should stay below natural %.2f", floatFromAny(staged["score"]), floatFromAny(natural["score"]))
+	}
+	if stringFromAny(staged["anchor_type"]) != "narrative_scene" {
+		t.Fatalf("novel prose must not switch to technical anchor: %+v", staged)
+	}
+}
+
 func TestEffectiveGatePercentUsesHumanAnchorFinalCap(t *testing.T) {
 	capValue := 4.8
 	report := Report{

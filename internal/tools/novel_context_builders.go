@@ -587,6 +587,14 @@ func (t *ContextTool) buildStyleStats(envelope *chapterContextEnvelope, state co
 	}
 	completed := slices.Clone(state.progress.CompletedChapters)
 	slices.Sort(completed)
+	cacheKey := t.styleStatsInputKey(completed)
+	t.styleStatsMu.Lock()
+	if cacheKey != "" && cacheKey == t.styleStatsKey && t.styleStatsCache != nil {
+		envelope.Episodic["style_stats"] = t.styleStatsCache
+		t.styleStatsMu.Unlock()
+		return
+	}
+	t.styleStatsMu.Unlock()
 	chapters := make([]string, 0, len(completed))
 	for _, ch := range completed {
 		// 个别章读取失败跳过：统计是 best-effort 事实，不因单章缺失放弃全书视野
@@ -610,7 +618,29 @@ func (t *ContextTool) buildStyleStats(envelope *chapterContextEnvelope, state co
 	if stats == nil {
 		return
 	}
+	t.styleStatsMu.Lock()
+	t.styleStatsKey = cacheKey
+	t.styleStatsCache = stats
+	t.styleStatsMu.Unlock()
 	envelope.Episodic["style_stats"] = stats
+}
+
+func (t *ContextTool) styleStatsInputKey(completed []int) string {
+	var b strings.Builder
+	for _, chapter := range completed {
+		path := filepath.Join(t.store.Dir(), "chapters", fmt.Sprintf("%02d.md", chapter))
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%d:%d:%d|", chapter, info.Size(), info.ModTime().UnixNano())
+	}
+	for _, rel := range []string{"outline.json", "characters.json", "meta/cast.json"} {
+		if info, err := os.Stat(filepath.Join(t.store.Dir(), filepath.FromSlash(rel))); err == nil {
+			fmt.Fprintf(&b, "%s:%d:%d|", rel, info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	return b.String()
 }
 
 // styleStopwords 收集角色名与别名供短语挖掘过滤——出场人名天然高频，不是文风问题。
@@ -1121,15 +1151,17 @@ func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *
 	if len(state.storyThreads) > 0 {
 		envelope.Selected["story_threads"] = state.storyThreads
 	}
-	if ragItems, trace := t.selectRAGRecall(ctx, state); len(ragItems) > 0 {
+	if ragItems, trace, cacheHit := t.selectRAGRecall(ctx, state); len(ragItems) > 0 {
 		envelope.Selected["rag_recall"] = ragItems
 		envelope.References["retrieval_trace"] = trace
-		if trace != nil {
+		if trace != nil && !cacheHit {
 			_ = t.store.RAG.AppendTrace(*trace)
 		}
 	} else if trace != nil && len(trace.Matches) > 0 {
 		envelope.References["retrieval_trace"] = trace
-		_ = t.store.RAG.AppendTrace(*trace)
+		if !cacheHit {
+			_ = t.store.RAG.AppendTrace(*trace)
+		}
 	}
 	if lessons := t.selectReviewLessons(state.chapter, warn); len(lessons) > 0 {
 		envelope.Selected["review_lessons"] = lessons
@@ -1489,6 +1521,8 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "普通对白里的分号会显得书面；改成停顿、省略、打断、追问或两句口语。")
 		case "stiff_trade_dialogue":
 			focus = append(focus, "讲价/互怼对白不能像合同条款或广告口号；改成有停顿、有关系、有算盘的普通人口语。")
+		case "system_message_overpacked":
+			focus = append(focus, "系统单条消息塞了过多功能；把拒绝、安慰、解释、任务和奖励拆开，一条消息只做一件事。")
 		case "bureaucratic_register_overuse":
 			focus = append(focus, "制度/纪要/表单词过密时，不要继续补规范说明；把信息拆进人物口语、担责压力、误读、拒写、私人消息打断和具体动作。专业词可以保留在表格/屏幕里，人物说话要短、怕事、有口头反应。")
 		case "structured_note_triplet":
@@ -1722,7 +1756,49 @@ func stateFocusText(state contextBuildState) string {
 	return strings.Join(parts, " ")
 }
 
-func (t *ContextTool) selectRAGRecall(ctx context.Context, state contextBuildState) ([]domain.RecallItem, *domain.RetrievalTrace) {
+func (t *ContextTool) selectRAGRecall(ctx context.Context, state contextBuildState) ([]domain.RecallItem, *domain.RetrievalTrace, bool) {
+	cacheKey := t.ragRecallCacheKey(state)
+	now := time.Now()
+	t.ragRecallMu.Lock()
+	if cached, ok := t.ragRecallCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+		items := append([]domain.RecallItem(nil), cached.items...)
+		trace := cached.trace
+		t.ragRecallMu.Unlock()
+		return items, trace, true
+	}
+	t.ragRecallMu.Unlock()
+
+	items, trace := t.selectRAGRecallFresh(ctx, state)
+	t.ragRecallMu.Lock()
+	if t.ragRecallCache == nil {
+		t.ragRecallCache = make(map[string]ragRecallCacheEntry)
+	}
+	// The cache is deliberately short-lived. It absorbs repeated recovery calls
+	// while allowing newly committed chapter/RAG state to become visible quickly.
+	t.ragRecallCache[cacheKey] = ragRecallCacheEntry{
+		items:     append([]domain.RecallItem(nil), items...),
+		trace:     trace,
+		expiresAt: now.Add(2 * time.Minute),
+	}
+	t.ragRecallMu.Unlock()
+	return items, trace, false
+}
+
+func (t *ContextTool) ragRecallCacheKey(state contextBuildState) string {
+	indexState, _ := t.store.RAG.LoadIndexStateReadOnly()
+	queryFields := recallFocusTerms(state.currentEntry, state.chapterPlan)
+	queryFields = append(queryFields, state.chapterParticipants...)
+	if state.currentEntry != nil {
+		queryFields = append(queryFields, state.currentEntry.Title, state.currentEntry.CoreEvent)
+	}
+	indexKey := "none"
+	if indexState != nil {
+		indexKey = fmt.Sprintf("%p:%s:%s:%d", indexState, indexState.SanitizedDigest, indexState.UpdatedAt, len(indexState.Chunks))
+	}
+	return fmt.Sprintf("ch=%d|index=%s|focus=%s|query=%s", state.chapter, indexKey, stateFocusText(state), strings.Join(queryFields, "\x1f"))
+}
+
+func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBuildState) ([]domain.RecallItem, *domain.RetrievalTrace) {
 	focus := stateFocusText(state)
 	queryFields := recallFocusTerms(state.currentEntry, state.chapterPlan)
 	queryFields = append(queryFields, state.chapterParticipants...)

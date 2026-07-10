@@ -90,7 +90,19 @@ DUPLICATE_WIND_CONTROL_RE = re.compile(r"当风控.{0,160}破风控|破风控.{0
 IMPOSSIBLE_SHADOW_GEOMETRY_RE = re.compile(r"肩膀以下[^。！？!?；;\n]{0,28}腰以上空了|腰以上空了[^。！？!?；;\n]{0,28}肩膀以下")
 CAT_EYE_IMPOSSIBLE_READ_RE = re.compile(r"(?:猫眼|门里|1704)[^。！？!?；;\n]{0,70}(?:白纸背面|背面翻起一角)[^。！？!?；;\n]{0,45}(?:代缴|双方确认|需双方确认)")
 FORM_IMAGE_MISMATCH_RE = re.compile(r"四栏[^。！？!?；;\n]{0,30}像临时盖上去的章")
-DIALOGUE_RE = re.compile(r"[“\"]([^”\"]{2,160})[”\"]")
+DIALOGUE_RE = re.compile(r"[“\"「]([^”\"」]{2,160})[”\"」]")
+SYSTEM_MESSAGE_RE = re.compile(r"【([^】]{2,240})】")
+ABSTRACT_SYSTEM_REASSURANCE_RE = re.compile(
+    r"(?:钱没跑|陪你(?:换条路|找(?:条)?路)|规矩不撤|先喘(?:半)?口气|(?:这回)?算你[^。！？!?]{0,8}挣来的)"
+)
+DIALOGUE_ACTION_LEAD_RE = re.compile(
+    r"^(?:[^“「\n]{0,46})(?:夹着|端着|拿着|护住|划出|刚说了句|说了句|看见|抬起|抬眼|抬头|低头|"
+    r"推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]"
+)
+OPAQUE_PROCEDURE_SINGLETON_RE = re.compile(r"(?:补上再测|补测|用途不符|真实改善消费|合规核验)")
+OPAQUE_PROCEDURE_TERMS = [
+    "采购凭证", "用途说明", "测试记录", "临时固定", "补测", "核验", "验收记录", "用途不符", "真实改善消费",
+]
 TEMPLATED_DIALOGUE_NAME_CALL_IN_TEXT_RE = re.compile(r"[“\"「][\u4e00-\u9fff]{2,4}[。！？!?]?[”\"」][^。！？!?；;\n]{0,12}叫[他她]")
 TEMPLATED_DIALOGUE_MICRO_BEAT_RE = re.compile(
     r"(?:叫[他她]|停住|停下|抬眼|抬头|看了[^。！？!?；;\n]{0,8}一眼|"
@@ -723,6 +735,68 @@ def cadence_issues(raw: str) -> list[dict]:
                 }
             )
             break
+
+    action_lead_run = 0
+    action_lead_examples: list[str] = []
+    for para in paras:
+        if not re.search(r"[“「]", para) or not DIALOGUE_ACTION_LEAD_RE.search(para.strip()):
+            action_lead_run = 0
+            action_lead_examples = []
+            continue
+        action_lead_run += 1
+        if len(action_lead_examples) < 3:
+            action_lead_examples.append(para.strip()[:48])
+        if action_lead_run >= 3:
+            issues.append(
+                {
+                    "rule": "dialogue_action_lead_repetition",
+                    "severity": "warning",
+                    "line": line_number(raw, raw.find(para)),
+                    "limit": 2,
+                    "actual": action_lead_run,
+                    "target": " / ".join(action_lead_examples),
+                    "evidence": "连续对白段不能都由人物动作报幕后再开口；定住空间后改用裸对白、简短标签、打断、漏答、群体反应或无人接话",
+                }
+            )
+            break
+
+    for match in SYSTEM_MESSAGE_RE.finditer(raw):
+        message = match.group(1).strip()
+        if not ABSTRACT_SYSTEM_REASSURANCE_RE.search(message):
+            continue
+        issues.append(
+            {
+                "rule": "abstract_system_reassurance",
+                "severity": "warning",
+                "line": line_number(raw, match.start()),
+                "limit": "回应眼前问题、具体对象或可执行下一步",
+                "actual": 1,
+                "target": message[:100],
+                "evidence": "系统陪伴感不能靠客服式空话；让它回答主角刚问的具体问题，或给一个能马上执行的选择",
+            }
+        )
+        break
+
+    messages = [match.group(1).strip() for match in DIALOGUE_RE.finditer(raw)]
+    messages.extend(match.group(1).strip() for match in SYSTEM_MESSAGE_RE.finditer(raw))
+    for message in messages:
+        term_count = sum(1 for term in OPAQUE_PROCEDURE_TERMS if term in message)
+        if not OPAQUE_PROCEDURE_SINGLETON_RE.search(message) and term_count < 2:
+            continue
+        target_index = raw.find(message)
+        issues.append(
+            {
+                "rule": "opaque_procedure_jargon",
+                "severity": "warning",
+                "line": line_number(raw, target_index if target_index >= 0 else 0),
+                "limit": "普通读者当场能看懂风险、后果和下一步",
+                "actual": term_count,
+                "target": message[:100],
+                "evidence": "流程缩写和验收黑话不得成串进入对白；改写成哪里会坏、谁会吃亏、现在要怎么办",
+            }
+        )
+        break
+
     isolated = [para for para in paras if len(split_sentences(para)) == 1]
     if len(isolated) > 4:
         issues.append(

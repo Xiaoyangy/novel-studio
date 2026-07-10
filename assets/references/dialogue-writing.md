@@ -9,6 +9,7 @@
 网络资料综合结论：
 
 - Writing Excuses 的 Dialogue Masterclass 把对白拆成作者意图、角色意图、场景冲突、上下文、潜台词和角色声口；对话不是现实闲聊照录，而是带目标的行动。
+- Writing Excuses 的 blocking/description 专题进一步指出：先用少量具体信息定住空间和人物，进入交锋后逐渐减少动作拍；每句对白都配动作会人为制造停顿，听感尤其僵硬。
 - Reedsy 强调 scene-based dialogue、动作拍、角色声口区分、删掉多余寒暄和把信息藏进对话动作里。
 - Center for Fiction 强调对白里每个角色都要想要某样东西，并会在谈话中改变策略；台词的表层内容、潜台词和行动目标不能是同一层。
 - Gotham Writers 与 NowNovel 都提示：读者能从上下文分辨说话人时，不必每行都标“他说/她问”；动作标签的职责是让场景和情绪显形，不是给每句台词配一个停顿动作。
@@ -16,8 +17,32 @@
 - K.M. Weiland / Jane Friedman 的冲突型对白强调：角色有外在场景目标，也有内在隐秘赌注；对话冲突不一定是吵架，也可以是观点、欲望、恐惧和权力位置相互顶住。
 - Gotham Writers Workshop、Writing Excuses 的 subtext 资料都强调：潜台词来自文本和上下文之间，身体语言、沉默、误读、文化语境和关系旧账会让同一句话变成另一层意思。
 - Writers Helping Writers 把对话张力拆成相反目标、情绪包袱、不安全感、偏见、错误假设、小烦躁、文化差异和潜台词。
+- 起点《都重生了谁考公务员啊》公开章节可见的可迁移手法是：裸对白、简短标签、人物反应和短叙述交替，朋友先按自己的关切误读，再回到主角需要的信息；段落不按“人物动作+台词”排队。另一公开章节《刚准备高考，离婚逆袭系统来了》也让玩笑先改变关系和现场行为，再补必要叙述，而非让动作拍逐句报幕。
+- 番茄 2026 年已有“县城+经营+系统+返现”新书，说明题材入口仍活跃；其简介和目录适合观察即时兑现、熟人社会和经营升级的市场包装，不直接当正文声口样本，更不能复制多女主或低俗刺激写法。
 
 工程化要求：关键对白先选 `dialogue_mode`，再决定 `opening_strategy`。对白先入场只是 `opening_strategy=dialogue_first` 的一种，不能成为全书模板。
+
+### 0.1 蓝图只定冲突，不定句序
+
+- `turn_progression` 只说明信息、压力或权力怎样变化，不得逐轮翻译成正文。
+- `action_beat` 是可选项，不是每轮必填。动作若不改变权力、遮掩信息、打断台词或影响现场结果，删掉。
+- 连续交锋允许 3-5 行裸对白；用声口、上一问、称谓和关系压力辨认说话人。需要重新定场时再补一个有效动作或环境变化。
+- 多人场不是每人轮流发言。允许有人抢话、话被忽略、两人同时反应、关键人物始终不接话。
+
+### 0.2 系统先回答人，再显示规则
+
+- 主角问“为什么不能还旧债”，系统就回答旧债为什么不算；不要回答成“用途不符”。
+- 一条消息最多承担一项：拒绝、解释、提示、奖励或吐槽。
+- 陪伴型系统的温度来自具体共同处境，例如帮主角在两个方案里挑一个；“钱没跑”“陪你换条路”“规矩不撤”没有对象与后果，是客服式空话。
+- 正式规则可以短、准；聊天回应可以有性格。二者不要挤在同一组方括号里。
+
+### 0.3 普通读者优先于专业正确
+
+角色可以懂施工、采购、财务或行政术语，读者不需要先学会这些才看懂剧情。术语出现时，页面应立即给出至少一项：会坏在哪里、谁会吃亏、现在要怎么办。给不出就换日常说法或删除。
+
+### 0.4 换场靠选择，不靠剪辑词
+
+每次换地点至少连起三件事：上一场余波、主角当下的需要/选择、抵达后的第一个阻力。只写“锁屏、下楼、去了河边”没有回答“为什么现在去”，属于作者搬运人物，不是快节奏。
 
 | 对话模式 | 适用场景 | 主要逻辑 | 常见开场 | 风险 |
 |-----|------|------|------|------|
@@ -50,6 +75,10 @@
 - Writing Excuses, Context Shapes Dialogue: https://writingexcuses.com/writing-excuses-10-38-how-does-context-shape-dialog/
 - Writing Excuses, Developing Subtext: https://writingexcuses.com/17-34-developing-subtext/
 - Writing Excuses, Character Voice: https://writingexcuses.com/13-13-character-voice/
+- Writing Excuses, Combining Dialogue, Blocking, and Description: https://writingexcuses.com/writing-excuses-8-31-combining-dialogue-blocking-and-description/
+- 起点《都重生了谁考公务员啊》第2章: https://www.qidian.com/chapter/1038504669/774682230/
+- 起点《刚准备高考，离婚逆袭系统来了》第57章: https://www.qidian.com/chapter/1040790581/802478028/
+- 番茄《县城：超市招精神小妹，赔钱返现》项目页（仅作题材/包装信号）: https://fanqienovel.com/page/7630009394888969241
 - Reedsy dialogue guide: https://reedsy.com/blog/guide/how-to-write-dialogue/
 - K.M. Weiland / Jane Friedman, conflict in dialogue: https://janefriedman.com/conflict-in-dialogue/
 - Gotham Writers Workshop, subtext in dialogue: https://www.writingclasses.com/toolbox/ask-writer/in-dialogue-what-is-subtext

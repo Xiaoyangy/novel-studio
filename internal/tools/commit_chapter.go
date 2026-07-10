@@ -200,12 +200,76 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
 	}
 	if t.store.Progress.IsChapterCompleted(a.Chapter) {
-		// 清理可能残留的 PendingCommit（崩溃发生在 ProgressMarked 之后、ClearPendingCommit 之前）
+		// Saga recovery: completed progress is not sufficient proof. Resume the
+		// quality gate, checkpoint and RAG stages before clearing PendingCommit.
 		if pending, _ := t.store.Signals.LoadPendingCommit(); pending != nil && pending.Chapter == a.Chapter {
-			if err := t.appendCommitCheckpoint(a.Chapter); err != nil {
-				return nil, fmt.Errorf("checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
+			content, wordCount, loadErr := t.store.Drafts.LoadChapterContent(a.Chapter)
+			if loadErr != nil || strings.TrimSpace(content) == "" {
+				return nil, fmt.Errorf("resume commit content: %w: %w", errs.ErrStoreRead, loadErr)
 			}
-			_ = t.store.Signals.ClearPendingCommit()
+			if !commitStageAtLeast(pending.Stage, domain.CommitStageQualityChecked) {
+				aiVoiceAnalysis, qualityErr := t.saveFinalAIVoice(a.Chapter, content, "")
+				if qualityErr != nil {
+					return nil, qualityErr
+				}
+				_ = aiVoiceAnalysis
+				aigcReport := aigc.Analyze(content)
+				violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+				violations = append(violations, aigcViolation(aigcReport)...)
+				violations = append(violations, t.resourcePendingViolations(content)...)
+				a.methodologyCommitExtras.ChapterContent = content
+				violations = append(violations, t.methodologyViolations(a.Chapter, wordCount, a.HookType, a.methodologyCommitExtras)...)
+				violations = append(violations, consistencyReconcile(t.store, a.Chapter, content, a.ResourceUpdates)...)
+				if err := t.saveAIGCReviewFiles(a.Chapter, content, aigcReport, violations); err != nil {
+					return nil, fmt.Errorf("resume save aigc review: %w: %w", errs.ErrStoreWrite, err)
+				}
+				if reason := blockingViolationReason(violations); reason != "" {
+					if err := t.enqueueMechanicalGateFailure(a.Chapter, reason); err != nil {
+						return nil, fmt.Errorf("resume mechanical gate: %w: %w", errs.ErrStoreWrite, err)
+					}
+				}
+				pending.Stage = domain.CommitStageQualityChecked
+				pending.UpdatedAt = time.Now().Format(time.RFC3339)
+				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+					return nil, fmt.Errorf("resume quality stage: %w: %w", errs.ErrStoreWrite, err)
+				}
+			}
+			if !commitStageAtLeast(pending.Stage, domain.CommitStageCheckpointed) {
+				if err := t.appendCommitCheckpoint(a.Chapter); err != nil {
+					return nil, fmt.Errorf("checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
+				}
+				pending.Stage = domain.CommitStageCheckpointed
+				pending.UpdatedAt = time.Now().Format(time.RFC3339)
+				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+					return nil, fmt.Errorf("resume checkpoint stage: %w: %w", errs.ErrStoreWrite, err)
+				}
+			}
+			if !commitStageAtLeast(pending.Stage, domain.CommitStageRAGIndexed) {
+				_, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
+					Chapter: a.Chapter, Summary: a.Summary, Characters: a.Characters, KeyEvents: a.KeyEvents,
+					TimelineEvents: a.TimelineEvents, ForeshadowUpdates: a.ForeshadowUpdates,
+					RelationshipChanges: a.RelationshipChanges, StateChanges: a.StateChanges,
+					ResourceUpdates: a.ResourceUpdates, ResourceProposals: a.ResourceProposals,
+					HookType: a.HookType, DominantStrand: a.DominantStrand,
+					OpeningDevice: a.OpeningDevice, EndingDevice: a.EndingDevice, WordCount: wordCount,
+				})
+				if ragErr != nil {
+					slog.Warn("恢复提交时章节 RAG 沉淀失败，已交给 pending upserts", "module", "commit", "chapter", a.Chapter, "err", ragErr)
+				}
+				pending.Stage = domain.CommitStageRAGIndexed
+				pending.UpdatedAt = time.Now().Format(time.RFC3339)
+				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+					return nil, fmt.Errorf("resume rag stage: %w: %w", errs.ErrStoreWrite, err)
+				}
+			}
+			if err := t.store.Progress.ClearInProgress(); err != nil {
+				return nil, fmt.Errorf("resume clear in-progress: %w: %w", errs.ErrStoreWrite, err)
+			}
+			if err := t.store.Signals.ClearPendingCommit(); err != nil {
+				return nil, fmt.Errorf("resume clear pending commit: %w: %w", errs.ErrStoreWrite, err)
+			}
+			progress, _ := t.store.Progress.Load()
+			return t.buildSkipResult(a.Chapter, progress)
 		}
 		// 打磨/重写路径：章节虽已完成，但仍在 pending_rewrites 中，允许覆盖并 drain 队列
 		progress, _ := t.store.Progress.Load()
@@ -466,7 +530,7 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	result.VolumeOutlineDue, result.VolumeOutlineReview = t.rollingVolumeOutlineSignals(a.Chapter)
 
-	pending.Stage = domain.CommitStageProgressMarked
+	pending.Stage = domain.CommitStageQualityChecked
 	pending.Result = &result
 	pending.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
@@ -478,13 +542,10 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if err := t.appendCommitCheckpoint(a.Chapter); err != nil {
 		return nil, fmt.Errorf("checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
 	}
-
-	// 10. 清除进度中间状态
-	if err := t.store.Progress.ClearInProgress(); err != nil {
-		return nil, fmt.Errorf("clear in-progress: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if err := t.store.Signals.ClearPendingCommit(); err != nil {
-		return nil, fmt.Errorf("clear pending commit: %w: %w", errs.ErrStoreWrite, err)
+	pending.Stage = domain.CommitStageCheckpointed
+	pending.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
+		return nil, fmt.Errorf("update checkpointed commit stage: %w: %w", errs.ErrStoreWrite, err)
 	}
 
 	ragIndexed, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
@@ -507,6 +568,19 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if ragErr != nil {
 		slog.Warn("章节 RAG 沉淀失败，跳过", "module", "commit", "chapter", a.Chapter, "err", ragErr)
 	}
+	pending.Stage = domain.CommitStageRAGIndexed
+	pending.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
+		return nil, fmt.Errorf("update rag-indexed commit stage: %w: %w", errs.ErrStoreWrite, err)
+	}
+
+	// 10. 所有可恢复阶段都有证据后才清中间状态。
+	if err := t.store.Progress.ClearInProgress(); err != nil {
+		return nil, fmt.Errorf("clear in-progress: %w: %w", errs.ErrStoreWrite, err)
+	}
+	if err := t.store.Signals.ClearPendingCommit(); err != nil {
+		return nil, fmt.Errorf("clear pending commit: %w: %w", errs.ErrStoreWrite, err)
+	}
 
 	// 11. 机械规则检查结果随返回透出，供 editor 和日志解释。
 	var audit *domain.ResourceAudit
@@ -514,6 +588,20 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 		audit = &ra
 	}
 	return json.Marshal(commitOutput{CommitResult: result, RuleViolations: violations, AIGCReport: &aigcReport, AIVoice: &aiVoiceAnalysis, ResourceAudit: audit, RAGIndexed: ragIndexed, RAGError: errorString(ragErr)})
+}
+
+func commitStageAtLeast(stage, want domain.CommitStage) bool {
+	rank := map[domain.CommitStage]int{
+		domain.CommitStageStarted:      1,
+		domain.CommitStageStateApplied: 2,
+		// Legacy progress_marked was saved only after quality checks completed.
+		domain.CommitStageProgressMarked: 3,
+		domain.CommitStageQualityChecked: 3,
+		domain.CommitStageCheckpointed:   4,
+		domain.CommitStageRAGIndexed:     5,
+		domain.CommitStageSignalSaved:    5,
+	}
+	return rank[stage] >= rank[want]
 }
 
 func (t *CommitChapterTool) appendCommitCheckpoint(chapter int) error {
@@ -1279,7 +1367,7 @@ func immediateMechanicalGateFailure(v rules.Violation) bool {
 	switch v.Rule {
 	case "aigc_ratio":
 		return v.Severity == rules.SeverityError
-	case "templated_dialogue_chain":
+	case "templated_dialogue_chain", "abstract_system_reassurance", "opaque_procedure_jargon", "dialogue_action_lead_repetition":
 		return true
 	case "project_contamination", "deprecated_story_engine":
 		return v.Severity == rules.SeverityError

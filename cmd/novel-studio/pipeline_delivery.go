@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1358,7 +1360,7 @@ func pipelineClearStalePipelineSteer(st *store.Store) error {
 	if meta == nil {
 		return nil
 	}
-	if strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
+	if isPipelineInternalRepairSteer(meta.PendingSteer) {
 		if err := st.RunMeta.ClearPendingSteer(); err != nil {
 			return fmt.Errorf("清理旧 staged plan 修复指令失败: %w", err)
 		}
@@ -1414,19 +1416,44 @@ func pipelineFinalizeStagedPlans(outputDir string, writeTo int) error {
 
 func pipelineQueueStagedPlanRepair(st *store.Store, chapter int, cause error) error {
 	meta, _ := st.RunMeta.Load()
-	if meta != nil && strings.TrimSpace(meta.PendingSteer) != "" && !strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
+	if meta != nil && strings.TrimSpace(meta.PendingSteer) != "" && !isPipelineInternalRepairSteer(meta.PendingSteer) {
 		return nil
 	}
-	msg := pipelineStagedPlanRepairSteer(chapter, cause.Error())
+	causeText := cause.Error()
+	msg := pipelineStagedPlanRepairSteer(chapter, causeText)
+	label := "staged plan"
+	if pipelineFailureNeedsWorldSimulation(causeText) {
+		msg = pipelineWorldSimulationRepairSteer(chapter, causeText)
+		label = "world simulation"
+	}
 	if err := st.RunMeta.SetPendingSteer(msg); err != nil {
 		return fmt.Errorf("写入 staged plan 修复指令失败: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[pipeline:write] 已排队第 %d 章 staged plan 修复指令，恢复后优先补齐 plan_details\n", chapter)
+	fmt.Fprintf(os.Stderr, "[pipeline:write] 已排队第 %d 章 %s 修复指令\n", chapter, label)
 	return nil
 }
 
+func isPipelineInternalRepairSteer(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, "Pipeline staged-plan repair") ||
+		strings.HasPrefix(text, "Pipeline world-simulation repair")
+}
+
+func pipelineFailureNeedsWorldSimulation(cause string) bool {
+	if strings.Contains(cause, "全角色世界推演") || strings.Contains(cause, "单世界全角色推演") {
+		return true
+	}
+	return strings.Contains(cause, "chapter_world_simulation") &&
+		(strings.Contains(cause, "invalid") || strings.Contains(cause, "未完成") || strings.Contains(cause, "missing"))
+}
+
+func pipelineWorldSimulationRepairSteer(chapter int, cause string) string {
+	return fmt.Sprintf("Pipeline world-simulation repair：第%d章的全角色世界推演尚未完成或已因 rewrite brief/hash 更新而失效。当前回合不是 plan 修复回合：先调用 novel_context(chapter=%d) 一次，然后只允许调用 simulate_chapter_world；严格读取工具返回的 gaps，每批只补 gaps 中最多8名角色，复用现有 meta/chapter_simulations/%03d.partial.json，不重发已完成角色。返工章必须逐条补齐 rewrite_fact_coverage，并提交完整 protagonist_projection；直到工具明确返回 simulated=true 才算完成。simulated=true 之前严禁调用 plan_structure、plan_details、draft_chapter、read_chapter 或 craft_recall，plan_details 在此阶段必然被拒绝。模拟 finalize 后工具会自动作废绑定旧 simulation ID 的 POV plan partial；请结束本回合，让 Router 下一轮重新创建 plan_structure。缺口摘要：%s",
+		chapter, chapter, chapter, truncateForPipelineSteer(cause, 6000))
+}
+
 func pipelineStagedPlanRepairSteer(chapter int, cause string) string {
-	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 修复，不写正文，不调用 craft_recall/read_chapter。先调用 novel_context(chapter=%d) 一次读取紧凑状态并严格执行 next_step。返工章的 rewrite_source 已直接注入当前终稿、正文 hash、完整 brief 和 preserve_facts：若 chapter_world_simulation 未完成或 invalid，分批调用 simulate_chapter_world，每批最多5名角色，让全部实名角色各自提交目标、压力、可选项、决定、决定理由、行动和蝴蝶效应，并用 rewrite_fact_coverage 逐条覆盖 preserve_facts 后 finalize；模拟更新或 structure_source_status=stale 时必须重新 plan_structure，不能沿用旧骨架。之后再调用 plan_details。POV plan 最小分组：batch1=world_simulation_id+protagonist_decision+project_promise+chapter_function+context_sources+initial_state（只覆盖主角；context_sources 必须含 rewrite_source 和 rewrite_brief 精确令牌），batch2=environment_state+causal_beats+decision_points+outcome_shift，batch3a=voice_logic+dialogue_scene_blueprints+emotional_logic，batch3b=anti_ai_execution_plan+reader_entertainment_plan（显式要求热梗时同时补 trend_language_plan；3a/3b 禁止合并为一个调用），batch4=reader_reward_plan+reader_retention_plan+ending_consequence_contract（第一章长篇项目同时补 longform_opening）；返工章同时补 review_refinement，并将全部 preserve_facts 原样写入 preserve_constraints。最后调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
+	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 修复，不写正文，不调用 craft_recall/read_chapter。先调用 novel_context(chapter=%d) 一次读取紧凑状态并严格执行 next_step。返工章的 rewrite_source 已直接注入当前终稿、正文 hash、完整 brief 和 preserve_facts：若 chapter_world_simulation 未完成或 invalid，分批调用 simulate_chapter_world，每批最多8名角色，让全部实名角色各自提交目标、压力、可选项、决定、决定理由、行动和蝴蝶效应，并用 rewrite_fact_coverage 逐条覆盖 preserve_facts 后 finalize；模拟更新或 structure_source_status=stale 时必须重新 plan_structure，不能沿用旧骨架。之后再调用 plan_details。POV plan 最小分组：batch1=world_simulation_id+protagonist_decision+project_promise+chapter_function+context_sources+initial_state+environment_state+causal_beats+decision_points+outcome_shift（initial_state 只覆盖主角；context_sources 必须含 rewrite_source 和 rewrite_brief 精确令牌），batch2=voice_logic+dialogue_scene_blueprints+emotional_logic+anti_ai_execution_plan+reader_entertainment_plan（显式要求热梗时同时补 trend_language_plan），batch3=reader_reward_plan+reader_retention_plan+ending_consequence_contract（第一章长篇项目同时补 longform_opening）；返工章同时补 review_refinement，并将全部 preserve_facts 原样写入 preserve_constraints。最后调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
 		chapter, chapter, chapter, chapter, truncateForPipelineSteer(cause, 6000))
 }
 
@@ -1554,9 +1581,10 @@ func resolvePipelinePromptFromFlags(flags pipelineFlags) (string, error) {
 	return strings.TrimSpace(flags.Prompt), nil
 }
 
-// loadOrInitPipelineState 读取已有状态；--restart 或阶段列表变化时重置。
-func loadOrInitPipelineState(path string, stages []string, prompt string, restart bool) (*domain.PipelineState, error) {
-	fresh := &domain.PipelineState{Stages: stages, Prompt: prompt}
+// loadOrInitPipelineState 读取已有状态；--restart、阶段列表、显式创作指令或
+// 模型/prompt 协议指纹变化时重置，避免旧产物被当成新输入的完成证据。
+func loadOrInitPipelineState(path string, stages []string, prompt, inputDigest string, restart bool) (*domain.PipelineState, error) {
+	fresh := &domain.PipelineState{Stages: stages, Prompt: prompt, InputDigest: inputDigest}
 	if restart {
 		return fresh, nil
 	}
@@ -1574,13 +1602,26 @@ func loadOrInitPipelineState(path string, stages []string, prompt string, restar
 	// 阶段列表变了：旧的 completed 不再适用，按新列表重来（但保留已捕获的 prompt）。
 	if !sameStages(prev.Stages, stages) {
 		fmt.Fprintln(os.Stderr, "[pipeline] 阶段列表已变化，重置进度（保留已有创作指令）")
-		next := &domain.PipelineState{Stages: stages, Prompt: prev.Prompt}
+		next := &domain.PipelineState{Stages: stages, Prompt: prev.Prompt, InputDigest: inputDigest}
 		if prompt != "" {
 			next.Prompt = prompt
 		}
 		return next, nil
 	}
-	// 命令行新给了 prompt 则覆盖（允许中途修订创作指令）。
+	// 命令行显式给出不同 prompt 是新的 pipeline 输入，必须失效旧完成图。
+	if prompt != "" && prompt != prev.Prompt {
+		fmt.Fprintln(os.Stderr, "[pipeline] 创作指令已变化，重置阶段证据")
+		return fresh, nil
+	}
+	if prev.InputDigest != "" && inputDigest != "" && prev.InputDigest != inputDigest {
+		fmt.Fprintln(os.Stderr, "[pipeline] 模型或 prompt 协议指纹已变化，重置阶段证据")
+		if prompt == "" {
+			fresh.Prompt = prev.Prompt
+		}
+		return fresh, nil
+	}
+	// 旧 schema 首次升级时保留已验证产物并建立后续比较基线。
+	prev.InputDigest = inputDigest
 	if prompt != "" {
 		prev.Prompt = prompt
 	}
@@ -1596,12 +1637,59 @@ func savePipelineState(path string, state *domain.PipelineState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// 临时文件 + rename，避免写一半崩溃损坏状态。
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 唯一临时文件 + fsync + rename，避免并发/崩溃留下半份状态。
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pipeline-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func pipelineRunInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
+	brainstormSHA := ""
+	brainstormPath := filepath.Clean(filepath.Join(cfg.OutputDir, "..", "..", "brainstorm.md"))
+	if body, err := os.ReadFile(brainstormPath); err == nil {
+		sum := sha256.Sum256(body)
+		brainstormSHA = hex.EncodeToString(sum[:])
+	}
+	payload, _ := json.Marshal(struct {
+		Schema          string
+		Provider        string
+		Model           string
+		ReasoningEffort string
+		Style           string
+		Roles           map[string]bootstrap.RoleConfig
+		Prompts         assets.Prompts
+		BrainstormSHA   string
+	}{
+		Schema:          "pipeline-input-v2-20260711",
+		Provider:        cfg.Provider,
+		Model:           cfg.ModelName,
+		ReasoningEffort: cfg.ReasoningEffort,
+		Style:           cfg.Style,
+		Roles:           cfg.Roles,
+		Prompts:         bundle.Prompts,
+		BrainstormSHA:   brainstormSHA,
+	})
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func sameStages(a, b []string) bool {

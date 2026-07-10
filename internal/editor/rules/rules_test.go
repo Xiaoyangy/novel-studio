@@ -35,6 +35,21 @@ func TestAnalyzeChapterFlagsAIVoicePatterns(t *testing.T) {
 	}
 }
 
+func TestAnalyzeChapterDoesNotRewardStockHandHesitation(t *testing.T) {
+	text := `付款页面已经打开，他的拇指却迟迟没落下。
+
+四千二百八十元。若提示下一秒消失，这笔钱仍要有人认。`
+	analysis := AnalyzeChapter(1, text, nil)
+	if analysis.Metrics.ProtagonistWaver {
+		t.Fatalf("stock hand hesitation must not earn protagonist waver credit: %+v", analysis.Metrics)
+	}
+
+	cognitive := AnalyzeChapter(1, `他先说自己无所谓，又改口：“等等，我没把握。”`, nil)
+	if !cognitive.Metrics.ProtagonistWaver {
+		t.Fatalf("changed judgment should count as protagonist waver: %+v", cognitive.Metrics)
+	}
+}
+
 func TestCandidateRoughnessRewardsDialogueAndPenalizesAphorism(t *testing.T) {
 	smooth := CandidateFromText(1, 1, `她说：“我要撕开真相。”
 
@@ -48,6 +63,14 @@ func TestCandidateRoughnessRewardsDialogueAndPenalizesAphorism(t *testing.T) {
 `)
 	if rough.RoughnessScore <= smooth.RoughnessScore {
 		t.Fatalf("roughness score = %.2f, want above smooth %.2f", rough.RoughnessScore, smooth.RoughnessScore)
+	}
+}
+
+func TestRoughnessDoesNotRewardDialogueFlooding(t *testing.T) {
+	balanced := domain.ChapterAIVoiceMetrics{DialogueRatio: 0.22, ProtagonistWaver: true}
+	flooded := domain.ChapterAIVoiceMetrics{DialogueRatio: 0.62, ProtagonistWaver: true}
+	if RoughnessScore(flooded) >= RoughnessScore(balanced) {
+		t.Fatalf("dialogue flooding score %.2f should stay below balanced %.2f", RoughnessScore(flooded), RoughnessScore(balanced))
 	}
 }
 
@@ -75,6 +98,17 @@ func TestAnalyzeChapterFlagsNewHardConstraints(t *testing.T) {
 	}
 	if analysis.Label != "❌ 需返工" {
 		t.Fatalf("label = %s, want rewrite label", analysis.Label)
+	}
+}
+
+func TestPurposeAnswerNeedsSpeechStrategyNotStockAction(t *testing.T) {
+	stock := AnalyzeChapter(1, `卡莱尔问：“你为什么来？”她摸了摸袖口：“我从一开始就是为了合同来的。”`, nil)
+	if !hasRedFlag(stock.RedFlags, "instant_purpose_answer_without_beat") {
+		t.Fatalf("touching an object must not bypass instant-purpose check: %+v", stock.RedFlags)
+	}
+	messy := AnalyzeChapter(1, `卡莱尔问：“你为什么来？”她反问：“你真想知道？”隔了一会儿，她只说了半句：“我从一开始就是为了合同来的。”`, nil)
+	if hasRedFlag(messy.RedFlags, "instant_purpose_answer_without_beat") {
+		t.Fatalf("a delayed partial answer should pass: %+v", messy.RedFlags)
 	}
 }
 
@@ -135,7 +169,7 @@ func TestEndingHookUsedAllowsActionAftermath(t *testing.T) {
 
 func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	longChapter := domain.ChapterAIVoiceMetrics{
-		DialogueRatio:  0.253,
+		DialogueRatio:  0.103,
 		SentenceCount:  190,
 		ParagraphCount: 60,
 	}
@@ -143,17 +177,17 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 		t.Fatalf("unexpected long-chapter dialogue flag: %+v", flags)
 	}
 
-	longChapterSoftBand := domain.ChapterAIVoiceMetrics{
-		DialogueRatio:  0.217,
+	longChapterNearLimit := domain.ChapterAIVoiceMetrics{
+		DialogueRatio:  0.097,
 		SentenceCount:  190,
 		ParagraphCount: 60,
 	}
-	if flags := redFlags(longChapterSoftBand, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
-		t.Fatalf("unexpected long-chapter soft-band dialogue flag: %+v", flags)
+	if flags := redFlags(longChapterNearLimit, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
+		t.Fatalf("unexpected long-chapter near-limit dialogue flag: %+v", flags)
 	}
 
 	longChapterTooLow := domain.ChapterAIVoiceMetrics{
-		DialogueRatio:  0.19,
+		DialogueRatio:  0.07,
 		SentenceCount:  190,
 		ParagraphCount: 60,
 	}
@@ -162,7 +196,7 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	}
 
 	shortChapter := domain.ChapterAIVoiceMetrics{
-		DialogueRatio:  0.253,
+		DialogueRatio:  0.08,
 		SentenceCount:  80,
 		ParagraphCount: 24,
 	}
@@ -171,7 +205,7 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	}
 
 	shortChapterNearLimit := domain.ChapterAIVoiceMetrics{
-		DialogueRatio:  0.297,
+		DialogueRatio:  0.117,
 		SentenceCount:  129,
 		ParagraphCount: 34,
 	}

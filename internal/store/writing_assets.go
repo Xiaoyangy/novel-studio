@@ -173,9 +173,7 @@ func (s *WritingAssetStore) ApplyStyleRules(rules domain.WritingStyleRules) erro
 func (s *WritingAssetStore) ApplyReviewFeedback(r domain.ReviewEntry, finalVerdict, escalationReason string) (feedbackUpserted, featuresUpserted int, err error) {
 	now := time.Now().Format(time.RFC3339)
 	feedback := reviewFeedbackEntries(r, finalVerdict, escalationReason, now)
-	if len(feedback) == 0 {
-		return 0, 0, nil
-	}
+	source := reviewFeedbackSourcePath(r)
 	err = s.io.WithWriteLock(func() error {
 		var lib domain.WritingAssetLibrary
 		if err := s.io.ReadJSONUnlocked(writingAssetsPath, &lib); err != nil && !os.IsNotExist(err) {
@@ -184,6 +182,14 @@ func (s *WritingAssetStore) ApplyReviewFeedback(r domain.ReviewEntry, finalVerdi
 		if lib.Version == 0 {
 			lib.Version = 1
 		}
+		// 当前 reviews/<chapter>.json 是该章最新事实；同源旧反馈必须先撤下，
+		// 否则复审纠正后的建议仍会长期污染 writing_engine 与 RAG。
+		lib.Feedback = slices.DeleteFunc(lib.Feedback, func(entry domain.WritingFeedback) bool {
+			return entry.Source == source
+		})
+		lib.Features = slices.DeleteFunc(lib.Features, func(feature domain.WritingFeature) bool {
+			return feature.Source == source
+		})
 		for _, entry := range feedback {
 			var added bool
 			lib.Feedback, added = upsertWritingFeedback(lib.Feedback, entry)

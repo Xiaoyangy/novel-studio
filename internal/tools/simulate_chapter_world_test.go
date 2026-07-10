@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,6 +95,12 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 		"sources":                []string{"world_tick:v1-a1", "character_dossiers", "current_chapter_outline"},
 		"finalize":               true,
 	})
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{"structure": map[string]any{"chapter": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RunMeta.SetPendingSteer("Pipeline world-simulation repair：test"); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := tool.Execute(context.Background(), second)
 	if err != nil {
 		t.Fatalf("complete simulation should finalize: %v", err)
@@ -112,6 +119,59 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 	if sim.ProtagonistProjection.ChosenDecision != "在饭桌承认失业" {
 		t.Fatalf("projection should be normalized to protagonist decision: %+v", sim.ProtagonistProjection)
 	}
+	if partial, err := st.Drafts.LoadChapterPlanPartial(1); err != nil || partial != nil {
+		t.Fatalf("new simulation must invalidate old POV plan partial: partial=%v err=%v", partial, err)
+	}
+	if meta, err := st.RunMeta.Load(); err != nil || (meta != nil && meta.PendingSteer != "") {
+		t.Fatalf("completed simulation repair steer must clear: meta=%+v err=%v", meta, err)
+	}
+}
+
+func TestSimulateChapterWorldReusesValidFinalAndDropsRedundantPartial(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	sim := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "当晚两小时",
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "承认失业", true),
+			simulatedDecision("沈知遥", "继续夜市检查", false),
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"饭桌追问"}, HiddenPressures: []string{"夜市检查"},
+			AvailableOptions: []string{"隐瞒", "承认"}, ChosenDecision: "承认失业", DecisionReason: "证据已公开",
+			PlanConstraints: []string{"限知"}, CausalChain: []string{"追问", "承认"},
+		},
+	}
+	sim.SimulationID = chapterWorldSimulationID(sim)
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChapterWorldSimulationPartial(domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, CharacterDecisions: []domain.CharacterWorldDecision{simulatedDecision("林澈", "重复推演", true)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter":             1,
+		"character_decisions": []domain.CharacterWorldDecision{simulatedDecision("林澈", "再次重复", true)},
+	})
+	raw, err := NewSimulateChapterWorldTool(st).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["simulated"] != true || out["reused"] != true || out["simulation_id"] != sim.SimulationID {
+		t.Fatalf("expected immutable simulation reuse, got %s", raw)
+	}
+	if partial, err := st.LoadChapterWorldSimulationPartial(1); err != nil || partial != nil {
+		t.Fatalf("redundant partial must be removed: partial=%+v err=%v", partial, err)
+	}
+	saved, err := st.LoadChapterWorldSimulation(1)
+	if err != nil || saved == nil || saved.CharacterDecisions[0].Decision != "承认失业" {
+		t.Fatalf("final simulation was overwritten: saved=%+v err=%v", saved, err)
+	}
 }
 
 func TestSimulateChapterWorldRejectsEmptyAndOversizedBatches(t *testing.T) {
@@ -121,13 +181,48 @@ func TestSimulateChapterWorldRejectsEmptyAndOversizedBatches(t *testing.T) {
 	if _, err := tool.Execute(context.Background(), empty); err == nil || !strings.Contains(err.Error(), "空提交无效") {
 		t.Fatalf("empty simulation patch must fail, got %v", err)
 	}
-	decisions := make([]domain.CharacterWorldDecision, 0, 6)
-	for _, name := range []string{"甲", "乙", "丙", "丁", "戊", "己"} {
+	decisions := make([]domain.CharacterWorldDecision, 0, 9)
+	for _, name := range []string{"甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬"} {
 		decisions = append(decisions, simulatedDecision(name, "继续自己的行动", false))
 	}
 	oversized, _ := json.Marshal(map[string]any{"chapter": 1, "character_decisions": decisions})
-	if _, err := tool.Execute(context.Background(), oversized); err == nil || !strings.Contains(err.Error(), "最多提交5名") {
+	if _, err := tool.Execute(context.Background(), oversized); err == nil || !strings.Contains(err.Error(), "最多提交8名") {
 		t.Fatalf("oversized simulation batch must fail, got %v", err)
+	}
+}
+
+func TestSimulateChapterWorldCanonicalizesCastAliasToCharacterIdentity(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+		{Name: "梁广财", Aliases: []string{"二姨夫"}, Role: "农户代表", Tier: "secondary"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Cast.Save([]domain.CastEntry{{Name: "二姨夫", BriefRole: "饭桌长辈", LastSeenChapter: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewSimulateChapterWorldTool(st)
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "time_window": "返乡饭桌当晚",
+		"character_decisions": []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "离开饭桌", true),
+			simulatedDecision("沈知遥", "继续夜市巡查", false),
+			simulatedDecision("二姨夫", "继续追问工作", true),
+		},
+	})
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := st.LoadChapterWorldSimulationPartial(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := characterDecisionNames(partial.CharacterDecisions)
+	if !slices.Contains(names, "梁广财") || slices.Contains(names, "二姨夫") {
+		t.Fatalf("alias should normalize to one canonical decision: %v", names)
 	}
 }
 

@@ -92,6 +92,16 @@ func NewPlannerStopGuard(st *store.Store) agentcore.StopGuard {
 	)
 }
 
+// NewWorldSimulatorStopGuard requires the dedicated simulation checkpoint.
+// It deliberately does not accept a plan checkpoint: this agent must finish
+// the world before a separate planner projects the POV chapter.
+func NewWorldSimulatorStopGuard(st *store.Store) agentcore.StopGuard {
+	return newCheckpointDeltaGuard(st, "world_simulator",
+		[]string{"chapter_world_simulation"},
+		"你必须继续调用 simulate_chapter_world，按 gaps 分批补齐角色决定、rewrite_fact_coverage 和 protagonist_projection，直到返回 simulated=true 后才能结束。",
+	)
+}
+
 // NewArchitectStopGuard 要求 architect 本轮至少落盘一次 save_foundation。
 // HARNESS-METADATA: name=architect_stop_guard class=model_gap review=2027-Q1
 func NewArchitectStopGuard(st *store.Store) agentcore.StopGuard {

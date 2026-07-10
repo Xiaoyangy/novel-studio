@@ -75,6 +75,25 @@ func (s *DraftStore) DeleteChapterPlanPartial(chapter int) error {
 	return s.io.RemoveFile(fmt.Sprintf("drafts/%02d.plan.partial.json", chapter))
 }
 
+// SaveRewriteBrief atomically replaces the active rewrite contract for a
+// chapter. Review and planning share this file as their versioned hand-off.
+func (s *DraftStore) SaveRewriteBrief(chapter int, content string) error {
+	return s.io.WriteMarkdown(fmt.Sprintf("reviews/%02d_rewrite_brief.md", chapter), content)
+}
+
+// LoadRewriteBrief reads the active rewrite contract. A missing brief is an
+// empty value so review code can create it on the first rewrite verdict.
+func (s *DraftStore) LoadRewriteBrief(chapter int) (string, error) {
+	data, err := s.io.ReadFile(fmt.Sprintf("reviews/%02d_rewrite_brief.md", chapter))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // SaveDraft 保存整章草稿到 drafts/{ch}.draft.md。
 func (s *DraftStore) SaveDraft(chapter int, content string) error {
 	return s.io.WriteMarkdown(fmt.Sprintf("drafts/%02d.draft.md", chapter), content)

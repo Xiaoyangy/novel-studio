@@ -346,7 +346,7 @@ type ReaderRetentionPlan struct {
 
 type RetentionSurfaceBeat struct {
 	PlanSource    string `json:"plan_source,omitempty"`
-	MustShow      string `json:"must_show,omitempty"`
+	MustShow      string `json:"must_show,omitempty"` // 兼容旧 JSON 名；表示选中此候选后应出现的页面证据，不等于所有候选都必写
 	ReaderPayoff  string `json:"reader_payoff,omitempty"`
 	SceneVehicle  string `json:"scene_vehicle,omitempty"`
 	ProofOnPage   string `json:"proof_on_page,omitempty"`

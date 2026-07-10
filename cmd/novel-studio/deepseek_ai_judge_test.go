@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
 )
@@ -60,6 +64,12 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 	if artifact == nil || !artifact.RawBodyOnly || artifact.BodySHA256 == "" {
 		t.Fatalf("artifact raw-body metadata missing: %+v", artifact)
 	}
+	if artifact.CacheKey == "" || artifact.CachePolicy.ReviewProtocolVersion != deepseekAIJudgeReviewProtocolVersion {
+		t.Fatalf("artifact cache identity missing: %+v", artifact)
+	}
+	if artifact.CachePolicy.SystemPromptSHA256 != reviewExistingSHA256(deepseekAIJudgeSystemPrompt) {
+		t.Fatalf("artifact system prompt fingerprint = %q", artifact.CachePolicy.SystemPromptSHA256)
+	}
 	if len(model.messages) != 2 {
 		t.Fatalf("messages = %d, want 2", len(model.messages))
 	}
@@ -75,6 +85,125 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 	}
 	if !artifact.Blocking || artifact.Verdict != "ai_like" || artifact.AIProbabilityPercent != 70 {
 		t.Fatalf("artifact verdict/blocking = %+v", artifact)
+	}
+}
+
+func TestDeepSeekAIJudgeCacheHitSkipsModelCall(t *testing.T) {
+	dir := t.TempDir()
+	body := "第一章\n\n林澈把账本合上。"
+	selection := deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true}
+	model := &reviewCacheModel{response: `{"verdict":"human_like","risk_level":"low","ai_probability_percent":5,"confidence":"high","summary":"自然"}`}
+
+	first := loadOrGenerateDeepSeekAIJudge(dir, model, selection, 1, body, time.Second)
+	if first.Err != nil || first.CacheHit || first.Artifact == nil {
+		t.Fatalf("first DeepSeek branch = %+v", first)
+	}
+	if err := saveDeepSeekAIJudgeCache(dir, first.Artifact); err != nil {
+		t.Fatalf("saveDeepSeekAIJudgeCache: %v", err)
+	}
+	second := loadOrGenerateDeepSeekAIJudge(dir, model, selection, 1, body, time.Second)
+	if second.Err != nil || !second.CacheHit || second.Artifact == nil {
+		t.Fatalf("second DeepSeek branch = %+v", second)
+	}
+	if model.callCount() != 1 {
+		t.Fatalf("DeepSeek Generate calls = %d, want 1", model.callCount())
+	}
+	if second.Artifact.CacheKey != first.Artifact.CacheKey {
+		t.Fatalf("cache key changed on hit: first=%s second=%s", first.Artifact.CacheKey, second.Artifact.CacheKey)
+	}
+	if err := saveDeepSeekAIJudge(dir, second.Artifact); err != nil {
+		t.Fatalf("saveDeepSeekAIJudge: %v", err)
+	}
+	var saved deepseekAIJudgeArtifact
+	raw, err := os.ReadFile(filepath.Join(dir, "reviews", "01_deepseek_ai_judge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.CacheKey == "" || saved.CachePolicy != first.Artifact.CachePolicy {
+		t.Fatalf("saved DeepSeek artifact cache identity missing: %+v", saved)
+	}
+}
+
+func TestDeepSeekAIJudgeCacheDriftCausesModelMiss(t *testing.T) {
+	dir := t.TempDir()
+	body := "第一章\n\n林澈推开窗。"
+	selection := deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true}
+	response := `{"verdict":"human_like","risk_level":"low","ai_probability_percent":5,"confidence":"high","summary":"自然"}`
+	seedModel := &reviewCacheModel{response: response}
+	seed := loadOrGenerateDeepSeekAIJudge(dir, seedModel, selection, 1, body, time.Second)
+	if seed.Err != nil || seed.Artifact == nil {
+		t.Fatalf("seed DeepSeek branch = %+v", seed)
+	}
+	if err := saveDeepSeekAIJudgeCache(dir, seed.Artifact); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		selection deepseekAIJudgeModelSelection
+		body      string
+	}{
+		{name: "body", selection: selection, body: body + "\n风进来了。"},
+		{name: "provider", selection: deepseekAIJudgeModelSelection{Provider: "openrouter", Model: "deepseek-v4-pro", Explicit: true}, body: body},
+		{name: "model", selection: deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v5", Explicit: true}, body: body},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &reviewCacheModel{response: response}
+			result := loadOrGenerateDeepSeekAIJudge(dir, model, tt.selection, 1, tt.body, time.Second)
+			if result.Err != nil || result.CacheHit {
+				t.Fatalf("drifted DeepSeek branch = %+v", result)
+			}
+			if model.callCount() != 1 {
+				t.Fatalf("DeepSeek Generate calls = %d, want 1", model.callCount())
+			}
+		})
+	}
+
+	driftedPolicy := seed.Artifact.CachePolicy
+	driftedPolicy.ReviewProtocolVersion += "-drift"
+	if reviewExistingCacheKey(driftedPolicy) == seed.Artifact.CacheKey {
+		t.Fatal("DeepSeek review protocol drift must change the cache key")
+	}
+	if cached, err := loadDeepSeekAIJudgeCache(dir, driftedPolicy); err != nil || cached != nil {
+		t.Fatalf("protocol-drifted DeepSeek cache load = artifact:%+v err:%v, want miss", cached, err)
+	}
+}
+
+func TestDeepSeekAIJudgeCacheRejectsTamperedArtifactAndRegenerates(t *testing.T) {
+	dir := t.TempDir()
+	body := "第一章\n\n林澈停了两秒。"
+	selection := deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true}
+	response := `{"verdict":"human_like","risk_level":"low","ai_probability_percent":5,"confidence":"high","summary":"自然"}`
+	seedModel := &reviewCacheModel{response: response}
+	seed := loadOrGenerateDeepSeekAIJudge(dir, seedModel, selection, 1, body, time.Second)
+	if seed.Err != nil || seed.Artifact == nil {
+		t.Fatalf("seed DeepSeek branch = %+v", seed)
+	}
+	if err := saveDeepSeekAIJudgeCache(dir, seed.Artifact); err != nil {
+		t.Fatal(err)
+	}
+
+	tampered := *seed.Artifact
+	tampered.BodySHA256 = reviewreport.BodySHA256("other body")
+	path := reviewExistingCachePath(dir, deepseekAIJudgeCacheBranch, seed.Artifact.CacheKey)
+	if err := writeReviewExistingCacheJSON(path, &tampered); err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := loadDeepSeekAIJudgeCache(dir, seed.Artifact.CachePolicy); err == nil || cached != nil {
+		t.Fatalf("tampered cache load = artifact:%+v err:%v, want validation error", cached, err)
+	}
+
+	recoveryModel := &reviewCacheModel{response: response}
+	recovered := loadOrGenerateDeepSeekAIJudge(dir, recoveryModel, selection, 1, body, time.Second)
+	if recovered.Err != nil || recovered.CacheHit || recovered.CacheLoadErr == nil {
+		t.Fatalf("recovered DeepSeek branch = %+v", recovered)
+	}
+	if recoveryModel.callCount() != 1 {
+		t.Fatalf("DeepSeek Generate calls after invalid cache = %d, want 1", recoveryModel.callCount())
 	}
 }
 
@@ -114,6 +243,84 @@ func TestSanitizeDeepSeekAIJudgeForProjectRemovesDeprecatedEngineAdvice(t *testi
 	}
 	if artifact.RawResponse != "" {
 		t.Fatalf("raw_response should be dropped when it contains deprecated terms: %q", artifact.RawResponse)
+	}
+}
+
+func TestSanitizeDeepSeekAIJudgeRespectsCompanionSystemRule(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{Preferences: "系统会和林澈交流解闷、短促吐槽并始终支持林澈，不能写成纯任务机器人。"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact := &deepseekAIJudgeArtifact{
+		Chapter: 1,
+		Reasons: []string{
+			"部分系统拟人台词偏暖，建议强化系统冷硬感。",
+			"两次任务结构略对称。",
+		},
+		DialogueFixPlan: []string{
+			"系统不予回应，减少系统拟人化玩笑。",
+			"人物问答之间增加一次环境打断。",
+		},
+		RawResponse: `{"dialogue_fix_plan":["系统不予回应，减少系统拟人化玩笑。"]}`,
+	}
+
+	sanitizeDeepSeekAIJudgeForProject(st, artifact)
+
+	joined := strings.Join(append(append([]string{}, artifact.Reasons...), artifact.DialogueFixPlan...), "\n")
+	if strings.Contains(joined, "系统不予回应") || strings.Contains(joined, "强化系统冷硬") {
+		t.Fatalf("contradictory advice survived: %s", joined)
+	}
+	if !strings.Contains(joined, "任务结构") || !strings.Contains(joined, "环境打断") {
+		t.Fatalf("aligned advice was removed: %s", joined)
+	}
+	if artifact.RawResponse != "" {
+		t.Fatalf("contradictory raw response must not enter later inputs: %q", artifact.RawResponse)
+	}
+	if !strings.Contains(strings.Join(artifact.RAGRules, "\n"), "系统必须能短促接话") {
+		t.Fatalf("missing corrective RAG rule: %+v", artifact.RAGRules)
+	}
+}
+
+func TestSanitizeDeepSeekAIJudgeRespectsApprovedTrendLanguagePlan(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{
+		Chapter: 1,
+		CausalSimulation: domain.ChapterCausalSimulation{
+			TrendLanguage: []domain.TrendLanguagePlan{{Item: "呱，", CharacterCarrier: "赵航"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	artifact := &deepseekAIJudgeArtifact{
+		Chapter: 1,
+		DialogueFixPlan: []string{
+			"赵航的台词改为更口语的拖长音，如‘呱——拿别人日子当标准答案’。",
+			"老丁报价前可以先看一眼材料。",
+		},
+		RawResponse: `{"dialogue_fix_plan":["把呱，改成呱——"]}`,
+	}
+
+	sanitizeDeepSeekAIJudgeForProject(st, artifact)
+
+	joined := strings.Join(artifact.DialogueFixPlan, "\n")
+	if strings.Contains(joined, "呱——") || strings.Contains(joined, "拖长音") {
+		t.Fatalf("trend-language contradiction survived: %s", joined)
+	}
+	if !strings.Contains(joined, "老丁") {
+		t.Fatalf("aligned dialogue advice was removed: %s", joined)
+	}
+	if artifact.RawResponse != "" {
+		t.Fatalf("contradictory raw response must be removed: %q", artifact.RawResponse)
+	}
+	if !strings.Contains(strings.Join(artifact.RAGRules, "\n"), "必须保持逗号起手") {
+		t.Fatalf("missing corrective trend RAG rule: %+v", artifact.RAGRules)
 	}
 }
 

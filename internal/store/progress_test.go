@@ -186,6 +186,25 @@ func TestSetPendingRewrites(t *testing.T) {
 	}
 }
 
+func TestSetPendingRewritesAndFlowEscalatesPolishAtomically(t *testing.T) {
+	store := NewStore(t.TempDir())
+	_ = store.Progress.Init("test", 10)
+	_ = store.Progress.MarkChapterComplete(1, 2600, "", "")
+	if err := store.Progress.SetPendingRewritesAndFlow([]int{1}, "先打磨", domain.FlowPolishing); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Progress.SetPendingRewritesAndFlow([]int{1}, "用户要求整章重写", domain.FlowRewriting); err != nil {
+		t.Fatalf("polishing -> rewriting should be valid: %v", err)
+	}
+	p, err := store.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Flow != domain.FlowRewriting || len(p.PendingRewrites) != 1 || p.RewriteReason != "用户要求整章重写" {
+		t.Fatalf("unexpected atomic rewrite state: %+v", p)
+	}
+}
+
 func TestSetPendingRewritesRejectsUnfinishedChapters(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)

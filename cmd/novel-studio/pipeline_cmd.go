@@ -170,7 +170,7 @@ func runPipelineAlias(opts cliOptions, stages []string, prompt string, stageArgs
 }
 
 func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string, prompt string, stageArgs map[string][]string) error {
-	cfg, _, err := loadCfgBundle(opts)
+	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
 	}
@@ -185,9 +185,15 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		stageArgs = pipelineStageArgs(flags)
 	}
 
-	state, err := loadOrInitPipelineState(statePath, stages, prompt, flags.Restart)
+	inputDigest := pipelineRunInputDigest(cfg, bundle)
+	state, err := loadOrInitPipelineState(statePath, stages, prompt, inputDigest, flags.Restart)
 	if err != nil {
 		return err
+	}
+	// Persist restart/input invalidation before the first expensive stage. A
+	// crash at stage startup must not resurrect the previous completed graph.
+	if err := savePipelineState(statePath, state); err != nil {
+		return fmt.Errorf("保存流水线启动状态失败: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "[pipeline] 阶段：%s\n", strings.Join(state.Stages, " → "))

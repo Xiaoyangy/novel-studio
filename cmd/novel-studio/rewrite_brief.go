@@ -312,6 +312,14 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 		return "屏幕、纸面、门牌、灯光等物件不要每次替人物确认；删掉多余即时响应，改成延迟、缺席、误读、旁人反应或后续代价。"
 	case "object_response_rhythm_flat":
 		return "物件回应必须不等距：至少一次重话后没有任何外部响应，一次响应延后到下一动作之后；不要句句重话后显字/亮屏/震动。"
+	case "system_message_overpacked":
+		return "系统单条消息不要同时拒绝、安慰、解释、发任务和发奖励；拆成一次一事的人话回应与必要数据行。"
+	case "abstract_system_reassurance":
+		return "删掉“钱没跑、陪你换条路、规矩不撤”等客服式空话；系统只回答主角刚问的具体问题，或给一个能马上执行的选择。"
+	case "opaque_procedure_jargon":
+		return "把补测、核验、用途说明、临时固定等流程黑话改成普通读者能当场看懂的后果：哪里会坏、谁会吃亏、现在要怎么办。"
+	case "dialogue_action_lead_repetition":
+		return "重排整组对白段落：定住人物和空间后改用裸对白、简短标签、打断、漏答、群体反应或无人接话；动作只留会改变权力、证据或现场结果的部分。"
 	case "structured_note_triplet":
 		return "便签和备忘录不要三条工整并列；改成划掉、补字、写半截和现场犹豫。"
 	case "card_tos_block":
@@ -378,7 +386,7 @@ func addAIVoiceAnalysisToPlan(analysis domain.AIVoiceAnalysis, addRed, addYellow
 			addSuggestion(flag.Suggestion)
 		}
 		if flag.Rule == "supporting_dialogue_ratio" {
-			addSuggestion(fmt.Sprintf("supporting_dialogue_ratio 定量修复：当前 %.2f，目标至少 %.2f；不要只补动作，需净增 120-180 字引号内配角主动话轮，例如夏岚误解/转述、程棠拒绝被支开、苏曼私信追问，并同步删同量说明。", flag.Actual, flag.Limit))
+			addSuggestion(fmt.Sprintf("supporting_dialogue_ratio 仅作诊断：当前 %.2f，参考下限 %.2f。先检查配角是否主动误解、打断、拒绝或改变关系；缺功能才重写整场，不得靠净增话轮、逐句动作标签或无意义短对白刷比例。", flag.Actual, flag.Limit))
 		}
 		if flag.Replacement != "" {
 			addSuggestion(flag.Replacement)

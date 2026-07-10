@@ -137,6 +137,45 @@ func TestWritingAssetsApplyReviewFeedbackSedimentsHistory(t *testing.T) {
 	}
 }
 
+func TestWritingAssetsReviewFeedbackReplacesSameSource(t *testing.T) {
+	s := newTestStore(t)
+	first := domain.ReviewEntry{
+		Chapter: 1,
+		Scope:   "chapter",
+		Issues: []domain.ConsistencyIssue{{
+			Type:        "aesthetic",
+			Severity:    "warning",
+			Description: "系统口吻偏暖，建议改冷。",
+		}},
+	}
+	if _, _, err := s.WritingAssets.ApplyReviewFeedback(first, "accept", ""); err != nil {
+		t.Fatal(err)
+	}
+	corrected := domain.ReviewEntry{
+		Chapter: 1,
+		Scope:   "chapter",
+		Issues: []domain.ConsistencyIssue{{
+			Type:        "aesthetic",
+			Severity:    "warning",
+			Description: "沈知遥的第二句解释略长，可压缩。",
+		}},
+	}
+	if _, _, err := s.WritingAssets.ApplyReviewFeedback(corrected, "accept", ""); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := s.WritingAssets.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, feedback := range lib.Feedback {
+		joined += feedback.Signal + "\n"
+	}
+	if strings.Contains(joined, "系统口吻偏暖") || !strings.Contains(joined, "沈知遥") {
+		t.Fatalf("same-source feedback was not reconciled: %s", joined)
+	}
+}
+
 func TestWritingAssetsCompileForScopeHonorsBindings(t *testing.T) {
 	lib := domain.WritingAssetLibrary{
 		Version: 1,

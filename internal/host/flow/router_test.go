@@ -98,12 +98,36 @@ func TestRoute_StagedPlanRepairBeatsGenericRewritePlanning(t *testing.T) {
 	}
 }
 
+func TestRoute_WorldSimulationRepairUsesRestrictedAgent(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{1}
+	steer := "Pipeline world-simulation repair：只补全角色决定"
+	got := Route(State{
+		Progress:                 p,
+		NextActionPlanReady:      false,
+		NextActionPlanPartial:    true,
+		NextActionPlanRepairTask: steer,
+	})
+	if got == nil || got.Agent != "world_simulator" || got.Task != steer {
+		t.Fatalf("world simulation repair must use restricted agent, got %+v", got)
+	}
+}
+
 func TestRoute_PendingPolishingVerb(t *testing.T) {
 	p := writingProgress([]int{1}, domain.FlowPolishing)
 	p.PendingRewrites = []int{2}
 	got := Route(State{Progress: p, NextActionPlanReady: true})
 	if got == nil || got.Agent != "drafter" || got.Task != "打磨第 2 章" {
 		t.Fatalf("expected drafter polish verb, got %+v", got)
+	}
+}
+
+func TestRoute_ExistingDraftUsesRestrictedFinalizer(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
+	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") {
+		t.Fatalf("existing draft should use restricted finalizer, got %+v", got)
 	}
 }
 
@@ -360,23 +384,27 @@ func TestDispatcher_TrackRepeat(t *testing.T) {
 	// 不需要真实 coordinator / store；trackRepeat 只读自己的缓存。
 	d := &Dispatcher{}
 	inst := &Instruction{Agent: "writer", Task: "写第 5 章", Reason: "续写"}
-	if got := d.trackRepeat(inst); got != 1 {
+	if got, stalled := d.trackRepeat(inst, "cp:7"); got != 1 || stalled {
 		t.Fatalf("首次下达应计 1，got %d", got)
 	}
-	if got := d.trackRepeat(inst); got != 2 {
+	if got, stalled := d.trackRepeat(inst, "cp:7"); got != 2 || stalled {
 		t.Fatalf("同 Agent+Task 重复下达应计 2，got %d", got)
 	}
 	// Reason 不同、Agent+Task 相同时视为同一指令继续累计
 	sameTaskDiffReason := &Instruction{Agent: "writer", Task: "写第 5 章", Reason: "弧末后继续"}
-	if got := d.trackRepeat(sameTaskDiffReason); got != 3 {
-		t.Fatalf("仅 Reason 不同应视为重复累计到 3，got %d", got)
+	if got, stalled := d.trackRepeat(sameTaskDiffReason, "cp:7"); got != 3 || !stalled {
+		t.Fatalf("仅 Reason 不同应累计到 3 并熔断，got %d stalled=%v", got, stalled)
+	}
+	// 同一任务新增 checkpoint 后属于真实推进，重新计数。
+	if got, stalled := d.trackRepeat(inst, "cp:8"); got != 1 || stalled {
+		t.Fatalf("checkpoint 推进后应重置为 1，got %d stalled=%v", got, stalled)
 	}
 	other := &Instruction{Agent: "writer", Task: "写第 6 章", Reason: "续写"}
-	if got := d.trackRepeat(other); got != 1 {
+	if got, stalled := d.trackRepeat(other, "cp:8"); got != 1 || stalled {
 		t.Fatalf("Task 变更后应重置为 1，got %d", got)
 	}
 	d.ResetRepeat()
-	if got := d.trackRepeat(other); got != 1 {
+	if got, stalled := d.trackRepeat(other, "cp:8"); got != 1 || stalled {
 		t.Fatalf("ResetRepeat 后首次应计 1，got %d", got)
 	}
 }
@@ -404,7 +432,7 @@ func TestDispatcher_OnRepeatFiresOnceAtThreshold(t *testing.T) {
 
 	inst := &Instruction{Agent: "writer", Task: "写第 5 章"}
 	for range 6 {
-		d.trackRepeat(inst) // n=1..6：只在 n==3 时回调一次
+		d.trackRepeat(inst, "") // n=1..6：只在告警阈值回调一次
 	}
 	if len(fired) != 1 || fired[0] != fmt.Sprintf("writer|写第 5 章|%d", repeatNotifyAt) {
 		t.Fatalf("应恰好在第 %d 次触发一次，got %v", repeatNotifyAt, fired)
@@ -412,11 +440,66 @@ func TestDispatcher_OnRepeatFiresOnceAtThreshold(t *testing.T) {
 
 	// 键变更后重新武装：换任务再连续 3 次 → 再触发一次
 	other := &Instruction{Agent: "writer", Task: "写第 6 章"}
-	for range 3 {
-		d.trackRepeat(other)
+	for range repeatNotifyAt {
+		d.trackRepeat(other, "")
 	}
 	if len(fired) != 2 {
 		t.Fatalf("键变更后应重新武装，got %v", fired)
+	}
+}
+
+func TestDispatcher_StallFiresOnceAndCheckpointProgressRearms(t *testing.T) {
+	d := &Dispatcher{}
+	var fired []string
+	d.SetOnStall(func(agent, task string, n int) {
+		fired = append(fired, fmt.Sprintf("%s|%s|%d", agent, task, n))
+	})
+	inst := &Instruction{Agent: "writer", Task: "写第 5 章"}
+
+	for range 5 {
+		n, stalled := d.trackRepeat(inst, "cp:9")
+		if stalled && n == stallAbortAt {
+			d.onStall(inst.Agent, inst.Task, n)
+		}
+	}
+	if len(fired) != 1 {
+		t.Fatalf("同一 checkpoint 上应只熔断一次，got %v", fired)
+	}
+
+	for range stallAbortAt {
+		n, stalled := d.trackRepeat(inst, "cp:10")
+		if stalled && n == stallAbortAt {
+			d.onStall(inst.Agent, inst.Task, n)
+		}
+	}
+	if len(fired) != 2 {
+		t.Fatalf("checkpoint 推进后应重新武装，got %v", fired)
+	}
+}
+
+func TestDispatcher_PartialArtifactCountsAsDurableProgress(t *testing.T) {
+	st := storepkg.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDispatcher(nil, st)
+	inst := &Instruction{Agent: "writer", Task: "规划第 1 章", Chapter: 1}
+	before := d.durableProgressToken(inst)
+	if got, stalled := d.trackRepeat(inst, before); got != 1 || stalled {
+		t.Fatalf("first dispatch got=%d stalled=%v", got, stalled)
+	}
+	if got, stalled := d.trackRepeat(inst, before); got != 2 || stalled {
+		t.Fatalf("second dispatch got=%d stalled=%v", got, stalled)
+	}
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{"causal_simulation": map[string]any{"initial_state": []any{"saved"}}}); err != nil {
+		t.Fatal(err)
+	}
+	after := d.durableProgressToken(inst)
+	if before == after {
+		t.Fatal("partial plan fingerprint did not change progress token")
+	}
+	if got, stalled := d.trackRepeat(inst, after); got != 1 || stalled {
+		t.Fatalf("partial progress must rearm counter: got=%d stalled=%v", got, stalled)
 	}
 }
 

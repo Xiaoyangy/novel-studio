@@ -7,11 +7,12 @@ import "time"
 // for stage completion; PipelineStageEvidence records the durable proof checked
 // before a stage is marked complete.
 type PipelineState struct {
-	Stages    []string                         `json:"stages"`
-	Completed []string                         `json:"completed"`
-	Prompt    string                           `json:"prompt,omitempty"`
-	UpdatedAt time.Time                        `json:"updated_at"`
-	Evidence  map[string]PipelineStageEvidence `json:"evidence,omitempty"`
+	Stages      []string                         `json:"stages"`
+	Completed   []string                         `json:"completed"`
+	Prompt      string                           `json:"prompt,omitempty"`
+	InputDigest string                           `json:"input_digest,omitempty"`
+	UpdatedAt   time.Time                        `json:"updated_at"`
+	Evidence    map[string]PipelineStageEvidence `json:"evidence,omitempty"`
 }
 
 // PipelineStageEvidence is the durable proof attached to a completed pipeline

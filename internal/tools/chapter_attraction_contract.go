@@ -102,7 +102,7 @@ func trendLanguagePlanGroundedInChapterBrief(s *store.Store, chapter int, items 
 				return false
 			}
 		}
-		return active > 0
+		return active == len(allowedItems)
 	}
 	section := chapterTrendLanguageBriefSection(s, chapter)
 	if section == "" {
@@ -189,10 +189,13 @@ func normalizeChapterAttractionPlan(s *store.Store, plan *domain.ChapterPlan) []
 	if requirements.Trend {
 		allowed := policy.ChapterTrendLanguage[fmt.Sprintf("%d", plan.Chapter)]
 		if len(allowed) > 0 && !trendLanguagePlanGroundedInChapterBrief(s, plan.Chapter, plan.CausalSimulation.TrendLanguage) {
-			chosen := chooseAnchoredTrendLanguagePlan(plan.CausalSimulation.TrendLanguage, allowed)
-			plan.CausalSimulation.TrendLanguage = []domain.TrendLanguagePlan{chosen}
-			changes = append(changes, "trend_language_plan 已按 meta/web_reference_brief.json 锚定为 "+chosen.Item)
+			plan.CausalSimulation.TrendLanguage = append([]domain.TrendLanguagePlan(nil), allowed...)
+			changes = append(changes, fmt.Sprintf("trend_language_plan 已按 meta/web_reference_brief.json 锚定为 %d 条可选候选", len(allowed)))
 		}
+	}
+	if required, optional := splitOptionalStyleBeats(plan.Contract.RequiredBeats, plan.CausalSimulation.TrendLanguage); len(optional) > 0 {
+		plan.Contract.RequiredBeats = required
+		changes = append(changes, fmt.Sprintf("已将 %d 条热梗/颜文字原句要求从 required_beats 降为可选风格素材", len(optional)))
 	}
 	if requirements.SystemCompanion && policy.SystemCompanion.Required {
 		if problems := domain.SystemCompanionPlanProblems(plan.CausalSimulation); len(problems) > 0 {
@@ -210,30 +213,6 @@ func normalizeChapterAttractionPlan(s *store.Store, plan *domain.ChapterPlan) []
 		plan.CausalSimulation.ContextSources = appendUniqueString(plan.CausalSimulation.ContextSources, "style_policy:meta/web_reference_brief.json")
 	}
 	return changes
-}
-
-func chooseAnchoredTrendLanguagePlan(current, allowed []domain.TrendLanguagePlan) domain.TrendLanguagePlan {
-	if len(allowed) == 0 {
-		return domain.TrendLanguagePlan{}
-	}
-	currentText := ""
-	for _, item := range current {
-		currentText += "\n" + item.Item + "\n" + item.CharacterCarrier + "\n" + item.SceneFunction
-		for _, candidate := range allowed {
-			if strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’") == strings.TrimSpace(candidate.Item) {
-				return candidate
-			}
-		}
-	}
-	for _, candidate := range allowed {
-		carrier := strings.TrimSpace(candidate.CharacterCarrier)
-		for _, name := range []string{"赵航", "林澈", "系统"} {
-			if strings.Contains(currentText, name) && strings.Contains(carrier, name) {
-				return candidate
-			}
-		}
-	}
-	return allowed[0]
 }
 
 func normalizeSystemCompanionForbiddenComedy(current, policy []string) []string {
@@ -341,12 +320,20 @@ func inspectChapterAttractionEvidence(plan domain.ChapterPlan, content string) c
 			continue
 		}
 		evidence.TrendItems = append(evidence.TrendItems, phrase)
-		if strings.Contains(content, phrase) {
+		if trendPhraseRealized(content, phrase) {
 			evidence.TrendMatches = append(evidence.TrendMatches, phrase)
 		}
 	}
 	evidence.TrendPassed = len(evidence.TrendItems) == 0 || len(evidence.TrendMatches) > 0
 	return evidence
+}
+
+func trendPhraseRealized(content, phrase string) bool {
+	phrase = strings.TrimSpace(phrase)
+	if strings.TrimRight(phrase, "，,") == "呱" {
+		return strings.Contains(content, "呱，") || strings.Contains(content, "呱,")
+	}
+	return phrase != "" && strings.Contains(content, phrase)
 }
 
 func requireChapterAttractionContent(s *store.Store, chapter int, content string) error {
@@ -358,12 +345,55 @@ func requireChapterAttractionContent(s *store.Store, chapter int, content string
 	if !domain.ChapterAttractionPlanReady(*plan, requirements.Trend, requirements.Entertainment, requirements.Longform, requirements.SystemCompanion) {
 		return fmt.Errorf("第 %d 章写前吸引力合同不完整：必须先重做 plan，补齐 reader_entertainment_plan、需要时的 trend_language_plan 与第一章 longform_opening: %w", chapter, errs.ErrToolPrecondition)
 	}
-	if requirements.Trend {
-		evidence := inspectChapterAttractionEvidence(*plan, content)
-		if !evidence.TrendPassed {
-			return fmt.Errorf("第 %d 章未兑现 trend_language_plan：正文至少自然使用一个已规划短梗（候选：%s），只能放在指定角色对白/系统交流/群聊反应中，不得塞进旁白或章末: %w",
-				chapter, strings.Join(evidence.TrendItems, "、"), errs.ErrToolPrecondition)
+	// trend_language_plan is a curated option and usage ceiling, not a literal
+	// per-chapter delivery gate. Forcing one planned phrase into every chapter
+	// turns memes and kaomoji into contract prose even when the scene rejects it.
+	if _, _, brief, loadErr := loadChapterRewriteSource(s, chapter); loadErr != nil {
+		return loadErr
+	} else if brief != "" {
+		var missing []string
+		optionalStyle := append(chapterTrendLanguageBriefItems(s, chapter), attractionTrendItems(*plan)...)
+		for _, literal := range rewriteBriefRequiredLiterals(brief) {
+			if literalMatchesOptionalStyle(literal, optionalStyle) {
+				continue
+			}
+			if !strings.Contains(content, literal) {
+				missing = append(missing, literal)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("第 %d 章未兑现 rewrite brief 要求原样出现的文本：%s: %w", chapter, strings.Join(missing, "、"), errs.ErrToolPrecondition)
 		}
 	}
 	return nil
+}
+
+func attractionTrendItems(plan domain.ChapterPlan) []string {
+	items := make([]string, 0, len(plan.CausalSimulation.TrendLanguage))
+	for _, item := range plan.CausalSimulation.TrendLanguage {
+		if value := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’"); value != "" {
+			items = append(items, value)
+		}
+	}
+	return items
+}
+
+func literalMatchesOptionalStyle(literal string, items []string) bool {
+	literal = strings.Trim(strings.TrimSpace(literal), "`'\"“”‘’")
+	if literal == "" {
+		return false
+	}
+	for _, item := range items {
+		item = strings.Trim(strings.TrimSpace(item), "`'\"“”‘’")
+		if item == "" {
+			continue
+		}
+		if literal == item || strings.Contains(item, literal) || strings.Contains(literal, item) {
+			return true
+		}
+		if strings.HasPrefix(item, "呱") && strings.HasPrefix(literal, "呱") {
+			return true
+		}
+	}
+	return strings.Contains(literal, "颜文字") || strings.Contains(literal, "^_^")
 }

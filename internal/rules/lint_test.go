@@ -536,6 +536,64 @@ func TestLint_PunctuationCadenceFlagsFormalSemicolonChains(t *testing.T) {
 	}
 }
 
+func TestLintSystemMessageOverpacked(t *testing.T) {
+	text := `【用途不符。旧债不算新增消费。先别急，钱没跑。换个能留下东西的花法。】`
+	if v := findRule(Lint(text), "system_message_overpacked"); v == nil {
+		t.Fatalf("expected system_message_overpacked, got %+v", Lint(text))
+	}
+	clean := "【这笔不算。旧账是昨天欠的。】\n\n【先别乱刷，我帮你挑第一笔。】"
+	if v := findRule(Lint(clean), "system_message_overpacked"); v != nil {
+		t.Fatalf("short layered system messages should pass: %+v", v)
+	}
+}
+
+func TestLint_AbstractSystemReassurance(t *testing.T) {
+	bad := "【钱没跑。】\n\n【我陪你换条路。】"
+	if v := findRule(Lint(bad), "abstract_system_reassurance"); v == nil {
+		t.Fatalf("expected abstract_system_reassurance, got %+v", Lint(bad))
+	}
+	clean := "【这笔不算。旧账是昨天欠的。】\n\n【夜市缺灯，先去问摊主愿不愿意。】"
+	if v := findRule(Lint(clean), "abstract_system_reassurance"); v != nil {
+		t.Fatalf("concrete system reply should pass: %+v", v)
+	}
+}
+
+func TestLint_OpaqueProcedureJargon(t *testing.T) {
+	bad := `沈知遥说：“补上再测。”
+
+“九点带上采购凭证、用途说明和测试记录。”`
+	if v := findRule(Lint(bad), "opaque_procedure_jargon"); v == nil {
+		t.Fatalf("expected opaque_procedure_jargon, got %+v", Lint(bad))
+	}
+	clean := `沈知遥指了指松开的卡扣：“这里没固定好，今晚一扯就可能断电。先补两个扣，明早我再来看。”`
+	if v := findRule(Lint(clean), "opaque_procedure_jargon"); v != nil {
+		t.Fatalf("plain-language consequence should pass: %+v", v)
+	}
+}
+
+func TestLint_DialogueActionLeadRepetition(t *testing.T) {
+	bad := `二姨夫夹着鱼：“回来也别闲着。”
+
+二姨把转盘推过去：“人家小赵跟你同岁。”
+
+父亲刚说了句“先吃饭”，桌边没人听。
+
+朋友看见他停筷，抬起眼：“你们替他上班了？”`
+	if v := findRule(Lint(bad), "dialogue_action_lead_repetition"); v == nil {
+		t.Fatalf("expected dialogue_action_lead_repetition, got %+v", Lint(bad))
+	}
+	clean := `“回来也别闲着。”二姨夫说。
+
+桌上静了一瞬。二姨还想接话，赵航先笑了：“人家替他上班了？”
+
+“先吃饭。”
+
+没人听林建国的。`
+	if v := findRule(Lint(clean), "dialogue_action_lead_repetition"); v != nil {
+		t.Fatalf("mixed dialogue topology should pass: %+v", v)
+	}
+}
+
 func TestLint_PunctuationCadenceAllowsRhymeSemicolons(t *testing.T) {
 	text := `# 第一章
 

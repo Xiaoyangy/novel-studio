@@ -2,8 +2,14 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/assets"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
@@ -19,13 +25,19 @@ import (
 // 新建小说时项目目录在头脑风暴确定书名后才生成，故这里用 runsRoot（data/runs）作根，
 // 由 save_brainstorm 按书名派生目录。
 func RunBrainstorm(cfg bootstrap.Config, bundle assets.Bundle, runsRoot, idea string) (string, error) {
+	kickoffKey := brainstormKickoffKey(cfg, bundle, idea)
+	if projectDir, ok := loadBrainstormKickoff(runsRoot, kickoffKey); ok {
+		return projectDir, nil
+	}
 	models, err := bootstrap.NewModelSet(cfg)
 	if err != nil {
 		return "", fmt.Errorf("create models: %w", err)
 	}
 	// 暂存 store：craft_recall/web_research/novel_context 需要一个 store；新书还没项目目录，
-	// 先用 runsRoot/.brainstorm-staging，落盘后真正的思路进 data/runs/<书名>/brainstorm.md。
-	stagingDir := filepath.Join(runsRoot, ".brainstorm-staging")
+	// Staging is isolated by immutable kickoff input. Concurrent new-book jobs do
+	// not share RAG traces or temporary state, and a failed run cannot contaminate
+	// another idea.
+	stagingDir := filepath.Join(runsRoot, ".brainstorm-staging", kickoffKey[:16])
 	st := store.NewStore(stagingDir)
 	_ = st.Init()
 
@@ -49,7 +61,7 @@ func RunBrainstorm(cfg bootstrap.Config, bundle assets.Bundle, runsRoot, idea st
 		agentcore.WithSystemPrompt(bundle.Prompts.Brainstorm),
 		agentcore.WithTools(saveBrainstorm, webResearch, craftRecall, contextTool),
 		agentcore.WithMaxTurns(cfg.ResolveMaxTurns("architect", 30)),
-		agentcore.WithToolsAreIdempotent(true),
+		agentcore.WithToolsAreIdempotent(false),
 		agentcore.WithMaxToolErrors(0),
 		agentcore.WithMaxRetries(subagentMaxRetries),
 	)
@@ -65,7 +77,99 @@ func RunBrainstorm(cfg bootstrap.Config, bundle assets.Bundle, runsRoot, idea st
 	if saved == "" {
 		return "", fmt.Errorf("头脑风暴结束但未落盘 brainstorm.md：请检查模型是否调用了 save_brainstorm")
 	}
-	return saved, nil
+	projectDir, err := filepath.Abs(saved)
+	if err != nil {
+		projectDir = saved
+	}
+	if err := saveBrainstormKickoff(runsRoot, kickoffKey, projectDir); err != nil {
+		return "", fmt.Errorf("save brainstorm kickoff journal: %w", err)
+	}
+	return projectDir, nil
+}
+
+type brainstormKickoffJournal struct {
+	InputSHA256   string `json:"input_sha256"`
+	ProjectDir    string `json:"project_dir"`
+	BrainstormSHA string `json:"brainstorm_sha256"`
+	CompletedAt   string `json:"completed_at"`
+}
+
+func brainstormKickoffKey(cfg bootstrap.Config, bundle assets.Bundle, idea string) string {
+	role := cfg.Roles["architect"]
+	payload, _ := json.Marshal(struct {
+		Idea             string
+		Style            string
+		DefaultProvider  string
+		DefaultModel     string
+		ArchitectRole    bootstrap.RoleConfig
+		BrainstormPrompt string
+	}{strings.TrimSpace(idea), cfg.Style, cfg.Provider, cfg.ModelName, role, bundle.Prompts.Brainstorm})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func brainstormKickoffPath(runsRoot, key string) string {
+	return filepath.Join(runsRoot, ".pipeline-kickoffs", key+".json")
+}
+
+func loadBrainstormKickoff(runsRoot, key string) (string, bool) {
+	raw, err := os.ReadFile(brainstormKickoffPath(runsRoot, key))
+	if err != nil {
+		return "", false
+	}
+	var journal brainstormKickoffJournal
+	if json.Unmarshal(raw, &journal) != nil || journal.InputSHA256 != key || strings.TrimSpace(journal.ProjectDir) == "" {
+		return "", false
+	}
+	body, err := os.ReadFile(filepath.Join(journal.ProjectDir, "brainstorm.md"))
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(body)
+	if hex.EncodeToString(sum[:]) != journal.BrainstormSHA {
+		return "", false
+	}
+	return journal.ProjectDir, true
+}
+
+func saveBrainstormKickoff(runsRoot, key, projectDir string) error {
+	body, err := os.ReadFile(filepath.Join(projectDir, "brainstorm.md"))
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(body)
+	journal := brainstormKickoffJournal{
+		InputSHA256:   key,
+		ProjectDir:    projectDir,
+		BrainstormSHA: hex.EncodeToString(sum[:]),
+		CompletedAt:   time.Now().Format(time.RFC3339),
+	}
+	raw, err := json.MarshalIndent(journal, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := brainstormKickoffPath(runsRoot, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kickoff-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func brainstormPrompt(idea string) string {

@@ -32,6 +32,8 @@ func TestCanTransitionFlow(t *testing.T) {
 		{from: "", to: FlowRewriting, want: true},
 		{from: FlowWriting, to: FlowReviewing, want: true},
 		{from: FlowReviewing, to: FlowPolishing, want: true},
+		{from: FlowPolishing, to: FlowRewriting, want: true},
+		{from: FlowRewriting, to: FlowPolishing, want: true},
 		{from: FlowRewriting, to: FlowWriting, want: true},
 		{from: FlowSteering, to: FlowRewriting, want: true},
 		{from: FlowRewriting, to: FlowReviewing, want: false},

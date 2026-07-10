@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -17,24 +18,24 @@ func (permanentEOFRAGEmbedder) Embed(context.Context, string) ([]float32, error)
 }
 
 type trackingRAGWriter struct {
-	deletes int
-	writes  int
+	deletes atomic.Int32
+	writes  atomic.Int32
 }
 
-type countingRAGEmbedder struct{ calls int }
+type countingRAGEmbedder struct{ calls atomic.Int32 }
 
 func (e *countingRAGEmbedder) Embed(context.Context, string) ([]float32, error) {
-	e.calls++
+	e.calls.Add(1)
 	return []float32{1, 0}, nil
 }
 
 func (w *trackingRAGWriter) Write(context.Context, rag.VectorPoint) error {
-	w.writes++
+	w.writes.Add(1)
 	return nil
 }
 
 func (w *trackingRAGWriter) DeleteSourcePath(context.Context, string) error {
-	w.deletes++
+	w.deletes.Add(1)
 	return nil
 }
 
@@ -68,8 +69,8 @@ func TestUpsertRAGChunksEmbeddingEOFPreservesCommittedSnapshot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected embedding EOF")
 	}
-	if remote.deletes != 0 || remote.writes != 0 {
-		t.Fatalf("remote source changed before embedding stage completed: deletes=%d writes=%d", remote.deletes, remote.writes)
+	if remote.deletes.Load() != 0 || remote.writes.Load() != 0 {
+		t.Fatalf("remote source changed before embedding stage completed: deletes=%d writes=%d", remote.deletes.Load(), remote.writes.Load())
 	}
 	state, err := s.RAG.LoadIndexState()
 	if err != nil {
@@ -118,8 +119,8 @@ func TestUpsertRAGChunksUnchangedSourceIsNoOp(t *testing.T) {
 	if err := UpsertRAGChunks(context.Background(), s, embedder, remote, []domain.RAGChunk{chunk}, domain.RAGIndexConfig{}); err != nil {
 		t.Fatalf("UpsertRAGChunks: %v", err)
 	}
-	if embedder.calls != 0 || remote.deletes != 0 || remote.writes != 0 {
-		t.Fatalf("unchanged source should be a no-op: embeds=%d deletes=%d writes=%d", embedder.calls, remote.deletes, remote.writes)
+	if embedder.calls.Load() != 0 || remote.deletes.Load() != 0 || remote.writes.Load() != 0 {
+		t.Fatalf("unchanged source should be a no-op: embeds=%d deletes=%d writes=%d", embedder.calls.Load(), remote.deletes.Load(), remote.writes.Load())
 	}
 	state, err := s.RAG.LoadIndexState()
 	if err != nil {
@@ -155,8 +156,8 @@ func TestUpsertRAGChunksReplaysPendingUpsertsOnNextSuccess(t *testing.T) {
 	if err := UpsertRAGChunks(context.Background(), s, embedder, remote, []domain.RAGChunk{current}, domain.RAGIndexConfig{}); err != nil {
 		t.Fatalf("UpsertRAGChunks: %v", err)
 	}
-	if embedder.calls != 2 || remote.deletes != 2 || remote.writes != 2 {
-		t.Fatalf("pending replay counts: embeds=%d deletes=%d writes=%d", embedder.calls, remote.deletes, remote.writes)
+	if embedder.calls.Load() != 2 || remote.deletes.Load() != 2 || remote.writes.Load() != 2 {
+		t.Fatalf("pending replay counts: embeds=%d deletes=%d writes=%d", embedder.calls.Load(), remote.deletes.Load(), remote.writes.Load())
 	}
 	pending, err := s.RAG.LoadPendingUpserts()
 	if err != nil {

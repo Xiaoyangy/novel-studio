@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
@@ -691,6 +692,74 @@ func TestSaveReviewEscalatesCriticalIssueEvenWhenVerdictAccept(t *testing.T) {
 	}
 }
 
+func TestSaveReviewRewriteRefreshesStaleBriefFromLatestReviewAndSteer(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveFinalChapter(1, "第一章 失业饭桌\n\n旧正文。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, 12, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveRewriteBrief(1, "# ch01 rewrite brief\n\n## 当前结论\n\n- 当前稿已通过，暂不继续自动改写。\n\n## 保留事实\n\n- 林澈付款4280元。\n- 老丁负责送装。\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunMeta.SetPendingSteer("赵航必须用‘呱，’起头；重写老丁全部对白。"); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "missed",
+		"contract_misses": []string{"缺失原句‘那还说啥了，给你了呗’"},
+		"issues": []map[string]any{{
+			"type": "character", "severity": "error",
+			"description": "赵航被写成拟声动作。", "evidence": "原文写成呱了一声。",
+			"suggestion": "改为赵航以呱，起头说完整吐槽。",
+		}},
+		"verdict": "rewrite", "summary": "按用户要求整章重写。", "affected_chapters": []int{1},
+	})
+	raw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["rewrite_brief"] != "reviews/01_rewrite_brief.md" {
+		t.Fatalf("expected refreshed brief path, got %+v", out)
+	}
+	brief, err := s.Drafts.LoadRewriteBrief(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"最新结构化评审：`rewrite`", "赵航必须用‘呱，’起头", "重写老丁全部对白",
+		"林澈付款4280元", "老丁负责送装", "那还说啥了，给你了呗", "赵航被写成拟声动作",
+	} {
+		if !strings.Contains(brief, want) {
+			t.Fatalf("refreshed brief missing %q:\n%s", want, brief)
+		}
+	}
+	if strings.Contains(brief, "当前稿已通过，暂不继续自动改写") {
+		t.Fatalf("stale acceptance conclusion survived refresh:\n%s", brief)
+	}
+	meta, err := s.RunMeta.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil && meta.PendingSteer != "" {
+		t.Fatalf("durably captured steer must be cleared to prevent redispatch: %+v", meta)
+	}
+}
+
 func TestSaveReviewEscalatesBlockingMechanicalGate(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -739,6 +808,139 @@ func TestSaveReviewEscalatesBlockingMechanicalGate(t *testing.T) {
 	saved, _ := s.World.LoadReview(3)
 	if saved == nil || saved.Verdict != "rewrite" || len(saved.AffectedChapters) != 1 || saved.AffectedChapters[0] != 3 {
 		t.Fatalf("unexpected saved review: %+v", saved)
+	}
+}
+
+func TestSaveReviewAcceptDrainsPriorRewriteForAdvisoryWarning(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatal(err)
+	}
+	body := "卡莱尔问：\u201c你怕吗？\u201d\n\n她抬起手，又放下。\u201c怕。\u201d"
+	if err := s.Drafts.SaveFinalChapter(3, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(3, len([]rune(body)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetPendingRewrites([]int{3}, "旧机械判定要求重写"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetFlow(domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	mechanical := reviewreport.MechanicalGatePayload{
+		Chapter:    3,
+		BodySHA256: reviewreport.BodySHA256(body),
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+		RuleViolations: []rules.Violation{{
+			Rule:     "isolated_sentence_overuse",
+			Severity: rules.SeverityWarning,
+		}},
+	}
+	rawGate, _ := json.Marshal(mechanical)
+	gatePath := filepath.Join(dir, "reviews", "03_ai_gate.json")
+	if err := os.MkdirAll(filepath.Dir(gatePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatePath, rawGate, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 3, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "met", "issues": []map[string]any{{
+			"type": "aesthetic", "severity": "warning",
+			"description": "物件回应节奏仍可微调。", "evidence": "提示出现四次。",
+		}},
+		"verdict": "accept", "summary": "正文通过，仅保留可选打磨建议。",
+	})
+	outRaw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(outRaw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["final_verdict"] != "accept" {
+		t.Fatalf("advisory warning must preserve accept: %+v", out)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Flow != domain.FlowWriting || len(progress.PendingRewrites) != 0 {
+		t.Fatalf("accepted review must drain stale rewrite state: %+v", progress)
+	}
+}
+
+func TestReviewEntryForLearningDropsUserRuleContradictions(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UserRules.Save(&rules.Snapshot{Preferences: "系统会与林澈交流解闷，能短促接话、吐槽和撑腰，并且始终支持林澈；不能写成纯任务机器人。"}); err != nil {
+		t.Fatal(err)
+	}
+	r := domain.ReviewEntry{
+		Chapter: 1,
+		Scope:   "chapter",
+		Issues: []domain.ConsistencyIssue{
+			{Type: "aesthetic", Severity: "warning", Description: "系统口吻偏暖，建议强化系统冷硬感。"},
+			{Type: "aesthetic", Severity: "warning", Description: "沈知遥的第二句解释略长，可压缩。"},
+		},
+	}
+
+	filtered := reviewEntryForLearning(s, r)
+	if len(filtered.Issues) != 1 || !strings.Contains(filtered.Issues[0].Description, "沈知遥") {
+		t.Fatalf("unexpected filtered review: %+v", filtered.Issues)
+	}
+}
+
+func TestSaveReviewEscalatesPolishingFlowToRewrite(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatal(err)
+	}
+	body := "林澈看见系统消息，又把手机按灭。"
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(body)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetPendingRewritesAndFlow([]int{1}, "先打磨", domain.FlowPolishing); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "missed", "contract_misses": []string{"用户要求整章重写"},
+		"issues": []map[string]any{{
+			"type": "aesthetic", "severity": "error", "description": "对白合同腔严重。", "evidence": "原文证据。",
+		}},
+		"verdict": "rewrite", "affected_chapters": []int{1}, "summary": "升级为整章重写。",
+	})
+	if _, err := NewSaveReviewTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Flow != domain.FlowRewriting || len(progress.PendingRewrites) != 1 {
+		t.Fatalf("expected rewrite flow after escalation: %+v", progress)
 	}
 }
 

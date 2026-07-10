@@ -89,7 +89,7 @@ func parseRewriteFlags(argv []string) (rewriteFlags, []string, error) {
 	var f rewriteFlags
 	f.Budget = 180 * time.Second
 	fs.StringVar(&f.RewriteExisting, "rewrite-existing", "", "项目根目录（缺省当前目录）")
-	fs.DurationVar(&f.Budget, "budget", f.Budget, "每章 Writer 调用硬时间预算")
+	fs.DurationVar(&f.Budget, "budget", f.Budget, "每章全部 Writer 尝试共享的总墙钟预算")
 	fs.IntVar(&f.Start, "from", 0, "起始章号（含），0=自动")
 	fs.IntVar(&f.End, "to", 0, "结束章号（含），0=自动")
 	fs.StringVar(&f.Role, "role", "writer", "调用的模型角色：writer / coordinator")
@@ -205,7 +205,7 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 	totalRewritten := 0
 	totalBriefs := 0
 	for round := 1; round <= maxRounds; round++ {
-		successCount, failureCount, skippedCount := 0, 0, 0
+		successCount, failureCount, skippedCount, pendingReviewCount := 0, 0, 0, 0
 		for _, chNum := range selectedChapters {
 			chapterRel := filepath.ToSlash(filepath.Join("chapters", fmt.Sprintf("%02d.md", chNum)))
 			briefRel := filepath.ToSlash(filepath.Join("reviews", fmt.Sprintf("%02d_rewrite_brief.md", chNum)))
@@ -215,6 +215,34 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 读原文失败：%v\n", chNum, err)
 				failureCount++
 				continue
+			}
+			if !flags.BriefOnly {
+				pendingReview, recoveryErr := rewriteAwaitingReview(eng.Dir(), st, chNum, string(original))
+				if recoveryErr != nil {
+					fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 读取恢复状态失败：%v\n", chNum, recoveryErr)
+					failureCount++
+					continue
+				}
+				if pendingReview {
+					fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 已换入候选正文但尚未复审，直接从 review 恢复，不再次调用 Writer\n", chNum)
+					if err := st.World.ClearChapterReview(chNum); err != nil {
+						fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 清理旧审核失败：%v\n", chNum, err)
+						failureCount++
+						continue
+					}
+					if err := syncRewriteProgressWordCount(st, chNum, rewriteWordCount(string(original))); err != nil {
+						fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 恢复字数失败：%v\n", chNum, err)
+						failureCount++
+						continue
+					}
+					if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "rewrite-body-swapped", chapterRel); err != nil {
+						fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 恢复 checkpoint 失败：%v\n", chNum, err)
+						failureCount++
+						continue
+					}
+					pendingReviewCount++
+					continue
+				}
 			}
 			if err := currentChapterReviewError(eng.Dir(), chNum); err != nil {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 拒绝使用过期审核：%v\n", chNum, err)
@@ -258,8 +286,15 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 			var retryFeedback string
 			compressionRetry := false
 			rewriteOK := false
+			chapterDeadline := time.Now().Add(flags.Budget)
 			for attempt := 1; attempt <= maxRewriteWriterAttempts; attempt++ {
-				newText, err = callWriterRewrite(model, eng.Dir(), bundle.References, cfg.Style, premise, characters, outlineEntry, chNum, string(original), plan.Brief, flags.Budget, rewriteCallOptions{
+				remaining := time.Until(chapterDeadline)
+				if remaining <= 0 {
+					err = fmt.Errorf("第 %d 章重写已用完总预算 %s", chNum, flags.Budget)
+					fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d %v\n", chNum, err)
+					break
+				}
+				newText, err = callWriterRewrite(model, eng.Dir(), bundle.References, cfg.Style, premise, characters, outlineEntry, chNum, string(original), plan.Brief, remaining, rewriteCallOptions{
 					LengthBounds:  bounds,
 					Attempt:       attempt,
 					RetryFeedback: retryFeedback,
@@ -313,6 +348,11 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 				failureCount++
 				continue
 			}
+			if err := stageRewriteRecovery(eng.Dir(), chNum, string(original), newText); err != nil {
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 写恢复日志失败，拒绝换入候选正文：%v\n", chNum, err)
+				failureCount++
+				continue
+			}
 			backupPath := chapterPath + ".pre-rewrite.md"
 			if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 				if err := os.WriteFile(backupPath, original, 0o644); err != nil {
@@ -323,6 +363,13 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 写回失败：%v\n", chNum, err)
 				failureCount++
 				continue
+			}
+			if err := markRewriteReviewPending(eng.Dir(), chNum); err != nil {
+				// candidate_staged 已含目标 hash；即使这里失败，重启仍能识别已换入正文。
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 更新恢复状态失败，将依靠候选 hash 恢复：%v\n", chNum, err)
+			}
+			if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "rewrite-body-swapped", chapterRel); err != nil {
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d body-swapped checkpoint 失败：%v\n", chNum, err)
 			}
 			if err := st.World.ClearChapterReview(chNum); err != nil {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 清理过期审核失败：%v\n", chNum, err)
@@ -348,7 +395,7 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 		if failureCount > 0 {
 			return fmt.Errorf("第 %d 轮重写未全部完成：成功 %d 章，跳过 %d 章，失败 %d 章", round, successCount, skippedCount, failureCount)
 		}
-		if successCount == 0 {
+		if successCount == 0 && pendingReviewCount == 0 {
 			if flags.BriefOnly {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] brief-only 完成，刷新 %d 份 brief\n", totalBriefs)
 				return nil
@@ -357,9 +404,14 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 			return nil
 		}
 
-		fmt.Fprintf(os.Stderr, "[rewrite-existing] 第 %d 轮完成，开始复审红旗...\n", round)
+		fmt.Fprintf(os.Stderr, "[rewrite-existing] 第 %d 轮正文换入 %d 章、恢复待审 %d 章，开始复审红旗...\n", round, successCount, pendingReviewCount)
 		if err := reviewExistingPipeline(opts, rewriteLoopReviewArgs(flags)); err != nil {
 			return fmt.Errorf("第 %d 轮重写后复审失败: %w", round, err)
+		}
+		for _, chNum := range selectedChapters {
+			if err := clearRewriteRecovery(eng.Dir(), chNum); err != nil {
+				return fmt.Errorf("ch%02d 清理 rewrite 恢复状态失败: %w", chNum, err)
+			}
 		}
 		includeYellow := flags.PolishWarnings
 		blocking, err := revisionChaptersNeedingWork(eng.Dir(), start, end, includeYellow)
@@ -1108,11 +1160,7 @@ func validateRewritePreflight(st *store.Store, chapter int, rewritten string, in
 			}
 			target := flag.Suggestion
 			if flag.Rule == "supporting_dialogue_ratio" {
-				need := int((flag.Limit-flag.Actual)*float64(rewriteWordCount(rewritten))) + 40
-				if need < 120 {
-					need = 120
-				}
-				target = fmt.Sprintf("对话占比 %.2f 低于 %.2f；至少净增约 %d 字引号内配角主动话轮，并同步删等量说明", flag.Actual, flag.Limit, need)
+				target = fmt.Sprintf("配角有效对白参考值 %.2f 低于 %.2f；只在配角缺少主动误解、打断、拒绝或关系动作时重写对应场景，不得按字数净增话轮或动作标签", flag.Actual, flag.Limit)
 			}
 			failures = append(failures, rules.Violation{
 				Rule:     "ai_voice:" + flag.Rule,

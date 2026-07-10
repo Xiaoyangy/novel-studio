@@ -18,7 +18,7 @@
 ### 1. 获取上下文
 调用 novel_context(chapter=最新章节号)，获取全部状态数据。
 先根据 `working_memory` 理解当前章局部上下文，再根据 `episodic_memory` 检查长期连续性；`memory_policy` 会告诉你当前摘要窗口和是否更适合依赖结构化交接工件。
-如果上下文里存在 `chapter_contract`，必须将其视为本章验收契约，对照检查本章是否完成 required_beats、是否触犯 forbidden_moves、是否满足 continuity_checks。
+如果上下文里存在 `chapter_contract`，必须将其视为本章验收契约，对照检查本章是否完成 required_beats、是否触犯 forbidden_moves、是否满足 continuity_checks。若旧计划曾把热梗、颜文字、台词原句、动作拍或流程措辞误写进 required_beats，按可选风格素材处理，不得因此强迫正文复述。
 如果项目启用了 `chapter_world_simulation`，先检查这条生成链，而不是要求 POV plan 重复全世界资料：
 - 正式模拟必须为 `status=ready`，覆盖 `simulation_characters` 中全部实名角色；每个角色都有自己的目标、压力、可选项、决定、决定理由、行动和至少一个蝴蝶效应。
 - `chapter_plan.causal_simulation.world_simulation_id` 与 `protagonist_decision` 必须分别匹配本轮模拟 ID 和主角投影选择；`context_sources` 要记录该模拟。
@@ -28,13 +28,16 @@
 
 随后只审核 POV plan 对正文真正有用的核心：章节契约、主角初始状态、因果节拍、对白目标、情绪到行动、反 AI 预案、可见爽点与代价、章末承接。世界层、仪式日历、宇宙观、视觉套件、关系弧等扩展模块仅在计划实际提交且本章使用时检查；轻都市、日常、轻喜剧章节没有这些模块，不得以“推演证据不足”机械扣分。若存在 simulation_restart_policy，仍须确认当前 generation 边界，旧章节与旧账本只能作种子。
 
-若 `dialogue_scene_blueprints` 存在，必须对照正文检查关键对白是否执行蓝图：`dialogue_mode` 是否适配当前角色、场景、压力、情绪和关系；`opening_strategy` 是否真的被执行，且没有把所有场景都写成对白先入场；双方 `objective_tactics` 是否能在正文中找到目标、策略、反制、情绪泄露和结果；直说/绕说比例、动作拍密度、沉默策略和信息释放是否符合本场模式。谈判应有筹码和让步，审问应有信息差和套话，求助应有转嫁/自尊/恐惧，告白或告解应有边界与代价，互怼/调情应有关系推进而不是纯吐槽，沉默压迫应让无人接话承担信息。还要检查是否出现“点名/叫人 -> 停笔或抬眼 -> 补口径/查字段 -> 第三人追问”的模板对白链；命中即归 aesthetic / ai_voice_detection，要求改成目标冲突、误读、拒写、打断、物件承压或信息延迟。连续双人对白若每行都标“某某说/问/答”、动作拍只负责停顿，或出现“人物：台词”剧本格式，同样归 ai_voice_detection；可辨认说话人时应允许省略标签，用声口、上一句问题、动作位置和关系压力区分。若正文先整段背景再对白、照抄样本题材/话术、主角第一轮就全懂、对手只等着被收、对白像系统菜单/选项展示，或用突然声响和金句替代现场退出，归 character / pacing / aesthetic / ai_voice_detection，必要时要求重建 `dialogue_scene_blueprints` 后再改正文。
+若 `render_packet.dialogue_scenes` 或 `causal_simulation.dialogue_scene_blueprints` 存在，必须对照正文检查关键对白是否执行场景目的、人物目标、信息差、关系压力和价值变化；蓝图不是句序，更不能把上游 `turn_progression` 或 `action_beat` 逐项翻译成正文。谈判应有筹码和让步，审问应有信息差和套话，求助应有转嫁/自尊/恐惧，告白或告解应有边界与代价，互怼/调情应有关系推进而不是纯吐槽，沉默压迫应让无人接话承担信息。还要检查是否出现“点名/叫人 -> 停笔或抬眼 -> 补口径/查字段 -> 第三人追问”的模板对白链；命中即归 aesthetic / ai_voice_detection。连续双人对白若每行都标“某某说/问/答”、连续三段都以“某人做动作：台词”起头、每个说话人都先夹菜/抬眼/推物件再开口，或出现“人物：台词”剧本格式，同样归 ai_voice_detection；可辨认说话人时应允许裸对白、简短标签、打断、漏答、答非所问、群体反应和无人接话。若正文先整段背景再对白、照抄样本题材/话术、主角第一轮就全懂、对手只等着被收、对白像系统菜单/选项展示，或用突然声响和金句替代现场退出，归 character / pacing / aesthetic / ai_voice_detection。
+对白必须额外做朗读测试：若角色轮流精准接话、每句都说成完整书面句、一个人一次讲齐金额/时限/售后/责任，或频繁出现“答完/问完/说完后，另一人才……”的舞台调度，应归 aesthetic / ai_voice_detection。系统消息要回答主角刚问的具体问题，一次只给一条规则或一个可执行提示；“钱没跑、陪你换条路、规矩不撤、先喘半口气”这类无具体对象和后果的客服式安慰直接判 aesthetic fail。专业角色说“补测、核验、用途说明、临时固定、采购凭证、测试记录”等词时，普通读者必须立刻看懂会坏在哪里、谁会吃亏、下一步做什么；术语成串、只有业内人看得懂时判 readability/aesthetic fail。用户允许的颜文字只能少量出现在私聊/群聊/手机消息中。热梗要核对完整句法和语境，`呱，……` 不得审成拟声词或单独一声。
+
+每次换地点都做一次因果朗读：上一场留下了什么压力，主角为什么现在去下一处，抵达后先撞上什么与选择有关的阻力。若正文只写锁屏、下楼、到了某地，删掉中间动机让场景凭作者需要跳转，归 pacing / causality fail；不得用“节奏快”放行。
 rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色位置、行动、知识边界、资源、关系、死亡/失踪/异化状态、时间线或世界反馈，但本章 `character_stage_records`、`state_changes`、`resource_updates`、`timeline_events`、`relationship_changes` 或 `chapter_world_deltas` 仍沿用旧事实，必须给 continuity/consistency issue，并要求重新 commit 同步覆盖。
 如果存在 `emotional_logic`、`relationship_emotion_arcs` 或 `visual_design`，必须做专项检查。`emotional_logic` 要证明角色行动不是只被事件推着走，而是由身体/即时状态、原始和复合情绪、目标评估、边界威胁、调节策略、防御机制、认知偏差、趋近/回避、短期/长期、自我/关系、显性理由/隐藏理由、意义需求和元认知共同推出；如果角色只有情绪标签没有动作证据，或所有人都像无情工具人，归 character / ai_voice_detection。`relationship_emotion_arcs` 要检查亲情、合作、敌对、债务和恋爱/暧昧潜势是否有情绪推进、亲密阶段、信任债、权力不对等、表达方式和边界；关系突然亲密、突然忠诚、突然发糖或恋爱线没有阻碍，归 character / consistency。`visual_design` 要检查人物长相、发型、穿衣、轮廓、色彩、身体语言、标志物和状态磨损是否在正文中承担识别、情绪、关系或世界状态；只有帅/美/普通、全员黑衣冷脸或外观不随章节状态改变，归 aesthetic。
 `initial_state` 只需把主角开章目标、压力、行动倾向和信息边界说清；全角色的可选项、决定理由与蝴蝶效应以 `chapter_world_simulation.character_decisions` 为准。审阅重点是正文中的主角选择能否从可见证据推出，而不是检查 POV plan 是否复制了每个角色的完整心理表。
 如果存在 `crowd_roles`，检查它们是否只承担群体反应、规模感、现场压力、样本后果或后勤功能。某个成员一旦被命名并做出会影响后续的选择，就应进入角色册和下一轮全角色世界模拟，而不是临时补进 POV 正文。
 
-如果存在 `writing_norms_applied`、`anti_ai_execution_plan`、`external_reference_plan`、`trend_language_plan`、`reader_entertainment_plan` 或 `grounding_details`，必须检查正文是否执行这些写前计划。`writing_norms_applied` 不能只列资料名，必须能在正文中找到对应的开场策略、物件承载、对白功能、句式节奏、约 3000 字整章检测自检或审核证据；若计划和正文脱节，归 aesthetic 或 contract。`reader_entertainment_plan` 必须逐项核对：前200字是否真的发生冲突/尴尬/误会/反转，至少两个喜剧节拍是否机制不同且有前后反应，即时兑现是否在页面上可见，流程说明是否按计划压缩，系统/搭档是否有性格化回应。只有俏皮措辞、没有事件反应，不算喜剧节拍；只有付款和核验流程、没有面子/关系/结果变化，不算爽点。`anti_ai_execution_plan` 要核对本章是否仍有整齐解释段、同型短句、金句收尾、物件即时回应过密、条款打印稿感、对白讲设定或单检测片段曲线过平；若命中而计划未处理，归 ai_voice_detection/aesthetic。`external_reference_plan` 和 `grounding_details` 要核对来源、时效和转化方式：网络资料、RAG 或项目简报只能变成可见细节、界面痕迹、生活动作、制度压力、角色职业/资源支撑、交通耗时或角色误判，不能把网页摘要/热词盘点搬进旁白。若外部资料被用于生成人物背景、工作地点、生活资源或城市交通，必须能看见转化后的具体行动压力和台账证据。`trend_language_plan` 要核对具体短梗是否由指定角色/媒介自然说出，前后是否有误会、吐槽对象、社死或关系反应，并遵守使用预算；旁白、主角关键判断、恐怖规则和章末钩子硬塞热梗时归 aesthetic/character，过时或错平台语境归 consistency。
+如果存在 `writing_norms_applied`、`anti_ai_execution_plan`、`external_reference_plan`、`trend_language_plan`、`reader_entertainment_plan` 或 `grounding_details`，必须检查正文是否执行核心写前约束。`writing_norms_applied` 不能只列资料名，必须能在正文中找到对应的开场策略、物件承载、对白功能、句式节奏、约 3000 字整章检测自检或审核证据；若计划和正文脱节，归 aesthetic 或 contract。`reader_entertainment_plan` 必须逐项核对：前200字是否真的发生冲突/尴尬/误会/反转，喜剧节拍是否有前后反应，即时兑现是否在页面可见，流程说明是否压缩，系统/搭档是否有性格化回应。只有俏皮措辞、没有事件反应，不算喜剧；只有付款和核验流程、没有面子/关系/结果变化，不算爽点。`anti_ai_execution_plan` 要核对本章是否仍有整齐解释段、同型短句、金句收尾、物件即时回应过密、条款打印稿感或对白讲设定。外部资料只能变成可见细节、生活动作、制度压力、角色资源、交通耗时或误判，不能把网页摘要搬进旁白。`trend_language_plan` 是候选与使用上限，不要求正文逐项执行；正文没用不构成 issue，用了才核对角色、语境、句法和预算，生硬时应要求删除而不是迁移重塞。
 如果 contract 中包含 `emotion_target`、`payoff_points`、`hook_goal`，还要检查：
 - emotion_target 是否在正文里形成清晰的情绪主色
 - payoff_points 是否得到合理回应；如果本章本来就是铺垫/过渡章，不要因为“爽点不够强”而机械扣分
@@ -125,7 +128,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 - 数字阶梯式规则陈述：禁止用“第一/第二/第三”“一是/二是/三是”“1/2/3”在正文或台词里机械列规则、计划、真相；命中时要求拆进动作、物件或后果。
 - 开篇单句金句：第一段不能只有一句抽象判断，必须先落动作、感官、物件或环境异常。
 - 章末金句问号：最后一句不能用命运、人生、真正的选择、最终答案等抽象反问收束；命中时列入格言/钩子红旗，要求换成现场事实或角色动作。
-- 主角目的秒答：主角回答“我从一开始就为这个来的”这类来意/立场问题时，必须先犹豫一拍；若秒答，要求补停顿、改口、摸物件或半遮掩回答。
+- 主角目的秒答：主角回答“我从一开始就为这个来的”这类来意/立场问题时，不能秒答成宣言；可改口、反问、只答半句、答非所问或拒答，再让对方追问。不得强制补“停手、摸物件、指尖一顿”这类动作通行证。
 
 第八维的修订建议必须具体到“第几段/哪句话/替换成什么”。禁止只写“加强细节”“提升描写质感”“增加人味”这类空话。
 

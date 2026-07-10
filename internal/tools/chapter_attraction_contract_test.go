@@ -11,7 +11,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func TestChapterAttractionContentRequiresPlannedMemeEvidence(t *testing.T) {
+func TestChapterAttractionContentTreatsPlannedMemeAsOptional(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
@@ -30,11 +30,38 @@ func TestChapterAttractionContentRequiresPlannedMemeEvidence(t *testing.T) {
 	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
 		t.Fatal(err)
 	}
-	if err := requireChapterAttractionContent(s, 1, "第一章 失业饭桌\n\n这里只有普通对白。"); err == nil || !strings.Contains(err.Error(), "未兑现 trend_language_plan") {
-		t.Fatalf("expected missing trend evidence, got %v", err)
+	if err := requireChapterAttractionContent(s, 1, "第一章 失业饭桌\n\n这里只有普通对白。"); err != nil {
+		t.Fatalf("missing optional trend phrase must not block prose: %v", err)
 	}
-	if err := requireChapterAttractionContent(s, 1, "第一章 失业饭桌\n\n赵航没憋住，呱了一声，又被舅舅瞪回碗里。"); err != nil {
-		t.Fatalf("planned trend evidence should pass: %v", err)
+	if evidence := inspectChapterAttractionEvidence(plan, "第一章 失业饭桌\n\n赵航没憋住，呱了一声，又被舅舅瞪回碗里。"); evidence.TrendPassed {
+		t.Fatal("呱了一声 must not be recorded as a correct 呱， discourse opener")
+	}
+	if err := requireChapterAttractionContent(s, 1, "第一章 失业饭桌\n\n赵航抬眼：‘呱，这也叫关心？’"); err != nil {
+		t.Fatalf("proper 呱， dialogue opener should pass: %v", err)
+	}
+}
+
+func TestRewriteBriefStyleLiteralsAreOptionalButPlainWordingContractRemains(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	prepareRewriteSourceTest(t, s,
+		"第一章 失业饭桌\n\n旧正文。",
+		"# brief\n\n## 用户本轮要求\n\n- 开头用‘回来也别闲着’；赵航必须说成‘呱，’起头；自然落地一次原句‘那还说啥了，给你了呗’。\n")
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "失业饭桌"}); err != nil {
+		t.Fatal(err)
+	}
+	missingPlainWording := "第一章 失业饭桌\n\n赵航替他挡了一句，林澈趁机离席。"
+	if err := requireChapterAttractionContent(s, 1, missingPlainWording); err == nil || !strings.Contains(err.Error(), "回来也别闲着") {
+		t.Fatalf("missing non-style wording contract must block commit, got %v", err)
+	}
+	withoutMemes := "第一章 失业饭桌\n\n回来也别闲着。赵航替他挡了一句，林澈趁机离席。"
+	if err := requireChapterAttractionContent(s, 1, withoutMemes); err != nil {
+		t.Fatalf("optional trend literals must not be forced into the rewrite: %v", err)
 	}
 }
 
@@ -93,7 +120,10 @@ func TestNormalizeChapterAttractionPlanAnchorsExplicitPolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.json"), []byte(policy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plan := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+	plan := domain.ChapterPlan{Chapter: 1, Contract: domain.ChapterContract{RequiredBeats: []string{
+		"赵航必须说成“呱，”再替林澈解围",
+		"林澈完成第一笔真实消费",
+	}}, CausalSimulation: domain.ChapterCausalSimulation{
 		TrendLanguage: []domain.TrendLanguagePlan{{
 			Item: "不是，哥们", SourceContext: "评论区", CharacterCarrier: "林澈",
 			SceneFunction: "自嘲", UsageBudget: "1次", ForbiddenUsage: "章末不用",
@@ -112,14 +142,17 @@ func TestNormalizeChapterAttractionPlanAnchorsExplicitPolicy(t *testing.T) {
 		}},
 	}}
 	changes := normalizeChapterAttractionPlan(s, &plan)
-	if len(changes) != 2 {
-		t.Fatalf("expected trend and system normalizations, got %v", changes)
+	if len(changes) != 3 {
+		t.Fatalf("expected trend anchoring, style demotion and system normalization, got %v", changes)
 	}
 	if got := plan.CausalSimulation.TrendLanguage[0].Item; got != "呱" {
 		t.Fatalf("expected anchored trend item, got %q", got)
 	}
 	if problems := domain.SystemCompanionPlanProblems(plan.CausalSimulation); len(problems) > 0 {
 		t.Fatalf("normalized system plan still contradicts policy: %v", problems)
+	}
+	if len(plan.Contract.RequiredBeats) != 1 || !strings.Contains(plan.Contract.RequiredBeats[0], "第一笔真实消费") {
+		t.Fatalf("style literal should be demoted from required beats: %v", plan.Contract.RequiredBeats)
 	}
 	if !contextSourcesContain(plan.CausalSimulation.ContextSources, "style_policy:meta/web_reference_brief.json") {
 		t.Fatalf("normalization provenance missing: %v", plan.CausalSimulation.ContextSources)

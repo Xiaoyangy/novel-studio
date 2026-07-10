@@ -29,6 +29,7 @@ type Prompts struct {
 	ArchitectShort   string
 	ArchitectLong    string
 	Brainstorm       string
+	Planner          string
 	Writer           string
 	Drafter          string
 	Editor           string
@@ -69,10 +70,11 @@ func LoadWithOverrides(style string, overrideDirs ...string) (Bundle, []PromptPr
 		"coordinator.md":     mustRead(promptsFS, "prompts/coordinator.md"),
 		"architect-short.md": mustRead(promptsFS, "prompts/architect-short.md"),
 		"architect-long.md":  mustRead(promptsFS, "prompts/architect-long.md"),
+		"planner.md":         mustRead(promptsFS, "prompts/planner.md"),
 		"writer.md":          mustRead(promptsFS, "prompts/writer.md"),
 		"editor.md":          mustRead(promptsFS, "prompts/editor.md"),
 	}
-	names := []string{"coordinator.md", "architect-short.md", "architect-long.md", "writer.md", "editor.md"}
+	names := []string{"coordinator.md", "architect-short.md", "architect-long.md", "planner.md", "writer.md", "editor.md"}
 
 	provenance := make([]PromptProvenance, 0, len(names))
 	for _, name := range names {
@@ -189,6 +191,7 @@ func loadPrompts() Prompts {
 		ArchitectShort:   WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-short.md"), "architect"),
 		ArchitectLong:    WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
 		Brainstorm:       mustRead(promptsFS, "prompts/brainstorm.md"),
+		Planner:          WithSimulationGuidance(mustRead(promptsFS, "prompts/planner.md"), "writer"),
 		Writer:           WithSimulationGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
 		Drafter:          WithSimulationGuidance(mustRead(promptsFS, "prompts/drafter.md"), "writer"),
 		Editor:           WithSimulationGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
@@ -221,6 +224,8 @@ func (b *Bundle) OverridePrompt(file, raw string) error {
 		b.Prompts.ArchitectLong = wrapped
 	case "writer.md":
 		b.Prompts.Writer = wrapped
+	case "planner.md":
+		b.Prompts.Planner = wrapped
 	case "editor.md":
 		b.Prompts.Editor = wrapped
 	}
@@ -232,6 +237,7 @@ var promptRole = map[string]string{
 	"coordinator.md":     "coordinator",
 	"architect-short.md": "architect",
 	"architect-long.md":  "architect",
+	"planner.md":         "writer",
 	"writer.md":          "writer",
 	"editor.md":          "editor",
 }

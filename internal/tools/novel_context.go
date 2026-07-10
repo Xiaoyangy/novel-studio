@@ -8,10 +8,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/stylestat"
 	"github.com/voocel/agentcore/schema"
 )
 
@@ -55,6 +57,17 @@ type ContextTool struct {
 	ragBM25Mu         sync.Mutex
 	ragBM25State      *domain.RAGIndexState
 	ragBM25Index      *rag.BM25Index
+	ragRecallMu       sync.Mutex
+	ragRecallCache    map[string]ragRecallCacheEntry
+	styleStatsMu      sync.Mutex
+	styleStatsKey     string
+	styleStatsCache   *stylestat.Stats
+}
+
+type ragRecallCacheEntry struct {
+	items     []domain.RecallItem
+	trace     *domain.RetrievalTrace
+	expiresAt time.Time
 }
 
 // NewContextTool 创建上下文工具。
@@ -77,7 +90,7 @@ func (t *ContextTool) Name() string { return "novel_context" }
 func (t *ContextTool) Description() string {
 	return "获取小说当前状态和创作上下文。" +
 		"不传 chapter：返回 progress_status（phase/flow/next_chapter/pending_rewrites 等进度字段）+ 基础设定，用于判断下一步该做什么。" +
-		"传 chapter=N：额外返回该章的前情摘要、伏笔、角色状态、风格规则等写作上下文"
+		"传 chapter=N：额外返回该章的前情摘要、伏笔、角色状态、风格规则等写作上下文；profile 可按 planning/world_simulation/draft 缩小只读预算"
 }
 func (t *ContextTool) Label() string { return "加载上下文" }
 
@@ -88,12 +101,14 @@ func (t *ContextTool) ConcurrencySafe(_ json.RawMessage) bool { return true }
 func (t *ContextTool) Schema() map[string]any {
 	return schema.Object(
 		schema.Property("chapter", schema.Int("章节号。不传则返回进度状态和基础设定（Coordinator 用于判断下一步）；传入则额外返回该章的写作上下文（Writer 用）")),
+		schema.Property("profile", schema.Enum("章节上下文预算；planning=章节计划，world_simulation=全角色推演，draft=正文渲染，full=兼容全量", "full", "planning", "world_simulation", "draft")),
 	)
 }
 
 func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var a struct {
-		Chapter int `json:"chapter"`
+		Chapter int    `json:"chapter"`
+		Profile string `json:"profile"`
 	}
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
@@ -172,6 +187,7 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	}
 
 	t.buildUserRules(result)
+	applyChapterContextProfile(result, a.Profile)
 
 	if len(warnings) > 0 {
 		result["_warnings"] = warnings
@@ -180,7 +196,19 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	// 优先级预算：章节推演会携带较丰富的 causal plan，允许约 192KB；但必须
 	// 真正收敛到预算内，避免一次 novel_context 把长上下文窗口顶满并触发反复压缩。
 	if a.Chapter > 0 {
-		trimByBudget(result, 188*1024) // reserve space for loading summary and reading guide
+		budget := 188 * 1024
+		switch a.Profile {
+		case "planning":
+			budget = 128 * 1024
+		case "world_simulation":
+			budget = 160 * 1024
+		case "draft":
+			budget = 144 * 1024
+		}
+		trimByBudget(result, budget)
+		if a.Profile != "" && a.Profile != "full" {
+			result["_context_profile"] = a.Profile
+		}
 	} else {
 		trimByBudget(result, 60*1024) // Coordinator/Architect: 60KB
 	}
