@@ -5,13 +5,147 @@
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/Xiaoyangy/novel-studio/releases/latest)
 
+## 效果图
+
+<img src="docs/assets/dashboard-overview-20260710.png" alt="进度看板总览" width="100%">
+
+<img src="docs/assets/dashboard-characters-20260710.png" alt="人物页签" width="100%">
+
+<img src="docs/assets/dashboard-offscreen-20260710.png" alt="离屏世界页签" width="100%">
+
 全自动 AI 长篇小说创作引擎。给一句话想法，它自己调研题材、推演世界、写完整本书、逐章审核返工——`--new-novel` 到 `deliver` 全程无需人工干预。与"逐段生成文本"的工具不同，novel-studio 的内核是一套**动态世界推演系统**：先推演世界，再落笔正文——正文永远只写主角能感知到的世界。
 
 > An autonomous long-form novel engine in Go: from a one-line idea to a finished book — dynamic world simulation, multi-agent long-run loop, mechanical quality gates and local RAG.
 
 ## 2026-07-10 全量工程升级
 
-本轮把可恢复 pipeline、全角色章节推演、返工事实保护、RAG/Qdrant 就绪链、审核版本新鲜度、AIGC/DeepSeek 门禁和进度看板 3.0 合并为同一套执行契约。完整变更、迁移方式、持久化产物和验证命令见 [README-20260710.md](README-20260710.md)。
+本轮把可恢复 pipeline、全角色章节推演、返工事实保护、RAG/Qdrant 就绪链、审核版本新鲜度、AIGC/DeepSeek 门禁和进度看板 3.0 合并为同一套执行契约。原先拆出去的工程总览和看板说明已并入这里，顶层不再维护分散 README。
+
+### 本次交付结论
+
+- 正文写作统一通过 `novel-studio --pipeline` 执行；新书默认阶段为 `architect -> zero-init -> write -> review -> rewrite -> deliver`。
+- 每章规划前新增全角色世界推演。角色依据自己的目标、压力、资源、知识边界和误判做决定，再由主视角投影收束为正文可见内容。
+- 返工不再重新发明章节。系统绑定当前终稿 hash、审核 brief 和必须保留事实，推演、计划、正文与复审必须引用同一份返工来源。
+- pipeline 完成状态不再只看布尔值。阶段产物写入 SHA-256 指纹，恢复、重跑和最终交付都会重新核验证据。
+- RAG 增加独立就绪入口、真实 embedding/Qdrant 状态检查、重试与可恢复索引写入；项目事实、写法资产与审核校准继续分通道召回。
+- 审核链增加正文版本新鲜度检查、本地 AIGC 分片判定、外部 DeepSeek 裁判和 warning/blocking 分级。
+- 进度看板升级为全信息编辑工作台，区分主线下一章与实际返工章，并交叉校验正文、进度、评审、RAG、运行事件和资产沉淀。
+
+### 新的执行链路
+
+```mermaid
+flowchart LR
+    P["一句话想法 / brainstorm"] --> A["architect<br/>foundation + readiness"]
+    A --> Z["zero-init<br/>世界、人物、关系、资源基线"]
+    Z --> S["simulate_chapter_world<br/>全角色行动与蝴蝶效应"]
+    S --> PL["plan_structure + plan_details<br/>主视角投影"]
+    PL --> D["draft / check / commit"]
+    D --> R["review<br/>八维评审 + AI 门禁 + 外部裁判"]
+    R -->|rewrite| RW["绑定终稿 hash + brief + preserve facts"]
+    RW --> S
+    R -->|accept| DL["deliver<br/>台账 + RAG + 快照"]
+    DL --> S
+```
+
+### 核心升级
+
+- **Architect 正式入链**：默认 pipeline 包含 `architect` 和 `zero-init`，第一章不能绕过 foundation、世界基线和零章 readiness 直接写正文。检查入口为 `novel-studio --architect-check --dir data/runs/<书名>/output/novel` 与 `novel-studio --zero-init --check --dir data/runs/<书名>/output/novel`。
+- **章节世界推演**：`simulate_chapter_world` 写入 `meta/chapter_simulations/NNN.json`。每个实名角色都必须提交目标、压力、资源、知识边界、行动选项、决定理由、完成度、后续状态和蝴蝶效应；章节 plan 必须引用正式 `simulation_id`。
+- **返工事实源绑定**：返工队列存在时只能处理队首章节。`rewrite_source` 绑定当前终稿路径、SHA-256、rune 字数、审核 brief、`preserve_facts` 和推演事实覆盖证明，拒绝正文、brief、计划和世界推演来源漂移。
+- **阶段证据可复核**：`meta/pipeline.json` 记录阶段产物指纹。恢复时先验证旧指纹，再验证当前阶段条件；最终交付前对已完成阶段做总对账，避免旧 review、旧 deliver 或旧 evidence 误放行。
+- **RAG 就绪独立化**：`novel-studio --rag-ready --dir data/runs/<书名>/output/novel` 只修复和验证 RAG，不启动正文写作；`--build-rag --with-embeddings` 统一 embedding、Qdrant、重试和恢复证据。
+- **审核与 AIGC 新鲜度**：review、AI 门禁与外部裁判产物绑定 `body_sha256`。过期评审不能作为完成证据；warning 与 blocking 分级处理，避免低风险提示制造返工死循环。
+- **模型与运行时**：模型 fallback 保留各目标自己的 `reasoning_effort`，failover 透传能力声明；Host/Coordinator flow 加强返工队列优先级、停止条件、阶段恢复和运行日志证据。
+
+### 进度看板 3.0
+
+统一读取仓库根 `data/runs/` 下全部书目工程的**只读**实时看板。首页以编辑工作台形式汇总全部项目，展示正文实算进度、细纲覆盖、质量通过率、实际工作章、主线下一章、推演/计划/写作/审核链路、模型用量、RAG、资产覆盖与数据一致性。前端每 4 秒轮询自动刷新，并支持搜索、状态筛选和排序。
+
+进度不是单一文件的近似值：页面交叉核对 `progress.json`、正文目录、章节字数、评审正文 hash、返工队列、检查点和运行事件。返工时会分别显示“主线下一章”和“实际工作章”，避免把第 1 章返工误报成正在写第 2 章。
+
+详情页包括：
+
+- **总览** —— 主线/工作章、实时步骤、数据一致性、RAG 与核心资产、章节状态、模型用量
+- **设定** —— premise / book_world、世界地图、地点与现实交通耗时、势力进度钟、独立世界规则、物理公理、背景时间线
+- **人物** —— 分层画像、OCEAN、DNA、当前目标/压力/情绪/行动、最新位置与状态、知识账本、决策框架、能力边界、群众名册与关系契约
+- **成长轨迹** —— 人物生命线、三段弧向、当前事实、长弧规划和按人物筛选的决策流
+- **计划** —— 卷 / 弧骨架树、已细化章节细纲、下一章计划、伏笔台账、时间线
+- **离屏世界** —— 世界推演游标、角色位置与独立推进、交通/会面约束、章节世界增量、社会情绪、离屏日程、进度钟与事件流
+- **质量** —— 逐章评审、AI 门禁、本地 AIGC、外部判定、正文版本新鲜度、AI 腔/对白/主角动摇指标
+- **运行** —— Provider/模型/规划档位、实时事件队列、近期错误与原始日志
+
+启动：
+
+```bash
+novel-studio service start    # 拉起并打开 http://127.0.0.1:8765/
+novel-studio service status   # 健康检查
+novel-studio service open     # 打开已启动的看板
+python3 services/dashboard/server.py --host 127.0.0.1 --port 8765
+```
+
+数据源固定为 `data/runs/<书名>/output/novel/`，可用环境变量 `NOVEL_STUDIO_RUNS_DIR` 覆盖扫描目录。服务零依赖，只使用 Python 标准库，不写任何文件。
+
+| 端点 | 内容 |
+|---|---|
+| `/` | 看板页面（自包含单文件，无外部资源） |
+| `/api/health` | 健康检查 |
+| `/api/novels` | 全部书目进度摘要（progress / pipeline / usage / 评审统计 / 当前章步骤） |
+| `/api/novels/<书名>` | 总览详情：章节表、按角色用量、交付沉淀次数、日志尾 80 行 |
+| `/api/novels/<书名>/setting` | 设定：premise / book_world MD、势力进度钟、世界规则、时间线 |
+| `/api/novels/<书名>/cast` | 人物：分层画像 + 群众名册 + 关系契约 |
+| `/api/novels/<书名>/growth` | 成长轨迹：人物出场生命线 + 弧向 + 长弧规划 + 决策流 |
+| `/api/novels/<书名>/plan` | 计划：卷弧骨架 / 细纲 / 下一章计划 / 伏笔 / 时间线 |
+| `/api/novels/<书名>/offscreen` | 离屏世界：tick 游标 / 日程 / 进度钟 / 社会情绪 / 事件流 |
+| `/api/novels/<书名>/quality` | 逐章评审 / AI 门禁 / AIGC / 外部判定 / 版本新鲜度 / 写作指标 |
+
+### 主要持久化产物
+
+| 目录或文件 | 用途 |
+|---|---|
+| `meta/architect_readiness.*` | foundation 完整性与新鲜度 |
+| `meta/first_chapter_generation_readiness.*` | 第一章前零章硬门禁 |
+| `meta/chapter_simulations/NNN.*` | 全角色章节世界推演 |
+| `drafts/NN.plan*.json` | 分阶段章节计划 |
+| `reviews/NN.json` | 八维审核与 rewrite/accept 结论 |
+| `reviews/NN_ai_gate.json` | 本地 AIGC 与机械门禁 |
+| `reviews/NN_deepseek_ai_judge.json` | 外部异模型判定 |
+| `meta/character_stage/NNN.*` | 角色位置、行动和性格变化 |
+| `meta/side_character_journeys/NNN.*` | 非主角独立经历与传播路径 |
+| `meta/chapter_world_deltas/NNN.*` | 章节造成的世界增量 |
+| `meta/rag/index_state.*` | RAG 配置、chunk 和向量状态 |
+| `meta/pipeline.json` | 阶段状态、产物和 SHA-256 证据 |
+| `meta/delivery_snapshots/` | 可复核交付快照 |
+
+### 推荐使用方式
+
+```bash
+# 新书
+novel-studio --pipeline \
+  --new-novel \
+  --prompt-file prompt.md \
+  --stages architect,zero-init,write,review,rewrite,deliver
+
+# 已有项目恢复
+novel-studio --architect-check --dir output/novel
+novel-studio --rag-ready --dir output/novel
+novel-studio --zero-init --check --dir output/novel
+novel-studio --pipeline --prompt-file prompt.md
+```
+
+不要手工把 `pipeline.json` 的阶段改成完成。若证据过期，应让 pipeline 重新验证或重跑对应阶段。
+
+### 验证命令
+
+```bash
+gofmt -w <本次修改的 Go 文件>
+go test ./...
+go build -o novel-studio ./cmd/novel-studio
+python3 scripts/validate_skill_context.py
+python3 -m unittest services.dashboard.test_server -v
+python3 -m py_compile services/dashboard/server.py services/dashboard/test_server.py
+novel-studio service status
+curl -sS http://127.0.0.1:8765/api/novels
+```
 
 ## 2026-07-08 工程交付
 
@@ -136,7 +270,7 @@ flowchart TD
     WR --> ST
     ED --> ST
     ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark / calibration 三库<br/>设计库按内容 facet + 阶段(architect/plan/writing/review)打标<br/>（语料源：deconstruction-library/）"]
-    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>七页签实时视图：总览 / 设定 / 人物 / 成长轨迹<br/>计划 / 离屏世界 / 日志"]
+    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>八页签实时视图：总览 / 设定 / 人物 / 成长轨迹<br/>计划 / 离屏世界 / 质量 / 运行"]
 ```
 
 | 智能体 | 职责 | 关键工具 |
@@ -251,7 +385,7 @@ novel-studio --pipeline --prompt "..." --stages write,deliver
 **运行时与运维**
 
 - **书目一览** —— `list` / `novels` 扫 `data/runs/`，一屏看清每本书的阶段（brainstorm / foundation / zero-init / writing / complete）、章节进度与字数
-- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标 / 规划 / 完成 / 落盘）与当前章步骤链，七页签抽屉动态查看——总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ **成长轨迹（人物出场生命线 + 三段弧向 + 决策流 old→new+理由）** / 计划 / 离屏世界（SVG 环形进度钟）/ 日志
+- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标 / 规划 / 完成 / 落盘）与当前章步骤链，八页签抽屉动态查看——总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ **成长轨迹（人物出场生命线 + 三段弧向 + 决策流 old→new+理由）** / 计划 / 离屏世界（SVG 环形进度钟）/ 质量 / 运行
 - **Step 级断点恢复** —— 每个工具执行成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename 原子操作
 - **实时干预（Steer）** —— `--steer "<指令>"` 排队干预，下次启动注入 Coordinator，由其评估影响范围决定改设定 / 重写 / 后续调整
 - **成本与预算** —— token / 费用按角色、按模型累计，OpenRouter 价格自动拉取，`budget.book_usd` 越线告警 / 熔断；codex-cli 订阅接入复用订阅额度
@@ -427,11 +561,11 @@ output/novel/
 | [`docs/project-structure.md`](docs/project-structure.md) | 目录分层说明 |
 | [`docs/design-stage-workflow.md`](docs/design-stage-workflow.md) | 长短篇统一规划口径 |
 | [`docs/writing-review-workflow.md`](docs/writing-review-workflow.md) | 写作审核一体化执行方案 |
+| [`docs/pipeline-recovery-audit-20260710.md`](docs/pipeline-recovery-audit-20260710.md) | Pipeline 恢复审计与证据口径 |
 | [`docs/data-lifecycle-and-progression.md`](docs/data-lifecycle-and-progression.md) | 数据沉淀与推进机制 |
 | [`docs/capability-inventory.md`](docs/capability-inventory.md) | 工程能力清单 |
 | [`docs/observability.md`](docs/observability.md) | 运行观测排查手册 |
 | [`deconstruction-library/README.md`](deconstruction-library/README.md) | RAG 语料源与拆解成品约定 |
-| [`services/dashboard/README.md`](services/dashboard/README.md) | 进度看板服务与 API |
 
 ## 技术栈
 
