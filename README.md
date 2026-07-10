@@ -1,627 +1,522 @@
-# novel-studio：AI 长篇小说自动写作引擎 / Dynamic World Simulation Pipeline
+# novel-studio：AI 长篇小说自动写作与动态世界推演引擎
 
 [![Release](https://img.shields.io/github/v/release/Xiaoyangy/novel-studio)](https://github.com/Xiaoyangy/novel-studio/releases/latest)
 [![License](https://img.shields.io/github/license/Xiaoyangy/novel-studio)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/Xiaoyangy/novel-studio/releases/latest)
 
-**novel-studio** 是一个开源、自托管、local-first 的 AI 小说写作系统：面向长篇网文、百万字连载、短篇投稿和整书工程化生产，提供 **AI 小说生成器、动态世界推演、多智能体写作、RAG/Qdrant 长程记忆、章节审核返工、AIGC 门禁、GitHub Release 升级与 Docker 部署** 一体化能力。
+**novel-studio** 是一个开源、自托管、local-first 的 AI 小说生产系统，面向长篇网文、百万字连载、短篇投稿和整书工程化创作。它把 **动态世界推演、多智能体写作、章节规划与渲染、RAG/Qdrant 长程记忆、质量审核返工、AIGC 门禁、断点恢复和进度看板** 放在同一套可验证 pipeline 中。
 
-**Search keywords / 检索关键词**：AI 小说写作、AI 网文生成器、长篇小说自动生成、自动写小说、小说创作 Agent、multi-agent novel writing、LLM writing pipeline、dynamic world simulation、local RAG、Qdrant、self-hosted AI writing、GitHub Release、Release 升级、release升级、novel-studio update。
+它不是“把上一段继续写长”的文本生成器。系统先推进角色和世界，再把主角可见的部分投影成章节计划；正文、评审、返工和交付都必须引用同一组落盘事实与正文指纹。
+
+**Search keywords / 检索关键词**：AI 小说写作、AI 网文生成器、长篇小说自动生成、自动写小说、小说创作 Agent、multi-agent novel writing、LLM writing pipeline、dynamic world simulation、local RAG、Qdrant、self-hosted AI writing、AIGC review、GitHub Release、Release 升级、novel-studio update。
 
 ## 效果图
 
-<figure>
-<img src="docs/assets/dashboard-overview-20260710.png" alt="novel-studio AI 小说创作进度看板总览：pipeline、章节审核、RAG、模型用量和 Release 升级后的 dashboard" width="100%">
-<figcaption>进度看板总览：统一展示 AI 小说写作 pipeline、章节进度、评审门禁、RAG 状态、模型用量与运行队列。</figcaption>
-</figure>
+![novel-studio AI 小说创作进度看板总览：pipeline、章节审核、RAG、模型用量和运行队列](docs/assets/dashboard-overview-20260710.png)
 
-<figure>
-<img src="docs/assets/dashboard-characters-20260710.png" alt="novel-studio 人物页签：AI 长篇小说角色档案、OCEAN 画像、目标压力、知识账本和关系契约" width="100%">
-<figcaption>人物页签：角色档案、OCEAN 画像、目标压力、知识边界、关系契约和长期弧线一屏可查。</figcaption>
-</figure>
+*总览：主线下一章、实际工作章、pipeline 阶段、评审门禁、RAG、模型用量和运行队列统一展示。*
 
-<figure>
-<img src="docs/assets/dashboard-offscreen-20260710.png" alt="novel-studio 离屏世界页签：动态世界推演、势力进度钟、社会情绪和 offscreen simulation" width="100%">
-<figcaption>离屏世界页签：动态世界推演、势力进度钟、社会情绪、信息传播和配角独立行动持续推进。</figcaption>
-</figure>
+![novel-studio 人物页签：角色档案、OCEAN 画像、目标压力、知识边界和关系契约](docs/assets/dashboard-characters-20260710.png)
 
-全自动 AI 长篇小说创作引擎。给一句话想法，它自己调研题材、推演世界、写完整本书、逐章审核返工——`--new-novel` 到 `deliver` 全程无需人工干预。与"逐段生成文本"的工具不同，novel-studio 的内核是一套**动态世界推演系统**：先推演世界，再落笔正文——正文永远只写主角能感知到的世界。
+*人物：角色档案、OCEAN 画像、目标与压力、知识边界、关系契约和长期弧线一屏可查。*
 
-> An autonomous long-form novel engine in Go: from a one-line idea to a finished book — dynamic world simulation, multi-agent long-run loop, mechanical quality gates and local RAG.
+![novel-studio 离屏世界页签：动态世界推演、势力进度钟、社会情绪和角色独立行动](docs/assets/dashboard-offscreen-20260710.png)
 
-## Release 升级：GitHub Release 下载、安装、自更新
+*离屏世界：世界推演游标、角色独立行动、势力进度钟、社会情绪和信息传播持续推进。*
 
-novel-studio 通过 [GitHub Releases](https://github.com/Xiaoyangy/novel-studio/releases/latest) 发布跨平台二进制，GoReleaser 自动构建 macOS / Linux / Windows、x86_64 / arm64 安装包，并提供 SHA-256 checksum。搜索 `novel-studio release`、`AI 小说生成器 release 升级`、`novel-studio update` 可直接定位到本节。
+## 核心能力
 
-| 场景 | 命令 / 入口 |
+| 能力 | 当前实现 |
 |---|---|
-| 下载最新 Release | [github.com/Xiaoyangy/novel-studio/releases/latest](https://github.com/Xiaoyangy/novel-studio/releases/latest) |
-| macOS / Linux 一键安装 latest | `curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \| sh` |
-| 安装指定版本 | `curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \| sh -s -- v1.2.3` |
-| 自定义安装目录 | `NOVEL_STUDIO_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \| sh` |
-| 原地升级到 latest | `novel-studio update` |
-| 原地升级到指定版本 | `novel-studio update v1.2.3` |
-| Windows 安装 / 升级 | 到 [Releases](https://github.com/Xiaoyangy/novel-studio/releases) 下载 Windows ZIP 后替换 `novel-studio.exe` |
-| Docker 镜像 | `docker pull ghcr.io/xiaoyangy/novel-studio:latest` |
-| 源码构建 | `go build -o novel-studio ./cmd/novel-studio` |
-
-Release 升级建议：先运行 `novel-studio --version` 确认当前版本，再执行 `novel-studio update`；长任务运行中不要替换二进制，等本轮 checkpoint 落盘后再升级。
-
-## 2026-07-10 全量工程升级
-
-本轮把可恢复 pipeline、全角色章节推演、返工事实保护、RAG/Qdrant 就绪链、审核版本新鲜度、AIGC/DeepSeek 门禁和进度看板 3.0 合并为同一套执行契约。原先拆出去的工程总览和看板说明已并入这里，顶层不再维护分散 README。
-
-### 本次交付结论
-
-- 正文写作统一通过 `novel-studio --pipeline` 执行；新书默认阶段为 `architect -> zero-init -> write -> review -> rewrite -> deliver`。
-- 每章规划前新增全角色世界推演。角色依据自己的目标、压力、资源、知识边界和误判做决定，再由主视角投影收束为正文可见内容。
-- 返工不再重新发明章节。系统绑定当前终稿 hash、审核 brief 和必须保留事实，推演、计划、正文与复审必须引用同一份返工来源。
-- pipeline 完成状态不再只看布尔值。阶段产物写入 SHA-256 指纹，恢复、重跑和最终交付都会重新核验证据。
-- RAG 增加独立就绪入口、真实 embedding/Qdrant 状态检查、重试与可恢复索引写入；项目事实、写法资产与审核校准继续分通道召回。
-- 审核链增加正文版本新鲜度检查、本地 AIGC 分片判定、外部 DeepSeek 裁判和 warning/blocking 分级。
-- 进度看板升级为全信息编辑工作台，区分主线下一章与实际返工章，并交叉校验正文、进度、评审、RAG、运行事件和资产沉淀。
-
-### 新的执行链路
-
-```mermaid
-flowchart LR
-    P["一句话想法 / brainstorm"] --> A["architect<br/>foundation + readiness"]
-    A --> Z["zero-init<br/>世界、人物、关系、资源基线"]
-    Z --> S["simulate_chapter_world<br/>全角色行动与蝴蝶效应"]
-    S --> PL["plan_structure + plan_details<br/>主视角投影"]
-    PL --> D["draft / check / commit"]
-    D --> R["review<br/>八维评审 + AI 门禁 + 外部裁判"]
-    R -->|rewrite| RW["绑定终稿 hash + brief + preserve facts"]
-    RW --> S
-    R -->|accept| DL["deliver<br/>台账 + RAG + 快照"]
-    DL --> S
-```
-
-### 核心升级
-
-- **Architect 正式入链**：默认 pipeline 包含 `architect` 和 `zero-init`，第一章不能绕过 foundation、世界基线和零章 readiness 直接写正文。检查入口为 `novel-studio --architect-check --dir data/runs/<书名>/output/novel` 与 `novel-studio --zero-init --check --dir data/runs/<书名>/output/novel`。
-- **章节世界推演**：`simulate_chapter_world` 写入 `meta/chapter_simulations/NNN.json`。每个实名角色都必须提交目标、压力、资源、知识边界、行动选项、决定理由、完成度、后续状态和蝴蝶效应；章节 plan 必须引用正式 `simulation_id`。
-- **返工事实源绑定**：返工队列存在时只能处理队首章节。`rewrite_source` 绑定当前终稿路径、SHA-256、rune 字数、审核 brief、`preserve_facts` 和推演事实覆盖证明，拒绝正文、brief、计划和世界推演来源漂移。
-- **阶段证据可复核**：`meta/pipeline.json` 记录阶段产物指纹。恢复时先验证旧指纹，再验证当前阶段条件；最终交付前对已完成阶段做总对账，避免旧 review、旧 deliver 或旧 evidence 误放行。
-- **RAG 就绪独立化**：`novel-studio --rag-ready --dir data/runs/<书名>/output/novel` 只修复和验证 RAG，不启动正文写作；`--build-rag --with-embeddings` 统一 embedding、Qdrant、重试和恢复证据。
-- **审核与 AIGC 新鲜度**：review、AI 门禁与外部裁判产物绑定 `body_sha256`。过期评审不能作为完成证据；warning 与 blocking 分级处理，避免低风险提示制造返工死循环。
-- **模型与运行时**：模型 fallback 保留各目标自己的 `reasoning_effort`，failover 透传能力声明；Host/Coordinator flow 加强返工队列优先级、停止条件、阶段恢复和运行日志证据。
-
-### 进度看板 3.0
-
-统一读取仓库根 `data/runs/` 下全部书目工程的**只读**实时看板。首页以编辑工作台形式汇总全部项目，展示正文实算进度、细纲覆盖、质量通过率、实际工作章、主线下一章、推演/计划/写作/审核链路、模型用量、RAG、资产覆盖与数据一致性。前端每 4 秒轮询自动刷新，并支持搜索、状态筛选和排序。
-
-进度不是单一文件的近似值：页面交叉核对 `progress.json`、正文目录、章节字数、评审正文 hash、返工队列、检查点和运行事件。返工时会分别显示“主线下一章”和“实际工作章”，避免把第 1 章返工误报成正在写第 2 章。
-
-详情页包括：
-
-- **总览** —— 主线/工作章、实时步骤、数据一致性、RAG 与核心资产、章节状态、模型用量
-- **设定** —— premise / book_world、世界地图、地点与现实交通耗时、势力进度钟、独立世界规则、物理公理、背景时间线
-- **人物** —— 分层画像、OCEAN、DNA、当前目标/压力/情绪/行动、最新位置与状态、知识账本、决策框架、能力边界、群众名册与关系契约
-- **成长轨迹** —— 人物生命线、三段弧向、当前事实、长弧规划和按人物筛选的决策流
-- **计划** —— 卷 / 弧骨架树、已细化章节细纲、下一章计划、伏笔台账、时间线
-- **离屏世界** —— 世界推演游标、角色位置与独立推进、交通/会面约束、章节世界增量、社会情绪、离屏日程、进度钟与事件流
-- **质量** —— 逐章评审、AI 门禁、本地 AIGC、外部判定、正文版本新鲜度、AI 腔/对白/主角动摇指标
-- **运行** —— Provider/模型/规划档位、实时事件队列、近期错误与原始日志
-
-启动：
-
-```bash
-novel-studio service start    # 拉起并打开 http://127.0.0.1:8765/
-novel-studio service status   # 健康检查
-novel-studio service open     # 打开已启动的看板
-python3 services/dashboard/server.py --host 127.0.0.1 --port 8765
-```
-
-数据源固定为 `data/runs/<书名>/output/novel/`，可用环境变量 `NOVEL_STUDIO_RUNS_DIR` 覆盖扫描目录。服务零依赖，只使用 Python 标准库，不写任何文件。
-
-| 端点 | 内容 |
-|---|---|
-| `/` | 看板页面（自包含单文件，无外部资源） |
-| `/api/health` | 健康检查 |
-| `/api/novels` | 全部书目进度摘要（progress / pipeline / usage / 评审统计 / 当前章步骤） |
-| `/api/novels/<书名>` | 总览详情：章节表、按角色用量、交付沉淀次数、日志尾 80 行 |
-| `/api/novels/<书名>/setting` | 设定：premise / book_world MD、势力进度钟、世界规则、时间线 |
-| `/api/novels/<书名>/cast` | 人物：分层画像 + 群众名册 + 关系契约 |
-| `/api/novels/<书名>/growth` | 成长轨迹：人物出场生命线 + 弧向 + 长弧规划 + 决策流 |
-| `/api/novels/<书名>/plan` | 计划：卷弧骨架 / 细纲 / 下一章计划 / 伏笔 / 时间线 |
-| `/api/novels/<书名>/offscreen` | 离屏世界：tick 游标 / 日程 / 进度钟 / 社会情绪 / 事件流 |
-| `/api/novels/<书名>/quality` | 逐章评审 / AI 门禁 / AIGC / 外部判定 / 版本新鲜度 / 写作指标 |
-
-### 主要持久化产物
-
-| 目录或文件 | 用途 |
-|---|---|
-| `meta/architect_readiness.*` | foundation 完整性与新鲜度 |
-| `meta/first_chapter_generation_readiness.*` | 第一章前零章硬门禁 |
-| `meta/chapter_simulations/NNN.*` | 全角色章节世界推演 |
-| `drafts/NN.plan*.json` | 分阶段章节计划 |
-| `reviews/NN.json` | 八维审核与 rewrite/accept 结论 |
-| `reviews/NN_ai_gate.json` | 本地 AIGC 与机械门禁 |
-| `reviews/NN_deepseek_ai_judge.json` | 外部异模型判定 |
-| `meta/character_stage/NNN.*` | 角色位置、行动和性格变化 |
-| `meta/side_character_journeys/NNN.*` | 非主角独立经历与传播路径 |
-| `meta/chapter_world_deltas/NNN.*` | 章节造成的世界增量 |
-| `meta/rag/index_state.*` | RAG 配置、chunk 和向量状态 |
-| `meta/pipeline.json` | 阶段状态、产物和 SHA-256 证据 |
-| `meta/delivery_snapshots/` | 可复核交付快照 |
-
-### 推荐使用方式
-
-```bash
-# 新书
-novel-studio --pipeline \
-  --new-novel \
-  --prompt-file prompt.md \
-  --stages architect,zero-init,write,review,rewrite,deliver
-
-# 已有项目恢复
-novel-studio --architect-check --dir output/novel
-novel-studio --rag-ready --dir output/novel
-novel-studio --zero-init --check --dir output/novel
-novel-studio --pipeline --prompt-file prompt.md
-```
-
-不要手工把 `pipeline.json` 的阶段改成完成。若证据过期，应让 pipeline 重新验证或重跑对应阶段。
-
-### 验证命令
-
-```bash
-gofmt -w <本次修改的 Go 文件>
-go test ./...
-go build -o novel-studio ./cmd/novel-studio
-python3 scripts/validate_skill_context.py
-python3 -m unittest services.dashboard.test_server -v
-python3 -m py_compile services/dashboard/server.py services/dashboard/test_server.py
-novel-studio service status
-curl -sS http://127.0.0.1:8765/api/novels
-```
-
-## 2026-07-08 工程交付
-
-本轮把《她的第二算法》第一章审核链路、DeepSeek v4 Pro 复审、3000 字整章 AI 检测口径、拦截与展示一致性、新建小说 brainstorm 流水线和架构图统一整理到一份交付文档：见 [docs/engineering-delivery-20260708.md](docs/engineering-delivery-20260708.md)。文档开头包含第一章进度图、AI 门禁占比图、审核前后对比和最新系统流程图。
-
-## 动态推演：镜头外的世界不等主角
-
-绝大多数 AI 写作工具的世界是"舞台布景"：主角走到哪里，世界才在哪里生成，配角在下场后就停止存在。novel-studio 把世界当作**独立于镜头持续运转的模拟系统**，写作只是对这个系统的采样：
-
-```mermaid
-flowchart TD
-    Z["--zero-init 零章推演（写第 1 章前的硬门禁）<br/>分层名单 · 初始日程 · 故事日历 · 信息差图 · 物理公理<br/>社会情绪 · 仪式日历 · 势力进度钟 · tick 零点 · 第一章推演草案"]
-    Z -->|readiness 校验通过| W["write：Writer 逐章写作<br/>Planner 推演 → Drafter 渲染 → check → commit"]
-    W --> B{"弧 / 卷边界？"}
-    B -->|是| T["save_world_tick 世界推演<br/>Architect 以 Game Master 身份裁决镜头外世界"]
-    T --> T1["离屏事件：按物理公理推算<br/>visibility_chapter + 传播路径"]
-    T --> T2["supporting 层角色<br/>各自日程推进 1-2 步"]
-    T --> T3["background 层<br/>社会情绪与谣言（群体状态机）"]
-    T --> T4["势力进度钟拨动（Blades 式）<br/>走满的钟必须转化为镜头外事件"]
-    T1 --> F["世界事实层<br/>world_events · agendas · social_mood · clocks"]
-    T2 --> F
-    T3 --> F
-    T4 --> F
-    F -->|"事件越过信息地平线（含 5 章消化窗口）"| H["novel_context 注入 horizon_events<br/>Writer 只看得见主角能感知的事件"]
-    H --> W
-    B -->|否| W
-    W --> C["commit_chapter<br/>state_changes / knowledge 同步主角认知"]
-    C --> D["deliver 交付沉淀<br/>推进台账刷新 + RAG 事实入库 + 交付快照"]
-    D -->|召回反哺后续章节| W
-```
-
-### 1. 零章推演（`--zero-init`）：世界先于第一章存在
-
-写第 1 章之前，系统先把"第 0 章时刻"的世界完整推演出来：
-
-- **分层名单** —— 全部角色按 LOD 分为三层：主角圈（全推演）、supporting（弧级日程）、background（群体状态机），成本随层级递减；
-- **离屏日程（offscreen_agenda）** —— supporting 层每个在册角色带着自己的 goal→steps 日程入场，而不是等主角遇到才被发明出来；
-- **故事日历（story_calendar）** —— 纪元 / 起始日期 / 一章≈几天，让"事件何时发生、何时传开"可以被算出来；
-- **信息差图（info_graph）** —— 谁知道什么、读者视角领先或落后于主角多少；
-- **物理公理（physics_axioms）** —— 距离、传信速度、物价、物候等一致性公理，是后续信息传播推算的依据；
-- **势力进度钟、社会情绪、仪式日历、道德天花板、tick 零点、第一章推演草案与 RAG 白名单索引**。
-
-这不是可选的"世界观填表"，而是**硬门禁**：`meta/first_chapter_generation_readiness` 就绪工件由多个消费方共用同一判定——Writer 派发守卫拒绝在未就绪时写第 1 章，Coordinator StopGuard 在该场景放行收工交还宿主，pipeline 必须先独立完成 `architect`，再完成 `zero-init`，`write` 阶段只验收前置证据、绝不代办。缺失或旧版 `schema_version` 的 `ready:true` 一律不可信。foundation 文件（premise / characters / world_rules / world_codex / 大纲）在 readiness 之后被重写会使就绪状态**自动过期**，防止零章资产引用旧设定。需要推倒重来时，`--zero-init --reset-simulation-state` 切换新的推演线（generation_id），旧章节数据只保留为背景种子，不允许恢复旧进度。
-
-### 2. 弧 / 卷边界世界 tick（`save_world_tick`）：GM 裁决，不是续写
-
-写作推进到弧 / 卷边界时，Architect 切换为 **Game Master 身份**做一次世界推演，只裁决镜头外的世界，绝不复写已发布正文的事实：
-
-- 每条离屏事件必须按 `physics_axioms.info_propagation` 推算 **visibility_chapter**（该消息最早可能传到主角处的章号）与 **visibility_path**（谣言 / 信使 / 亲见 / 官报）；
-- supporting 层角色按各自日程推进 1-2 步并回写；background 层不逐角色推演，只更新社会情绪与谣言；
-- **势力进度钟**按 Blades in the Dark 模式拨动：每个势力一个"目标 + 进度 + 走满后果"的钟，走满的钟**必须**转化为镜头外事件——反派不会在主角练级时静止等待；
-- 与既有事实（timeline / relationship_state / resource_ledger / info_graph / 已发布章节）冲突时，一律以既有事实为准，调整推演而不是账本；
-- 有回收价值的事件标记 `foreshadow_candidate`，成为下一弧规划的伏笔素材——伏笔不是硬编的"梗"，而是世界运转的自然产物。
-
-`--diag` 持续监控**世界停摆**：镜头外世界长期未推进会作为诊断发现报出，提示 Architect 在下一次弧边界先把世界推到弧末再展开规划。
-
-### 3. 信息地平线：正文只写主角能感知的世界
-
-Writer 写每一章时，`novel_context` 只注入**已越过信息地平线**的离屏事件（越线后保留 5 章消化窗口）。主角只能通过事件的传播路径（谣言 / 信使 / 亲见 / 官报）得知消息，感知程度与渠道可信度匹配；未列入地平线表的离屏事件，主角一概不知、**不得写入正文**。事件在正文落地后，由 `commit_chapter` 的 state_changes / knowledge 同步主角认知——信息差从"作者脑内设定"变成了**可校验的数据结构**。
-
-### 4. 交付沉淀：推演事实反哺召回
-
-章节通过评审（accept）后，`deliver` 阶段做交付沉淀：刷新章级 / 项目级推进台账，把本章事实 chunk 沉入本地 RAG 索引（只准 accept 后入库，杜绝草稿污染召回），落交付快照与 `meta/delivery_log.md`。后续章节写作时，这些事实与零章推演资产、拆文库素材一起参与召回——推演、写作、沉淀构成闭环。
-
-## 完整生命周期：一句话想法 → 成书
-
-一条命令跑完从想法到成书的全过程，长短篇统一分流（设计总字数 ≤ 30000 走短篇压缩粒度，> 30000 走长篇分层滚动）。每个阶段落盘可恢复，中途崩溃 `cd` 回目录重跑即续：
-
-```mermaid
-flowchart LR
-    I["一句话想法<br/>--new-novel --prompt"] --> BS["brainstorm 头脑风暴<br/>web_research + craft_recall<br/>调研题材 → brainstorm.md"]
-    BS --> FD["foundation 前置设计<br/>Architect 据 brainstorm 生成<br/>premise / 角色 / 世界规则 / 大纲"]
-    FD --> ZI["zero-init 零章推演<br/>世界模拟资产 + 白名单 RAG<br/>（写第 1 章硬门禁）"]
-    ZI --> WR["write 逐章写作<br/>plan → draft → check → commit"]
-    WR --> RV["review 八维评审"]
-    RV --> RW["rewrite 按反馈返工"]
-    RW --> DL["deliver 交付沉淀<br/>台账 + RAG 入库 + 快照"]
-    DL -.->|下一章| WR
-```
-
-- **brainstorm（`--new-novel`）** —— 一个专注单代理用 `web_research` + `craft_recall` + `novel_context` 调研题材、推敲逻辑，`save_brainstorm` 落盘 `data/runs/<书名>/brainstorm.md`，后续 Architect 据此初始化世界；
-- **foundation → zero-init → write → review → rewrite → deliver** —— 详见「[动态推演](#动态推演镜头外的世界不等主角)」与「[流水线](#流水线)」；
-- **`list` / `novels`** —— 一览 `data/runs/` 下全部书目的阶段（brainstorm / foundation / zero-init / writing / complete）、章节进度与字数，随时知道每本书写到哪。
-
-## 优势与不同点
-
-| 维度 | 常见做法 | novel-studio |
-|---|---|---|
-| 起步 | 人写大纲喂给 AI | 一句话想法 → 自动调研题材、推敲逻辑、初始化世界 |
-| 世界模拟 | 世界随主角视角即时生成 | 零章推演 + 弧边界世界 tick，离屏角色有独立日程，势力有进度钟 |
-| 信息差 | 靠作者提示词自觉维持 | visibility_chapter / visibility_path / info_graph 数据化，未越地平线的事件不进上下文 |
-| 一致性 | 依赖模型记忆 | 物理公理 + 时间线 / 关系 / 资源账本 + `check_consistency` 机械校验 |
-| 质量控制 | 生成后人工把关 | 八维 Editor 评审 + 机械门禁（每章 `ai_gate` 不过不放行）+ 异族裁判（reviewer 与 writer 用不同模型家族，对冲 LLM judge 75-84% 的自我偏好） |
-| 去 AI 味 | 后置润色 | 写前规避清单注入 → 写中语义变体族计数（not-x-but-y 防换皮）→ 写后书级同质度统计 + 外部检测器校准，slop 词表以人类拆文语料为基线再生成 |
-| 长篇上下文 | 无限拼接直到溢出 | 按总章数自动切换全量 / 滑窗 / 分层摘要，四级压缩管线 + Lost-in-the-Middle 治理（关键信息头尾、参考资料居中），支撑 500+ 章 |
-| 断点恢复 | 从头再来或手工找进度 | 每个工具成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename，断电不损坏 |
-| 编排哲学 | 复杂工作流引擎 | LLM 驱动长循环：一次 Prompt 写完整本书，Host 不介入调度；工具只返事实，指令由 Reminder 每轮从事实层重算 |
-| 记忆 | 对话历史即记忆 | 本地 RAG（keyword + embedding + Qdrant）：accept 后事实入库 + 拆文手法库 / 对标素材库 / 审核校准库三通道，设计库按**内容级 facet + 可用阶段**打标（Architect / plan / writing / review 各取所需），检索有 trace 可审计 |
-| 成本 | 跑完才知道花了多少 | token / 费用按角色按模型累计，预算越线告警 / 熔断；支持 codex-cli 订阅接入省 API 费 |
-
-### 生态位：和主流工具比，它站在哪
-
-- **对比商业写作副驾**（[Sudowrite](https://www.sudowrite.com/)、[NovelAI](https://novelai.net/)、[novelcrafter](https://www.novelcrafter.com/) 等）——它们定位"人写 AI 辅"：作者逐章驱动，一致性靠手工维护的 Story Bible / Codex 注入提示词，按订阅或点数计费。novel-studio 定位**无人值守生产**：一句话想法跑完整本书，一致性由工具写入的事实层 + 机械校验保证而非人工登记；开源自托管、BYOK（自带任意厂商 key），成本以 token 实价按角色记账。
-- **对比国内网文 AI 工具**（笔灵、蛙蛙写作、彩云小梦等）——它们是面向手机 / 网页的续写与润色助手，强在"接住作者当下这一段"。novel-studio 强在**工程化整书生产**：平台节奏契约、机械审核门禁、评审-返工闭环、拆文库 RAG 化沉淀，产物是带完整证据链（评审报告 / ai_gate / 交付快照）的仓库级工程，而不是一段段可复制的文本。
-- **对比开源长篇生成器**（[Long-Novel-GPT](https://github.com/MaoXiaoYuZ/Long-Novel-GPT)、[AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator)、[NovelForge](https://github.com/RhythmicWave/NovelForge) 等）——同类项目多为"大纲 → 逐章生成"的编排器，记忆靠摘要与向量检索。novel-studio 的结构性差异在于：**动态世界推演**（离屏世界独立运转 + 信息地平线，同类项目普遍没有这一层）、**质量是门禁而非建议**（每章 `ai_gate` 不过不放行、异族裁判对冲自评偏好）、**工业级运行时**（step 级 checkpoint 断点恢复、OTel 对齐的调用 trace、预算熔断、eval harness）。
-
-一句话定位：别人做的是"写作副驾"或"生成脚本"，novel-studio 做的是**可无人值守的世界模拟 + 小说生产流水线**。
-
-## 系统架构
-
-核心设计：**LLM 驱动，Host 服务**。Coordinator 在一次 Run 中自主决策整本书的创作流程，Host 只做启动、恢复和事件观察，不做任何调度决策。
-
-```mermaid
-flowchart TD
-    P["Host（薄外壳）<br/>pipeline 编排：brainstorm → write → review → rewrite → deliver<br/>启动 / 断点恢复 / 事件观察"]
-    P -->|一次 Prompt| CO["Coordinator（LLM 长循环）<br/>唯一决策者：读 novel_context → 调子代理 → 读结果 → 继续"]
-    P -.->|"--new-novel"| BS["Brainstorm（前置单代理）<br/>web_research + craft_recall<br/>→ brainstorm.md"]
-    CO --> AR["Architect<br/>设定 / 大纲 / 弧卷展开<br/>零章推演 / 世界 tick（GM）"]
-    CO --> WR["Writer 两阶段<br/>① Planner 推演：落 causal_simulation<br/>② Drafter 渲染：干净上下文写正文 → commit"]
-    CO --> ED["Editor / Reviewer<br/>八维评审 · 弧卷摘要<br/>AI 味判别（异族裁判）"]
-    AR --> ST["Store（事实层，原子写入）<br/>progress · checkpoints · outline · chapters<br/>timeline · world_events · 各类账本台账"]
-    WR --> ST
-    ED --> ST
-    ST <--> RAG["本地 RAG<br/>keyword + embedding + Qdrant<br/>项目事实 + craft / benchmark / calibration 三库<br/>设计库按内容 facet + 阶段(architect/plan/writing/review)打标<br/>（语料源：deconstruction-library/）"]
-    ST -.->|"只读扫描 data/runs/"| VIEW["进度看板（service）<br/>八页签实时视图：总览 / 设定 / 人物 / 成长轨迹<br/>计划 / 离屏世界 / 质量 / 运行"]
-```
-
-| 智能体 | 职责 | 关键工具 |
-|--------|------|------|
-| **Brainstorm** | 新建小说前置：调研题材、推敲逻辑、落盘 brainstorm.md（一次性单代理） | `web_research` `craft_recall` `novel_context` `save_brainstorm` |
-| **Coordinator** | 调度全局，处理评审裁定和用户干预 | `subagent` `novel_context` |
-| **Architect** | 前提 / 大纲 / 角色档案 / 世界规则；零章推演与弧边界世界 tick | `novel_context` `save_foundation` `save_world_tick` `web_research` |
-| **Writer · Planner（推演）** | 读全量规划上下文，产出完整 `chapter_plan.causal_simulation`（40+ 字段：因果链 / 声口 / 对话蓝图 / 情感逻辑 / 视觉设计 / 证据回收 / 章末后果契约…）后停 | `novel_context` `plan_chapter` `plan_structure` `plan_details` `craft_recall` `web_research` |
-| **Writer · Drafter（渲染）** | 起干净会话，只读定稿计划 + 精要写法上下文，把推演渲染成正文并自审提交 | `novel_context` `read_chapter` `draft_chapter` `edit_chapter` `check_consistency` `commit_chapter` |
-| **Editor / Reviewer** | 章级八维评审、弧卷评审与摘要、AI 味盲测 | `novel_context` `read_chapter` `save_review` `save_arc_summary` `save_volume_summary` |
-
-**逐章两阶段拆分**：写一章分成独立上下文的两步——**Planner 推演** 吃全量规划上下文，把"要发生什么、谁怎么想、怎么说话、哪些物件承载信息"全部推演成 `causal_simulation` 落盘即停（长章可用 `plan_structure` + `plan_details` 分批补齐）；**Drafter 渲染** 起一个干净会话，只读已定稿计划把它写成正文，`check_consistency` 对照事实校验后 `commit_chapter` 提交并回刷时间线 / 伏笔 / 关系 / 角色状态。commit 会核对 consistency checkpoint 的草稿指纹，并拒绝正文标题偏离 `plan.title`。好处：drafter 不背规划对话的历史 token，长章不撑爆窗口、注意力集中在正文；planner 与 drafter 共用 writer 角色的模型配置。每章的机械门禁、AI voice、Editor JSON、异模型裸正文判定和统一报告必须全部绑定当前正文 SHA-256，且章审 `accept` 后才允许续写或交付。
-
-## 流水线
-
-```mermaid
-flowchart LR
-    BS["brainstorm<br/>（--new-novel）调研落盘 brainstorm.md"] --> CC["cocreate<br/>（可选）多轮澄清需求"]
-    CC --> W["write<br/>逐章创作<br/>含零章门禁"]
-    W --> R["review<br/>逐章八维评审"]
-    R --> RW["rewrite<br/>按评审反馈重写"]
-    RW --> D["deliver<br/>台账刷新 + RAG 入库<br/>+ 交付快照"]
-```
-
-`novel-studio --pipeline` 把各阶段串成一条**可恢复的流水线**：状态存 `meta/pipeline.json`，已完成阶段重跑时先复核产物证据再决定跳过或重跑；阶段内部各自还有更细的恢复（write 走 checkpoint、review/rewrite 按章号），两层恢复叠加。
-
-```bash
-# 从一句话想法新建一本书（brainstorm → 设计 → 零章 → 写作 → 评审 → 重写 → 交付）
-novel-studio --pipeline --new-novel --prompt "一个会算命的程序员穿越到修真界靠代码逻辑破局"
-
-# 已有创作指令，直接跑主链路（中断后重跑同一命令即续跑）
-novel-studio --pipeline --prompt "写一本东方玄幻长篇，主角从边陲小城起步"
-
-# 自定义阶段子集；--restart 从头重跑
-novel-studio --pipeline --prompt "..." --stages write,deliver
-```
-
-默认阶段 `write,review,rewrite,deliver`。启动时按配置确保本机 Qdrant 可用；进入 `write` 前构建或刷新当前项目 RAG。
-
-### 执行入口一览
-
-全部入口在 `cmd/novel-studio` 单一二进制内路由：
-
-| 入口 | 做什么 | 落点 / 产物 |
-|---|---|---|
-| `--pipeline --new-novel` | 从一句话想法新建：brainstorm → 设计 → 零章 → 写作 → 交付 | `data/runs/<书名>/` 全套工件 |
-| `--pipeline` | 主链路：write → review → rewrite → deliver，断点续跑 | `output/novel/` 全套工件 + `meta/pipeline.json` |
-| `--cocreate` | 多轮对话澄清需求，定稿创作指令 | `meta/cocreate-prompt.txt`（可接 `--pipeline`） |
-| `--zero-init` | 零章推演资产 + 白名单 RAG（写第 1 章前的硬门禁） | `meta/first_chapter_generation_readiness` 等 |
-| `list` / `novels` | 一览 `data/runs/` 下全部书目的阶段与进度 | 终端表格 |
-| `--steer "<指令>"` | 排队一条干预，下次启动注入 Coordinator | `run.json` |
-| `--check` | LLM 连通性自检（含 fallback 验证） | 终端报告，退出码可入 CI |
-| `--diag` | 只读诊断（流程 / 质量 / 规划 / 上下文 + 世界停摆、证据漂移） | `meta/diag-export.md`（脱敏可分享） |
-| `--refresh-progress` | 回填章节推进 / 人物变化 / 下一章计划台账 | `meta/*_progress.*` |
-| `--build-rag` | 构建本书 RAG 索引，`--probe-chapter N` 探测召回 | `meta/rag/index_state.json` + Qdrant |
-| `--simulate` / `--import-sim` | 仿写画像合成 / 导入 | `meta/simulation_profile.json` |
-| `--writing-assets` | 写法资产查看 / 启停 / 组合 / 试写 / seed-defaults | `meta/writing_assets.json` |
-| `eval inspect / run` | 评测 harness（产物断言 / stylestat 门禁 / prompt A/B） | 评测报告 |
-| `reader-metrics log` | 登记真实读者指标（读完率 / 评论 / 收藏），供校准 | 项目 meta 台账 |
-| `service start/status/stop` | 进度看板（只读扫描 `data/runs/`） | `http://127.0.0.1:8765/` |
-| `skills list/context/export` | 内置 skills 查看与一键部署到外部 agent | 目标项目的 skills 目录 |
-| `update` / `--version` | 原地自更新 / 版本信息 | — |
-
-`--headless --prompt`、`--review-existing`、`--rewrite-existing` 是兼容别名，内部委派到 pipeline 对应阶段。恢复语义全线一致：同目录重跑同一命令即续跑（pipeline 看阶段证据，write 看 step 级 checkpoint，review/rewrite 按章号）。
-
-## 适用平台
-
-**运行环境** —— macOS / Linux / Windows 全平台，x86_64 与 arm64 双架构 [Release 二进制](https://github.com/Xiaoyangy/novel-studio/releases/latest)；一键安装脚本与 `novel-studio update` 原地自更新；Docker 镜像适合服务器 / NAS 挂机长任务。检索与 embedding 全部本地化（Qdrant + llama.cpp GGUF），书稿、设定与索引不出本机——搭配 Ollama 本地模型可完全离线运行。
-
-**模型接入** —— OpenRouter / Anthropic / Gemini / OpenAI / DeepSeek / Qwen / GLM / Grok / MiniMax / Ollama / Bedrock 及任意 OpenAI / Anthropic 协议自定义代理；另支持 **codex-cli 订阅接入**（走本机 Codex CLI 复用 ChatGPT / Codex 订阅额度，不走 HTTP key）。五个角色（coordinator / architect / writer / editor / reviewer）可各配不同模型并带请求级 failover。
-
-**创作与发布形态** —— 长篇连载与短篇双模式，按设计总字数统一分流：≤ 30000 字走短篇压缩粒度（1 卷 1 弧、全文终审），> 30000 字走长篇分层滚动规划（上下文治理支撑 500+ 章）。针对国内网文平台内置六档**节奏契约预设**（起点玄幻 / 起点都市 / 晋江 / 豆瓣 / 出版 / 短篇：章末钩子要求、大钩子间隔、单章字数区间逐档不同），配套番茄 / 起点 / 知乎盐言的平台审稿 rubric 与豆瓣阅读原创长篇专项入口；产物为带完整审核证据链的章节 Markdown 工程，可直接用于各平台投稿与申诉举证。
-
-## 功能全景
-
-**创作引擎**
-
-- **一句话新建** —— `--new-novel` 从想法起步：brainstorm 代理 web 调研题材 + craft 库检索，落盘 brainstorm.md 供 Architect 初始化世界
-- **推演 / 渲染两阶段写作** —— 每章拆成 Planner 推演（落 `causal_simulation` 40+ 字段）与 Drafter 渲染（干净上下文只读定稿计划写正文）两个独立上下文，长章不撑爆窗口、注意力集中在正文
-- **联网研究（web_research）** —— brainstorm 与推演阶段可实时检索网页补题材现实支架、行业 / 地域 / 制度细节，结果登记 `meta/web_research_log.md` 可审计来源
-- **多智能体协作** —— Coordinator 在一次长循环中调度 Architect / Writer / Editor 子代理，自主决策创作流程
-- **LLM 驱动长循环** —— 一次 Prompt 写完整本书，Host 不介入调度；越简单越稳定，拒绝复杂编排
-- **卷弧双层滚动规划** —— 初始只规划前 2 卷弧骨架 + 第 1 弧详细章节，后续弧 / 卷在写作推进到时再由 Architect 展开，远期规划不空洞
-- **相关章节智能推荐** —— 每章写作时从伏笔、角色出场、状态变化、关系四个维度自动推荐相关历史章节，配合下一章预告，支撑 500+ 章连续性
-- **自适应上下文策略** —— 根据总章节数自动切换全量 / 滑窗 / 分层摘要，四级压缩管线支撑 500+ 章长篇
-- **Lost-in-the-Middle 治理** —— novel_context 注入按"关键信息在头尾、参考资料居中"有序序列化，附阅读指引，对抗长上下文 U 形注意力衰退
-- **工具参数容错解析** —— LLM 工具参数经代理 / 弱模型出现围栏包裹、尾逗号、字符串化 JSON 时自动修复（纯 Go、零依赖），修复失败返回结构化错误交 LLM 自主重试
-
-**世界与角色建模**
-
-- **世界模拟（离屏推演）** —— 零章推演 + 弧边界世界 tick + 信息地平线，详见开篇「[动态推演](#动态推演镜头外的世界不等主角)」
-- **世界建模纵深** —— 势力矛盾网（立场 / 内部张力 / 冲突类型与烈度）、显规则 / 潜规则 / 隐秘规则三层可见性、物理一致性公理、宇宙观公理、道德天花板、仪式日历、NPC 生态、文化脚注、信息差图等可选工件，写前注入预防设定崩塌
-- **角色动态档案** —— 角色不是静态人设标签，而是包含知识账本、决策框架、关系契约、情绪评价、长期弧线的变化决策系统
-- **定量心理画像** —— 角色可选配大五人格（OCEAN）、依恋类型、Schwartz 价值观、道德基础（MFT）、认知偏差、能力偏科矩阵和显性 / 隐性 / 突变三维 DNA 分组；画像注入写作上下文并附行为化指引，commit 时与 Writer 自报表现做确定性一致性提醒
-- **本书世界资产** —— `book_world` 保存地图、地点、路线和势力图谱，章节上下文按本章相关性裁剪注入
-
-**质量与审核**
-
-- **八维质量评审** —— 设定一致性、角色行为、节奏、叙事连贯、伏笔、钩子、审美品质、AI 腔检测；审美维度必须引用原文举证，AI 腔检测给出比喻密度、对话占比、格言命中、章末钩子等量化结论
-- **机械门禁 + 用户规则** —— 内置去 AI 味基线（套句 / 疲劳词黑名单 + 语义判据），用户用大白话写偏好即自动归一化为本书规则快照，commit 时机械自检
-- **叙事量化 lint** —— 每章可选自报场景动力四参数（冲突引擎 / 压力 / 信息释放 / 熵变）与 POV，配合六档体裁节奏契约做跨章确定性趋势检测：连续低压、信息过载、缺喘息、钩子超期、POV 越界轮换全部产出 warning 级事实透传 Editor
-- **异族裁判（reviewer 角色）** —— LLM judge 对同族输出有 75-84% 自我偏好：可配独立 reviewer 角色用于三采样 pairwise 终选与 AI 味盲测，推荐与 writer 用不同模型家族
-- **AI 味防线（写前-写中-写后闭环）** —— slop 词表语料化（内置 embed + 项目级覆盖 + `lexicon_version` 入门禁报告，以人类拆文语料为基线再生成）；写前规避清单注入、返工时注入命中明细；not-x-but-y 等句式按语义变体族合并计数防换皮；书级同质度统计；外部检测器（朱雀）人工抽检登记与本地分相关性校准
-- **审核闭环强化** —— 审核历史零丢失归档，复审自动注入上一轮 issues 做回归验证（防"修了 A 换挑 B"），第 3 轮循环刹车；锚定 rubric（四档描述符 + 证据先于评分）修复分数聚簇
-
-**记忆与检索**
-
-- **本地 RAG + Qdrant 召回** —— 构造与使用详见「[RAG](#rag构造与使用)」一节；foundation、章节、评审、返工持续增量沉淀
-- **交付沉淀** —— accept 后 `deliver` 阶段刷新推进台账、事实 chunk 入库、落交付快照与 delivery_log
-- **仿写画像** —— `--simulate` 分析 `simulate/` 目录参考语料合成画像，注入各 Agent 借鉴结构 / 节奏 / 钩子；`--import-sim` 按语料指纹增量合并
-
-**运行时与运维**
-
-- **书目一览** —— `list` / `novels` 扫 `data/runs/`，一屏看清每本书的阶段（brainstorm / foundation / zero-init / writing / complete）、章节进度与字数
-- **进度看板** —— `service start` 起浏览器实时看板（只读扫描 `data/runs/`）：书目卡片展示三层进度（目标 / 规划 / 完成 / 落盘）与当前章步骤链，八页签抽屉动态查看——总览 / 设定（世界背景 MD + 背景时间线）/ 人物（分层画像 + 状态情绪）/ **成长轨迹（人物出场生命线 + 三段弧向 + 决策流 old→new+理由）** / 计划 / 离屏世界（SVG 环形进度钟）/ 质量 / 运行
-- **Step 级断点恢复** —— 每个工具执行成功后写 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复；文件写入 temp + fsync + rename 原子操作
-- **实时干预（Steer）** —— `--steer "<指令>"` 排队干预，下次启动注入 Coordinator，由其评估影响范围决定改设定 / 重写 / 后续调整
-- **成本与预算** —— token / 费用按角色、按模型累计，OpenRouter 价格自动拉取，`budget.book_usd` 越线告警 / 熔断；codex-cli 订阅接入复用订阅额度
-- **无人值守告警** —— 完成 / 空转 / 预算事件推送 macOS / Linux 桌面通知，或经自定义命令推手机（Bark / ntfy）
-- **可观测 / 可诊断** —— 全量工具调用日志、LLM 调用级 trace（对齐 OTel gen_ai.* 语义约定）、`--diag` 规则化诊断与脱敏导出、`eval` 评测 harness 与 prompt A/B
-- **Prompt 运行时覆盖** —— `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链，指纹落 manifest，改 prompt 实验不必重编译
-- **写法资产** —— `--writing-assets` 查看 / 启停 / 组合 / 绑定 / 试写本书写法特征池，`seed-defaults` 注入人工感与去 AI 味基线
-- **功能 skill 化** —— 每个功能一份 SKILL.md，外部 agent（Claude Code / Codex / OpenCode / OpenClaw）读后直接拼命令行调用，`skills export` 一键部署
+| 一句话开书 | `--pipeline --new-novel` 先做 brainstorm，再生成 foundation、zero-init 资产并进入写作 |
+| 动态世界 | 每章先运行全角色世界模拟，记录目标、压力、知识边界、选择、耗时、完成度和蝴蝶效应 |
+| 主视角边界 | `protagonist_projection` 只暴露主角可见事实，hidden / delayed 信息不能提前进入正文 |
+| 规划与正文隔离 | World Simulator、Planner、Drafter 使用独立 prompt、工具集和上下文预算 |
+| 候选选优 | 正常草稿基于同一冻结计划并发生成 3 个候选，确定性初筛后可交给异模型 Reviewer 二选一 |
+| 质量闭环 | 机械规则、本地 AIGC、Editor、异模型裸正文判定和统一报告共同决定 accept / warning / blocking |
+| 可恢复提交 | 章节提交按 state applied → quality checked → checkpointed → RAG indexed 分阶段恢复，不会用半完成状态冒充交付 |
+| 长程记忆 | 项目事实 RAG、写法库、对标库和审核校准库分通道路由，支持 embedding、Qdrant、本地向量与 BM25 |
+| 运行保护 | 阶段证据指纹、正文 SHA-256、审核缓存、返工来源绑定、预算保险丝和无进展熔断 |
+| 可观测性 | 浏览器看板只读聚合全部书目，交叉核对正文、进度、评审、RAG、检查点与运行事件 |
 
 ## 快速开始
 
-```bash
-# 推荐：从 GitHub Release 一键安装 latest（macOS / Linux）
+### 1. 安装
+
+稳定版本从 [GitHub Releases](https://github.com/Xiaoyangy/novel-studio/releases/latest) 下载。Release 使用 GoReleaser 构建 macOS、Linux、Windows 的 x86_64 / arm64 包并附带 SHA-256 checksums。仓库 `main` 可能包含尚未进入最新 Release 的变更。
+
+~~~bash
+# macOS / Linux：安装最新 Release
 curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
 
-# 查看版本；后续升级直接用 novel-studio update
-novel-studio --version
-novel-studio update
+# 安装指定版本
+curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh -s -- v0.2.0
 
-# 可选：源码构建（Go 1.25+）
+# 安装到用户目录；环境变量必须传给管道右侧的 sh
+curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh |
+  NOVEL_STUDIO_INSTALL_DIR="$HOME/.local/bin" sh
+~~~
+
+Windows 用户从 [Releases](https://github.com/Xiaoyangy/novel-studio/releases) 下载对应 ZIP，解压后将 `novel-studio.exe` 放入 `PATH`。
+
+~~~bash
+# 从源码构建
 git clone https://github.com/Xiaoyangy/novel-studio.git
-cd novel-studio && go build ./cmd/novel-studio
+cd novel-studio
+go build -o novel-studio ./cmd/novel-studio
 
-# 首次运行：交互终端走一次 stdin 引导（选 Provider → 填 API Key → 模型名）
+# Docker：仓库提供 Dockerfile 和本地 compose 配置
+docker compose build novel-studio
+docker compose run --rm novel-studio --version
+~~~
+
+### 2. 首次配置与连通性检查
+
+首次直接运行会启动配置引导；后续无参数运行只打印用法。
+
+~~~bash
 novel-studio
-
-# 创作前自检 LLM 是否真的可用
 novel-studio --check
+~~~
 
-# 从一句话想法新建一本书（自动调研 → 设计 → 零章 → 写作 → 交付）
-novel-studio --pipeline --new-novel --prompt "一个会算命的程序员穿越修真界靠代码逻辑破局"
+配置默认读取 `~/.novel-studio/config.json`，项目目录中的 `./.novel-studio/config.json` 可覆盖全局配置。完整示例见 [config.example.jsonc](config.example.jsonc)。
 
-# 随时看所有书写到哪
-novel-studio list
-```
+### 3. 启动完整 pipeline
 
-### 常用命令
+~~~bash
+# 从一句话想法新建小说：brainstorm + 默认完整阶段
+novel-studio --pipeline --new-novel \
+  --prompt "一个返乡程序员得到只能投资家乡的系统，从夜市改造开始重建县城"
 
-```bash
-novel-studio --pipeline --new-novel --prompt "<想法>"   # 从头脑风暴新建一本书
-novel-studio list                            # 一览 data/runs/ 下全部书目进度
-novel-studio --zero-init [--dir d]           # 第一章前的零章推演资产 + 白名单 RAG（写前硬门禁）
-novel-studio --pipeline --stages review      # 逐章 Editor 评审（不改原文）
-novel-studio --pipeline --stages rewrite     # 按评审反馈逐章重写
-novel-studio --pipeline --stages deliver     # 交付沉淀：台账 + RAG 事实 + 快照
-novel-studio --cocreate                      # 多轮对话澄清需求，定稿创作指令
-novel-studio --steer "<指令>"                # 排队一条干预，下次启动生效
-novel-studio --diag                          # 诊断项目产物（含世界停摆、流水线证据漂移）
-novel-studio --build-rag [--dir d]           # 构建本书 RAG 索引并可探测召回
-novel-studio service start                   # 浏览器进度看板
-novel-studio update [version]                # 从 GitHub Release 原地升级
-novel-studio skills list / export --to <dir> # 列出 / 导出内置 skills
-```
+# 更适合长期维护：把完整创作契约写入文件
+novel-studio --pipeline --new-novel --prompt-file prompt.md
 
-> `--headless --prompt`、`--review-existing`、`--rewrite-existing` 是兼容别名，内部委派到 pipeline。
+# 先写到第 10 章暂停
+novel-studio --pipeline --prompt-file prompt.md --write-to 10
 
-### Docker
+# 中断后在同一项目目录重跑同一命令，按证据续跑
+novel-studio --pipeline --prompt-file prompt.md
+~~~
 
-```bash
-mkdir -p config workspace
-docker run --rm \
-  -v "$PWD/config:/root/.novel-studio" \
-  -v "$PWD/workspace:/workspace" \
-  ghcr.io/xiaoyangy/novel-studio:latest \
-  --pipeline --new-novel --prompt "写一本东方玄幻长篇"
-```
+默认阶段是：
 
-每本小说落在 `data/runs/<书名>/`，产物在 `output/novel/`；`cd` 回目录重跑 = 从最近 checkpoint 自动恢复。
+~~~text
+architect -> zero-init -> write -> review -> rewrite -> deliver
+~~~
+
+`--new-novel` 会在此之前增加 brainstorm；`cocreate` 是可选阶段，不在默认阶段列表中。
+
+### 4. 打开进度看板
+
+~~~bash
+novel-studio service open
+novel-studio service status
+~~~
+
+默认地址是 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)。pipeline 会尝试复用或后台启动看板；看板启动失败不会中断正文任务。
+
+## 当前系统架构
+
+~~~mermaid
+flowchart TD
+    CLI["CLI / Pipeline Stage Runner<br/>参数路由、阶段恢复、证据核验"] --> BS["Brainstorm<br/>新书输入哈希与 kickoff journal"]
+    CLI --> HOST["Host<br/>项目生命周期、预算、事件、恢复"]
+    HOST --> FLOW["Flow Router + Dispatcher<br/>从 Store 推导下一任务<br/>无进展熔断"]
+    FLOW --> CO["Coordinator<br/>接收事实化指令并调度子代理"]
+
+    CO --> AR["Architect<br/>foundation、卷弧、大纲、世界 tick"]
+    CO --> WS["World Simulator<br/>全角色单世界推进"]
+    CO --> PL["Planner<br/>POV structure + details"]
+    CO --> DR["Drafter / Finalizer<br/>冻结 render packet 写正文"]
+    CO --> ED["Editor<br/>叙事与契约评审"]
+
+    CLI --> REV["Review Engine<br/>同一正文冻结快照"]
+    REV --> EBR["Editor branch"]
+    REV --> RBR["Reviewer branch<br/>异模型裸正文判定"]
+
+    AR --> TOOLS["Tools<br/>唯一事实写入口"]
+    WS --> TOOLS
+    PL --> TOOLS
+    DR --> TOOLS
+    ED --> TOOLS
+    EBR --> TOOLS
+    RBR --> TOOLS
+
+    TOOLS --> STORE["Store + Domain<br/>原子文件、Progress、Checkpoint、台账"]
+    STORE --> RAG["RAG<br/>BM25 + embedding + local vectors + Qdrant"]
+    STORE --> QA["Quality<br/>rules + AIGC + review reports"]
+    STORE -.-> DASH["Dashboard<br/>只读扫描 data/runs"]
+~~~
+
+### 分层职责
+
+| 层 | 目录 | 职责 |
+|---|---|---|
+| CLI / 阶段编排 | `cmd/novel-studio/` | 命令路由、pipeline 阶段、review/rewrite/deliver、Release 更新和看板控制 |
+| Host / Flow | `internal/host/` | 启动与恢复、事件和预算、根据持久化事实生成下一条指令、重复任务熔断 |
+| Agent 装配 | `internal/agents/` | Coordinator、Architect、World Simulator、Planner、Drafter、Editor 的模型、prompt、工具和上下文配置 |
+| 工具契约 | `internal/tools/` | 规划、推演、写作、校验、提交、评审和 RAG 写入的前置条件与原子语义 |
+| 事实模型 | `internal/domain/` | 章节、世界模拟、角色、计划、审核、pipeline、提交阶段和账本 schema |
+| 持久化 | `internal/store/` | 原子文件、progress、checkpoints、signals、RAG、角色与世界状态 |
+| 召回 | `internal/rag/` | BM25、embedding、本地 GGUF、Qdrant、向量 fallback、facet/stage 路由和重试 |
+| 质量 | `internal/rules/`、`internal/aigc/`、`internal/reviewreport/` | 机械 lint、AI 痕迹信号、门禁合并和统一报告 |
+| 可导出能力 | `skills/` | 外部 Agent 使用的单一 skill 源目录；写作型入口统一转入 pipeline |
+| 看板 | `services/dashboard/` | Python 标准库只读服务，展示全部小说工程的实时状态 |
+
+## Pipeline 执行模型
+
+### 阶段级生命周期
+
+| 阶段 | 主要工作 | 完成证据 |
+|---|---|---|
+| `cocreate` | 可选的多轮需求澄清 | 定稿创作指令 |
+| `architect` | premise、角色、世界规则、分层大纲和写前 foundation | `meta/architect_readiness.*` 与 foundation 指纹 |
+| `zero-init` | 第 0 章世界、初始日程、关系/资源/伏笔台账、第一章准备度 | `meta/first_chapter_generation_readiness.*` |
+| `write` | 每章世界推演、POV 计划、候选正文、校验和提交 | 正文、commit checkpoint、Progress 与提交 saga |
+| `review` | 本地机械/AIGC + Editor + 异模型 Reviewer | 全部报告绑定当前 `body_sha256` |
+| `rewrite` | 只处理当前审核认定的 blocking 正文 | 来源 hash、rewrite brief、备份、新正文和复审 |
+| `deliver` | 对账最终正文、审核、台账、RAG 与快照 | 非空交付日志、RAG ready、delivery snapshot |
+
+`meta/pipeline.json` 是阶段索引，不是可以手工勾选的完成事实。每个阶段写入 artifact SHA-256；恢复和最终交付都会重新核验。创作指令、模型选择或 prompt 协议指纹变化时，旧完成图会按依赖关系失效。
+
+### 单章关键路径
+
+~~~mermaid
+flowchart LR
+    S["World Simulator<br/>全部实名角色分批决策"] --> P["Planner<br/>structure + 3 组 details"]
+    P --> RP["Frozen Render Packet<br/>只保留正文所需事实"]
+    RP --> C["3 个草稿候选并发生成<br/>rewrite 只生成 1 个"]
+    C --> PICK["确定性粗糙度初筛<br/>可选 Reviewer pairwise 终选"]
+    PICK --> CHECK["draft -> edit -> consistency"]
+    CHECK --> COMMIT["Commit Saga<br/>state_applied -> quality_checked<br/>-> checkpointed -> rag_indexed"]
+    COMMIT --> REVIEW["Editor || Reviewer<br/>冻结正文并行审核 + 分支缓存"]
+    REVIEW --> G{"当前正文是否 blocking"}
+    G -->|是| RW["绑定 body hash 的 rewrite"]
+    RW --> REVIEW
+    G -->|否| NEXT["accept / deliver / 下一章"]
+~~~
+
+世界模拟、计划 partial、Progress、Checkpoint、正文换入、review ledger 和 RAG 写入保持单写者顺序。并发只用于同一冻结输入上的草稿候选或独立审核分支，不能用通用并发工具同时修改同一本书的事实线。
+
+## 最新架构基线
+
+当前主干已把长时间空转、上下文放大、同文复评和半提交恢复纳入代码级控制：
+
+| 变化 | 当前行为 |
+|---|---|
+| 独立 Planner | 新增专用 Planner prompt；全量规划规则不再塞给 Drafter |
+| 分阶段上下文 | Planner、World Simulator、Drafter、Draft Finalizer 使用不同上下文预算与裁剪策略 |
+| 世界模拟收敛 | 实名角色仍全覆盖，每批最多 8 个角色；partial 有变化才视为真实进展 |
+| 计划收敛 | `plan_structure` 后按因果基础、声口/娱乐性、读者合同 3 组 details 收口 |
+| 正文 render packet | Drafter 读取专门的精简渲染包，不再直接吞下整份大型计划对象 |
+| 冻结输入并发 | 正常草稿 3 候选并发；Editor 与 Reviewer 对同一正文并发，结果串行落盘 |
+| 审核缓存 | cache key 绑定正文、模型、prompt、上下文和审核协议；失败重跑只补缺失分支 |
+| 提交 saga | `state_applied`、`quality_checked`、`checkpointed`、`rag_indexed` 分阶段记录，恢复时从缺失阶段继续 |
+| 返工恢复 | 正文换入后即使进程中断，也能从 rewrite source 和当前 hash 继续复审 |
+| 无进展熔断 | 同一任务在 checkpoint / simulation partial / plan partial 都不变时，第 3 次派发中止 |
+| 有界运行 | Planner、Simulator、Drafter、Finalizer 使用独立 turn 上限；rewrite 尝试共享章节总 deadline |
+| 写作规则前移 | 字数、开篇吸引力、即时兑现、流程压缩、系统同伴声口和长篇首章承诺在 plan/draft/commit 多处校验 |
+
+详细性能与恢复依据见 [Pipeline 性能与恢复审计](docs/pipeline-performance-audit-20260711.md) 和 [Pipeline Recovery Audit](docs/pipeline-recovery-audit-20260710.md)。
+
+## 动态世界与主视角边界
+
+novel-studio 把“世界发生了什么”和“正文能写什么”拆成两层：
+
+1. `simulate_chapter_world` 推进所有实名角色。每个角色必须基于自己的目标、压力、资源、知识边界和误判给出候选、决定、理由、行动耗时、完成度与蝴蝶效应。
+2. 模拟生成唯一 `simulation_id` 和 `protagonist_projection`。POV plan 必须引用它，不能另造一套世界事实。
+3. `hidden` / `delayed` 决策只约束后续世界反馈；除非沿合法传播路径越过信息地平线，否则旁白和主角心理都不能提前知道。
+4. `commit_chapter` 把实际发生的角色状态、知识、关系、资源、时间线和世界增量回写事实层，下一章模拟从这些结果继续。
+5. 弧 / 卷边界由 `save_world_tick` 推进离屏日程、社会情绪、仪式和势力进度钟；世界不会在主角离场后暂停。
+
+这条链保证跨章节因果只有一条来源：
+
+~~~text
+世界事实 -> 全角色决策 -> 主角投影 -> POV 计划 -> 正文 -> 提交回写 -> 新世界事实
+~~~
+
+## 写作与质量合同
+
+| 合同 | 约束 |
+|---|---|
+| 章节字数 | `user_rules.chapter_words` 是硬门禁；超出后保留草稿，只允许局部 `edit_chapter`，不能反复整章重抽 |
+| 开篇吸引力 | 轻松/爽文项目在 plan 中明确前 200 字冲突、不同机制笑点、即时兑现和流程压缩 |
+| 长篇第一章 | `longform_opening` 必须说明开篇钩子、连载发动机、长线承诺、解释预算和第一章页面证据 |
+| 热梗与流行语 | 必须来自项目简报并绑定角色、场景和使用预算；它是可选风格素材，不会为了过门禁强塞进每章 |
+| 系统/同伴声口 | 若用户定义其会交流、吐槽和支持主角，anti-AI 规则不能把它改写成冷硬菜单机器 |
+| 计划范围 | `required_beats` 必须发生，`forbidden_moves` 绝不能发生；计划外重大情节必须退回 Planner |
+| 正文渲染 | Render packet 只给 Drafter 页面所需事实；流程说明、离屏心理和 latent context 不得整段搬进正文 |
+| 对白与分段 | 禁止“人物：台词”剧本格式、同腔解释对白、连续孤句和无功能文字墙；换说话人或行动焦点正常换段 |
+| AIGC / AI 腔 | 机械规则、片段信号、本地 detector、Editor 和异模型判定分层合并；warning 与 blocking 分开处理 |
+| 审核新鲜度 | review、AI gate 和外部判定必须绑定当前正文 SHA-256；旧报告不能放行新正文 |
+| 返工事实保护 | rewrite source 绑定旧终稿、审核 brief、必须保留事实和当前 plan/simulation 来源，防止越改越偏 |
+
+评审维度不仅看语法，还覆盖 plot、character、continuity、pacing、worldbuilding、style/aesthetic、contract 和 ai_voice_detection。外部 Reviewer 的建议会经过本书设定、系统人格和热梗计划过滤，不能用通用审稿偏好推翻用户硬规则。
+
+## RAG 与长程记忆
+
+### 召回分层
+
+| 通道 | 内容 | 使用边界 |
+|---|---|---|
+| 项目事实 | 当前书的 prompt、brainstorm、foundation、台账、摘要和已提交事实 | Architect、Planner、Writer、Review 的连续性依据 |
+| Craft | 写法技巧与拆文方法 | 只迁移手法，不成为世界事实 |
+| Benchmark | 对标素材的结构、节奏和场景方法 | 禁止复制原文、角色和专有设定 |
+| Calibration | 审核样本、规则命中和 detector 校准 | 只服务 review / rewrite 判断 |
+
+项目事实索引默认只扫描当前项目的安全来源，并跳过章节原文库、拆文库、对标库、历史输出和其他书目目录。外部资料必须通过明确的 `--add-source` 或配置通道加入；设计素材和项目事实不会混成一条无来源记忆。
+
+### 后端与恢复
+
+- 词法召回使用 BM25。
+- 语义召回可使用 OpenAI-compatible embedding、本地 GGUF embedding 或其他配置模型。
+- Qdrant 是语义主后端；`meta/rag/vector_store.json` 保留本地向量 fallback。
+- Qdrant 错误或空结果时依次降级到本地向量和 BM25，不让一次后端故障清空上下文。
+- RAG schema hash 覆盖 context、summary、keywords、text 和 metadata；只有语义内容变化才重嵌入。
+- 增量写入失败会保存 `pending_upserts.json`，下次启动或 `--rag-ready` 自动回放。
+- Qdrant 丢库时可从本地向量恢复，不必重新计算全部 embedding。
+
+~~~bash
+# 构建当前项目事实索引
+novel-studio --build-rag --dir output/novel
+
+# 同时生成 embedding、写本地向量并同步 Qdrant
+novel-studio --build-rag --dir output/novel --with-embeddings
+
+# 在默认项目来源上显式追加写法资料
+novel-studio --build-rag --dir output/novel \
+  --add-source deconstruction-library/writing-techniques
+
+# 只迁移 schema、回放 pending、复用向量并恢复 Qdrant；不启动写作
+novel-studio --rag-ready --dir output/novel
+
+# 离线验证 RAG/embedding/vector store 工件
+novel-studio eval inspect --cases evals/cases/harness
+~~~
+
+## 恢复、返工与证据
+
+- `meta/checkpoints.jsonl` 是 step 级只追加日志；相同 scope、step 和 digest 重试时保持幂等。
+- `meta/pipeline.json` 保存阶段状态、输入指纹、artifact digest 和 evidence，但完成状态会在恢复时重新验证。
+- `PendingCommit` 记录章节提交 saga；正文状态、质量、checkpoint 或 RAG 任一步缺失都能继续补齐。
+- `PendingRewrites` 是返工队列；存在返工时，Flow Router 优先处理队首章节，不继续写新章。
+- review cache 与正式 review artifact 分离。缓存可以避免同文重复调用，正式报告仍按当前正文和项目规则落盘。
+- `--restart` 清空 pipeline 阶段索引，不会把缺失的正文事实凭空补出来；通常先运行 `--diag` 判断是否真要重启。
+- 不要手工把阶段改成 `completed`，也不要删除 `.pre-rewrite.md`、rewrite source 或 checkpoint 来“解锁”流程。
+
+常用恢复命令：
+
+~~~bash
+novel-studio --diag
+novel-studio --architect-check --dir output/novel
+novel-studio --zero-init --check --dir output/novel
+novel-studio --rag-ready --dir output/novel
+novel-studio --pipeline --prompt-file prompt.md
+~~~
+
+## 进度看板
+
+`services/dashboard/` 使用 Python 标准库启动只读服务，默认扫描仓库 `data/runs/` 下的全部书目；`NOVEL_STUDIO_RUNS_DIR` 可覆盖扫描根目录。页面交叉核对 `progress.json`、正文目录、章节字数、评审正文 hash、返工队列、检查点、RAG 和运行事件，而不是只相信一个进度数字。
+
+详情页包括：
+
+- **总览**：主线下一章、实际工作章、实时步骤、资产覆盖、RAG、成本与数据一致性
+- **设定**：premise、世界地图、地点与路线、势力进度钟、世界规则和时间线
+- **人物**：分层画像、目标/压力/情绪、知识账本、能力边界、群众名册和关系契约
+- **成长轨迹**：人物生命线、阶段事实、长弧规划和决策流
+- **计划**：卷弧骨架、章节细纲、下一章计划、伏笔和时间线
+- **离屏世界**：tick、独立日程、社会情绪、信息传播、进度钟和事件流
+- **质量**：逐章评审、AI gate、本地 AIGC、异模型判定、版本新鲜度和写作指标
+- **运行**：模型选择、reasoning effort、事件队列、近期错误和日志
+
+~~~bash
+novel-studio service start
+novel-studio service status
+novel-studio service open
+novel-studio service url
+
+# 直接启动服务
+python3 services/dashboard/server.py --host 127.0.0.1 --port 8765
+~~~
+
+主要 API：
+
+| 端点 | 内容 |
+|---|---|
+| `/api/health` | 轻量健康检查 |
+| `/api/novels` | 全部书目摘要 |
+| `/api/novels/<书名>` | 项目总览 |
+| `/api/novels/<书名>/setting` | 设定与世界规则 |
+| `/api/novels/<书名>/cast` | 人物与关系 |
+| `/api/novels/<书名>/growth` | 成长轨迹 |
+| `/api/novels/<书名>/plan` | 卷弧与章节计划 |
+| `/api/novels/<书名>/offscreen` | 离屏世界 |
+| `/api/novels/<书名>/quality` | 审核与质量 |
+
+## 命令速查
+
+| 命令 | 用途 |
+|---|---|
+| `novel-studio --pipeline --prompt-file prompt.md` | 运行或恢复默认完整 pipeline |
+| `novel-studio --pipeline --new-novel --prompt "..."` | 从一句话 idea 新建书目 |
+| `novel-studio --pipeline --dir data/runs/<书名>` | 从已存在书目的持久化证据恢复 |
+| `novel-studio --pipeline --stages review --from 1 --to 10` | 只评审指定章节 |
+| `novel-studio --pipeline --stages rewrite --max-rewrite-rounds 3` | 按 blocking 反馈返工并复审 |
+| `novel-studio --cocreate` | 多轮澄清创作需求 |
+| `novel-studio --check` | 验证 provider、model 与 fallback 连通性 |
+| `novel-studio --architect-check --dir output/novel` | 核验 foundation 并生成 readiness |
+| `novel-studio --zero-init --dir output/novel` | 生成第一章前置推演资产 |
+| `novel-studio --rag-ready --dir output/novel` | 单独恢复/验证 RAG |
+| `novel-studio --build-rag --dir output/novel` | 重建项目 RAG |
+| `novel-studio --diag` | 只读诊断并导出脱敏报告 |
+| `novel-studio --refresh-progress --dir output/novel` | 回填推进、人物变化和下一章台账 |
+| `novel-studio --writing-assets list` | 查看写法资产 |
+| `novel-studio --simulate` / `--import-sim` | 合成或导入仿写画像 |
+| `novel-studio --steer "指令"` | 给下一次恢复排队干预 |
+| `novel-studio list` | 查看 `data/runs/` 下全部书目 |
+| `novel-studio reader-metrics log ...` | 登记真实读者反馈用于校准 |
+| `novel-studio eval inspect ...` | 离线检查项目工件与 RAG |
+| `novel-studio skills list` | 列出内置 skills |
+| `novel-studio skills export --to <dir>` | 导出 skills |
+| `novel-studio update [version]` | 更新到 latest 或指定 Release |
+| `novel-studio --version` | 查看版本、commit 和构建时间 |
+
+完整参数以本机二进制为准：
+
+~~~bash
+novel-studio --help
+novel-studio --pipeline --help
+novel-studio --build-rag --help
+novel-studio --zero-init --help
+novel-studio service --help
+novel-studio skills --help
+~~~
 
 ## 配置
 
-首次运行自动引导生成 `~/.novel-studio/config.json`，后续直接编辑。完整示例见 [`config.example.jsonc`](config.example.jsonc)。
+novel-studio 支持 OpenAI、Anthropic、Gemini、OpenRouter、DeepSeek、Qwen、GLM、Grok、MiniMax、Ollama、Bedrock 和兼容代理，也支持通过本机 Codex CLI 接入订阅能力。模型调用是否离线取决于你的 provider；只有使用本地生成模型和本地 embedding 时，正文处理才可完全离线。
 
-> 从旧版（配置目录为 `~/.ainovel/`）迁移：`mv ~/.ainovel ~/.novel-studio`（项目内如有 `./.ainovel/` 同理改名），内容格式不变。
+配置重点：
 
-```jsonc
-{
-  "provider": "minimax",
-  "model": "MiniMax-M3[1M]",
-  "providers": {
-    "minimax": { "api_key": "sk-xxx", "models": ["MiniMax-M3[1M]", "MiniMax-M3"] },
-    // 订阅接入：走本机 Codex CLI 复用 ChatGPT/Codex 订阅额度，base_url 为 codex 二进制路径（空=自动探测）
-    "codex": { "type": "codex-cli", "base_url": "", "models": ["gpt-5.6-sol"] }
-  },
-  "roles": {                                  // 角色级模型覆盖 + 请求级 failover
-    "writer":   { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high" },
-    "reviewer": { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "max" }
-  },
-  "rag": {
-    "embedding": { "enabled": true, "local_gguf": "models/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf",
-                   "local_port": 18434, "model": "qwen3-embedding-0.6b" },
-    "qdrant":    { "enabled": true, "url": "http://127.0.0.1:6333" },
-    "craft_library":     "deconstruction-library/writing-techniques",
-    "benchmark_library": "deconstruction-library/novel_all"
-  },
-  "budget": { "book_usd": 20, "warn_ratio": 0.8 },   // 挂机保险丝
-  "notify": { "enabled": true }                       // 无人值守告警
-}
-```
+- `providers`：凭证、协议、base URL、模型列表和 provider 额外请求参数
+- `roles`：`coordinator`、`architect`、`writer`、`editor`、`reviewer` 的主模型、fallback 和 reasoning effort
+- `context_window` / `context_windows`：真实模型窗口和压缩阈值来源
+- `rag.embedding`：远程 embedding 或本地 GGUF embedding
+- `rag.qdrant`：URL、collection、本地进程或 Docker 自动启动
+- `rag.craft_library` / `benchmark_library` / `calibration_library`：设计与审核素材的隔离通道
+- `budget`：单书 USD 告警和硬停止
+- `notify`：桌面或自定义通知
+- `aigc.real_lm`：外部 detector 的观测/融合配置
 
-配置查找顺序（后者覆盖前者）：`~/.novel-studio/config.json` → `./.novel-studio/config.json`（项目级，含密钥已默认 gitignore）→ `--config <path>`。`providers` / `roles` 按 key 合并；`provider` 的值是 `providers` 里的 key 名（指针），角色可配 `fallbacks` 做请求级故障切换。支持 OpenRouter / Anthropic / Gemini / OpenAI / DeepSeek / Qwen / GLM / Grok / MiniMax / Ollama / Bedrock、codex-cli 订阅接入及任意自定义代理（`type` + `extra` 透传 UA / headers）。
+不要提交真实 API key。项目级 `.novel-studio/config.json` 会覆盖全局值；若切换默认 provider，必须同时提供同名的 `providers.<name>` 配置。
 
-## RAG：构造与使用
+## 输出结构
 
-要 RAG 化的语料统一放在 **`deconstruction-library/`**（写作方法与拆解成品语料库：craft / benchmark 双库 + 每本书一目录的拆解成品文档，长文拆解在工程外完成后放入）。RAG 分两条互相隔离的通道：**本书事实层**（写作中途召回）与**设计时刻双库**（只服务设计，不进章节召回）。
+新书通常落在 `data/runs/<书名>/`；直接在普通项目目录运行时，默认输出根是 `output/novel/`。
 
-```mermaid
-flowchart TD
-    subgraph SRC["语料来源"]
-        S1["本书项目事实<br/>prompt / brainstorm / 设定 / 账本 / 零章资产"]
-        S2["craft_library 写作手法库<br/>deconstruction-library/writing-techniques"]
-        S3["benchmark_library 对标素材库<br/>deconstruction-library/novel_all（11 类归并）"]
-        S4["章节事实（accept 后）<br/>summaries 提炼，不沉正文"]
-    end
-    S1 -->|"--build-rag / --zero-init 白名单<br/>准入策略拒绝散源与拆解成品"| IDX["索引构建<br/>切块 → chunk hash 去重 → facet 标注"]
-    S2 -->|"source_kind=craft_technique"| IDX
-    S3 -->|"source_kind=benchmark_reference<br/>确定性类目标注"| IDX
-    S4 -->|"deliver 阶段入库<br/>草稿一律不准入"| IDX
-    IDX --> STO["三层存储<br/>index_state.json（keyword/BM25）<br/>Qdrant collection（向量）<br/>vector_store.json（本地兜底）"]
-    STO --> Q1["常规章节召回 rag_recall<br/>只查本书事实层，设计库硬性排除"]
-    STO --> Q2["设计时刻召回 craft_recall<br/>类目 filter 集合运算 + BM25 排序"]
-    Q1 -->|"novel_context 注入"| WR2["Writer 写作 / 返工"]
-    Q2 -->|"检索结果实例化为本书事实<br/>dossier · props · world_codex"| AR2["Brainstorm / Architect<br/>题材调研 · 零章推演 · 章计划"]
-    Q1 --> TR["meta/rag/retrieval_trace.jsonl<br/>每次召回的命中原因可审计"]
-    Q2 --> TR
-```
+~~~text
+data/runs/<书名>/
+├── prompt.md
+├── brainstorm.md
+└── output/novel/
+    ├── premise.md                  # 故事前提
+    ├── characters.json             # 核心人物档案
+    ├── outline.json                # 章节大纲
+    ├── layered_outline.json        # 长篇卷弧结构
+    ├── world_rules.json            # 世界规则
+    ├── book_world.json             # 地点、路线与势力图谱
+    ├── chapters/                   # 已提交正文
+    ├── drafts/                     # structure、plan details、草稿和 partial
+    ├── reviews/                    # Editor、AI gate、Reviewer 与统一报告
+    ├── summaries/                  # 章、弧、卷摘要
+    └── meta/
+        ├── progress.json
+        ├── checkpoints.jsonl
+        ├── pipeline.json
+        ├── architect_readiness.*
+        ├── first_chapter_generation_readiness.*
+        ├── chapter_simulations/
+        ├── character_stage/
+        ├── side_character_journeys/
+        ├── chapter_world_deltas/
+        ├── rag/
+        └── delivery_snapshots/
+~~~
 
-### 构造：什么能进索引，什么时候进
-
-- **`--build-rag`** 构建本书主索引：默认只扫当前项目的 `prompt.md`、`input/*.md` 与 `output/novel` 关键设定 / 账本文件，写入 `meta/rag/index_state.json/md`。**准入策略是代码级的**：拆解库散源（novel_sucai 等）、外部参考库一律拒绝进入写作 RAG，仅 `writing-techniques`（纯手法，无情节事实）与 `novel_all`（归并对标库）豁免、且分别打上 `craft_technique` / `benchmark_reference` 的 source_kind 标记供后续路由隔离；
-- **`--zero-init`** 附带白名单索引：只索引当前项目设定与零章推演资产，防止旧代次数据污染新推演线；
-- **持续沉淀**：写作过程中 `save_foundation` / `commit_chapter` / `save_review` 挂了 RAG sink，foundation、章节、评审、返工产生的事实增量 upsert；章级事实 chunk 以 accept 后的 `deliver` 阶段为准入口（来源是章节摘要提炼的事实，`uses_body=false` 不沉正文），草稿不入库；
-- **三层存储**：keyword/BM25 索引（`index_state.json`）始终可用；配置 embedding 后（本地 Qwen3-Embedding GGUF，llama-server 自动拉起）向量写 Qdrant collection，同时落 `vector_store.json` 本地兜底；schema v2 语义 hash 覆盖 context / summary / keywords / metadata，重建幂等；
-- pipeline 进入 `write` / `deliver` 前自动检查索引与本机 Qdrant；本地向量完整时直接复用，Qdrant 丢库则从 fallback 重放，不重复 embedding。增量回填永久失败时写 `meta/rag/pending_upserts.json`，下次自动补偿。
-
-### 使用：两条召回通道，路由隔离
-
-- **常规章节召回（`rag_recall`）** —— Writer 写每章时，`novel_context` 从本章推进焦点（伏笔 / 角色 / 状态变化 / 关系）提取查询词与 facet 提示，对**本书事实层**做混合检索：BM25 关键词 + 向量语义加性混合；`craft_technique` / `benchmark_reference` 两类设计库 chunk 被**硬性排除**——写作中途的一致性只信本书事实，不信参考素材；
-- **设计时刻召回（`craft_recall`）** —— 只在头脑风暴、零章初始化、新角色 / 新武器 / 新能力首次出场的章计划时刻走设计双库：每个设计字段绑定固定类目 filter（集合运算，命中与否确定），BM25 只在命中子集内排序，查不到返回显式 `no_material` 而不是静默降级；检索结果**立刻实例化为本书事实**（人物 dossier、道具、视觉设计、world_codex），此后写作只引用实例化产物——对标素材只可迁移手法 / 结构 / 节奏，情节、人名与专有设定禁止照搬；
-- **降级链**：Qdrant EOF/空结果 → `vector_store.json` 本地向量 → 缓存 BM25 / 关键词；embedding EOF 直接走 BM25。网络 EOF、截断 JSON、429/5xx 使用有界退避重试，召回不会因单个语义后端失效而返回空白；
-- **可审计**：每次召回追加一条 `meta/rag/retrieval_trace.jsonl`（query、策略、每条命中的 chunk / 得分 / 命中原因 / facet / source_kind）；`--build-rag --probe-chapter N` 可离线探测某章的召回结果。
-
-## 质量门禁与用户规则
-
-- **八维评审** —— 设定一致性、角色行为、节奏、叙事连贯、伏笔、钩子、审美品质（必须引用原文举证）、AI 腔检测（比喻密度 / 对话占比 / 格言命中 / 章末钩子等量化结论）；
-- **机械门禁** —— 内置去 AI 味基线（套句 / 疲劳词黑名单 + 语义判据），每章 commit 时自检，违规按固定映射分级（禁用词 → error，疲劳词超阈 → warning，字数偏差 ≥20% → error）；
-- **用户规则零格式** —— 在 `~/.novel-studio/rules/`（全局）或 `./.novel-studio/rules/`（本书）放任意 `.md`，大白话写偏好（「主角别写成圣母」「每章 3000 字左右」），系统归一化成本书规则快照自动遵循，详见 [`docs/user-rules-runtime.md`](docs/user-rules-runtime.md)；
-- **审核闭环** —— 审核历史零丢失归档（`reviews/NN.history.jsonl`），复审自动注入上一轮 issues 做回归验证（防"修了 A 换挑 B"），第 3 轮循环刹车；
-- **Prompt 运行时覆盖** —— `~/.novel-studio/prompts/` → `./.novel-studio/prompts/` 覆盖链，指纹落 `meta/prompt_manifest.json`，精确回答"这次 run 用的是哪版 prompt"。
-
-## 断点恢复
-
-写一部长篇可能需要数天，中途崩溃 / 断网 / Ctrl+C 都是常态。所有产物持久化在 `output/`，每个工具执行成功后写 checkpoint（`meta/checkpoints.jsonl`）；同一目录再次运行时读取 `progress.json` + 最近 checkpoint + 待处理信号，精确到 step 级生成恢复指令（如"第 7 章 draft 已落盘，请继续 check_consistency"）。文件写入使用 temp + fsync + rename 原子操作，断电也不会损坏已有数据。
-
-## 输出结构（`data/runs/<书名>/`）
-
-```
-brainstorm.md                                                       # 新建时的题材调研与逻辑推敲
-output/novel/
-├── premise.md / characters.json / world_rules.json / book_world.json   # 设定事实层
-├── outline.json / layered_outline.json / timeline.json                 # 规划与时间线
-├── relationship_state.json / foreshadow_ledger.json / resource_ledger.json
-├── chapters/          # 章节终稿（01.md ...）
-├── summaries/         # 章节摘要
-├── reviews/           # NN.md + NN.json + NN_ai_gate.json + NN_ai_voice_redflags.json + NN_deepseek_ai_judge.json
-└── meta/              # progress / pipeline / checkpoints / usage / delivery_log
-                       # world tick 事实、rag 索引状态、sessions 与 llm_calls 全量 trace
-```
-
-可观测性：Coordinator 与每个子代理的完整工具调用日志（`meta/sessions/*.jsonl`）、LLM 调用级 trace（`meta/runtime/llm_calls.jsonl`，字段对齐 OTel gen_ai.* 语义约定）、`--diag` 脱敏导出可直接贴 issue。
+所有运行事实都应通过工具或维护命令更新。不要把聊天历史当作项目真相，也不要靠手工编辑 `progress.json` 修复章节状态。
 
 ## Skills
 
-每个功能在 [`skills/`](skills/README.md) 下有一份入口 SKILL.md（novel-* 原生命令入口 + story 网文工具箱：长短篇写作方法论 / 去 AI 味 / 审查 / 短篇拆文），外部 agent（Claude Code / Codex / OpenCode / OpenClaw）读后直接拼命令行调用；`novel-studio skills export --to <dir>` 一键导出到目标项目。
+`skills/` 是可导出能力的唯一源目录。`story-long-write`、`story-short-write`、`story-douban-long-write` 等写作方法 skill 负责整理输入和方法约束，正文生成必须回到 `novel-studio --pipeline`，避免旁路写作绕开世界模拟、字数合同和审核门禁。
+
+~~~bash
+novel-studio skills list
+novel-studio skills export --to ./exported-skills
+python3 scripts/validate_skill_context.py
+~~~
+
+## 开发与验证
+
+要求 Go 1.25；看板要求 Python 3；embedding/Qdrant 按配置选用。
+
+~~~bash
+go test -count=1 ./...
+go test -race -count=1 \
+  ./internal/writer/sampler \
+  ./cmd/novel-studio \
+  ./internal/tools \
+  ./internal/host/flow
+go vet ./...
+go build -o /tmp/novel-studio ./cmd/novel-studio
+python3 scripts/validate_skill_context.py
+python3 -m unittest services.dashboard.test_server -v
+python3 -m py_compile \
+  services/dashboard/server.py \
+  services/dashboard/test_server.py \
+  quality/audit/scripts/aigc_value.py \
+  quality/audit/scripts/content_lint.py
+git diff --check
+~~~
 
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | 架构全貌与合宪约束 |
-| [`docs/project-structure.md`](docs/project-structure.md) | 目录分层说明 |
-| [`docs/design-stage-workflow.md`](docs/design-stage-workflow.md) | 长短篇统一规划口径 |
-| [`docs/writing-review-workflow.md`](docs/writing-review-workflow.md) | 写作审核一体化执行方案 |
-| [`docs/pipeline-recovery-audit-20260710.md`](docs/pipeline-recovery-audit-20260710.md) | Pipeline 恢复审计与证据口径 |
-| [`docs/data-lifecycle-and-progression.md`](docs/data-lifecycle-and-progression.md) | 数据沉淀与推进机制 |
-| [`docs/capability-inventory.md`](docs/capability-inventory.md) | 工程能力清单 |
-| [`docs/observability.md`](docs/observability.md) | 运行观测排查手册 |
-| [`deconstruction-library/README.md`](deconstruction-library/README.md) | RAG 语料源与拆解成品约定 |
+| [系统架构](docs/architecture.md) | Host、Coordinator、Tools、Store、上下文与 Agent 拓扑 |
+| [项目结构](docs/project-structure.md) | 顶层目录与资料归属 |
+| [能力清单](docs/capability-inventory.md) | CLI、Agent、Store、RAG、质量和服务能力盘点 |
+| [设计阶段工作流](docs/design-stage-workflow.md) | 长短篇规划与写前设计口径 |
+| [上下文管理](docs/context-management.md) | 压缩、store summary 和恢复包 |
+| [数据生命周期](docs/data-lifecycle-and-progression.md) | 章节、角色、世界与推进台账 |
+| [写作审核工作流](docs/writing-review-workflow.md) | 写作、评审、返工与交付 |
+| [用户规则运行时](docs/user-rules-runtime.md) | 用户硬规则如何进入工具门禁 |
+| [评测系统](docs/evaluation-system.md) | Harness、指标和回归验证 |
+| [可观测性](docs/observability.md) | 事件、usage、trace 和诊断 |
+| [Pipeline 性能审计](docs/pipeline-performance-audit-20260711.md) | 最新并发边界、缓存、熔断和恢复设计 |
+| [Pipeline Recovery Audit](docs/pipeline-recovery-audit-20260710.md) | 全角色模拟、RAG 恢复和返工链问题清单 |
+| [工程交付记录](docs/engineering-delivery-20260708.md) | DeepSeek 复审、AIGC 门禁和历史交付证据 |
+| [拆文库规范](deconstruction-library/README.md) | RAG 设计素材与拆解工作区约定 |
+| [架构总览 HTML](docs/architecture-overview.html) | 浏览器可视化架构说明 |
 
-## 技术栈
+核心运行时使用 Go 1.25、[agentcore](https://github.com/voocel/agentcore) 和仓内维护的 [litellm fork](third_party/litellm/README.md)；浏览器看板使用 Python 3 标准库；Qdrant 与 llama.cpp/GGUF embedding 均为可配置组件。
 
-- **Go 1.25** —— 主语言（~8.8 万行，360+ 个源文件）
-- **[agentcore](https://github.com/voocel/agentcore)** —— 极简 Agent 内核（tool-calling + streaming + StopGuard/ToolGate）
-- **[litellm](https://github.com/voocel/litellm)** —— 统一 LLM 接口适配（经 `third_party/litellm` 仓内 fork 引入，修复空参 tool_use 回放丢 input 字段的问题）
-- **Codex CLI**（可选）—— codex-cli 订阅接入复用 ChatGPT / Codex 订阅额度
-- **Qdrant + llama.cpp** —— 本地向量检索与 embedding 推理，全链路可离线
+## Release 升级
 
-## 联系方式
+~~~bash
+novel-studio --version
+novel-studio update
+novel-studio update v0.2.0
+~~~
 
-问题反馈优先走 [Issues](https://github.com/Xiaoyangy/novel-studio/issues)；交流合作可加微信：
-
-<img src="docs/assets/wechat-qr.jpg" alt="微信二维码" width="220">
+长任务运行中不要替换二进制。等待当前 checkpoint 落盘并退出后再升级；升级完成后先运行 `novel-studio --check`，再从原项目目录恢复 pipeline。
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache License 2.0](LICENSE)
 
-本项目积极参与并认可 [linux.do 社区](https://linux.do/)。
+## 联系
+
+问题反馈优先提交到 [GitHub Issues](https://github.com/Xiaoyangy/novel-studio/issues)。
+
+<img src="docs/assets/wechat-qr.jpg" alt="novel-studio 项目联系二维码" width="180">
