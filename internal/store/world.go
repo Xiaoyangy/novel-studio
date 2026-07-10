@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -398,6 +400,11 @@ func (s *WorldStore) LoadStyleRules() (*domain.WritingStyleRules, error) {
 
 // SaveReview 保存审阅结果。
 func (s *WorldStore) SaveReview(r domain.ReviewEntry) error {
+	if r.Scope == "chapter" && strings.TrimSpace(r.BodySHA256) == "" {
+		if body, err := s.io.ReadFile(fmt.Sprintf("chapters/%02d.md", r.Chapter)); err == nil && len(body) > 0 {
+			r.BodySHA256 = chapterBodySHA256(body)
+		}
+	}
 	return s.io.WriteJSON(reviewPath(r.Chapter, r.Scope), r)
 }
 
@@ -413,7 +420,16 @@ func (s *WorldStore) HasArcReview(chapter int) bool {
 // 读失败按"未通过"处理，让 Router 倾向于重派 editor，而不是跳过审阅。
 func (s *WorldStore) HasAcceptedChapterReview(chapter int) bool {
 	rv, err := s.LoadReview(chapter)
-	return err == nil && rv != nil && rv.Scope == "chapter" && rv.Verdict == "accept"
+	if err != nil || rv == nil || rv.Scope != "chapter" || rv.Verdict != "accept" || strings.TrimSpace(rv.BodySHA256) == "" {
+		return false
+	}
+	body, err := s.io.ReadFile(fmt.Sprintf("chapters/%02d.md", chapter))
+	return err == nil && len(body) > 0 && rv.BodySHA256 == chapterBodySHA256(body)
+}
+
+func chapterBodySHA256(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 // HasAcceptedChapterReviews 检查一组已完成章节是否都已有通过的章级审阅。
@@ -444,10 +460,23 @@ func (s *WorldStore) HasAcceptedGlobalReview(chapter int) bool {
 	return err == nil && rv.Scope == "global" && rv.Verdict == "accept"
 }
 
-// ClearChapterReview 删除指定章节的章级审阅结果。
-// 章节重写/打磨提交后旧 review 已失效，必须清掉以便重新审。
+// ClearChapterReview invalidates every current-version review artifact for a
+// chapter. Review history and external detector history are retained, but no
+// stale current report may survive a body rewrite and look deliverable.
 func (s *WorldStore) ClearChapterReview(chapter int) error {
-	return s.io.RemoveFile(fmt.Sprintf("reviews/%02d.json", chapter))
+	for _, rel := range []string{
+		fmt.Sprintf("reviews/%02d.json", chapter),
+		fmt.Sprintf("reviews/%02d.md", chapter),
+		fmt.Sprintf("reviews/%02d_ai_gate.json", chapter),
+		fmt.Sprintf("reviews/%02d_ai_voice_redflags.json", chapter),
+		fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chapter),
+		fmt.Sprintf("reviews/%02d_deepseek_ai_judge.md", chapter),
+	} {
+		if err := s.io.RemoveFile(rel); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ClearGlobalReview 删除指定章节锚点的全局/全文审阅结果。

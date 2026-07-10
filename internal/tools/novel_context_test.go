@@ -3,10 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -1019,6 +1021,168 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 	}
 }
 
+func TestTrimByBudgetPreservesCanonicalChapterTaskAndDeduplicatesPlan(t *testing.T) {
+	plan := &domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "旧计划",
+		CausalSimulation: domain.ChapterCausalSimulation{
+			ProjectPromise: strings.Repeat("旧推演", 200),
+		},
+	}
+	causal := domain.ChapterCausalSimulation{ProjectPromise: strings.Repeat("当前推演", 200)}
+	working := map[string]any{
+		"current_chapter_outline": map[string]any{"chapter": 1, "title": "目标章"},
+		"chapter_plan":            plan,
+		"causal_simulation":       causal,
+		"character_continuity":    strings.Repeat("历史台账", 400),
+	}
+	result := map[string]any{
+		"working_memory":          working,
+		"current_chapter_outline": working["current_chapter_outline"],
+		"chapter_plan":            plan,
+		"causal_simulation":       causal,
+		"character_continuity":    working["character_continuity"],
+	}
+
+	trimByBudget(result, 1800)
+
+	if _, ok := result["current_chapter_outline"]; ok {
+		t.Fatal("expected top-level mirror to be removed")
+	}
+	if _, ok := working["current_chapter_outline"]; !ok {
+		t.Fatal("expected canonical current_chapter_outline to be preserved")
+	}
+	trimmedPlan, ok := working["chapter_plan"].(domain.ChapterPlan)
+	if !ok {
+		t.Fatalf("expected cloned chapter plan, got %T", working["chapter_plan"])
+	}
+	if hasChapterCausalSimulation(trimmedPlan.CausalSimulation) {
+		t.Fatal("expected duplicate causal_simulation inside chapter_plan to be stripped")
+	}
+	if _, ok := working["causal_simulation"]; !ok {
+		t.Fatal("expected canonical causal_simulation to be preserved")
+	}
+}
+
+func TestContextToolPartialPlanHidesStaleFormalPlan(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "新标题", CoreEvent: "新事件"}}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+	if err := st.Progress.Init("test", 2); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "旧标题",
+		Goal:    "旧目标",
+		CausalSimulation: domain.ChapterCausalSimulation{
+			ProjectPromise: "旧推演",
+		},
+	}); err != nil {
+		t.Fatalf("SaveChapterPlan: %v", err)
+	}
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{
+		"structure": map[string]any{"chapter": 1, "title": "新标题"},
+		"causal_simulation": map[string]any{
+			"project_promise":   "新推演",
+			"review_refinement": map[string]any{"stop_condition": "通过"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveChapterPlanPartial: %v", err)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	working, ok := payload["working_memory"].(map[string]any)
+	if !ok {
+		t.Fatal("expected working_memory")
+	}
+	if _, ok := working["chapter_plan"]; ok {
+		t.Fatal("stale formal plan must be hidden while a partial plan exists")
+	}
+	stage, ok := working["chapter_plan_stage"].(map[string]any)
+	if !ok || stage["status"] != "partial" {
+		t.Fatalf("expected partial plan stage, got %#v", working["chapter_plan_stage"])
+	}
+	fields, ok := stage["causal_fields_present"].([]any)
+	if !ok || len(fields) != 2 {
+		t.Fatalf("expected staged causal fields, got %#v", stage["causal_fields_present"])
+	}
+}
+
+func TestContextToolHidesStaleRewritePlanAndDraft(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "目标章", CoreEvent: "当前事件", Hook: "当前钩子"}}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+	if err := st.Progress.Save(&domain.Progress{
+		NovelName:         "test",
+		TotalChapters:     2,
+		CompletedChapters: []int{1},
+		PendingRewrites:   []int{1},
+	}); err != nil {
+		t.Fatalf("Save progress: %v", err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "旧计划", Goal: "旧目标"}); err != nil {
+		t.Fatalf("SaveChapterPlan: %v", err)
+	}
+	if err := st.Drafts.SaveDraft(1, "# 第1章 旧草稿\n\n旧内容"); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "# 第1章 旧终稿\n\n待返工内容"); err != nil {
+		t.Fatalf("SaveFinalChapter: %v", err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	newTime := time.Now()
+	for _, rel := range []string{"drafts/01.plan.json", "drafts/01.draft.md"} {
+		if err := os.Chtimes(filepath.Join(dir, rel), oldTime, oldTime); err != nil {
+			t.Fatalf("Chtimes %s: %v", rel, err)
+		}
+	}
+	if err := os.Chtimes(filepath.Join(dir, "chapters/01.md"), newTime, newTime); err != nil {
+		t.Fatalf("Chtimes final: %v", err)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	working := payload["working_memory"].(map[string]any)
+	if _, ok := working["chapter_plan"]; ok {
+		t.Fatal("stale formal plan must not be injected into rewrite planning")
+	}
+	if _, ok := working["chapter_draft"]; ok {
+		t.Fatal("stale draft must not be advertised as the current rewrite draft")
+	}
+	planStage := working["chapter_plan_stage"].(map[string]any)
+	if planStage["status"] != "stale_for_rewrite" {
+		t.Fatalf("unexpected plan stage: %#v", planStage)
+	}
+	draftStage := working["chapter_draft_stage"].(map[string]any)
+	if draftStage["status"] != "stale_for_rewrite" {
+		t.Fatalf("unexpected draft stage: %#v", draftStage)
+	}
+}
+
 func TestContextToolSelectedMemoryRecallsStoryThreadsAndReviewLessons(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -1286,8 +1450,114 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 			t.Fatalf("duplicate hit in hybrid recall: %+v", payload.Selected.RAG)
 		}
 	}
-	if payload.ReferencePack.Trace.Strategy != "qdrant_bm25_hybrid_v1" {
+	if payload.ReferencePack.Trace.Strategy != "qdrant_bm25_hybrid_v2" {
 		t.Fatalf("expected qdrant hybrid strategy, got %+v", payload.ReferencePack.Trace)
+	}
+}
+
+type contextEOFEmbedder struct{}
+
+func (contextEOFEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return nil, io.EOF
+}
+
+type contextEOFSearcher struct{}
+
+func (contextEOFSearcher) Search(context.Context, []float32, int) ([]rag.VectorSearchHit, error) {
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestContextToolRAGEmbeddingEOFFallsBackToBM25(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "返乡开店", CoreEvent: "男主在青山县盘下第一间门店"}}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+	if err := s.Progress.Init("test", 8); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	chunk := rag.NormalizeChunk(domain.RAGChunk{
+		SourcePath: "outline.md", SourceKind: "planning", Facet: "plot",
+		Summary: "返乡后盘下青山县第一间门店。", Text: "开店、装修和第一笔真实营业收入。",
+	})
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{Chunks: []domain.RAGChunk{chunk}, UpdatedAt: "v1"}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+	tool := NewContextTool(s, References{}, "default").WithRAGEmbedder(contextEOFEmbedder{})
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload struct {
+		Selected struct {
+			RAG []domain.RecallItem `json:"rag_recall"`
+		} `json:"selected_memory"`
+		ReferencePack struct {
+			Trace domain.RetrievalTrace `json:"retrieval_trace"`
+		} `json:"reference_pack"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(payload.Selected.RAG) == 0 || payload.Selected.RAG[0].Key != chunk.ID {
+		t.Fatalf("BM25 fallback did not return project chunk: %+v", payload.Selected.RAG)
+	}
+	if payload.ReferencePack.Trace.Strategy != "embedding_error_bm25_fallback_v2" {
+		t.Fatalf("unexpected fallback trace: %+v", payload.ReferencePack.Trace)
+	}
+}
+
+func TestContextToolRAGQdrantEOFFallsBackToLocalVector(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "返乡开店", CoreEvent: "男主在青山县装修门店"}}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+	if err := s.Progress.Init("test", 8); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	chunk := rag.NormalizeChunk(domain.RAGChunk{
+		SourcePath: "meta/project_progress.md", SourceKind: "ledger", Facet: "progress",
+		Summary: "青山县门店装修进入收尾。", Text: "招牌、货架和试营业同步推进。",
+	})
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{Chunks: []domain.RAGChunk{chunk}, UpdatedAt: "v1"}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+	if err := s.RAG.SaveVectorStore(domain.RAGVectorStore{
+		Config: domain.RAGIndexConfig{VectorDimension: 2},
+		Points: []domain.RAGVectorPoint{{ID: chunk.ID, Hash: chunk.Hash, Vector: []float32{1, 0}, Chunk: chunk}},
+	}); err != nil {
+		t.Fatalf("SaveVectorStore: %v", err)
+	}
+	tool := NewContextTool(s, References{}, "default").
+		WithRAGEmbedder(contextTestEmbedder{}).
+		WithRAGVectorSearcher(contextEOFSearcher{})
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload struct {
+		Selected struct {
+			RAG []domain.RecallItem `json:"rag_recall"`
+		} `json:"selected_memory"`
+		ReferencePack struct {
+			Trace domain.RetrievalTrace `json:"retrieval_trace"`
+		} `json:"reference_pack"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(payload.Selected.RAG) == 0 || payload.Selected.RAG[0].Key != chunk.ID {
+		t.Fatalf("local vector fallback did not return project chunk: %+v", payload.Selected.RAG)
+	}
+	if payload.ReferencePack.Trace.Strategy != "qdrant_error_local_vector_bm25_fallback_v2" {
+		t.Fatalf("unexpected fallback trace: %+v", payload.ReferencePack.Trace)
 	}
 }
 
@@ -1617,7 +1887,7 @@ func TestContextToolInjectsMechanicalGateBriefForPendingRewrite(t *testing.T) {
 	violations := []rules.Violation{
 		{Rule: "aigc_ratio", Target: "codex-local-aigc-v3", Limit: "5%", Actual: 72.5, Severity: rules.SeverityError},
 	}
-	if err := NewCommitChapterTool(s).saveAIGCReviewFiles(2, report, violations); err != nil {
+	if err := NewCommitChapterTool(s).saveAIGCReviewFiles(2, "第二章测试正文", report, violations); err != nil {
 		t.Fatalf("saveAIGCReviewFiles: %v", err)
 	}
 
@@ -1722,6 +1992,64 @@ func TestContextToolDoesNotInjectUserDirectives(t *testing.T) {
 		// user_rules 仍应稳定注入
 		if _, ok := working["user_rules"].(map[string]any); !ok {
 			t.Errorf("[%s] working_memory.user_rules 应稳定注入", name)
+		}
+	}
+}
+
+func TestContextToolLocksRequestedChapterToPendingRewriteTarget(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatalf("InitProgress: %v", err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, 2000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if err := s.Progress.SetPendingRewrites([]int{1}, "返工第一章"); err != nil {
+		t.Fatalf("SetPendingRewrites: %v", err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{
+		{Chapter: 1, Title: "返工目标章"},
+		{Chapter: 2, Title: "未来续写章"},
+	}); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	tool := NewContextTool(s, References{}, "default")
+	args, _ := json.Marshal(map[string]any{"chapter": 2})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	active, ok := payload["active_chapter_task"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected active_chapter_task, got %T", payload["active_chapter_task"])
+	}
+	if active["chapter"] != float64(1) || active["requested_chapter"] != float64(2) || active["corrected"] != true {
+		t.Fatalf("unexpected chapter correction: %+v", active)
+	}
+	if _, ok := payload["rewrite_brief"]; !ok {
+		t.Fatal("corrected context must load the pending rewrite chapter brief")
+	}
+	current, ok := payload["current_chapter_outline"].(map[string]any)
+	if !ok || current["title"] != "返工目标章" {
+		t.Fatalf("expected only rewrite target outline, got %+v", payload["current_chapter_outline"])
+	}
+	for _, hidden := range []string{"outline", "next_chapter_outline", "future_outline_window"} {
+		if _, ok := payload[hidden]; ok {
+			t.Fatalf("rewrite context must hide %s", hidden)
+		}
+		if working, ok := payload["working_memory"].(map[string]any); ok {
+			if _, ok := working[hidden]; ok {
+				t.Fatalf("rewrite working_memory must hide %s", hidden)
+			}
 		}
 	}
 }

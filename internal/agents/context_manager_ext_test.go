@@ -54,17 +54,17 @@ func TestResolveRoleContextWindowUsesRoleSelectionBeforeWrappedModelFallback(t *
 	cfg := bootstrap.Config{
 		ContextWindow: 200000,
 		ContextWindows: map[string]int{
-			"gpt-5.5": 400000,
+			"gpt-5.6-sol": 372000,
 		},
 	}
-	window, source, model := resolveRoleContextWindow(cfg, fakeRoleSelection{"writer": "gpt-5.5"}, "writer", nil)
-	if window != 400000 {
-		t.Fatalf("window = %d, want role-specific 400000", window)
+	window, source, model := resolveRoleContextWindow(cfg, fakeRoleSelection{"writer": "gpt-5.6-sol"}, "writer", nil)
+	if window != 372000 {
+		t.Fatalf("window = %d, want role-specific 372000", window)
 	}
 	if source != bootstrap.CtxWindowConfig {
 		t.Fatalf("source = %s, want config", source)
 	}
-	if model != "gpt-5.5" {
-		t.Fatalf("model = %q, want gpt-5.5", model)
+	if model != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want gpt-5.6-sol", model)
 	}
 }

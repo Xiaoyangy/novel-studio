@@ -71,3 +71,34 @@ func TestOpenAIEmbedderDoesNotRetryAuthFailure(t *testing.T) {
 		t.Fatalf("expected 1 call, got %d", got)
 	}
 }
+
+func TestOpenAIEmbedderRetriesTruncatedAndMissingVectors(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			_, _ = w.Write([]byte(`{"data":[{"embedding":`))
+		case 2:
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.4,0.6]}]}`))
+		}
+	}))
+	defer srv.Close()
+
+	embedder, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
+		BaseURL: srv.URL,
+		Model:   "test-embedding",
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAIEmbedder: %v", err)
+	}
+	vector, err := embedder.Embed(context.Background(), "青山县返乡经营")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vector) != 2 || atomic.LoadInt32(&calls) != 3 {
+		t.Fatalf("vector=%v calls=%d", vector, calls)
+	}
+}

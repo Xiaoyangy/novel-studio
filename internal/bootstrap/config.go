@@ -88,8 +88,9 @@ func (pc ProviderConfig) ProviderType(name string) (string, error) {
 
 // ModelRef 表示一个 provider/model 组合。
 type ModelRef struct {
-	Provider string `json:"provider"` // provider 名称（Providers map 中的 key）
-	Model    string `json:"model"`    // 模型名（原样透传，不做任何解析）
+	Provider        string `json:"provider"`                   // provider 名称（Providers map 中的 key）
+	Model           string `json:"model"`                      // 模型名（原样透传，不做任何解析）
+	ReasoningEffort string `json:"reasoning_effort,omitempty"` // 该兜底模型自己的推理强度；空=继承角色
 }
 
 // RoleConfig 定义单个角色的模型覆盖。
@@ -97,7 +98,7 @@ type RoleConfig struct {
 	Provider  string     `json:"provider"`            // 主 provider 名称（Providers map 中的 key）
 	Model     string     `json:"model"`               // 主模型名（原样透传，不做任何解析）
 	Fallbacks []ModelRef `json:"fallbacks,omitempty"` // 显式备用 provider/model 列表
-	// ReasoningEffort 该角色的推理强度（off/low/medium/high/xhigh/max），空=继承顶层默认。
+	// ReasoningEffort 该角色的推理强度（off/low/medium/high/xhigh/max/ultra），空=继承顶层默认。
 	// 由 agents.ParseThinkingLevel 校验后应用，越级值视为空。
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// MaxTurns 该角色单次 subagent 运行的回合上限；0=使用内置默认，负数非法。
@@ -123,7 +124,7 @@ type Config struct {
 	// 默认 LLM 配置
 	Provider  string `json:"provider"` // 默认 provider（Providers map 中的 key）
 	ModelName string `json:"model"`    // 默认模型名
-	// ReasoningEffort 顶层默认推理强度（off/low/medium/high/xhigh/max），空=不覆盖（沿用模型/provider 默认）。
+	// ReasoningEffort 顶层默认推理强度（off/low/medium/high/xhigh/max/ultra），空=不覆盖（沿用模型/provider 默认）。
 	// 角色未单独配置 reasoning_effort 时回落到此值。
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 
@@ -311,6 +312,9 @@ func (c *Config) ValidateBase() error {
 			if err := validateConfigText(fmt.Sprintf("role %q fallback[%d] model", role, i), fallback.Model); err != nil {
 				return err
 			}
+			if err := validateConfigText(fmt.Sprintf("role %q fallback[%d] reasoning_effort", role, i), fallback.ReasoningEffort); err != nil {
+				return err
+			}
 			if err := c.validateModelRef(
 				fmt.Sprintf("role %q fallback[%d]", role, i),
 				fallback,
@@ -469,7 +473,7 @@ func (c Config) ResolveContextWindow(modelName string) (int, ContextWindowSource
 	return DefaultContextWindow, CtxWindowDefault
 }
 
-// ResolveReasoningEffort 返回某角色生效的推理强度原始串（off/low/medium/high/xhigh/max 或空）。
+// ResolveReasoningEffort 返回某角色生效的推理强度原始串（off/low/medium/high/xhigh/max/ultra 或空）。
 // 优先级：角色级 Roles[role].ReasoningEffort → 顶层默认 ReasoningEffort → ""（不覆盖，沿用模型/provider 默认）。
 // role 为空或 "default" 时直接取顶层默认。值的合法性由 agents.ParseThinkingLevel 把关。
 func (c Config) ResolveReasoningEffort(role string) string {

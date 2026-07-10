@@ -69,7 +69,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 	)
 }
 
-func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		Type           string          `json:"type"`
 		Content        json.RawMessage `json:"content"`
@@ -318,7 +318,7 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 	if _, err := t.store.Checkpoints.AppendArtifact(scope, a.Type, foundationArtifact(a.Type)); err != nil {
 		return nil, fmt.Errorf("checkpoint foundation %s: %w: %w", a.Type, errs.ErrStoreWrite, err)
 	}
-	ragIndexed, ragErr := t.sedimentFoundationRAG(a.Type, content)
+	ragIndexed, ragErr := t.sedimentFoundationRAG(ctx, a.Type, content)
 	if ragErr != nil {
 		result["rag_error"] = ragErr.Error()
 	}
@@ -340,12 +340,12 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 	return json.Marshal(result)
 }
 
-func (t *SaveFoundationTool) sedimentFoundationRAG(kind, content string) (bool, error) {
+func (t *SaveFoundationTool) sedimentFoundationRAG(ctx context.Context, kind, content string) (bool, error) {
 	chunks := foundationRAGChunks(kind, content)
 	if len(chunks) == 0 {
 		return false, nil
 	}
-	if err := upsertRAGChunks(context.Background(), t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
+	if err := upsertRAGChunks(ctx, t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
 		return true, err
 	}
 	return true, nil

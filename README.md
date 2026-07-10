@@ -9,6 +9,10 @@
 
 > An autonomous long-form novel engine in Go: from a one-line idea to a finished book — dynamic world simulation, multi-agent long-run loop, mechanical quality gates and local RAG.
 
+## 2026-07-10 全量工程升级
+
+本轮把可恢复 pipeline、全角色章节推演、返工事实保护、RAG/Qdrant 就绪链、审核版本新鲜度、AIGC/DeepSeek 门禁和进度看板 3.0 合并为同一套执行契约。完整变更、迁移方式、持久化产物和验证命令见 [README-20260710.md](README-20260710.md)。
+
 ## 2026-07-08 工程交付
 
 本轮把《她的第二算法》第一章审核链路、DeepSeek v4 Pro 复审、3000 字整章 AI 检测口径、拦截与展示一致性、新建小说 brainstorm 流水线和架构图统一整理到一份交付文档：见 [docs/engineering-delivery-20260708.md](docs/engineering-delivery-20260708.md)。文档开头包含第一章进度图、AI 门禁占比图、审核前后对比和最新系统流程图。
@@ -50,7 +54,7 @@ flowchart TD
 - **物理公理（physics_axioms）** —— 距离、传信速度、物价、物候等一致性公理，是后续信息传播推算的依据；
 - **势力进度钟、社会情绪、仪式日历、道德天花板、tick 零点、第一章推演草案与 RAG 白名单索引**。
 
-这不是可选的"世界观填表"，而是**硬门禁**：`meta/first_chapter_generation_readiness` 就绪工件由三个消费方共用同一判定——Writer 派发守卫拒绝在未就绪时写第 1 章、Coordinator StopGuard 在该场景放行收工交还宿主、pipeline write 阶段自动补跑 `--zero-init` 后续跑。foundation 文件（premise / characters / world_rules / book_world / 大纲）在 readiness 之后被重写会使就绪状态**自动过期**，防止零章资产引用旧设定。需要推倒重来时，`--zero-init --reset-simulation-state` 切换新的推演线（generation_id），旧章节数据只保留为背景种子，不允许恢复旧进度。
+这不是可选的"世界观填表"，而是**硬门禁**：`meta/first_chapter_generation_readiness` 就绪工件由多个消费方共用同一判定——Writer 派发守卫拒绝在未就绪时写第 1 章，Coordinator StopGuard 在该场景放行收工交还宿主，pipeline 必须先独立完成 `architect`，再完成 `zero-init`，`write` 阶段只验收前置证据、绝不代办。缺失或旧版 `schema_version` 的 `ready:true` 一律不可信。foundation 文件（premise / characters / world_rules / world_codex / 大纲）在 readiness 之后被重写会使就绪状态**自动过期**，防止零章资产引用旧设定。需要推倒重来时，`--zero-init --reset-simulation-state` 切换新的推演线（generation_id），旧章节数据只保留为背景种子，不允许恢复旧进度。
 
 ### 2. 弧 / 卷边界世界 tick（`save_world_tick`）：GM 裁决，不是续写
 
@@ -144,7 +148,7 @@ flowchart TD
 | **Writer · Drafter（渲染）** | 起干净会话，只读定稿计划 + 精要写法上下文，把推演渲染成正文并自审提交 | `novel_context` `read_chapter` `draft_chapter` `edit_chapter` `check_consistency` `commit_chapter` |
 | **Editor / Reviewer** | 章级八维评审、弧卷评审与摘要、AI 味盲测 | `novel_context` `read_chapter` `save_review` `save_arc_summary` `save_volume_summary` |
 
-**逐章两阶段拆分**：写一章分成独立上下文的两步——**Planner 推演** 吃全量规划上下文，把"要发生什么、谁怎么想、怎么说话、哪些物件承载信息"全部推演成 `causal_simulation` 落盘即停（长章可用 `plan_structure` + `plan_details` 分批补齐）；**Drafter 渲染** 起一个干净会话，只读已定稿计划把它写成正文，`check_consistency` 对照事实校验后 `commit_chapter` 提交并回刷时间线 / 伏笔 / 关系 / 角色状态。好处：drafter 不背规划对话的历史 token，长章不撑爆窗口、注意力集中在正文；planner 与 drafter 共用 writer 角色的模型配置。每章必须通过 Editor 章级审阅（`reviews/NN_ai_gate.json` + `reviews/NN.md`）才允许续写。
+**逐章两阶段拆分**：写一章分成独立上下文的两步——**Planner 推演** 吃全量规划上下文，把"要发生什么、谁怎么想、怎么说话、哪些物件承载信息"全部推演成 `causal_simulation` 落盘即停（长章可用 `plan_structure` + `plan_details` 分批补齐）；**Drafter 渲染** 起一个干净会话，只读已定稿计划把它写成正文，`check_consistency` 对照事实校验后 `commit_chapter` 提交并回刷时间线 / 伏笔 / 关系 / 角色状态。commit 会核对 consistency checkpoint 的草稿指纹，并拒绝正文标题偏离 `plan.title`。好处：drafter 不背规划对话的历史 token，长章不撑爆窗口、注意力集中在正文；planner 与 drafter 共用 writer 角色的模型配置。每章的机械门禁、AI voice、Editor JSON、异模型裸正文判定和统一报告必须全部绑定当前正文 SHA-256，且章审 `accept` 后才允许续写或交付。
 
 ## 流水线
 
@@ -322,7 +326,7 @@ docker run --rm \
   "providers": {
     "minimax": { "api_key": "sk-xxx", "models": ["MiniMax-M3[1M]", "MiniMax-M3"] },
     // 订阅接入：走本机 Codex CLI 复用 ChatGPT/Codex 订阅额度，base_url 为 codex 二进制路径（空=自动探测）
-    "codex": { "type": "codex-cli", "base_url": "", "models": ["gpt-5.5"] }
+    "codex": { "type": "codex-cli", "base_url": "", "models": ["gpt-5.6-sol"] }
   },
   "roles": {                                  // 角色级模型覆盖 + 请求级 failover
     "writer":   { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high" },
@@ -372,14 +376,14 @@ flowchart TD
 - **`--build-rag`** 构建本书主索引：默认只扫当前项目的 `prompt.md`、`input/*.md` 与 `output/novel` 关键设定 / 账本文件，写入 `meta/rag/index_state.json/md`。**准入策略是代码级的**：拆解库散源（novel_sucai 等）、外部参考库一律拒绝进入写作 RAG，仅 `writing-techniques`（纯手法，无情节事实）与 `novel_all`（归并对标库）豁免、且分别打上 `craft_technique` / `benchmark_reference` 的 source_kind 标记供后续路由隔离；
 - **`--zero-init`** 附带白名单索引：只索引当前项目设定与零章推演资产，防止旧代次数据污染新推演线；
 - **持续沉淀**：写作过程中 `save_foundation` / `commit_chapter` / `save_review` 挂了 RAG sink，foundation、章节、评审、返工产生的事实增量 upsert；章级事实 chunk 以 accept 后的 `deliver` 阶段为准入口（来源是章节摘要提炼的事实，`uses_body=false` 不沉正文），草稿不入库；
-- **三层存储**：keyword/BM25 索引（`index_state.json`）始终可用；配置 embedding 后（本地 Qwen3-Embedding GGUF，llama-server 自动拉起）向量写 Qdrant collection，同时落 `vector_store.json` 本地兜底；chunk 按内容 hash 去重，重建幂等；
-- pipeline 进入 `write` 前自动检查 / 刷新索引并确保本机 Qdrant 可用（`--pipeline` / rewrite 共用同一就绪检查）。
+- **三层存储**：keyword/BM25 索引（`index_state.json`）始终可用；配置 embedding 后（本地 Qwen3-Embedding GGUF，llama-server 自动拉起）向量写 Qdrant collection，同时落 `vector_store.json` 本地兜底；schema v2 语义 hash 覆盖 context / summary / keywords / metadata，重建幂等；
+- pipeline 进入 `write` / `deliver` 前自动检查索引与本机 Qdrant；本地向量完整时直接复用，Qdrant 丢库则从 fallback 重放，不重复 embedding。增量回填永久失败时写 `meta/rag/pending_upserts.json`，下次自动补偿。
 
 ### 使用：两条召回通道，路由隔离
 
 - **常规章节召回（`rag_recall`）** —— Writer 写每章时，`novel_context` 从本章推进焦点（伏笔 / 角色 / 状态变化 / 关系）提取查询词与 facet 提示，对**本书事实层**做混合检索：BM25 关键词 + 向量语义加性混合；`craft_technique` / `benchmark_reference` 两类设计库 chunk 被**硬性排除**——写作中途的一致性只信本书事实，不信参考素材；
 - **设计时刻召回（`craft_recall`）** —— 只在头脑风暴、零章初始化、新角色 / 新武器 / 新能力首次出场的章计划时刻走设计双库：每个设计字段绑定固定类目 filter（集合运算，命中与否确定），BM25 只在命中子集内排序，查不到返回显式 `no_material` 而不是静默降级；检索结果**立刻实例化为本书事实**（人物 dossier、道具、视觉设计、world_codex），此后写作只引用实例化产物——对标素材只可迁移手法 / 结构 / 节奏，情节、人名与专有设定禁止照搬；
-- **降级链**：Qdrant 不可用 → 读 `vector_store.json` 本地向量兜底；未启用 embedding → 纯 BM25 / 关键词策略，链路永不因向量服务缺席而中断；
+- **降级链**：Qdrant EOF/空结果 → `vector_store.json` 本地向量 → 缓存 BM25 / 关键词；embedding EOF 直接走 BM25。网络 EOF、截断 JSON、429/5xx 使用有界退避重试，召回不会因单个语义后端失效而返回空白；
 - **可审计**：每次召回追加一条 `meta/rag/retrieval_trace.jsonl`（query、策略、每条命中的 chunk / 得分 / 命中原因 / facet / source_kind）；`--build-rag --probe-chapter N` 可离线探测某章的召回结果。
 
 ## 质量门禁与用户规则
@@ -404,7 +408,7 @@ output/novel/
 ├── relationship_state.json / foreshadow_ledger.json / resource_ledger.json
 ├── chapters/          # 章节终稿（01.md ...）
 ├── summaries/         # 章节摘要
-├── reviews/           # NN.md + NN_ai_gate.json + NN.history.jsonl
+├── reviews/           # NN.md + NN.json + NN_ai_gate.json + NN_ai_voice_redflags.json + NN_deepseek_ai_judge.json
 └── meta/              # progress / pipeline / checkpoints / usage / delivery_log
                        # world tick 事实、rag 索引状态、sessions 与 llm_calls 全量 trace
 ```

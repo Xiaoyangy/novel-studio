@@ -88,6 +88,9 @@ func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 
 // inProgressChapterOf 从进度推断当前正在推演的章号（in_progress 优先，回退下一待写章）。
 func inProgressChapterOf(s *store.Store) int {
+	if target, ok := pendingRewriteTarget(s); ok {
+		return target
+	}
 	progress, err := s.Progress.Load()
 	if err != nil || progress == nil {
 		return 0
@@ -192,6 +195,10 @@ func ensureChapterPlannable(s *store.Store, chapter int) (skipped json.RawMessag
 // finalizeChapterPlan 完整校验并落盘章节计划：写 plan 文件、置章节 in_progress、
 // 记 checkpoint、透出事件编织冲突。plan_chapter 单发与 plan_details finalize 共用。
 func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan bool) (json.RawMessage, error) {
+	applyOutlineAnchorsToPlan(s, &plan)
+	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
+		return nil, err
+	}
 	if err := validateChapterPrewriteSimulation(s, plan, isRewritePlan); err != nil {
 		return nil, err
 	}
@@ -250,6 +257,46 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 		}
 	}
 	return json.Marshal(result)
+}
+
+func applyRewriteAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) error {
+	if plan == nil {
+		return nil
+	}
+	source, _, _, err := loadChapterRewriteSource(s, plan.Chapter)
+	if err != nil || source == nil {
+		return err
+	}
+	for _, fact := range source.PreserveFacts {
+		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, fact)
+	}
+	plan.Contract.ContinuityChecks = appendUniqueString(plan.Contract.ContinuityChecks,
+		fmt.Sprintf("局部返工源正文 %s 的 sha256 必须保持为 %s；若正文源已变化，本计划作废并重新推演。", source.BodyPath, source.BodySHA256))
+	return nil
+}
+
+func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
+	if s == nil || plan == nil || plan.Chapter <= 0 {
+		return
+	}
+	entry, err := s.Outline.GetChapterOutline(plan.Chapter)
+	if err != nil || entry == nil {
+		return
+	}
+	if hook := strings.TrimSpace(entry.Hook); hook != "" {
+		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, "必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末："+hook)
+	}
+	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
+		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, "必须完整兑现大纲核心事件："+event)
+	}
+}
+
+func appendUniqueString(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" || slices.Contains(items, value) {
+		return items
+	}
+	return append(items, value)
 }
 
 func ensureSimulationRestartProgressReady(s *store.Store, progress *domain.Progress) error {
@@ -325,8 +372,8 @@ func decodeChapterPlanArgs(args json.RawMessage) (domain.ChapterPlan, error) {
 }
 
 // ChapterPlanIdentityIssues catches template-like planning before it reaches
-// draft rendering. It is activated by the project's premise file so generic
-// fixtures and older projects are not reinterpreted.
+// draft rendering. Any project with a character roster gets the guard; tests
+// and empty scaffolds without characters remain unaffected.
 func ChapterPlanIdentityIssues(s *store.Store, chapter int, payload any) []string {
 	if !chapterIdentityGuardActive(s) {
 		return nil
@@ -340,25 +387,109 @@ func ChapterPlanIdentityIssues(s *store.Store, chapter int, payload any) []strin
 		}
 	}
 	text := strings.Join(flattenPlanStrings(payload), "\n")
+	for _, placeholder := range []string{
+		"既定主角", "既定地点", "本章触发事件",
+		"current_chapter_outline 规定", "current_chapter_outline 指定",
+	} {
+		if strings.Contains(text, placeholder) {
+			issues = append(issues, fmt.Sprintf("计划仍含模板占位 %q，必须改写为当前章大纲中的人物、地点、物件和事件", placeholder))
+		}
+	}
 	if len(required) > 0 && !containsAnyLiteral(text, required) {
 		issues = append(issues, fmt.Sprintf("计划文本未出现本章角色实名（需要至少命中：%s），不能用“主角/关键对话对象/后台关联者”占位", strings.Join(required, "、")))
+	}
+	if entry, err := s.Outline.GetChapterOutline(chapter); err == nil && entry != nil {
+		expected := strings.TrimSpace(entry.Title)
+		actual := planPayloadTitle(payload)
+		if expected != "" && actual != expected {
+			issues = append(issues, fmt.Sprintf("计划标题 %q 与大纲标题 %q 不一致，必须原样使用大纲标题", actual, expected))
+		}
 	}
 	if bad := characterFieldIdentityIssues(payload, names, inferCommitProtagonist(s), projectHasFemaleProtagonist(s)); len(bad) > 0 {
 		issues = append(issues, bad...)
 	}
+	if rewriteTarget, ok := pendingRewriteTarget(s); ok && rewriteTarget == chapter {
+		issues = append(issues, visibleCharacterOutlineScopeIssues(s, chapter, payload)...)
+	}
 	return compactStrings(issues)
 }
 
-func chapterIdentityGuardActive(s *store.Store) bool {
-	data, err := os.ReadFile(filepath.Join(s.Dir(), "premise.md"))
-	if err != nil {
-		return false
+func visibleCharacterOutlineScopeIssues(s *store.Store, chapter int, payload any) []string {
+	entry, err := s.Outline.GetChapterOutline(chapter)
+	if err != nil || entry == nil {
+		return nil
 	}
-	text := string(data)
-	return strings.Contains(text, "女频") ||
-		strings.Contains(text, "女性") ||
-		strings.Contains(text, "许闻溪") ||
-		strings.Contains(text, "第二算法")
+	allowed := map[string]struct{}{}
+	for _, name := range chapterOutlineCharacterNames(s, chapter) {
+		allowed[name] = struct{}{}
+	}
+	chars, _ := s.Characters.Load()
+	roles := make(map[string]string, len(chars))
+	for _, character := range chars {
+		roles[character.Name] = character.Role
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil
+	}
+	sim, _ := root["causal_simulation"].(map[string]any)
+	if sim == nil {
+		return nil
+	}
+	stages, _ := sim["offscreen_character_stage"].([]any)
+	var issues []string
+	for index, item := range stages {
+		stage, _ := item.(map[string]any)
+		if stage == nil || stage["visible_in_chapter"] != true {
+			continue
+		}
+		name, _ := stage["character"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := allowed[name]; ok {
+			continue
+		}
+		role := strings.TrimSpace(roles[name])
+		if role == "" {
+			role = "未登记职责"
+		}
+		issues = append(issues, fmt.Sprintf(
+			"causal_simulation.offscreen_character_stage[%d] 将 %s 标为本章可见，但 current_chapter_outline 未授权该角色出场，且其职责为 %q；改为 visible_in_chapter=false，或使用本章大纲明确的人物",
+			index, name, role,
+		))
+	}
+	return issues
+}
+
+func chapterIdentityGuardActive(s *store.Store) bool {
+	chars, err := s.Characters.Load()
+	return err == nil && len(chars) > 0
+}
+
+func planPayloadTitle(payload any) string {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return ""
+	}
+	if title, _ := root["title"].(string); strings.TrimSpace(title) != "" {
+		return strings.TrimSpace(title)
+	}
+	if structure, _ := root["structure"].(map[string]any); structure != nil {
+		title, _ := structure["title"].(string)
+		return strings.TrimSpace(title)
+	}
+	return ""
 }
 
 func projectHasFemaleProtagonist(s *store.Store) bool {
@@ -367,7 +498,10 @@ func projectHasFemaleProtagonist(s *store.Store) bool {
 		return false
 	}
 	text := string(data)
-	return strings.Contains(text, "女频") || strings.Contains(text, "女性") || strings.Contains(text, "女主")
+	return strings.Contains(text, "女频") ||
+		strings.Contains(text, "女性主角") ||
+		strings.Contains(text, "主角为女性") ||
+		strings.Contains(text, "主角是女性")
 }
 
 func knownCharacterNameSet(s *store.Store) map[string]struct{} {
@@ -385,6 +519,18 @@ func knownCharacterNameSet(s *store.Store) map[string]struct{} {
 			alias = strings.TrimSpace(alias)
 			if alias != "" {
 				names[alias] = struct{}{}
+			}
+		}
+	}
+	if cast, err := s.Cast.RecentActive(200); err == nil {
+		for _, entry := range cast {
+			if name := strings.TrimSpace(entry.Name); name != "" {
+				names[name] = struct{}{}
+			}
+			for _, alias := range entry.Aliases {
+				if alias = strings.TrimSpace(alias); alias != "" {
+					names[alias] = struct{}{}
+				}
 			}
 		}
 	}
@@ -543,6 +689,9 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	if !hasChapterCausalSimulation(sim) {
 		return fmt.Errorf("第 %d 章缺少写前 causal_simulation：正文写作必须先推演前文/时间线/卷弧/未来窗口、角色状态、资源账本和 AI 味风险: %w", plan.Chapter, errs.ErrToolPrecondition)
 	}
+	if err := validateChapterWorldSimulationReference(s, plan); err != nil {
+		return err
+	}
 
 	var missing []string
 	require := func(ok bool, field string) {
@@ -556,18 +705,21 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	restartPolicy, restartErr := s.LoadSimulationRestartPolicy()
 	restartActive := restartErr == nil && restartPolicy != nil && restartPolicy.Active
 
+	require(strings.TrimSpace(sim.ProjectPromise) != "", "causal_simulation.project_promise")
+	require(strings.TrimSpace(sim.ChapterFunction) != "", "causal_simulation.chapter_function")
 	require(len(sim.ContextSources) > 0, "causal_simulation.context_sources")
-	require(len(sim.OffscreenStage) > 0, "causal_simulation.offscreen_character_stage")
+	require(len(sim.InitialState) > 0, "causal_simulation.initial_state")
 	require(len(sim.EnvironmentState) > 0, "causal_simulation.environment_state")
 	require(len(sim.CausalBeats) > 0, "causal_simulation.causal_beats")
 	require(len(sim.DecisionPoints) > 0, "causal_simulation.decision_points")
 	require(len(sim.OutcomeShift) > 0, "causal_simulation.outcome_shift")
 	require(len(sim.VoiceLogic) > 0, "causal_simulation.voice_logic")
 	require(len(sim.DialogueBlueprints) > 0, "causal_simulation.dialogue_scene_blueprints")
-	require(len(sim.CharacterArcTests) > 0, "causal_simulation.character_arc_tests")
-	require(len(sim.DormantPolicy) > 0, "causal_simulation.dormant_character_policy")
 	require(len(sim.EmotionalLogic) > 0, "causal_simulation.emotional_logic")
-	require(len(sim.RelationshipArcs) > 0, "causal_simulation.relationship_emotion_arcs")
+	require(hasFocusedAntiAIExecutionPlan(sim.AntiAIPlan), "causal_simulation.anti_ai_execution_plan")
+	require(hasReaderRewardPlan(sim.ReaderRewardPlan), "causal_simulation.reader_reward_plan")
+	require(hasReaderRetentionPlan(sim.ReaderRetentionPlan), "causal_simulation.reader_retention_plan")
+	require(hasEndingConsequenceContract(sim.EndingContract), "causal_simulation.ending_consequence_contract")
 	// 轻松大众题材不把资料/装备/视觉/读者奖励矩阵设为硬卡点；这些字段存在时仍校验来源，
 	// 缺失交给 Editor/AI 味审核和正文阶段处理，避免第一章计划被方法论表格拖死。
 	for i, vd := range sim.VisualDesign {
@@ -598,32 +750,29 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 			require(strings.TrimSpace(ability.MaterialSource) != "", aprefix+".material_source")
 		}
 	}
-	require(hasWorldBackgroundLayers(sim.WorldLayers), "causal_simulation.world_background_layers")
-	require(len(sim.InformationLedger) > 0, "causal_simulation.information_asymmetry")
-	require(len(sim.HiddenRules) > 0, "causal_simulation.hidden_rule_pressure")
-	require(len(sim.SocialMoodRumors) > 0, "causal_simulation.social_mood_rumors")
-	require(len(sim.RitualCalendar) > 0, "causal_simulation.ritual_calendar")
-	require(len(sim.StructuralResources) > 0, "causal_simulation.structural_resources")
-	require(len(sim.CosmologyChecks) > 0, "causal_simulation.cosmology_checks")
-	require(len(sim.ConflictWeb) > 0, "causal_simulation.conflict_web")
-	require(hasNarrativeTensionMatrix(sim.TensionMatrix), "causal_simulation.narrative_tension_matrix")
-
 	if rewrite {
 		require(hasReviewRefinementLoop(sim.ReviewRefinement), "causal_simulation.review_refinement")
 		require(hasSource("rewrite_brief", "review"), "causal_simulation.context_sources(rewrite_brief/review)")
+		rewriteSource, _, _, rewriteErr := loadChapterRewriteSource(s, plan.Chapter)
+		if rewriteErr != nil {
+			return rewriteErr
+		}
+		if rewriteSource != nil {
+			require(hasSource(rewriteSourceToken(rewriteSource)), "causal_simulation.context_sources("+rewriteSourceToken(rewriteSource)+")")
+			require(hasSource(rewriteBriefToken(rewriteSource)), "causal_simulation.context_sources("+rewriteBriefToken(rewriteSource)+")")
+			for i, fact := range rewriteSource.PreserveFacts {
+				require(factCoveredByConstraints(fact, sim.ReviewRefinement.PreserveConstraints),
+					fmt.Sprintf("causal_simulation.review_refinement.preserve_constraints[%d]=%s", i, fact))
+			}
+		}
 	} else {
-		require(len(sim.InitialState) > 0, "causal_simulation.initial_state")
 		if restartActive {
 			require(hasSource("simulation_restart_policy", "restart_policy", "generation_id"), "causal_simulation.context_sources(simulation_restart_policy)")
 		}
 		require(hasSource("world_foundation", "world_iron_law", "past_timeline"), "causal_simulation.context_sources(world_foundation)")
 		require(hasSource("character_dossiers", "character_dossier", "role_dossier"), "causal_simulation.context_sources(character_dossiers)")
 		require(hasSource("current_chapter_outline", "outline"), "causal_simulation.context_sources(current_chapter_outline/outline)")
-		require(hasSource("future_outline_window", "future"), "causal_simulation.context_sources(future_outline_window)")
 		require(hasSource("progression", "chapter_progress", "chapter_contract"), "causal_simulation.context_sources(progression/chapter_contract)")
-		require(hasSource("character_continuity", "character_stage", "initial_character_dynamics"), "causal_simulation.context_sources(character_continuity/character_stage)")
-		require(hasSource("resource", "foreshadow", "relationship"), "causal_simulation.context_sources(resource/foreshadow/relationship)")
-		require(hasSource("dialogue_writing", "dialogue"), "causal_simulation.context_sources(dialogue_writing)")
 	}
 
 	for i, state := range sim.InitialState {
@@ -632,14 +781,6 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(state.CurrentGoal != "", prefix+".current_goal")
 		require(state.Pressure != "", prefix+".pressure")
 		require(state.ActionTendency != "", prefix+".action_tendency")
-		require(state.CompetenceStage != "", prefix+".competence_stage")
-		require(len(state.SkillLimits) > 0, prefix+".skill_limits")
-		require(len(state.PlausibleMistakes) > 0, prefix+".plausible_mistakes")
-		require(len(state.CorrectionTriggers) > 0, prefix+".correction_triggers")
-		require(len(state.KnowledgeLedger.KnownFacts) > 0 || len(state.KnowledgeLedger.UnknownFacts) > 0, prefix+".knowledge_ledger")
-		require(len(state.DecisionFrame.AvailableOptions) > 0 || state.DecisionFrame.DecisionRule != "", prefix+".decision_frame")
-		require(state.EmotionAppraisal.TriggerEvent != "" || state.EmotionAppraisal.GoalImpact != "", prefix+".emotion_appraisal")
-		require(state.ArcAxis.Want != "" || state.ArcAxis.ValueAxis != "", prefix+".arc_axis")
 	}
 	for i, stage := range sim.OffscreenStage {
 		prefix := fmt.Sprintf("causal_simulation.offscreen_character_stage[%d]", i)
@@ -651,32 +792,15 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(stage.TimelineConsistency != "", prefix+".timeline_consistency")
 	}
 	protagonist := inferCommitProtagonist(s)
-	hasSideCharacter := false
-	for i, stage := range sim.OffscreenStage {
-		if stage.Character == "" || (protagonist != "" && stage.Character == protagonist) {
-			continue
-		}
-		hasSideCharacter = true
-		prefix := fmt.Sprintf("causal_simulation.offscreen_character_stage[%d]", i)
-		require(stage.Status != "", prefix+".status")
-		require(hasMovementConstraint(stage), prefix+".transport/travel_time/meeting_constraint")
-		require(stage.PersonalityDelta != "", prefix+".personality_delta")
-		require(stage.DeathState != "", prefix+".death_state")
-		require(stage.ProtagonistNotice != "", prefix+".protagonist_notice")
-	}
-	require(hasSideCharacter, "causal_simulation.offscreen_character_stage(non_protagonist)")
-	requiredCharacters := requiredDossierCharacterNames(s, plan.Chapter)
-	if missingCharacters := missingInitialStateCoverage(requiredCharacters, sim.InitialState); len(missingCharacters) > 0 {
+	protagonistOnly := compactStrings([]string{protagonist})
+	if missingCharacters := missingInitialStateCoverage(protagonistOnly, sim.InitialState); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.initial_state", missingCharacters))
 	}
-	if missingCharacters := missingStageCoverage(requiredCharacters, sim.OffscreenStage); len(missingCharacters) > 0 {
-		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.offscreen_character_stage", missingCharacters))
-	}
-	if missingCharacters := missingArcTestCoverage(requiredCharacters, sim.CharacterArcTests); len(missingCharacters) > 0 {
-		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.character_arc_tests", missingCharacters))
-	}
-	if missingCharacters := missingEmotionalLogicCoverage(requiredCharacters, sim.EmotionalLogic); len(missingCharacters) > 0 {
+	if missingCharacters := missingEmotionalLogicCoverage(protagonistOnly, sim.EmotionalLogic); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.emotional_logic", missingCharacters))
+	}
+	if protagonist != "" && !voiceLogicContainsCharacter(sim.VoiceLogic, protagonist) {
+		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.voice_logic", []string{protagonist}))
 	}
 	for i, arc := range sim.CharacterArcTests {
 		prefix := fmt.Sprintf("causal_simulation.character_arc_tests[%d]", i)
@@ -697,12 +821,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(voice.HiddenSubtext != "", prefix+".hidden_subtext")
 		require(voice.KnowledgeBoundary != "", prefix+".knowledge_boundary")
 		require(voice.DictionAndRhythm != "", prefix+".diction_and_rhythm")
-		require(voice.SentenceLength != "", prefix+".sentence_length")
-		require(voice.PunctuationStyle != "", prefix+".punctuation_style")
-		require(voice.LineBreakStyle != "", prefix+".line_break_style")
-		require(voice.SubtextStrategy != "", prefix+".subtext_strategy")
 		require(voice.SilenceOrAction != "", prefix+".silence_or_action_beat")
-		require(voice.VoiceContrast != "", prefix+".voice_contrast")
 		require(len(voice.DialogueFunctions) > 0, prefix+".dialogue_functions")
 		require(len(voice.ForbiddenMoves) > 0, prefix+".forbidden_moves")
 	}
@@ -710,76 +829,16 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		prefix := fmt.Sprintf("causal_simulation.dialogue_scene_blueprints[%d]", i)
 		require(blueprint.SceneID != "", prefix+".scene_id")
 		require(blueprint.DialogueMode != "", prefix+".dialogue_mode")
-		require(blueprint.ModeReason != "", prefix+".mode_reason")
 		require(blueprint.ScenePressure != "", prefix+".scene_pressure")
-		require(blueprint.EmotionalTemperature != "", prefix+".emotional_temperature")
 		require(blueprint.RelationshipFrame != "", prefix+".relationship_frame")
-		require(blueprint.Medium != "", prefix+".medium")
-		require(blueprint.AudiencePresence.Present != "", prefix+".audience_presence.present")
-		if !dialogueAudienceAbsent(blueprint.AudiencePresence.Present) {
-			require(blueprint.AudiencePresence.PerformanceFor != "", prefix+".audience_presence.performance_for")
-			require(blueprint.AudiencePresence.AudienceEffect != "", prefix+".audience_presence.audience_effect")
-		}
-		require(blueprint.InfoAsymmetry.POVLacks != "", prefix+".information_asymmetry.pov_lacks")
-		require(blueprint.InfoAsymmetry.OtherHolds != "", prefix+".information_asymmetry.other_holds")
-		require(blueprint.InfoAsymmetry.ReaderPosition != "", prefix+".information_asymmetry.reader_position")
-		require(blueprint.InfoAsymmetry.AsymmetryPlay != "", prefix+".information_asymmetry.asymmetry_play")
-		require(blueprint.ValueShift.Value != "", prefix+".value_shift.value")
-		require(blueprint.ValueShift.OpeningCharge != "", prefix+".value_shift.opening_charge")
-		require(blueprint.ValueShift.TurnTrigger != "", prefix+".value_shift.turn_trigger")
-		require(blueprint.ValueShift.ClosingCharge != "", prefix+".value_shift.closing_charge")
-		require(strings.TrimSpace(blueprint.ValueShift.ClosingCharge) != strings.TrimSpace(blueprint.ValueShift.OpeningCharge),
-			prefix+".value_shift.closing_charge(必须与 opening_charge 不同：没有价值翻转的对话场应该删除)")
-		require(blueprint.PowerTrajectory.OpeningHolder != "", prefix+".power_trajectory.opening_holder")
-		require(blueprint.PowerTrajectory.FlipBeat != "", prefix+".power_trajectory.flip_beat")
-		require(blueprint.PowerTrajectory.ClosingHolder != "", prefix+".power_trajectory.closing_holder")
-		mode := strings.ToLower(blueprint.DialogueMode)
-		if strings.Contains(mode, "group_council") {
-			require(len(blueprint.Participants) >= 3 || len(blueprint.ObjectiveTactics) >= 3, prefix+".participants(多人议事至少三方)")
-			require(blueprint.CoalitionShift != "", prefix+".coalition_shift")
-		}
-		if strings.Contains(mode, "overheard") {
-			require(blueprint.POVRole != "" && blueprint.POVRole != "participant", prefix+".pov_role(偷听场必须是 eavesdropper/bystander)")
-		}
-		if strings.Contains(mode, "public_confrontation") {
-			require(!dialogueAudienceAbsent(blueprint.AudiencePresence.Present), prefix+".audience_presence(公开对峙必须有第三方观众)")
-		}
-		require(blueprint.OpeningStrategy != "", prefix+".opening_strategy")
-		require(blueprint.FirstSpokenMoment != "", prefix+".first_spoken_moment")
 		require(blueprint.LocationAnchor != "", prefix+".location_anchor")
-		require(blueprint.POVState != "", prefix+".pov_state")
-		require(blueprint.InnerQuestion != "", prefix+".inner_question")
-		require(blueprint.MemoryBridge != "", prefix+".memory_bridge")
-		require(blueprint.IdentityGrounding != "", prefix+".identity_grounding")
 		require(blueprint.DialogueObjective != "", prefix+".dialogue_objective")
-		require(blueprint.InterlocutorAgenda != "", prefix+".interlocutor_agenda")
-		require(blueprint.ProtagonistResponseStrategy != "", prefix+".protagonist_response_strategy")
-		require(len(blueprint.ObjectiveTactics) > 0, prefix+".objective_tactics")
 		require(len(blueprint.TurnProgression) > 0, prefix+".turn_progression")
-		require(blueprint.DirectnessPolicy != "", prefix+".directness_policy")
-		require(blueprint.SubtextSource != "", prefix+".subtext_source")
-		require(blueprint.EscalationPattern != "", prefix+".escalation_pattern")
-		require(blueprint.BeatDensity != "", prefix+".beat_density")
-		require(blueprint.SilencePolicy != "", prefix+".silence_policy")
-		require(blueprint.InfoReleasePolicy != "", prefix+".info_release_policy")
-		require(blueprint.ExpositionBudget != "", prefix+".exposition_budget")
-		require(blueprint.SubtextAndPowerShift != "", prefix+".subtext_and_power_shift")
 		require(blueprint.ExitBeat != "", prefix+".exit_beat")
-		require(len(blueprint.DoNotUse) > 0, prefix+".do_not_use")
-		for j, tactic := range blueprint.ObjectiveTactics {
-			tacticPrefix := fmt.Sprintf("%s.objective_tactics[%d]", prefix, j)
-			require(tactic.Character != "", tacticPrefix+".character")
-			require(tactic.ImmediateObjective != "", tacticPrefix+".immediate_objective")
-			require(tactic.Tactic != "", tacticPrefix+".tactic")
-			require(tactic.CounterTactic != "", tacticPrefix+".counter_tactic")
-			require(tactic.EmotionalLeak != "", tacticPrefix+".emotional_leak")
-			require(tactic.TurnResult != "", tacticPrefix+".turn_result")
-		}
 		for j, turn := range blueprint.TurnProgression {
 			turnPrefix := fmt.Sprintf("%s.turn_progression[%d]", prefix, j)
 			require(turn.Speaker != "", turnPrefix+".speaker")
 			require(turn.SurfaceLineFunction != "", turnPrefix+".surface_line_function")
-			require(turn.HiddenSubtext != "", turnPrefix+".hidden_subtext")
 			require(turn.NewInformation != "" || turn.PowerMove != "", turnPrefix+".new_information/power_move")
 			require(turn.ActionBeat != "", turnPrefix+".action_beat")
 			require(turn.NextPressure != "", turnPrefix+".next_pressure")
@@ -816,25 +875,12 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	for i, emo := range sim.EmotionalLogic {
 		prefix := fmt.Sprintf("causal_simulation.emotional_logic[%d]", i)
 		require(emo.Character != "", prefix+".character")
-		require(emo.PhysiologicalState != "", prefix+".physiological_state")
 		require(emo.ImmediateState != "", prefix+".immediate_state")
 		require(emo.PrimaryEmotion != "", prefix+".primary_emotion")
-		require(emo.CompositeEmotion != "", prefix+".composite_emotion")
 		require(emo.EmotionalTrigger != "", prefix+".emotional_trigger")
 		require(emo.GoalAppraisal != "", prefix+".goal_appraisal")
-		require(emo.BoundaryThreat != "", prefix+".boundary_threat")
 		require(emo.RegulationStrategy != "", prefix+".regulation_strategy")
-		require(emo.DefenseMechanism != "", prefix+".defense_mechanism")
-		require(emo.CognitiveBias != "", prefix+".cognitive_bias")
-		require(emo.ApproachAvoidance != "", prefix+".approach_avoidance")
-		require(emo.ShortLongTermTension != "", prefix+".short_long_term_tension")
-		require(emo.SelfRelationshipTension != "", prefix+".self_relationship_tension")
-		require(emo.ConsciousReason != "", prefix+".conscious_reason")
-		require(emo.HiddenReason != "", prefix+".hidden_reason")
-		require(emo.MeaningNeed != "", prefix+".meaning_need")
-		require(emo.Metacognition != "", prefix+".metacognition")
 		require(emo.EmotionLedAction != "", prefix+".emotion_led_action")
-		require(emo.EventCompletionRole != "", prefix+".event_completion_role")
 		require(len(emo.EvidenceInScene) > 0, prefix+".evidence_in_scene")
 	}
 	for i, arc := range sim.RelationshipArcs {
@@ -1020,29 +1066,39 @@ func hasNarrativeTensionMatrix(matrix domain.NarrativeTensionMatrix) bool {
 		strings.TrimSpace(matrix.POVBoundary) != ""
 }
 
+func hasFocusedAntiAIExecutionPlan(plan domain.AntiAIExecutionPlan) bool {
+	return len(plan.RiskSignals) > 0 &&
+		len(plan.CounterMoves) > 0 &&
+		strings.TrimSpace(plan.SentenceRhythmPolicy) != "" &&
+		strings.TrimSpace(plan.DialogueFunctionPlan) != "" &&
+		len(plan.ReviewChecks) > 0
+}
+
+func voiceLogicContainsCharacter(records []domain.CharacterVoiceLogic, character string) bool {
+	character = strings.TrimSpace(character)
+	for _, record := range records {
+		if strings.TrimSpace(record.Character) == character {
+			return true
+		}
+	}
+	return false
+}
+
 func hasReaderRewardPlan(plan domain.ReaderRewardPlan) bool {
-	return strings.TrimSpace(plan.ChapterWindow) != "" &&
-		strings.TrimSpace(plan.FirstChapterSmallWin) != "" &&
+	return strings.TrimSpace(plan.FirstChapterSmallWin) != "" &&
 		strings.TrimSpace(plan.NewDebtOrCost) != "" &&
 		strings.TrimSpace(plan.PayoffVisibility) != "" &&
-		strings.TrimSpace(plan.TrafficRisk) != "" &&
-		len(plan.RewardLadder) > 0
+		len(plan.ForbiddenRewardPatterns) > 0
 }
 
 func hasReaderRetentionPlan(plan domain.ReaderRetentionPlan) bool {
-	if len(plan.SurfaceBeats) == 0 ||
-		len(plan.LatentContext) == 0 ||
-		len(plan.RevealBudget) == 0 ||
-		len(plan.CutOrCompress) == 0 ||
-		len(plan.PageTurnQuestions) == 0 {
+	if len(plan.SurfaceBeats) == 0 || len(plan.CutOrCompress) == 0 || len(plan.PageTurnQuestions) == 0 {
 		return false
 	}
 	for _, beat := range plan.SurfaceBeats {
-		if strings.TrimSpace(beat.PlanSource) != "" &&
-			strings.TrimSpace(beat.MustShow) != "" &&
+		if strings.TrimSpace(beat.MustShow) != "" &&
 			strings.TrimSpace(beat.ReaderPayoff) != "" &&
-			strings.TrimSpace(beat.SceneVehicle) != "" &&
-			strings.TrimSpace(beat.ProofOnPage) != "" {
+			strings.TrimSpace(beat.SceneVehicle) != "" {
 			return true
 		}
 	}
@@ -1054,14 +1110,172 @@ func hasEndingConsequenceContract(contract domain.EndingConsequenceContract) boo
 		strings.TrimSpace(contract.ConcreteAnchor) != "" &&
 		strings.TrimSpace(contract.Consequence) != "" &&
 		strings.TrimSpace(contract.NextChapterPull) != "" &&
-		strings.TrimSpace(contract.WhyNotUI) != "" &&
 		len(contract.ForbiddenEndings) > 0
 }
 
-// causalSimulationSchema 构建 causal_simulation 的 JSONSchema。
-// strict=true（plan_chapter 单发提交）要求全部核心块必填；
-// strict=false（plan_details 分批提交）允许每批只带部分字段，完整性由 finalize 时的服务端校验兜底。
+// causalSimulationSchema 的分批路径只暴露正文真正依赖的紧凑契约，完整性由
+// finalize 的服务端校验兜底。单发路径暂保留兼容 schema，旧调用不会失效。
 func causalSimulationSchema(strict bool) map[string]any {
+	if strict {
+		return legacyCausalSimulationSchema(true)
+	}
+	return focusedCausalSimulationSchema()
+}
+
+func focusedCausalSimulationSchema() map[string]any {
+	initialState := schema.Object(
+		schema.Property("character", schema.String("角色实名")).Required(),
+		schema.Property("current_goal", schema.String("开章时的具体目标")).Required(),
+		schema.Property("pressure", schema.String("当前外部或内部压力")).Required(),
+		schema.Property("action_tendency", schema.String("按当前信息最可能先做什么")).Required(),
+		schema.Property("likely_action", schema.String("本章最可能采取的行动")),
+		schema.Property("private_boundary", schema.String("不能说或不能越过的边界")),
+		schema.Property("resources", schema.Array("可用资源", schema.String(""))),
+		schema.Property("misbeliefs", schema.Array("误判或未知", schema.String(""))),
+		schema.Property("skill_limits", schema.Array("当前能力边界", schema.String(""))),
+		schema.Property("plausible_mistakes", schema.Array("合理会犯的错误", schema.String(""))),
+	)
+	offscreenStage := schema.Object(
+		schema.Property("character", schema.String("角色实名")).Required(),
+		schema.Property("location", schema.String("本章时段的位置")).Required(),
+		schema.Property("current_action", schema.String("此刻行动")).Required(),
+		schema.Property("decision", schema.String("本章选择")).Required(),
+		schema.Property("knowledge_boundary", schema.String("知道和不知道什么")).Required(),
+		schema.Property("timeline_consistency", schema.String("与主线时间如何同步")).Required(),
+		schema.Property("visible_in_chapter", schema.Bool("是否直接出现在正文")),
+		schema.Property("status", schema.String("当前状态")),
+		schema.Property("pressure", schema.String("当前压力")),
+		schema.Property("transport", schema.String("移动方式；未移动可写原地")),
+		schema.Property("travel_time", schema.String("现实尺度耗时")),
+	)
+	environmentState := schema.Object(
+		schema.Property("place", schema.String("地点或物件")).Required(),
+		schema.Property("visible_state", schema.String("读者可见状态")).Required(),
+		schema.Property("information_carried", schema.String("承载的信息")),
+		schema.Property("pressure_applied", schema.String("对选择施加的压力")).Required(),
+		schema.Property("expected_change", schema.String("章末变化")).Required(),
+	)
+	causalBeat := schema.Object(
+		schema.Property("cause", schema.String("前置事实")).Required(),
+		schema.Property("character_choice", schema.String("角色选择")).Required(),
+		schema.Property("world_response", schema.String("环境、关系或规则反馈")).Required(),
+		schema.Property("story_result", schema.String("状态后果")).Required(),
+	)
+	voiceLogic := schema.Object(
+		schema.Property("character", schema.String("角色实名")).Required(),
+		schema.Property("scene_objective", schema.String("对话中要达成的目的")).Required(),
+		schema.Property("hidden_subtext", schema.String("未明说的内容")).Required(),
+		schema.Property("knowledge_boundary", schema.String("台词不能越过的信息边界")).Required(),
+		schema.Property("diction_and_rhythm", schema.String("词汇和节奏特征")).Required(),
+		schema.Property("silence_or_action_beat", schema.String("沉默或动作承接")).Required(),
+		schema.Property("dialogue_functions", schema.Array("对白承担的功能", schema.String(""))).Required(),
+		schema.Property("forbidden_moves", schema.Array("禁用声口和表达", schema.String(""))).Required(),
+	)
+	dialogueTurn := schema.Object(
+		schema.Property("speaker", schema.String("说话人")).Required(),
+		schema.Property("surface_line_function", schema.String("表层台词功能")).Required(),
+		schema.Property("hidden_subtext", schema.String("潜台词")),
+		schema.Property("new_information", schema.String("新增信息")),
+		schema.Property("power_move", schema.String("权力变化")),
+		schema.Property("action_beat", schema.String("动作或停顿")).Required(),
+		schema.Property("next_pressure", schema.String("下一压力点")).Required(),
+	)
+	dialogueBlueprint := schema.Object(
+		schema.Property("scene_id", schema.String("场景标识")).Required(),
+		schema.Property("dialogue_mode", schema.String("对话模式")).Required(),
+		schema.Property("scene_pressure", schema.String("场景压力")).Required(),
+		schema.Property("relationship_frame", schema.String("关系和权力位置")).Required(),
+		schema.Property("location_anchor", schema.String("现场锚点")).Required(),
+		schema.Property("dialogue_objective", schema.String("对白必须完成的剧情功能")).Required(),
+		schema.Property("turn_progression", schema.Array("至少一轮改变信息或压力的对白", dialogueTurn)).Required(),
+		schema.Property("exit_beat", schema.String("退出对白的现场后果")).Required(),
+	)
+	emotionalLogic := schema.Object(
+		schema.Property("character", schema.String("角色实名")).Required(),
+		schema.Property("immediate_state", schema.String("即时状态")).Required(),
+		schema.Property("primary_emotion", schema.String("主要情绪")).Required(),
+		schema.Property("emotional_trigger", schema.String("触发事件")).Required(),
+		schema.Property("goal_appraisal", schema.String("对目标的影响判断")).Required(),
+		schema.Property("regulation_strategy", schema.String("角色如何压住或处理情绪")).Required(),
+		schema.Property("emotion_led_action", schema.String("情绪推动的可见行动")).Required(),
+		schema.Property("evidence_in_scene", schema.Array("正文可见证据", schema.String(""))).Required(),
+	)
+	antiAI := schema.Object(
+		schema.Property("risk_signals", schema.Array("本章高风险 AI 味", schema.String(""))).Required(),
+		schema.Property("counter_moves", schema.Array("对应阻断动作", schema.String(""))).Required(),
+		schema.Property("sentence_rhythm_policy", schema.String("句长和段落节奏")).Required(),
+		schema.Property("object_response_budget", schema.String("屏幕、物件回应预算")),
+		schema.Property("dialogue_function_plan", schema.String("对白功能分配")).Required(),
+		schema.Property("review_checks", schema.Array("提交前检查项", schema.String(""))).Required(),
+	)
+	rewardPlan := schema.Object(
+		schema.Property("chapter_window", schema.String("兑现窗口")),
+		schema.Property("first_chapter_small_win", schema.String("本章可见小胜")).Required(),
+		schema.Property("new_debt_or_cost", schema.String("小胜后的新代价")).Required(),
+		schema.Property("payoff_visibility", schema.String("读者如何看见兑现")).Required(),
+		schema.Property("traffic_risk", schema.String("可能导致流失的风险")),
+		schema.Property("forbidden_reward_patterns", schema.Array("禁用的虚假爽点", schema.String(""))).Required(),
+	)
+	retentionBeat := schema.Object(
+		schema.Property("plan_source", schema.String("对应计划来源")),
+		schema.Property("must_show", schema.String("正文必须展示的事件")).Required(),
+		schema.Property("reader_payoff", schema.String("读者获得什么")).Required(),
+		schema.Property("scene_vehicle", schema.String("用什么场景承载")).Required(),
+		schema.Property("proof_on_page", schema.String("页面证据")),
+	)
+	retentionPlan := schema.Object(
+		schema.Property("surface_beats", schema.Array("正文显性节拍", retentionBeat)).Required(),
+		schema.Property("latent_context", schema.Array("只留后台的上下文", schema.String(""))),
+		schema.Property("reveal_budget", schema.Array("延后解释的内容", schema.String(""))),
+		schema.Property("cut_or_compress", schema.Array("删除或压缩内容", schema.String(""))).Required(),
+		schema.Property("page_turn_questions", schema.Array("带入下一章的问题", schema.String(""))).Required(),
+	)
+	endingContract := schema.Object(
+		schema.Property("ending_mode", schema.String("章末模式")).Required(),
+		schema.Property("concrete_anchor", schema.String("章末具体物件、动作或提示")).Required(),
+		schema.Property("consequence", schema.String("已发生且不能撤销的后果")).Required(),
+		schema.Property("next_chapter_pull", schema.String("与下一章的直接承接")).Required(),
+		schema.Property("why_not_ui", schema.String("为何不是空 UI 提示")),
+		schema.Property("forbidden_endings", schema.Array("禁用收尾", schema.String(""))).Required(),
+	)
+	reviewRefinement := schema.Object(
+		schema.Property("trigger_sources", schema.Array("审核或 rewrite brief 来源", schema.String(""))).Required(),
+		schema.Property("failure_modes", schema.Array("本轮失败类型", schema.String(""))).Required(),
+		schema.Property("localized_targets", schema.Array("局部修复目标", schema.String(""))).Required(),
+		schema.Property("preserve_constraints", schema.Array("必须保留内容", schema.String(""))).Required(),
+		schema.Property("replanning_moves", schema.Array("重规划动作", schema.String(""))).Required(),
+		schema.Property("acceptance_checks", schema.Array("验收问题", schema.String(""))).Required(),
+		schema.Property("stop_condition", schema.String("停止继续整章重写的条件")).Required(),
+		schema.Property("iteration_limit", schema.Int("同类失败最多迭代次数")).Required(),
+	)
+	return schema.Object(
+		schema.Property("world_simulation_id", schema.String("simulate_chapter_world finalize 返回的稳定 ID")),
+		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
+		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺")),
+		schema.Property("chapter_function", schema.String("本章在全书中的功能")),
+		schema.Property("context_sources", schema.Array("本次实际使用的上下文来源", schema.String(""))),
+		schema.Property("initial_state", schema.Array("只需覆盖主角；同场关键人可按需增加", initialState)),
+		schema.Property("offscreen_character_stage", schema.Array("仅写本章相关人物；非本章角色不必填", offscreenStage)),
+		schema.Property("environment_state", schema.Array("现场环境和物件状态", environmentState)),
+		schema.Property("causal_beats", schema.Array("触发、选择、反馈、后果", causalBeat)),
+		schema.Property("decision_points", schema.Array("必须落成的选择", schema.String(""))),
+		schema.Property("outcome_shift", schema.Array("章末状态变化", schema.String(""))),
+		schema.Property("voice_logic", schema.Array("至少覆盖主角声口", voiceLogic)),
+		schema.Property("dialogue_scene_blueprints", schema.Array("关键对白场景", dialogueBlueprint)),
+		schema.Property("emotional_logic", schema.Array("至少覆盖主角的情绪到行动", emotionalLogic)),
+		schema.Property("anti_ai_execution_plan", antiAI),
+		schema.Property("reader_reward_plan", rewardPlan),
+		schema.Property("reader_retention_plan", retentionPlan),
+		schema.Property("ending_consequence_contract", endingContract),
+		schema.Property("review_refinement", reviewRefinement),
+		schema.Property("world_rules_in_force", schema.Array("本章实际施压的规则", schema.String(""))),
+		schema.Property("information_gaps", schema.Array("信息差和未授权内容", schema.String(""))),
+		schema.Property("scene_constraints", schema.Array("视角、解释和场景限制", schema.String(""))),
+	)
+}
+
+// legacyCausalSimulationSchema 保留旧单发 plan_chapter 的完整输入契约。
+func legacyCausalSimulationSchema(strict bool) map[string]any {
 	req := func(p schema.Prop) schema.Prop {
 		if strict {
 			return p.Required()
@@ -1611,6 +1825,8 @@ func causalSimulationSchema(strict bool) map[string]any {
 		schema.Property("story_result", schema.String("该反馈带来的剧情后果或状态位移")),
 	)
 	causalSimulation := schema.Object(
+		schema.Property("world_simulation_id", schema.String("simulate_chapter_world finalize 返回的稳定 ID")),
+		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、可见事实回收、升级爽点等")),
 		schema.Property("chapter_function", schema.String("本章在全书/卷/弧中的功能；第一章必须写明开局承诺、核心问题和主角初始选择")),
 		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),

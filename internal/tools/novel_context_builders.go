@@ -236,6 +236,7 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	warn("run_meta", err)
 	state.progress = progress
 	state.runMeta = runMeta
+	isRewrite := progress != nil && slices.Contains(progress.PendingRewrites, chapter)
 
 	if runMeta != nil && runMeta.PlanningTier != "" {
 		envelope.Episodic["planning_tier"] = runMeta.PlanningTier
@@ -255,8 +256,38 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	}
 	state.currentEntry = currentEntry
 
+	partialPlan, partialPlanErr := t.store.Drafts.LoadChapterPlanPartial(chapter)
+	if partialPlanErr != nil {
+		warn("chapter_plan_partial", partialPlanErr)
+	}
 	chapterPlan, chapterPlanErr := t.store.Drafts.LoadChapterPlan(chapter)
-	if chapterPlanErr == nil && chapterPlan != nil {
+	if partialPlan != nil {
+		// 两阶段规划已开始时，正式 plan 仍是上一轮旧版本。把它注入会让 Writer
+		// 同时看到“旧正式计划”和“当前 staged plan”，在返工场景尤其容易误判目标。
+		// partial 的完整内容由 plan_structure/plan_details 在工具侧持有，这里只暴露
+		// 阶段状态；收口为正式 plan 后下一次 novel_context 会自然恢复完整计划。
+		causalFields := make([]string, 0)
+		if causal, ok := partialPlan["causal_simulation"].(map[string]any); ok {
+			for key := range causal {
+				causalFields = append(causalFields, key)
+			}
+			sort.Strings(causalFields)
+		}
+		envelope.Working["chapter_plan_stage"] = map[string]any{
+			"status":                "partial",
+			"chapter":               chapter,
+			"causal_fields_present": causalFields,
+			"policy":                "当前 staged plan 是唯一规划真相；不要读取或复述上一轮正式 plan。继续 plan_details 补最小缺项并 finalize，禁止转去下一章。",
+		}
+		chapterPlan = nil
+	} else if chapterPlanErr == nil && chapterPlan != nil && isRewrite && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.plan.json", chapter)) {
+		envelope.Working["chapter_plan_stage"] = map[string]any{
+			"status":  "stale_for_rewrite",
+			"chapter": chapter,
+			"policy":  "旧正式 plan 的修改时间不晚于待返工终稿，不能作为本轮规划事实；请按 current_chapter_outline 与 rewrite_brief 重新 plan_structure。",
+		}
+		chapterPlan = nil
+	} else if chapterPlanErr == nil && chapterPlan != nil {
 		envelope.Working["chapter_plan"] = chapterPlan
 		if len(chapterPlan.Contract.RequiredBeats) > 0 ||
 			len(chapterPlan.Contract.ForbiddenMoves) > 0 ||
@@ -272,7 +303,7 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 			envelope.Working["causal_simulation"] = chapterPlan.CausalSimulation
 			envelope.Working["causal_simulation_policy"] = "causal_simulation 是原章节计划的同源增强：必须服从 current_chapter_outline、chapter_contract、progression_snapshot、project_progress、resource_audit、user_rules 和 writing_engine；voice_logic 用于约束人物声口和说话逻辑；review_refinement 用于审核失败后的反馈来源、局部目标、保留约束、验收条件和停止条件；正文仍按原 plan->draft->check->commit 逻辑产出，返工章必须先吸收 rewrite_brief 审核结论再重建推演，不能另起大纲或绕开契约。"
 		}
-	} else {
+	} else if chapterPlanErr != nil {
 		warn("chapter_plan", chapterPlanErr)
 	}
 	state.chapterPlan = chapterPlan
@@ -285,15 +316,20 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	t.buildMethodologyContext(envelope.Working)
 	t.buildHorizonEvents(envelope.Working, chapter, warn)
 
-	// 是否正在重写本章：决定 novel_context 是否补"重写专用"事实。
-	isRewrite := progress != nil && slices.Contains(progress.PendingRewrites, chapter)
-
 	// 暴露 draft 是否已存在的事实：让 writer 被重派时能自行判断跳过重写还是覆盖。
 	// 只暴露 exists + word_count，不注入正文（正文让 writer 按需用 read_chapter 拉）。
 	if _, draftWords, draftErr := t.store.Drafts.LoadChapterContent(chapter); draftErr == nil && draftWords > 0 {
-		envelope.Working["chapter_draft"] = map[string]any{
-			"exists":     true,
-			"word_count": draftWords,
+		if isRewrite && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.draft.md", chapter)) {
+			envelope.Working["chapter_draft_stage"] = map[string]any{
+				"status":     "stale_for_rewrite",
+				"word_count": draftWords,
+				"policy":     "旧 draft 的修改时间不晚于待返工终稿；重规划阶段只用 rewrite_brief，正式 plan 收口后才可由 Drafter 按需读取旧终稿，本轮必须生成新 draft 覆盖它。",
+			}
+		} else {
+			envelope.Working["chapter_draft"] = map[string]any{
+				"exists":     true,
+				"word_count": draftWords,
+			}
 		}
 	} else if draftErr != nil {
 		warn("chapter_draft", draftErr)
@@ -382,6 +418,11 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 			warn("rewrite_ai_voice_redflags", aiErr)
 		}
 		envelope.Working["rewrite_brief"] = brief
+		if source, body, markdown, sourceErr := loadChapterRewriteSource(t.store, chapter); sourceErr == nil && source != nil {
+			envelope.Working["rewrite_source"] = rewriteSourceContext(source, body, markdown)
+		} else if sourceErr != nil {
+			warn("rewrite_source", sourceErr)
+		}
 	}
 
 	foreshadow, foreshadowErr := t.store.World.LoadActiveForeshadow()
@@ -428,8 +469,22 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	return state
 }
 
+func chapterArtifactNotNewerThanFinal(dir string, chapter int, artifact string) bool {
+	artifactInfo, err := os.Stat(filepath.Join(dir, filepath.FromSlash(artifact)))
+	if err != nil {
+		return false
+	}
+	finalInfo, err := os.Stat(filepath.Join(dir, "chapters", fmt.Sprintf("%02d.md", chapter)))
+	if err != nil {
+		return false
+	}
+	return !artifactInfo.ModTime().After(finalInfo.ModTime())
+}
+
 func hasChapterCausalSimulation(sim domain.ChapterCausalSimulation) bool {
-	return sim.ProjectPromise != "" ||
+	return sim.WorldSimulationID != "" ||
+		sim.ProtagonistDecision != "" ||
+		sim.ProjectPromise != "" ||
 		sim.ChapterFunction != "" ||
 		len(sim.ContextSources) > 0 ||
 		len(sim.WritingNorms) > 0 ||
@@ -503,7 +558,7 @@ func hasLongformOpeningDesign(opening domain.LongformOpeningDesign) bool {
 		len(opening.RetentionRisks) > 0
 }
 
-func (t *ContextTool) buildChapterContext(result map[string]any, state contextBuildState, warn func(string, error)) {
+func (t *ContextTool) buildChapterContext(ctx context.Context, result map[string]any, state contextBuildState, warn func(string, error)) {
 	envelope := newChapterContextEnvelope()
 	result["memory_policy"] = domain.NewChapterMemoryPolicy(state.progress, state.profile, state.currentEntry != nil)
 
@@ -516,7 +571,7 @@ func (t *ContextTool) buildChapterContext(result map[string]any, state contextBu
 	t.buildChapterEpisodicMemory(&envelope, state, warn)
 	t.buildChapterWorkingMemory(&envelope, state, warn)
 	t.buildChapterReferencePack(&envelope, state, warn)
-	t.buildChapterSelectedMemory(&envelope, state, warn)
+	t.buildChapterSelectedMemory(ctx, &envelope, state, warn)
 	t.buildStyleStats(&envelope, state)
 	envelope.apply(result)
 }
@@ -584,16 +639,30 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 		warn("simulation_restart_policy", restartErr)
 	}
 	suppressLegacyState := shouldSuppressLegacyStateForRestart(restartPolicy, state.progress)
+	isRewriteTarget := state.progress != nil && slices.Contains(state.progress.PendingRewrites, state.chapter)
 	if suppressLegacyState {
 		envelope.Working["legacy_state_policy"] = "检测到 simulation_restart_policy 与 progress.generation_id 不一致；已压制旧 chapter_progress/project_progress/evolution_report/character_continuity，避免旧章节事实污染新推演。正式生成前应先运行 --zero-init --reset-simulation-state。"
 	} else {
 		if ledger, err := t.store.LoadChapterProgressLedger(); err == nil && ledger != nil {
-			envelope.Working["progression_snapshot"] = compactProgressionSnapshot(ledger, state.chapter)
+			snapshot := compactProgressionSnapshot(ledger, state.chapter)
+			if isRewriteTarget {
+				delete(snapshot, "next_plan")
+				delete(snapshot, "next_plan_warning")
+				snapshot["active_rewrite_chapter"] = state.chapter
+				snapshot["usage"] = "当前任务是返工 active_rewrite_chapter；只用 recent_entries 核对返工前事实。下一新章计划已暂时隐藏，待返工提交并通过审核后再读取。"
+			}
+			envelope.Working["progression_snapshot"] = snapshot
 		} else {
 			warn("chapter_progress", err)
 		}
 		if ledger, err := t.store.LoadProjectProgressLedger(); err == nil && ledger != nil {
-			envelope.Working["project_progress"] = compactProjectProgressSnapshot(ledger, state.chapter)
+			snapshot := compactProjectProgressSnapshot(ledger, state.chapter)
+			if isRewriteTarget {
+				delete(snapshot, "next_chapter_actions")
+				snapshot["active_rewrite_chapter"] = state.chapter
+				snapshot["usage"] = "当前任务是返工 active_rewrite_chapter；项目级未来动作暂时隐藏，只保留范围、承诺、资源、伏笔和关系连续性约束。"
+			}
+			envelope.Working["project_progress"] = snapshot
 		} else {
 			warn("project_progress", err)
 		}
@@ -603,7 +672,13 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 			warn("evolution_report", err)
 		}
 		if ledger, err := t.store.LoadCharacterContinuityLedger(); err == nil && ledger != nil {
-			envelope.Working["character_continuity"] = compactCharacterContinuitySnapshot(ledger, state.chapter)
+			snapshot := compactCharacterContinuitySnapshot(ledger, state.chapter)
+			if isRewriteTarget {
+				delete(snapshot, "next_chapter_focus")
+				snapshot["active_rewrite_chapter"] = state.chapter
+				snapshot["usage"] = "当前任务是返工 active_rewrite_chapter；按既有人物状态与知识边界修复本章，下一新章焦点暂时隐藏。"
+			}
+			envelope.Working["character_continuity"] = snapshot
 		} else {
 			warn("character_continuity", err)
 		}
@@ -660,12 +735,16 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 		warn("chapter_world_deltas", err)
 	}
 
-	if next, err := t.store.Outline.GetChapterOutline(state.chapter + 1); err == nil && next != nil {
-		envelope.Working["next_chapter_outline"] = next
-	}
-	if future := t.futureOutlineWindow(state.chapter, 4); len(future) > 0 {
-		envelope.Working["future_outline_window"] = future
-		envelope.Working["future_outline_policy"] = "写正文前必须同时核对当前章及后续3-4章大纲，确保本章选择、伏笔、资源和人物状态服务本卷/本弧后续推进；不得只顾当前单章爽点。"
+	if isRewriteTarget {
+		envelope.Working["future_outline_policy"] = "当前处于返工阶段，只使用 current_chapter_outline 与 rewrite_brief 重建本章；next_chapter_outline 和 future_outline_window 已隐藏，禁止续写未来章。"
+	} else {
+		if next, err := t.store.Outline.GetChapterOutline(state.chapter + 1); err == nil && next != nil {
+			envelope.Working["next_chapter_outline"] = next
+		}
+		if future := t.futureOutlineWindow(state.chapter, 4); len(future) > 0 {
+			envelope.Working["future_outline_window"] = future
+			envelope.Working["future_outline_policy"] = "写正文前必须同时核对当前章及后续3-4章大纲，确保本章选择、伏笔、资源和人物状态服务本卷/本弧后续推进；不得只顾当前单章爽点。"
+		}
 	}
 
 	if !suppressLegacyState {
@@ -1037,11 +1116,11 @@ func compactCharacterContinuitySnapshot(ledger *domain.CharacterContinuityLedger
 	return snapshot
 }
 
-func (t *ContextTool) buildChapterSelectedMemory(envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) {
+func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) {
 	if len(state.storyThreads) > 0 {
 		envelope.Selected["story_threads"] = state.storyThreads
 	}
-	if ragItems, trace := t.selectRAGRecall(state); len(ragItems) > 0 {
+	if ragItems, trace := t.selectRAGRecall(ctx, state); len(ragItems) > 0 {
 		envelope.Selected["rag_recall"] = ragItems
 		envelope.References["retrieval_trace"] = trace
 		if trace != nil {
@@ -1642,7 +1721,7 @@ func stateFocusText(state contextBuildState) string {
 	return strings.Join(parts, " ")
 }
 
-func (t *ContextTool) selectRAGRecall(state contextBuildState) ([]domain.RecallItem, *domain.RetrievalTrace) {
+func (t *ContextTool) selectRAGRecall(ctx context.Context, state contextBuildState) ([]domain.RecallItem, *domain.RetrievalTrace) {
 	focus := stateFocusText(state)
 	queryFields := recallFocusTerms(state.currentEntry, state.chapterPlan)
 	queryFields = append(queryFields, state.chapterParticipants...)
@@ -1679,20 +1758,12 @@ func (t *ContextTool) selectRAGRecall(state contextBuildState) ([]domain.RecallI
 	// BM25 词法通道：与向量召回互补（专名、门牌、条款编号等精确词命中）。
 	// 向量路径做加性混合，无 embedder 时作为 fallback 的主干排序信号。
 	bm25Query := ragQueryEmbeddingText(focus, queryFields, terms)
+	ragState, ragStateErr := t.store.RAG.LoadIndexStateReadOnly()
 	addBM25 := func() bool {
-		ragState, err := t.store.RAG.LoadIndexState()
-		if err != nil || ragState == nil || len(ragState.Chunks) == 0 {
+		if ragStateErr != nil || ragState == nil || len(ragState.Chunks) == 0 {
 			return false
 		}
-		// 排除手法库/对标库：词法通道同样只检索本书事实，外部材料不占召回名额。
-		factChunks := make([]domain.RAGChunk, 0, len(ragState.Chunks))
-		for _, chunk := range ragState.Chunks {
-			if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
-				continue
-			}
-			factChunks = append(factChunks, chunk)
-		}
-		hits := rag.BuildBM25Index(factChunks).Search(bm25Query, maxRAGRecallResults*3)
+		hits := t.cachedProjectBM25(ragState).Search(bm25Query, maxRAGRecallResults*3)
 		if len(hits) == 0 {
 			return false
 		}
@@ -1704,37 +1775,64 @@ func (t *ContextTool) selectRAGRecall(state contextBuildState) ([]domain.RecallI
 	}
 
 	if t.ragEmbedder != nil {
-		if queryVector, err := t.ragEmbedder.Embed(context.Background(), ragQueryEmbeddingText(focus, queryFields, terms)); err == nil {
+		embedCtx, cancelEmbed := context.WithTimeout(ctx, 20*time.Second)
+		queryVector, embedErr := t.ragEmbedder.Embed(embedCtx, bm25Query)
+		cancelEmbed()
+		if embedErr == nil && len(queryVector) > 0 {
+			qdrantState := "not_configured"
 			if t.ragVectorSearcher != nil {
-				if hits, err := t.ragVectorSearcher.Search(context.Background(), queryVector, maxRAGRecallResults*3); err == nil {
+				searchCtx, cancelSearch := context.WithTimeout(ctx, 8*time.Second)
+				hits, searchErr := t.ragVectorSearcher.Search(searchCtx, queryVector, maxRAGRecallResults*3)
+				cancelSearch()
+				if searchErr == nil {
+					qdrantState = "empty"
 					for _, hit := range hits {
 						addScore(hit.Point.Chunk, hit.Score*3.5, fmt.Sprintf("qdrant:%.3f", hit.Score))
 					}
-					strategy := "qdrant_vector_engine_v1"
-					if addBM25() {
-						strategy = "qdrant_bm25_hybrid_v1"
+					if len(hits) > 0 {
+						strategy := "qdrant_vector_engine_v2"
+						if addBM25() {
+							strategy = "qdrant_bm25_hybrid_v2"
+						}
+						return finishRAGRecall(scoredByID, focus, terms, strategy)
 					}
-					return finishRAGRecall(scoredByID, focus, terms, strategy)
 				} else {
-					return nil, nil
+					qdrantState = "error"
 				}
 			}
-			if vectorStore, err := t.store.RAG.LoadVectorStore(); err == nil && vectorStore != nil && len(vectorStore.Points) > 0 {
-				for _, hit := range rag.SearchVectorStore(vectorStore, queryVector, maxRAGRecallResults*3) {
+
+			if vectorStore, err := t.store.RAG.LoadVectorStoreReadOnly(); err == nil && vectorStore != nil && len(vectorStore.Points) > 0 {
+				localHits := rag.SearchVectorStore(vectorStore, queryVector, maxRAGRecallResults*3)
+				for _, hit := range localHits {
 					addScore(hit.Point.Chunk, hit.Score*3.0, fmt.Sprintf("vector:%.3f", hit.Score))
 				}
-				strategy := "local_vector_store_fallback_v1"
-				if addBM25() {
-					strategy = "local_vector_bm25_hybrid_v1"
+				if len(localHits) > 0 {
+					strategy := "local_vector_bm25_hybrid_v2"
+					if qdrantState == "error" {
+						strategy = "qdrant_error_local_vector_bm25_fallback_v2"
+					} else if qdrantState == "empty" {
+						strategy = "qdrant_empty_local_vector_bm25_fallback_v2"
+					}
+					_ = addBM25()
+					return finishRAGRecall(scoredByID, focus, terms, strategy)
+				}
+			}
+			if addBM25() {
+				strategy := "semantic_empty_bm25_fallback_v2"
+				if qdrantState == "error" {
+					strategy = "qdrant_error_bm25_fallback_v2"
 				}
 				return finishRAGRecall(scoredByID, focus, terms, strategy)
 			}
+			return nil, nil
+		}
+		if addBM25() {
+			return finishRAGRecall(scoredByID, focus, terms, "embedding_error_bm25_fallback_v2")
 		}
 		return nil, nil
 	}
 
-	ragState, err := t.store.RAG.LoadIndexState()
-	if err != nil || ragState == nil || len(ragState.Chunks) == 0 {
+	if ragStateErr != nil || ragState == nil || len(ragState.Chunks) == 0 {
 		return nil, nil
 	}
 	for _, chunk := range ragState.Chunks {
@@ -1797,6 +1895,27 @@ func (t *ContextTool) selectRAGRecall(state contextBuildState) ([]domain.RecallI
 		strategy = "local_bm25_keyword_hybrid_v1"
 	}
 	return finishRAGRecall(scoredByID, focus, terms, strategy)
+}
+
+func (t *ContextTool) cachedProjectBM25(state *domain.RAGIndexState) *rag.BM25Index {
+	if state == nil {
+		return rag.BuildBM25Index(nil)
+	}
+	t.ragBM25Mu.Lock()
+	defer t.ragBM25Mu.Unlock()
+	if t.ragBM25Index != nil && t.ragBM25State == state {
+		return t.ragBM25Index
+	}
+	factChunks := make([]domain.RAGChunk, 0, len(state.Chunks))
+	for _, chunk := range state.Chunks {
+		if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			continue
+		}
+		factChunks = append(factChunks, chunk)
+	}
+	t.ragBM25Index = rag.BuildBM25Index(factChunks)
+	t.ragBM25State = state
+	return t.ragBM25Index
 }
 
 type ragScored struct {

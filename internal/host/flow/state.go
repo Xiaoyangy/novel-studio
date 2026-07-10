@@ -48,9 +48,12 @@ func LoadState(store *storepkg.Store) State {
 
 	// 阶段拆分：判断下一个要处理章节的计划是否已就绪可渲染。
 	if len(progress.PendingRewrites) > 0 {
-		s.NextActionPlanReady = chapterPlanReadyForDraft(store, progress.PendingRewrites[0], true)
+		target := progress.PendingRewrites[0]
+		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
+		loadNextActionOutline(store, next, &s)
 	}
 
 	s.BookCompleteByChapters = domain.StructurallyComplete(progress)
@@ -75,4 +78,17 @@ func LoadState(store *storepkg.Store) State {
 	}
 
 	return s
+}
+
+func loadNextActionOutline(store *storepkg.Store, chapter int, state *State) {
+	if store == nil || state == nil || chapter <= 0 {
+		return
+	}
+	entry, err := store.Outline.GetChapterOutline(chapter)
+	if err != nil || entry == nil {
+		return
+	}
+	state.NextActionTitle = entry.Title
+	state.NextActionCoreEvent = entry.CoreEvent
+	state.NextActionHook = entry.Hook
 }

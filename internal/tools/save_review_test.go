@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -682,6 +684,61 @@ func TestSaveReviewEscalatesCriticalIssueEvenWhenVerdictAccept(t *testing.T) {
 	p, _ := s.Progress.Load()
 	if p.Flow != domain.FlowRewriting || len(p.PendingRewrites) != 1 || p.PendingRewrites[0] != 3 {
 		t.Fatalf("expected chapter 3 queued for rewrite, got flow=%s pending=%v", p.Flow, p.PendingRewrites)
+	}
+	saved, err := s.World.LoadReview(3)
+	if err != nil || saved == nil || len(saved.AffectedChapters) != 1 || saved.AffectedChapters[0] != 3 {
+		t.Fatalf("escalated review must persist affected_chapters, saved=%+v err=%v", saved, err)
+	}
+}
+
+func TestSaveReviewEscalatesBlockingMechanicalGate(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveFinalChapter(3, "第三章正文。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(3, 6, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	mechanical := reviewreport.MechanicalGatePayload{
+		Chapter:    3,
+		BodySHA256: reviewreport.BodySHA256("第三章正文。"),
+		RuleViolations: []rules.Violation{{
+			Rule: "isolated_sentence_overuse", Severity: rules.SeverityWarning,
+		}},
+	}
+	rawGate, _ := json.Marshal(mechanical)
+	gatePath := filepath.Join(dir, "reviews", "03_ai_gate.json")
+	if err := os.MkdirAll(filepath.Dir(gatePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatePath, rawGate, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 3, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "met", "issues": []map[string]any{},
+		"verdict": "accept", "summary": "模型认为可通过。",
+	})
+	outRaw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(outRaw, &out)
+	if out["final_verdict"] != "rewrite" {
+		t.Fatalf("blocking mechanical gate must escalate to rewrite: %+v", out)
+	}
+	saved, _ := s.World.LoadReview(3)
+	if saved == nil || saved.Verdict != "rewrite" || len(saved.AffectedChapters) != 1 || saved.AffectedChapters[0] != 3 {
+		t.Fatalf("unexpected saved review: %+v", saved)
 	}
 }
 

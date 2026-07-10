@@ -6,8 +6,10 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -59,10 +61,21 @@ func NewQdrantClient(cfg QdrantClientConfig) (*QdrantClient, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &QdrantClient{
-		cfg:    cfg,
-		client: &http.Client{Timeout: cfg.Timeout},
-	}, nil
+	responseHeaderTimeout := 15 * time.Second
+	if cfg.Timeout < responseHeaderTimeout {
+		responseHeaderTimeout = cfg.Timeout
+	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+	}
+	return &QdrantClient{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout, Transport: transport}}, nil
 }
 
 func (c *QdrantClient) Collection() string { return c.cfg.Collection }
@@ -78,7 +91,10 @@ func (c *QdrantClient) EnsureCollection(ctx context.Context, vectorSize int) err
 	}
 	c.ensureMu.Lock()
 	defer c.ensureMu.Unlock()
-	if c.ensured && c.vectorDim == vectorSize {
+	if c.ensured {
+		if c.vectorDim != vectorSize {
+			return fmt.Errorf("qdrant collection %s vector dimension mismatch: existing=%d requested=%d", c.cfg.Collection, c.vectorDim, vectorSize)
+		}
 		return nil
 	}
 	if c.cfg.ResetCollection {
@@ -86,19 +102,33 @@ func (c *QdrantClient) EnsureCollection(ctx context.Context, vectorSize int) err
 			return err
 		}
 		if err := c.createCollection(ctx, vectorSize); err != nil {
-			return err
+			if verifyErr := c.verifyCollectionDimension(ctx, vectorSize); verifyErr != nil {
+				return fmt.Errorf("create qdrant collection: %w (verification: %v)", err, verifyErr)
+			}
 		}
 		c.ensured = true
 		c.vectorDim = vectorSize
 		return nil
 	}
-	if err := c.doJSON(ctx, http.MethodGet, c.collectionPath(), nil, nil, http.StatusOK); err == nil {
+	info, err := c.collectionInfo(ctx)
+	if err == nil {
+		if info.VectorSize <= 0 {
+			return fmt.Errorf("qdrant collection %s did not report vector size", c.cfg.Collection)
+		}
+		if info.VectorSize != vectorSize {
+			return fmt.Errorf("qdrant collection %s vector dimension mismatch: existing=%d requested=%d", c.cfg.Collection, info.VectorSize, vectorSize)
+		}
 		c.ensured = true
-		c.vectorDim = vectorSize
+		c.vectorDim = info.VectorSize
 		return nil
 	}
-	if err := c.createCollection(ctx, vectorSize); err != nil {
-		return err
+	if !isQdrantHTTPStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("inspect qdrant collection %s: %w", c.cfg.Collection, err)
+	}
+	if err = c.createCollection(ctx, vectorSize); err != nil {
+		if verifyErr := c.verifyCollectionDimension(ctx, vectorSize); verifyErr != nil {
+			return fmt.Errorf("create qdrant collection: %w (verification: %v)", err, verifyErr)
+		}
 	}
 	c.ensured = true
 	c.vectorDim = vectorSize
@@ -106,32 +136,63 @@ func (c *QdrantClient) EnsureCollection(ctx context.Context, vectorSize int) err
 }
 
 func (c *QdrantClient) Write(ctx context.Context, point VectorPoint) error {
-	if len(point.Vector) == 0 {
+	return c.WriteBatch(ctx, []VectorPoint{point})
+}
+
+func (c *QdrantClient) WriteBatch(ctx context.Context, points []VectorPoint) error {
+	if len(points) == 0 {
+		return nil
+	}
+	vectorSize := len(points[0].Vector)
+	if vectorSize == 0 {
 		return fmt.Errorf("qdrant point vector is empty")
 	}
-	chunk := NormalizeChunk(point.Chunk)
-	if chunk.ID == "" {
-		return fmt.Errorf("qdrant point chunk id is empty")
+	encoded := make([]map[string]any, 0, len(points))
+	for _, point := range points {
+		if len(point.Vector) != vectorSize {
+			return fmt.Errorf("qdrant batch vector dimension drift: got=%d want=%d", len(point.Vector), vectorSize)
+		}
+		if err := ValidateVector(point.Vector); err != nil {
+			return fmt.Errorf("qdrant point vector is invalid: %w", err)
+		}
+		chunk := NormalizeChunk(point.Chunk)
+		if chunk.ID == "" {
+			return fmt.Errorf("qdrant point chunk id is empty")
+		}
+		payload := chunkPayload(chunk)
+		payload["chunk_id"] = chunk.ID
+		payload["chunk"] = chunk
+		encoded = append(encoded, map[string]any{
+			"id": qdrantPointID(chunk.ID), "vector": point.Vector, "payload": payload,
+		})
 	}
-	if err := c.EnsureCollection(ctx, len(point.Vector)); err != nil {
+	if err := c.EnsureCollection(ctx, vectorSize); err != nil {
 		return err
 	}
-	payload := chunkPayload(chunk)
-	payload["chunk_id"] = chunk.ID
-	payload["chunk"] = chunk
-	body := map[string]any{
-		"points": []map[string]any{{
-			"id":      qdrantPointID(chunk.ID),
-			"vector":  point.Vector,
-			"payload": payload,
-		}},
+	body := map[string]any{"points": encoded}
+	for recovery := 0; recovery < 2; recovery++ {
+		err := c.doJSON(ctx, http.MethodPut, c.collectionPath()+"/points?wait=true", body, nil, http.StatusOK)
+		if err == nil {
+			return nil
+		}
+		if recovery == 0 && isQdrantHTTPStatus(err, http.StatusNotFound) {
+			c.invalidateCollection()
+			if ensureErr := c.EnsureCollection(ctx, vectorSize); ensureErr != nil {
+				return fmt.Errorf("recreate missing qdrant collection: %w", ensureErr)
+			}
+			continue
+		}
+		return err
 	}
-	return c.doJSON(ctx, http.MethodPut, c.collectionPath()+"/points?wait=true", body, nil, http.StatusOK)
+	return fmt.Errorf("qdrant batch write failed")
 }
 
 func (c *QdrantClient) Search(ctx context.Context, vector []float32, limit int) ([]VectorSearchHit, error) {
 	if len(vector) == 0 || limit <= 0 {
 		return nil, nil
+	}
+	if err := ValidateVector(vector); err != nil {
+		return nil, fmt.Errorf("qdrant query vector is invalid: %w", err)
 	}
 	body := map[string]any{
 		"vector":       vector,
@@ -199,19 +260,7 @@ func (c *QdrantClient) DeleteSourcePath(ctx context.Context, sourcePath string) 
 }
 
 func (c *QdrantClient) deleteCollection(ctx context.Context) error {
-	resp, err := c.doRaw(ctx, http.MethodDelete, c.collectionPath(), nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("qdrant delete collection failed: status=%d", resp.StatusCode)
-	}
-	return nil
+	return c.doJSON(ctx, http.MethodDelete, c.collectionPath(), nil, nil, http.StatusOK, http.StatusNotFound)
 }
 
 func (c *QdrantClient) createCollection(ctx context.Context, vectorSize int) error {
@@ -221,7 +270,47 @@ func (c *QdrantClient) createCollection(ctx context.Context, vectorSize int) err
 			"distance": c.cfg.Distance,
 		},
 	}
-	return c.doJSON(ctx, http.MethodPut, c.collectionPath(), body, nil, http.StatusOK)
+	return c.doJSON(ctx, http.MethodPut, c.collectionPath(), body, nil, http.StatusOK, http.StatusCreated)
+}
+
+type qdrantCollectionInfo struct {
+	VectorSize int
+}
+
+func (c *QdrantClient) collectionInfo(ctx context.Context) (qdrantCollectionInfo, error) {
+	var out struct {
+		Result struct {
+			Config struct {
+				Params struct {
+					Vectors struct {
+						Size int `json:"size"`
+					} `json:"vectors"`
+				} `json:"params"`
+			} `json:"config"`
+		} `json:"result"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, c.collectionPath(), nil, &out, http.StatusOK); err != nil {
+		return qdrantCollectionInfo{}, err
+	}
+	return qdrantCollectionInfo{VectorSize: out.Result.Config.Params.Vectors.Size}, nil
+}
+
+func (c *QdrantClient) verifyCollectionDimension(ctx context.Context, vectorSize int) error {
+	info, err := c.collectionInfo(ctx)
+	if err != nil {
+		return err
+	}
+	if info.VectorSize != vectorSize {
+		return fmt.Errorf("vector dimension mismatch: existing=%d requested=%d", info.VectorSize, vectorSize)
+	}
+	return nil
+}
+
+func (c *QdrantClient) invalidateCollection() {
+	c.ensureMu.Lock()
+	c.ensured = false
+	c.vectorDim = 0
+	c.ensureMu.Unlock()
 }
 
 func (c *QdrantClient) collectionPath() string {
@@ -229,47 +318,102 @@ func (c *QdrantClient) collectionPath() string {
 }
 
 func (c *QdrantClient) doJSON(ctx context.Context, method, path string, body any, out any, okStatuses ...int) error {
-	resp, err := c.doRaw(ctx, method, path, body)
-	if err != nil {
-		return err
+	var data []byte
+	if body != nil {
+		var err error
+		data, err = json.Marshal(body)
+		if err != nil {
+			return err
+		}
 	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 1; attempt <= defaultRAGIOAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var reader io.Reader
+		if data != nil {
+			reader = bytes.NewReader(data)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.cfg.URL+path, reader)
+		if err != nil {
+			return err
+		}
+		if data != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if c.cfg.APIKey != "" {
+			req.Header.Set("api-key", c.cfg.APIKey)
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("qdrant transport: %w", err)
+		} else {
+			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+			closeErr := resp.Body.Close()
+			if readErr != nil {
+				lastErr = fmt.Errorf("read qdrant response: %w", readErr)
+			} else if closeErr != nil && IsTransientRAGError(closeErr) {
+				lastErr = fmt.Errorf("close qdrant response: %w", closeErr)
+			} else if !statusOK(resp.StatusCode, okStatuses...) {
+				lastErr = qdrantHTTPError{method: method, path: path, status: resp.StatusCode, body: truncateForError(string(raw), 300)}
+				if !isRetryableHTTPStatus(resp.StatusCode) {
+					return lastErr
+				}
+			} else if out != nil {
+				if len(raw) == 0 {
+					lastErr = fmt.Errorf("parse qdrant response: %w", io.ErrUnexpectedEOF)
+				} else if err := json.Unmarshal(raw, out); err != nil {
+					lastErr = fmt.Errorf("parse qdrant response: %w", err)
+				} else {
+					return nil
+				}
+			} else if len(raw) == 0 && resp.StatusCode != http.StatusNoContent {
+				lastErr = fmt.Errorf("parse qdrant response: %w", io.ErrUnexpectedEOF)
+			} else if len(raw) > 0 && !json.Valid(raw) {
+				var syntax any
+				parseErr := json.Unmarshal(raw, &syntax)
+				lastErr = fmt.Errorf("parse qdrant response: %w", parseErr)
+			} else {
+				return nil
+			}
+		}
+		if attempt == defaultRAGIOAttempts || (!IsTransientRAGError(lastErr) && !isRetryableQdrantError(lastErr)) {
+			return lastErr
+		}
+		c.closeIdleConnections()
+		if err := sleepRAGRetry(ctx, ragRetryBackoff(attempt)); err != nil {
+			return err
+		}
 	}
-	if !statusOK(resp.StatusCode, okStatuses...) {
-		return fmt.Errorf("qdrant request failed: method=%s path=%s status=%d body=%s", method, path, resp.StatusCode, truncateForError(string(raw), 300))
-	}
-	if out == nil || len(raw) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("parse qdrant response: %w", err)
-	}
-	return nil
+	return lastErr
 }
 
-func (c *QdrantClient) doRaw(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	var r io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		r = bytes.NewReader(data)
+type qdrantHTTPError struct {
+	method string
+	path   string
+	status int
+	body   string
+}
+
+func (e qdrantHTTPError) Error() string {
+	return fmt.Sprintf("qdrant request failed: method=%s path=%s status=%d body=%s", e.method, e.path, e.status, e.body)
+}
+
+func isQdrantHTTPStatus(err error, status int) bool {
+	var httpErr qdrantHTTPError
+	return errors.As(err, &httpErr) && httpErr.status == status
+}
+
+func isRetryableQdrantError(err error) bool {
+	var httpErr qdrantHTTPError
+	return errors.As(err, &httpErr) && isRetryableHTTPStatus(httpErr.status)
+}
+
+func (c *QdrantClient) closeIdleConnections() {
+	if closer, ok := c.client.Transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.cfg.URL+path, r)
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.cfg.APIKey != "" {
-		req.Header.Set("api-key", c.cfg.APIKey)
-	}
-	return c.client.Do(req)
 }
 
 func statusOK(status int, okStatuses ...int) bool {

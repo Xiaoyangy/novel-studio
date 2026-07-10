@@ -50,6 +50,7 @@ type Report struct {
 	AIRatioPercent         float64              `json:"ai_ratio_percent"`
 	BlendedAIGCPercent     float64              `json:"blended_aigc_percent"`
 	SegmentRiskFloor       float64              `json:"segment_risk_floor_percent"`
+	WholeTextSegmentGate   float64              `json:"whole_text_single_segment_gate_percent,omitempty"`
 	ContentIntegrityFloor  float64              `json:"content_integrity_floor_percent"`
 	RiskLabel              string               `json:"risk_label"`
 	Confidence             string               `json:"confidence"`
@@ -183,6 +184,8 @@ const SingleDetectionSegmentMaxHanzi = 5000
 
 // EffectiveGatePercent 返回用于门禁判定的 AIGC 百分比：
 //   - 内容完整性风险（脏码/绕检噪声）在场 → 直接用 AIGCPercent。
+//   - 短章被朱雀式代理判为整章单段高风险 → 按 segment_risk_floor 判定；
+//     这模拟读者把整章合成一段提交检测的场景，human anchor 不能覆盖它。
 //   - 强人工叙事锚点已触发 final cap → 使用 human_anchor_final_cap_percent 对应的
 //     AIGCPercent；报告仍保留原始 segment_risk_floor 供复核。
 //   - 短章（≤5000 字，单检测片段）默认用 AIGCPercent（含 segment_risk_floor 真高），
@@ -194,6 +197,9 @@ const SingleDetectionSegmentMaxHanzi = 5000
 func EffectiveGatePercent(report Report) float64 {
 	if report.ContentIntegrityFloor > 0 {
 		return report.AIGCPercent
+	}
+	if risk, ok := wholeTextSingleSegmentRisk(report); ok {
+		return math.Max(report.AIGCPercent, risk)
 	}
 	if capValue, ok := HumanAnchorFinalCap(report); ok {
 		if report.AIGCPercent > 0 && report.AIGCPercent < capValue {
@@ -211,6 +217,21 @@ func EffectiveGatePercent(report Report) float64 {
 		return report.BlendedAIGCPercent
 	}
 	return report.AIGCPercent
+}
+
+func wholeTextSingleSegmentRisk(report Report) (float64, bool) {
+	proxy := report.ZhuqueSegmentProxy
+	if !proxy.Enabled || len(proxy.Segments) != 1 {
+		return 0, false
+	}
+	segment := proxy.Segments[0]
+	if segment.Proportion >= 0.95 && proxy.RiskFloorPercent >= 50 {
+		return proxy.RiskFloorPercent, true
+	}
+	if segment.Proportion >= 0.95 && proxy.MaxSegmentPercent >= 50 {
+		return proxy.MaxSegmentPercent, true
+	}
+	return 0, false
 }
 
 func HumanAnchorFinalCap(report Report) (float64, bool) {
@@ -327,7 +348,12 @@ func analyze(text string, includeSegments bool) Report {
 		}
 	}
 	final := math.Max(math.Max(blended, segmentProxy.RiskFloorPercent), contentFloor)
-	if humanAnchorFinalCap != nil && contentFloor == 0 {
+	wholeTextGate, wholeTextHighRisk := wholeTextSingleSegmentRisk(Report{
+		AIGCPercent:        final,
+		SegmentRiskFloor:   segmentProxy.RiskFloorPercent,
+		ZhuqueSegmentProxy: segmentProxy,
+	})
+	if humanAnchorFinalCap != nil && contentFloor == 0 && !wholeTextHighRisk {
 		final = math.Max(blended, contentFloor)
 	}
 	return Report{
@@ -339,6 +365,7 @@ func analyze(text string, includeSegments bool) Report {
 		AIRatioPercent:         final,
 		BlendedAIGCPercent:     blended,
 		SegmentRiskFloor:       segmentProxy.RiskFloorPercent,
+		WholeTextSegmentGate:   wholeTextGate,
 		ContentIntegrityFloor:  contentFloor,
 		RiskLabel:              labelFor(final),
 		Confidence:             confidenceFor(nHanzi, dims),
@@ -638,12 +665,13 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 	proxy.SuspectedAIRatioPercent = round2(float64(suspectedChars) / float64(maxInt(total, 1)) * 100)
 	proxy.AIFeatureRatioPercent = round2(float64(aiChars) / float64(maxInt(total, 1)) * 100)
 	proxy.HumanRatioPercent = round2(100 - proxy.SuspectedAIRatioPercent - proxy.AIFeatureRatioPercent)
-	if len(proxy.Segments) == 1 && proxy.SuspectedAIRatioPercent >= 99 && proxy.MaxSegmentPercent >= 50 {
+	riskRatio := round2(proxy.SuspectedAIRatioPercent + proxy.AIFeatureRatioPercent)
+	if len(proxy.Segments) == 1 && riskRatio >= 99 && proxy.MaxSegmentPercent >= 50 {
 		proxy.RiskFloorPercent = proxy.MaxSegmentPercent
-	} else if proxy.MaxSegmentPercent >= 80 && proxy.SuspectedAIRatioPercent >= 60 {
-		proxy.RiskFloorPercent = round2(proxy.SuspectedAIRatioPercent * 0.90)
-	} else if proxy.MaxSegmentPercent >= 60 && proxy.SuspectedAIRatioPercent >= 35 {
-		proxy.RiskFloorPercent = round2(proxy.SuspectedAIRatioPercent * 0.70)
+	} else if proxy.MaxSegmentPercent >= 80 && riskRatio >= 60 {
+		proxy.RiskFloorPercent = round2(riskRatio * 0.90)
+	} else if proxy.MaxSegmentPercent >= 60 && riskRatio >= 35 {
+		proxy.RiskFloorPercent = round2(riskRatio * 0.70)
 	}
 	return proxy
 }
@@ -699,18 +727,38 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 	}
 	anchor := report.Stats.HumanAnchor
 	anchorType := stringFromAny(anchor["anchor_type"])
+	blockers := stringSliceFromAny(anchor["blockers"])
 	narrativeLike := anchorType == "narrative_scene" || report.Stats.DialogueRatio >= 0.10 || report.Stats.ActionDensityPerK+report.Stats.SensoryDensityPerK >= 15
 	if charCount >= 1800 && proportion >= 0.95 && narrativeLike && anchorType != "technical_expository" {
 		rawCurve := math.Max(math.Max(rawProbabilityCurve, rawEntropy), rawWeak)
-		if rawCurve >= 80 {
+		currentCurve := math.Max(math.Max(probabilityCurve, entropy), weak)
+		dimScore := func(key string) float64 {
+			if dim, ok := report.Dimensions[key]; ok {
+				return dim.Score
+			}
+			return 0
+		}
+		burstiness := dimScore("burstiness")
+		structure := dimScore("structure_fingerprint")
+		crossParagraph := dimScore("cross_paragraph_consistency")
+		strongAnchor := boolFromAny(anchor["eligible"]) &&
+			stringFromAny(anchor["strength"]) == "strong" &&
+			len(blockers) == 0
+		multiSignalSupport := currentCurve >= 60 ||
+			report.ZhuqueCompositePercent >= 38 ||
+			(burstiness >= 35 && (structure >= 45 || crossParagraph >= 30)) ||
+			(structure >= 65 && concrete < 18 && report.Stats.DialogueRatio < 0.35) ||
+			(!strongAnchor && rawCurve >= 90)
+		if rawCurve >= 80 && multiSignalSupport {
 			externalLikeScore := math.Min(86, math.Max(76, 62+rawCurve*0.20))
 			if externalLikeScore > score {
 				score = externalLikeScore
-				evidence = append(evidence, "整章单段疑似朱雀形态：曲线原始高值偏高，本地不再用小说人工锚点压低整段风险")
+				evidence = append(evidence, "整章单段疑似朱雀形态：曲线原始高值偏高且存在当前曲线/结构节奏复合支撑")
 			}
+		} else if rawCurve >= 80 {
+			evidence = append(evidence, "整章单段原始曲线偏高，但当前曲线、人味锚点和结构节奏未形成复合高风险")
 		}
 	}
-	blockers := stringSliceFromAny(anchor["blockers"])
 	lengthOnlyBlocker := len(blockers) > 0
 	for _, blocker := range blockers {
 		if !strings.HasPrefix(blocker, "文本长度不足") {
@@ -742,10 +790,11 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 
 func scoreZhuqueSegmentProxy(proxy ZhuqueSegmentProxy) Dimension {
 	signals := []Signal{}
-	if proxy.SuspectedAIRatioPercent >= 60 && proxy.MaxSegmentPercent >= 80 {
-		signals = append(signals, sig("zhuque_like_suspected_span_ratio_high", proxy.SuspectedAIRatioPercent, "疑似AI片段占比和最高风险片段偏高"))
-	} else if proxy.SuspectedAIRatioPercent >= 35 || proxy.MaxSegmentPercent >= 70 {
-		signals = append(signals, sig("zhuque_like_suspected_span_ratio_mid", math.Max(proxy.SuspectedAIRatioPercent, proxy.MaxSegmentPercent), "出现中高风险分片"))
+	riskRatio := round2(proxy.SuspectedAIRatioPercent + proxy.AIFeatureRatioPercent)
+	if riskRatio >= 60 && proxy.MaxSegmentPercent >= 80 {
+		signals = append(signals, sig("zhuque_like_suspected_span_ratio_high", riskRatio, "疑似/AI特征片段占比和最高风险片段偏高"))
+	} else if riskRatio >= 35 || proxy.MaxSegmentPercent >= 70 {
+		signals = append(signals, sig("zhuque_like_suspected_span_ratio_mid", math.Max(riskRatio, proxy.MaxSegmentPercent), "出现中高风险分片"))
 	}
 	return dim("朱雀式分片代理", "zhuque_segment_proxy", map[string]any{
 		"suspected_ai_ratio_percent": proxy.SuspectedAIRatioPercent,
@@ -2103,18 +2152,57 @@ func rowValues(rows []map[string]float64, key string) []float64 {
 }
 
 func dialogueRatio(text string) float64 {
-	lines := 0
-	dialogue := 0
+	lines := []string{}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		lines++
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return 0
+	}
+	dialogue := 0
+	for _, line := range lines {
 		if strings.Contains(line, "“") || strings.Contains(line, "\"") {
 			dialogue++
 		}
 	}
-	return ratio(dialogue, lines)
+	lineRatio := ratio(dialogue, len(lines))
+	quoteRatio := quotedHanziRatio(text)
+	if len(lines) <= 2 && quoteRatio > 0 {
+		return round3(math.Min(lineRatio, quoteRatio*1.15))
+	}
+	if quoteRatio > 0 {
+		return round3(math.Min(lineRatio, math.Max(quoteRatio*1.15, 0.12)))
+	}
+	return round3(lineRatio)
+}
+
+func quotedHanziRatio(text string) float64 {
+	total := len(hanzi(text))
+	if total == 0 {
+		return 0
+	}
+	quoted := 0
+	inQuote := false
+	for _, r := range text {
+		switch r {
+		case '“', '「', '『':
+			inQuote = true
+			continue
+		case '"':
+			inQuote = !inQuote
+			continue
+		case '”', '」', '』':
+			inQuote = false
+			continue
+		}
+		if inQuote && r >= '\u4e00' && r <= '\u9fff' {
+			quoted++
+		}
+	}
+	return math.Min(1, float64(quoted)/float64(total))
 }
 
 func normalizedEntropy(chars []rune) float64 {

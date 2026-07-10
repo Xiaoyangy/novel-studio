@@ -307,6 +307,18 @@ func TestRewritePatchBoundsClampToProjectChapterWords(t *testing.T) {
 	}
 }
 
+func TestValidateRewriteChapterTitleUsesOutlineTitle(t *testing.T) {
+	if err := validateRewriteChapterTitle(1, "失业饭桌", "# 第一章 失业饭桌\n\n正文。"); err != nil {
+		t.Fatalf("matching rewrite title rejected: %v", err)
+	}
+	if err := validateRewriteChapterTitle(1, "失业饭桌", "# 第一章 回乡第一天\n\n正文。"); err == nil || !strings.Contains(err.Error(), "重写标题与大纲不一致") {
+		t.Fatalf("rewrite title drift should be blocked, got %v", err)
+	}
+	if err := validateRewriteChapterTitle(1, "失业饭桌", "林澈推门进屋。\n\n正文。"); err == nil {
+		t.Fatal("rewrite without an explicit matching heading should be blocked")
+	}
+}
+
 func TestValidateRewritePreflightBlocksSecondAlgorithmDeprecatedEngine(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)

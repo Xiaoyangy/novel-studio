@@ -51,6 +51,27 @@ func TestCheckChapterPlanConsistencyRequiresOutlineTitle(t *testing.T) {
 	}
 }
 
+func TestCheckChapterPlanConsistencyRejectsHiddenCharacterInRequiredBeat(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 1,
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "承认失业", true),
+			simulatedDecision("沈知遥", "留在办公室", false),
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Contract: domain.ChapterContract{
+		RequiredBeats: []string{"让沈知遥在林家饭桌追问林澈"},
+	}}
+	hard, _ := checkChapterPlanConsistency(st, plan)
+	if len(hard) == 0 || !strings.Contains(strings.Join(hard, "\n"), "visible_to_pov=false") {
+		t.Fatalf("hidden character entering a visible beat must fail: %v", hard)
+	}
+}
+
 func TestChapterPlanScopeCheckFlagsForbiddenHit(t *testing.T) {
 	plan := domain.ChapterPlan{
 		Chapter:  1,

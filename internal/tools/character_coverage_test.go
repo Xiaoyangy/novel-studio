@@ -8,7 +8,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func TestRequiredDossierCharacterNamesSkipsDormantDossiers(t *testing.T) {
+func TestRequiredDossierCharacterNamesCoversWholeSimulationCast(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
@@ -29,19 +29,46 @@ func TestRequiredDossierCharacterNamesSkipsDormantDossiers(t *testing.T) {
 	}
 
 	names := requiredDossierCharacterNames(st, 1)
-	for _, want := range []string{"林澈", "沈知遥"} {
+	for _, want := range []string{"林澈", "沈知遥", "叶南栀", "周曼"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("expected %s in required names: %v", want, names)
 		}
 	}
-	for _, dormant := range []string{"叶南栀", "周曼"} {
-		if slices.Contains(names, dormant) {
-			t.Fatalf("dormant dossier %s should not be required: %v", dormant, names)
+}
+
+func TestChapterOutlineCharacterNamesInfersParentsFromOutline(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+		{Name: "林建国", Role: "主角父亲", Tier: "important"},
+		{Name: "周曼", Role: "主角母亲", Tier: "important"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "失业饭桌",
+		CoreEvent: "林澈返乡饭桌被亲戚阴阳失业，父母嘴硬护不住面子。",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	names := chapterOutlineCharacterNames(st, 1)
+	for _, want := range []string{"林澈", "林建国", "周曼"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("expected %s in required names: %v", want, names)
 		}
+	}
+	if slices.Contains(names, "沈知遥") {
+		t.Fatalf("female lead should stay dormant until the outline authorizes her: %v", names)
 	}
 }
 
-func TestRequiredDossierCharacterNamesIncludesOutlineMention(t *testing.T) {
+func TestChapterOutlineCharacterNamesIncludesOutlineMention(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
@@ -60,7 +87,7 @@ func TestRequiredDossierCharacterNamesIncludesOutlineMention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	names := requiredDossierCharacterNames(st, 1)
+	names := chapterOutlineCharacterNames(st, 1)
 	if !slices.Contains(names, "叶南栀") {
 		t.Fatalf("outline-mentioned character should be required: %v", names)
 	}

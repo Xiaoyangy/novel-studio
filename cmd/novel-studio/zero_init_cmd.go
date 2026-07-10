@@ -14,6 +14,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 type zeroInitFlags struct {
@@ -115,7 +116,7 @@ type zeroInitRAGStats struct {
 // zeroReadinessSchemaVersion readiness 文件的 schema 版本。消费方（pipeline 写前检查、
 // 外部 agent）读到缺 schema_version 或 < 当前值的 readiness 一律视为 not ready——
 // 防止旧版生成器的 ready:true 被误信（清跑项目事故根因）。
-const zeroReadinessSchemaVersion = 3
+const zeroReadinessSchemaVersion = tools.ZeroInitReadinessSchemaVersion
 
 type zeroInitReadiness struct {
 	Ready            bool             `json:"ready"`
@@ -470,21 +471,27 @@ func rebuildZeroInitRAG(opts cliOptions, dir string, flags zeroInitFlags) (zeroI
 		_, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, override)
 		if !enabled {
 			resetRAGTrace(dir)
+			if err := st.RAG.ClearPendingUpserts(); err != nil {
+				return zeroInitRAGStats{}, err
+			}
 			return stats, nil
 		}
 		embeddingResult, vectorStore, err := buildRAGEmbeddings(context.Background(), cfg, override, result.State.Chunks)
 		if err != nil {
 			return zeroInitRAGStats{}, err
 		}
-		if err := st.RAG.SaveIndexState(embeddingResult.State); err != nil {
+		if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
 			return zeroInitRAGStats{}, err
 		}
-		if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
+		if err := st.RAG.SaveIndexState(embeddingResult.State); err != nil {
 			return zeroInitRAGStats{}, err
 		}
 		stats.VectorEnabled = true
 		stats.VectorEmbedded = embeddingResult.Embedded
 		stats.VectorWritten = embeddingResult.Written
+	}
+	if err := st.RAG.ClearPendingUpserts(); err != nil {
+		return zeroInitRAGStats{}, err
 	}
 	resetRAGTrace(dir)
 	return stats, nil

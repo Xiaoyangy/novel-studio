@@ -61,10 +61,10 @@ func TestCaptureRuntimeLogCountsOnlyCurrentRunWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := strings.Join([]string{
-		`time=2026-07-02T11:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.5`,
+		`time=2026-07-02T11:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.6-sol`,
 		`time=2026-07-02T11:01:00 level=ERROR msg=stale_failure module=event category=ERROR agent=writer`,
 		`time=2026-07-02T11:02:00 level=WARN msg=上下文重写 module=context agent=writer reason=threshold strategy=store_summary committed=true tokens_before=120000 tokens_after=54000 compacted=56 kept=24`,
-		`time=2026-07-02T12:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.5`,
+		`time=2026-07-02T12:00:00 level=INFO msg=启动 module=boot provider=codex model=gpt-5.6-sol`,
 		`time=2026-07-02T12:01:00 level=WARN msg=current_warning module=usage agent=coordinator`,
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(logDir, "headless.log"), []byte(log), 0o644); err != nil {

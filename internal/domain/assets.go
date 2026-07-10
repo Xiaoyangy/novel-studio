@@ -216,17 +216,27 @@ type FactionRelation struct {
 	ConflictState string `json:"conflict_state,omitempty"` // open_war / cold_war / truce / hidden_hostility / alliance
 }
 
+const CurrentRAGIndexSchemaVersion = 2
+
 // RAGIndexState 记录本地/RAG 后端索引状态。Embedding 与 Qdrant 写入并发由 Config 控制。
 type RAGIndexState struct {
-	Config      RAGIndexConfig `json:"config"`
-	Chunks      []RAGChunk     `json:"chunks,omitempty"`
-	ChunkHashes []string       `json:"chunk_hashes,omitempty"`
-	UpdatedAt   string         `json:"updated_at,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	Config        RAGIndexConfig `json:"config"`
+	Chunks        []RAGChunk     `json:"chunks,omitempty"`
+	ChunkHashes   []string       `json:"chunk_hashes,omitempty"`
+	UpdatedAt     string         `json:"updated_at,omitempty"`
+}
+
+type RAGPendingUpserts struct {
+	Chunks    []RAGChunk `json:"chunks"`
+	LastError string     `json:"last_error,omitempty"`
+	UpdatedAt string     `json:"updated_at,omitempty"`
 }
 
 type RAGIndexConfig struct {
 	EmbeddingConcurrency   int    `json:"embedding_concurrency"`
 	QdrantWriteConcurrency int    `json:"qdrant_write_concurrency"`
+	VectorBatchSize        int    `json:"vector_batch_size,omitempty"`
 	Collection             string `json:"collection,omitempty"`
 	EmbeddingProvider      string `json:"embedding_provider,omitempty"`
 	EmbeddingModel         string `json:"embedding_model,omitempty"`

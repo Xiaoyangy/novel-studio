@@ -1,6 +1,8 @@
 package reviewreport
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,9 +19,16 @@ import (
 // MechanicalGatePayload is the machine-readable result written by commit_chapter.
 type MechanicalGatePayload struct {
 	Chapter        int               `json:"chapter"`
+	BodySHA256     string            `json:"body_sha256,omitempty"`
 	AIGCReport     aigc.Report       `json:"aigc_report"`
 	RuleViolations []rules.Violation `json:"rule_violations"`
 	GeneratedAt    string            `json:"generated_at,omitempty"`
+}
+
+// BodySHA256 binds review artifacts to the exact chapter body they evaluated.
+func BodySHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 type UnifiedMarkdownInput struct {
@@ -117,6 +126,9 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 第%03d章 统一审核\n\n", chapter)
 	fmt.Fprintf(&b, "> 生成时间：%s\n", generatedAt)
+	if bodyHash := unifiedBodySHA256(in); bodyHash != "" {
+		fmt.Fprintf(&b, "> 正文指纹：sha256=%s\n", bodyHash)
+	}
 	b.WriteString("> 文件口径：本文件汇总机械门禁、AI 味信号和 Editor 复审；结构化事实保留在同目录 JSON。\n\n")
 
 	fmt.Fprintf(&b, "## 总体评分：%s\n", editorTotalScore(in.Editor))
@@ -156,6 +168,19 @@ func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
 	b.WriteString("\n## 结论\n\n")
 	fmt.Fprintf(&b, "- %s\n", unifiedConclusion(in.Mechanical, in.AIVoice, in.ExternalAIJudge, in.Editor))
 	return b.String()
+}
+
+func unifiedBodySHA256(in UnifiedMarkdownInput) string {
+	if in.Mechanical != nil && strings.TrimSpace(in.Mechanical.BodySHA256) != "" {
+		return strings.TrimSpace(in.Mechanical.BodySHA256)
+	}
+	if in.AIVoice != nil && strings.TrimSpace(in.AIVoice.BodySHA256) != "" {
+		return strings.TrimSpace(in.AIVoice.BodySHA256)
+	}
+	if in.Editor != nil {
+		return strings.TrimSpace(in.Editor.BodySHA256)
+	}
+	return ""
 }
 
 func mechanicalGateStatus(payload *MechanicalGatePayload) string {
@@ -223,6 +248,12 @@ func unifiedNeedRewrite(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoi
 		return "是"
 	}
 	return "待定"
+}
+
+// RewriteDisposition is the shared final gate used by reports, pipeline
+// verification and delivery. Values are "是", "否", "可选" or "待定".
+func RewriteDisposition(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, external *ExternalAIJudge, editor *domain.ReviewEntry) string {
+	return unifiedNeedRewrite(mechanical, aiVoice, external, editor)
 }
 
 func unifiedConclusion(mechanical *MechanicalGatePayload, aiVoice *domain.AIVoiceAnalysis, external *ExternalAIJudge, editor *domain.ReviewEntry) string {
@@ -472,6 +503,9 @@ func unifiedIssues(in UnifiedMarkdownInput) []string {
 	}
 	if in.AIVoice != nil {
 		for _, flag := range in.AIVoice.RedFlags {
+			if !IsBlockingAIVoiceFlagInAnalysis(flag, *in.AIVoice) {
+				continue
+			}
 			label := fmt.Sprintf("AI %s｜%s", flag.Severity, flag.Rule)
 			if flag.Evidence != "" {
 				label += "｜" + flag.Evidence

@@ -145,7 +145,24 @@ func TestParseCodexResponseFallbackToText(t *testing.T) {
 }
 
 func TestSupportsTools(t *testing.T) {
-	if !New("", "gpt-5.5", "high").SupportsTools() {
+	if !New("", "gpt-5.6-sol", "high").SupportsTools() {
 		t.Fatal("应支持工具")
+	}
+}
+
+func TestResolveReasoningUsesUltraCallOption(t *testing.T) {
+	model := New("", "gpt-5.6-sol", "high")
+	got := model.resolveReasoning([]agentcore.CallOption{
+		agentcore.WithThinking(agentcore.ThinkingLevel("ultra")),
+	})
+	if got != "ultra" {
+		t.Fatalf("reasoning = %q, want ultra", got)
+	}
+}
+
+func TestCapabilitiesAdvertiseUltra(t *testing.T) {
+	capabilities := New("", "gpt-5.6-sol", "").Capabilities()
+	if !capabilities.Thinking.SupportsEffort(agentcore.ThinkingLevel("ultra")) {
+		t.Fatal("gpt-5.6-sol should advertise ultra reasoning")
 	}
 }

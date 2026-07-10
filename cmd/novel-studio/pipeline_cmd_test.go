@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -234,6 +235,79 @@ func TestPipelineNeedsFreshWritingSessionResetsInvalidStagedPlan(t *testing.T) {
 	}
 }
 
+func TestPipelineFinalizeStagedPlanKeepsRepairSteerOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{
+		NovelName:         "test",
+		TotalChapters:     2,
+		CompletedChapters: []int{1},
+		PendingRewrites:   []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{
+		"structure": map[string]any{
+			"chapter":  1,
+			"title":    "测试章",
+			"goal":     "推进测试事件",
+			"conflict": "测试冲突",
+			"hook":     "测试钩子",
+		},
+		"causal_simulation": map[string]any{
+			"chapter_function": "只填一个字段，确保 finalize 失败",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pipelineFinalizeStagedPlans(dir, 2); err != nil {
+		t.Fatalf("pipelineFinalizeStagedPlans: %v", err)
+	}
+	meta, err := st.RunMeta.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || !strings.HasPrefix(meta.PendingSteer, "Pipeline staged-plan repair") {
+		t.Fatalf("failed staged plan must retain exact repair steer, got %+v", meta)
+	}
+	if !strings.Contains(meta.PendingSteer, "chapter_function") {
+		t.Fatalf("repair steer should carry finalize diagnostics, got %q", meta.PendingSteer)
+	}
+
+	if err := pipelineFinalizeStagedPlans(dir, 2); err != nil {
+		t.Fatalf("second pipelineFinalizeStagedPlans: %v", err)
+	}
+	meta, _ = st.RunMeta.Load()
+	if meta == nil || meta.PendingSteer == "" {
+		t.Fatal("a repeated failed preflight must not clear the pending repair steer")
+	}
+}
+
+func TestPipelineFinalizeStagedPlansClearsRepairSteerWhenNoPartialRemains(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RunMeta.SetPendingSteer("Pipeline staged-plan repair：旧指令"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineFinalizeStagedPlans(dir, 2); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := st.RunMeta.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil && meta.PendingSteer != "" {
+		t.Fatalf("stale repair steer should clear after all partials are gone, got %q", meta.PendingSteer)
+	}
+}
+
 func TestPipelineAutoRepairBookWorldStructureAddsDanglingFactionAndAliases(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
@@ -434,8 +508,7 @@ func TestVerifyPipelineReviewStageRequiresReviewArtifacts(t *testing.T) {
 		t.Fatalf("expected missing review artifact error, got %v", err)
 	}
 
-	mustWriteFile(t, filepath.Join(dir, "reviews", "01.md"), "# ch01 评审\n")
-	mustWriteFile(t, filepath.Join(dir, "meta", "review-summary.md"), "# review-summary\n")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
 	evidence, err := verifyPipelineStage("review", dir, pipelineFlags{}, &domain.PipelineState{})
 	if err != nil {
 		t.Fatalf("verify review: %v", err)
@@ -449,8 +522,7 @@ func TestVerifyPipelineReviewStageHonorsChapterRange(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章正文")
 	mustWriteFile(t, filepath.Join(dir, "chapters", "02.md"), "第二章正文")
-	mustWriteFile(t, filepath.Join(dir, "reviews", "02.md"), "# ch02 评审\n")
-	mustWriteFile(t, filepath.Join(dir, "meta", "review-summary.md"), "# review-summary\n")
+	mustWriteCurrentReviewArtifacts(t, dir, 2)
 
 	evidence, err := verifyPipelineStage("review", dir, pipelineFlags{Start: 2, End: 2}, &domain.PipelineState{})
 	if err != nil {
@@ -464,16 +536,43 @@ func TestVerifyPipelineReviewStageHonorsChapterRange(t *testing.T) {
 	}
 }
 
+func TestVerifyPipelineReviewStageRejectsStaleBodyHash(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一版正文")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第二版正文")
+
+	_, err := verifyPipelineStage("review", dir, pipelineFlags{}, &domain.PipelineState{})
+	if err == nil || !strings.Contains(err.Error(), "body_sha256 stale") {
+		t.Fatalf("stale review should be rejected after body change, got %v", err)
+	}
+}
+
+func TestRebuildReviewSummaryPreservesAllChapterRows(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章正文")
+	mustWriteFile(t, filepath.Join(dir, "chapters", "02.md"), "第二章正文")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
+	mustWriteCurrentReviewArtifacts(t, dir, 2)
+
+	raw, err := os.ReadFile(filepath.Join(dir, "meta", "review-summary.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := string(raw)
+	for _, want := range []string{"**ch01**", "**ch02**", "body_sha256=" + reviewreport.BodySHA256("第一章正文"), "body_sha256=" + reviewreport.BodySHA256("第二章正文")} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("rebuilt summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestVerifyPipelineRewriteStageRequiresBackups(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "重写后正文")
-	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_voice_redflags.json"), `{
-  "chapter": 1,
-  "label": "❌ 需返工",
-  "red_flags": [
-    {"rule": "catalog_stuffing", "severity": "error", "evidence": "竹柄雨伞、裂口搪瓷杯、旧台历夹、粉笔头、桦皮袖扣、蓼蓝布头、荞麦壳、陶埙裂片、绢纱穗、菖蒲根"}
-  ]
-}`)
+	mustWriteCurrentReviewArtifacts(t, dir, 1, domain.AIVoiceRedFlag{
+		Rule: "catalog_stuffing", Severity: "error", Evidence: "竹柄雨伞、裂口搪瓷杯、旧台历夹、粉笔头、桦皮袖扣、蓼蓝布头、荞麦壳、陶埙裂片、绢纱穗、菖蒲根",
+	})
 
 	_, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
 	if err == nil || !strings.Contains(err.Error(), "chapters/01.md.pre-rewrite.md") {
@@ -493,6 +592,7 @@ func TestVerifyPipelineRewriteStageRequiresBackups(t *testing.T) {
 func TestVerifyPipelineRewriteStageAllowsCleanChaptersWithoutBackup(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。周行舟问：“还要核哪一项？”他指了指押金条：“先核这个，别添别的。”")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
 
 	evidence, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
 	if err != nil {
@@ -507,6 +607,7 @@ func TestVerifyPipelineRewriteStageAcceptsResolvedRewriteBackup(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。周行舟问：“还要核哪一项？”他指了指押金条：“先核这个，别添别的。”")
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md.pre-rewrite.md"), "改写前正文")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
 
 	evidence, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
 	if err != nil {
@@ -523,6 +624,7 @@ func TestVerifyPipelineRewriteStageAcceptsResolvedRewriteBackup(t *testing.T) {
 func TestVerifyPipelineRewriteStageBriefOnlyRequiresBriefNotBackup(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。")
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
 
 	_, err := verifyPipelineStage("rewrite", dir, pipelineFlags{RewriteBriefOnly: true}, &domain.PipelineState{})
 	if err == nil || !strings.Contains(err.Error(), "reviews/01_rewrite_brief.md") {
@@ -545,13 +647,9 @@ func TestVerifyPipelineRewriteStageBriefOnlyRequiresBriefNotBackup(t *testing.T)
 func TestVerifyPipelineRewriteStageRequiresBackupForBlockingAIVoiceWarnings(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "江烬把账单压在桌上。周行舟问：“还要核哪一项？”他指了指押金条：“先核这个。”")
-	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_voice_redflags.json"), `{
-  "chapter": 1,
-  "label": "⚠️ 需打磨",
-  "red_flags": [
-    {"rule": "ending_hook_uniformity", "severity": "warning", "evidence": "章末用新名词制造悬念", "suggestion": "换成行动压力或未读消息。"}
-  ]
-}`)
+	mustWriteCurrentReviewArtifacts(t, dir, 1, domain.AIVoiceRedFlag{
+		Rule: "ending_hook_uniformity", Severity: "warning", Evidence: "章末用新名词制造悬念", Suggestion: "换成行动压力或未读消息。",
+	})
 
 	_, err := verifyPipelineStage("rewrite", dir, pipelineFlags{}, &domain.PipelineState{})
 	if err == nil || !strings.Contains(err.Error(), "chapters/01.md.pre-rewrite.md") {
@@ -579,7 +677,7 @@ func TestCompleteResolvedRewritesClearsAcceptedPending(t *testing.T) {
 	}
 	text := "江烬把收据压在黑卡旁。许曼问：“七天后呢？”他说：“账上另算。”"
 	mustWriteFile(t, filepath.Join(dir, "chapters", "03.md"), text)
-	mustWriteFile(t, filepath.Join(dir, "reviews", "03.json"), `{"chapter":3,"scope":"chapter","verdict":"accept","summary":"复审通过"}`)
+	mustWriteCurrentReviewArtifacts(t, dir, 3)
 	if err := st.Progress.MarkChapterComplete(3, len([]rune(text)), "crisis", "quest"); err != nil {
 		t.Fatal(err)
 	}
@@ -617,6 +715,21 @@ func TestPipelineStateDoneEvidenceCanBeCleared(t *testing.T) {
 	}
 	if got := state.Evidence["review"].Status; got != "stale" {
 		t.Fatalf("evidence status = %s, want stale", got)
+	}
+}
+
+func TestVerifyStoredPipelineArtifactDigestsRejectsDrift(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一版")
+	evidence := stampPipelineArtifactDigests(dir, domain.PipelineStageEvidence{
+		Stage: "write", Artifacts: []string{"chapters/01.md"},
+	})
+	if err := verifyStoredPipelineArtifactDigests(dir, evidence); err != nil {
+		t.Fatalf("fresh digest rejected: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第二版")
+	if err := verifyStoredPipelineArtifactDigests(dir, evidence); err == nil || !strings.Contains(err.Error(), "指纹漂移") {
+		t.Fatalf("digest drift should be rejected, got %v", err)
 	}
 }
 
@@ -692,8 +805,8 @@ func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify zero-init: %v", err)
 	}
-	if evidence.Message != "zero-init ready" {
-		t.Fatalf("message=%q, want zero-init ready", evidence.Message)
+	if !strings.Contains(evidence.Message, "historical zero-init evidence is stale after chapter one") {
+		t.Fatalf("message=%q, want historical stale evidence note", evidence.Message)
 	}
 	for _, want := range []string{"meta/first_chapter_generation_readiness.json", "meta/world_tick.json", "meta/world_events.jsonl"} {
 		if !slices.Contains(evidence.Artifacts, want) {
@@ -763,6 +876,7 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	if err := st.World.SaveReview(domain.ReviewEntry{Chapter: 1, Scope: "chapter", Verdict: "accept", Summary: "章级审核通过"}); err != nil {
 		t.Fatal(err)
 	}
+	mustWriteCurrentReviewArtifacts(t, dir, 1)
 
 	if err := settlePipelineDelivery(dir, pipelineFlags{Start: 1, End: 1}); err != nil {
 		t.Fatalf("settlePipelineDelivery: %v", err)
@@ -823,6 +937,19 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	}
 }
 
+func TestSettlePipelineDeliveryRejectsUnifiedBlockingGate(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章正文")
+	mustWriteCurrentReviewArtifactsWithVerdict(t, dir, 1, "accept", domain.AIVoiceRedFlag{
+		Rule: "ending_hook_uniformity", Severity: "warning", Evidence: "章末装置重复", Suggestion: "改成行动压力。",
+	})
+
+	err := settlePipelineDelivery(dir, pipelineFlags{Start: 1, End: 1})
+	if err == nil || (!strings.Contains(err.Error(), "统一审核裁决") && !strings.Contains(err.Error(), "blocking unified review")) {
+		t.Fatalf("blocking unified gate should reject delivery, got %v", err)
+	}
+}
+
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -831,4 +958,51 @@ func mustWriteFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustWriteCurrentReviewArtifacts(t *testing.T, dir string, chapter int, redFlags ...domain.AIVoiceRedFlag) {
+	verdict := "accept"
+	if len(redFlags) > 0 {
+		verdict = "rewrite"
+	}
+	mustWriteCurrentReviewArtifactsWithVerdict(t, dir, chapter, verdict, redFlags...)
+}
+
+func mustWriteCurrentReviewArtifactsWithVerdict(t *testing.T, dir string, chapter int, verdict string, redFlags ...domain.AIVoiceRedFlag) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dir, "chapters", fmt.Sprintf("%02d.md", chapter)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyHash := reviewreport.BodySHA256(string(body))
+	mechanical := reviewreport.MechanicalGatePayload{Chapter: chapter, BodySHA256: bodyHash}
+	voice := domain.AIVoiceAnalysis{Chapter: chapter, BodySHA256: bodyHash, Label: "可通过", RedFlags: redFlags}
+	editor := domain.ReviewEntry{Chapter: chapter, BodySHA256: bodyHash, Scope: "chapter", Verdict: verdict, Summary: "章级审核通过"}
+	if verdict == "rewrite" || verdict == "polish" {
+		editor.AffectedChapters = []int{chapter}
+	}
+	judge := deepseekAIJudgeArtifact{
+		Chapter: chapter, BodySHA256: bodyHash, RawBodyOnly: true, UserPayloadKind: "chapter_body_only", Verdict: "human_like", RiskLevel: "low",
+	}
+	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d_ai_gate.json", chapter)), mechanical)
+	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d_ai_voice_redflags.json", chapter)), voice)
+	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d.json", chapter)), editor)
+	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter)), judge)
+	if err := reviewreport.WriteUnifiedMarkdown(dir, reviewreport.UnifiedMarkdownInput{
+		Chapter: chapter, Mechanical: &mechanical, AIVoice: &voice, Editor: &editor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rebuildReviewSummary(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteJSONFile(t *testing.T, path string, value any) {
+	t.Helper()
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, path, string(raw))
 }

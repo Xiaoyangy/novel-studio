@@ -80,7 +80,7 @@ func (t *SaveReviewTool) Schema() map[string]any {
 	)
 }
 
-func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var r domain.ReviewEntry
 	if err := unmarshalToolArgs(args, &r); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
@@ -95,6 +95,14 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	}
 	if err := validateReviewEntry(r); err != nil {
 		return nil, err
+	}
+	if r.Scope == "chapter" {
+		// Parameter-validation tests and import tooling may not have materialized
+		// chapter bytes yet. Persisting is allowed, but only a review with this
+		// identity can satisfy the router/pipeline freshness gates.
+		if body, err := t.store.Drafts.LoadChapterText(r.Chapter); err == nil && strings.TrimSpace(body) != "" {
+			r.BodySHA256 = reviewreport.BodySHA256(body)
+		}
 	}
 
 	// 评分卡/issue 门禁：最终 verdict 是模型 verdict 与确定性门禁的最严结果。
@@ -120,7 +128,7 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	if verdict, reason := issueSeverityReviewGate(r.Issues); verdict != "" {
 		applyGate(verdict, reason)
 	}
-	if verdict, reason := t.aiVoiceReviewGate(r); verdict != "" {
+	if verdict, reason := t.chapterArtifactReviewGate(r); verdict != "" {
 		applyGate(verdict, reason)
 	}
 	escalationReason := strings.Join(escalationReasons, "；")
@@ -136,6 +144,7 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	}
 
 	r.Verdict = finalVerdict
+	r.AffectedChapters = affected
 
 	// 根据最终 verdict 更新 Progress。
 	// 写失败必须早返回——后续会 append review checkpoint，若此处吞 err 会让 Coordinator
@@ -282,11 +291,11 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	if _, err := t.store.Checkpoints.AppendArtifact(scope, "review", artifact); err != nil {
 		return nil, fmt.Errorf("checkpoint review: %w", err)
 	}
-	ragIndexed, ragErr := t.sedimentReviewRAG(r, finalVerdict, affected, escalationReason)
+	ragIndexed, ragErr := t.sedimentReviewRAG(ctx, r, finalVerdict, affected, escalationReason)
 	projectMemoryRAGIndexed := false
 	var projectMemoryRAGErr error
 	if finalVerdict == "accept" && r.Scope == "chapter" {
-		projectMemoryRAGIndexed, projectMemoryRAGErr = upsertProjectMemoryRAG(context.Background(), t.store, t.ragEmbedder, t.ragVectorWriter, r.Chapter)
+		projectMemoryRAGIndexed, projectMemoryRAGErr = upsertProjectMemoryRAG(ctx, t.store, t.ragEmbedder, t.ragVectorWriter, r.Chapter)
 	}
 
 	result := map[string]any{
@@ -333,12 +342,12 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 	return json.Marshal(result)
 }
 
-func (t *SaveReviewTool) sedimentReviewRAG(r domain.ReviewEntry, finalVerdict string, affected []int, escalationReason string) (bool, error) {
+func (t *SaveReviewTool) sedimentReviewRAG(ctx context.Context, r domain.ReviewEntry, finalVerdict string, affected []int, escalationReason string) (bool, error) {
 	chunks := reviewRAGChunks(r, finalVerdict, affected, escalationReason)
 	if len(chunks) == 0 {
 		return false, nil
 	}
-	if err := upsertRAGChunks(context.Background(), t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
+	if err := upsertRAGChunks(ctx, t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -652,7 +661,7 @@ func scorecardReviewGate(dimensions []domain.DimensionScore) (string, string) {
 	return "", ""
 }
 
-func (t *SaveReviewTool) aiVoiceReviewGate(r domain.ReviewEntry) (string, string) {
+func (t *SaveReviewTool) chapterArtifactReviewGate(r domain.ReviewEntry) (string, string) {
 	if r.Scope != "chapter" || r.Chapter <= 0 {
 		return "", ""
 	}
@@ -660,7 +669,18 @@ func (t *SaveReviewTool) aiVoiceReviewGate(r domain.ReviewEntry) (string, string
 	if err != nil || analysis == nil {
 		return "", ""
 	}
-	return aiVoiceAnalysisGate(*analysis)
+	mechanical, _, mechanicalErr := reviewreport.LoadMechanicalGate(t.store.Dir(), r.Chapter)
+	if mechanicalErr != nil || mechanical == nil {
+		return aiVoiceAnalysisGate(*analysis)
+	}
+	switch reviewreport.RewriteDisposition(mechanical, analysis, nil, &r) {
+	case "是":
+		return "rewrite", "统一机械门禁/AI voice 裁决要求重写"
+	case "待定":
+		return "rewrite", "章级审核裁决待定，禁止直接放行"
+	default:
+		return "", ""
+	}
 }
 
 func aiVoiceAnalysisGate(analysis domain.AIVoiceAnalysis) (string, string) {
@@ -688,6 +708,7 @@ func (t *SaveReviewTool) currentFinalAIVoiceAnalysis(chapter int) (*domain.AIVoi
 	}
 	history, _ := t.store.AIVoice.LoadAllChapterMetrics()
 	analysis := editrules.AnalyzeChapter(chapter, text, history)
+	analysis.BodySHA256 = reviewreport.BodySHA256(text)
 	if previousMetrics, _ := t.store.AIVoice.LoadChapterMetrics(chapter); previousMetrics != nil {
 		analysis.Metrics.RevisionRound = previousMetrics.RevisionRound
 		analysis.Metrics.BeforeAfterDiff = previousMetrics.BeforeAfterDiff

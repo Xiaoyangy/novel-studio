@@ -177,6 +177,12 @@ func renderCharacterStageRecords(chapter int, records []domain.CharacterStageRec
 		fmt.Fprintf(&b, "- 当前行动：%s\n", r.CurrentAction)
 		fmt.Fprintf(&b, "- 压力：%s\n", r.Pressure)
 		fmt.Fprintf(&b, "- 决策：%s\n", r.Decision)
+		if r.DecisionReason != "" {
+			fmt.Fprintf(&b, "- 决策理由：%s\n", r.DecisionReason)
+		}
+		if len(r.ButterflyEffects) > 0 {
+			fmt.Fprintf(&b, "- 蝴蝶效应：%s\n", strings.Join(r.ButterflyEffects, "；"))
+		}
 		if r.MistakeOrMisbelief != "" {
 			fmt.Fprintf(&b, "- 误判/错误：%s\n", r.MistakeOrMisbelief)
 		}
@@ -230,6 +236,12 @@ func renderSideCharacterJourneys(chapter int, protagonist string, records []doma
 		fmt.Fprintf(&b, "- 本章经历/行动：%s\n", r.CurrentAction)
 		fmt.Fprintf(&b, "- 压力：%s\n", r.Pressure)
 		fmt.Fprintf(&b, "- 按性格做出的决策：%s\n", r.Decision)
+		if r.DecisionReason != "" {
+			fmt.Fprintf(&b, "- 决策理由：%s\n", r.DecisionReason)
+		}
+		if len(r.ButterflyEffects) > 0 {
+			fmt.Fprintf(&b, "- 蝴蝶效应：%s\n", strings.Join(r.ButterflyEffects, "；"))
+		}
 		if r.MistakeOrMisbelief != "" {
 			fmt.Fprintf(&b, "- 误判/错误：%s\n", r.MistakeOrMisbelief)
 		}

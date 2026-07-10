@@ -291,7 +291,7 @@ func projectMemoryRAGChunks(st *store.Store, chapter int) ([]domain.RAGChunk, er
 			Facet:      "zero_init",
 			Context:    "第一章具体写前推演 | ch01_prewrite_simulation",
 			Summary:    "第一章具体角色行动系统、因果链、场景承载、捧场角色边界、声口测试、状态回填和审核返工条件。",
-			Keywords:   []string{"第一章", "写前推演", "江烬", "知识账本", "决策框架", "关系契约", "声口逻辑", "状态回填"},
+			Keywords:   []string{"第一章", "写前推演", "主角", "知识账本", "决策框架", "关系契约", "声口逻辑", "状态回填"},
 			MaxRunes:   2000,
 		},
 		{

@@ -22,6 +22,12 @@ import (
 // 写盘顺序被误判为"foundation 晚于 readiness 更新"。
 const zeroInitFreshnessGrace = 2 * time.Second
 
+// ZeroInitReadinessSchemaVersion is the minimum readiness schema accepted
+// before the first chapter can be written. Keep the producer and every
+// consumer pinned to this single value so a legacy ready:true artifact cannot
+// bypass a newer prewriting contract.
+const ZeroInitReadinessSchemaVersion = 3
+
 // foundationFreshnessFiles 参与 readiness 过期判定的 foundation 工件。
 // 任何一个在 readiness 生成之后被重写，零章推演资产就可能引用了旧设定。
 //
@@ -80,13 +86,17 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 		return false, "meta/first_chapter_generation_readiness.json 不存在（尚未执行 zero-init）"
 	}
 	var r struct {
-		Ready       bool     `json:"ready"`
-		GeneratedAt string   `json:"generated_at"`
-		Missing     []string `json:"missing"`
-		Issues      []string `json:"issues"`
+		SchemaVersion int      `json:"schema_version"`
+		Ready         bool     `json:"ready"`
+		GeneratedAt   string   `json:"generated_at"`
+		Missing       []string `json:"missing"`
+		Issues        []string `json:"issues"`
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
 		return false, "readiness 工件无法解析，需重跑 zero-init"
+	}
+	if r.SchemaVersion < ZeroInitReadinessSchemaVersion {
+		return false, fmt.Sprintf("readiness schema_version=%d 低于当前要求 %d，需重跑 zero-init --overwrite", r.SchemaVersion, ZeroInitReadinessSchemaVersion)
 	}
 	if !r.Ready {
 		return false, fmt.Sprintf("readiness ready=false（missing=%d issues=%d，详见 meta/first_chapter_generation_readiness.md）", len(r.Missing), len(r.Issues))

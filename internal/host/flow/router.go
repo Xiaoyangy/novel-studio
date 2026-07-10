@@ -51,6 +51,12 @@ type State struct {
 	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
 	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
 	NextActionPlanReady bool
+
+	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
+	// 避免大上下文裁剪把当前章标题/核心事件挤掉。
+	NextActionTitle     string
+	NextActionCoreEvent string
+	NextActionHook      string
 }
 
 // Route 根据事实返回下一步指令；返回 nil 表示让 Coordinator LLM 自主裁定。
@@ -96,9 +102,22 @@ func Route(s State) *Instruction {
 			verb = "打磨"
 		}
 		if !s.NextActionPlanReady {
+			task := fmt.Sprintf(
+				"返工目标锁定第 %d 章：按本章 rewrite_brief 重做写前推演计划（%s前）。该章已在 completed_chapters、进度游标指向下一章都属于正常返工状态；严禁规划第 %d 章或任何未来章节。read_chapter(第%d章) 是读取待返工原文，不是把它当上一章续写；所有 planning 工具必须提交 chapter=%d",
+				ch, verb, ch+1, ch, ch,
+			)
+			if s.NextActionTitle != "" {
+				task += fmt.Sprintf("。当前大纲标题必须原样使用《%s》", s.NextActionTitle)
+			}
+			if s.NextActionCoreEvent != "" {
+				task += "；核心事件：" + s.NextActionCoreEvent
+			}
+			if s.NextActionHook != "" {
+				task += "；章末钩子：" + s.NextActionHook
+			}
 			return &Instruction{
 				Agent:   "writer",
-				Task:    fmt.Sprintf("为第 %d 章按审阅结论重做写前推演计划（%s前）", ch, verb),
+				Task:    task,
 				Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划需先纳入 rewrite_brief 重推演", len(p.PendingRewrites)),
 				Chapter: ch,
 			}
@@ -187,9 +206,19 @@ func Route(s State) *Instruction {
 	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
+		task := fmt.Sprintf("为第 %d 章做写前推演，落盘完整章节计划", next)
+		if s.NextActionTitle != "" {
+			task += fmt.Sprintf("；计划标题必须原样使用《%s》", s.NextActionTitle)
+		}
+		if s.NextActionCoreEvent != "" {
+			task += "；核心事件：" + s.NextActionCoreEvent
+		}
+		if s.NextActionHook != "" {
+			task += "；章末钩子：" + s.NextActionHook
+		}
 		return &Instruction{
 			Agent:   "writer",
-			Task:    fmt.Sprintf("为第 %d 章做写前推演，落盘完整章节计划", next),
+			Task:    task,
 			Reason:  "下一章计划待推演",
 			Chapter: next,
 		}

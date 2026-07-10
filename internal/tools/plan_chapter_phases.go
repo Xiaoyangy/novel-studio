@@ -19,6 +19,11 @@ import (
 // 提交 causal_simulation 并在最后一批 finalize。单发的 plan_chapter 保持不变，
 // 两条路径在 finalizeChapterPlan 汇合，校验口径完全一致。
 
+const (
+	planStructureWorldSimulationKey = "_world_simulation_id"
+	planStructureRewriteSHAKey      = "_rewrite_source_sha256"
+)
+
 // PlanStructureTool 两阶段规划第 1 步：提交章节骨架。
 type PlanStructureTool struct {
 	store *store.Store
@@ -70,11 +75,20 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	if err != nil || skipped != nil {
 		return skipped, err
 	}
+	worldSimulation, err := ensureChapterWorldSimulationReadyForPlanning(t.store, chapter)
+	if err != nil {
+		return nil, err
+	}
 	for _, field := range []string{"title", "goal", "conflict", "hook"} {
 		if s, _ := structure[field].(string); s == "" {
 			return nil, fmt.Errorf("plan_structure 缺少核心字段 %s: %w", field, errs.ErrToolArgs)
 		}
 	}
+	applyOutlineAnchorsToStructure(t.store, chapter, structure)
+	if err := applyRewriteAnchorsToStructure(t.store, chapter, structure); err != nil {
+		return nil, err
+	}
+	bindPlanStructureToSources(t.store, chapter, structure, worldSimulation)
 	delete(structure, "causal_simulation") // 细节只走 plan_details，避免两处口径漂移
 
 	// 保留已累积的 causal_simulation：planner 在重试/续跑时常再调一次 plan_structure，
@@ -82,7 +96,7 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	// 仅更新骨架，保住已有推演字段。
 	existingSim := map[string]any{}
 	if prev, err := t.store.Drafts.LoadChapterPlanPartial(chapter); err == nil && prev != nil {
-		if sim, ok := prev["causal_simulation"].(map[string]any); ok {
+		if sim, ok := prev["causal_simulation"].(map[string]any); ok && planStructureBoundToSources(t.store, chapter, prev, worldSimulation) {
 			existingSim = sim
 		}
 	}
@@ -109,6 +123,98 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 			"每批只带一部分字段即可（例如先 initial_state/offscreen_character_stage，再对白/世界层，最后计划类字段），" +
 			"最后一批传 finalize=true 触发完整校验并落成正式 plan",
 	})
+}
+
+func applyRewriteAnchorsToStructure(s *store.Store, chapter int, structure map[string]any) error {
+	source, _, _, err := loadChapterRewriteSource(s, chapter)
+	if err != nil || source == nil {
+		return err
+	}
+	required := stringSliceFromAny(structure["required_beats"])
+	for _, fact := range source.PreserveFacts {
+		required = appendUniqueString(required, fact)
+	}
+	if len(required) > 0 {
+		structure["required_beats"] = required
+	}
+	checks := stringSliceFromAny(structure["continuity_checks"])
+	checks = appendUniqueString(checks, fmt.Sprintf("局部返工必须继承 %s 的事实链；源正文 sha256=%s，允许改写表达，不得改动事件顺序、金额、地点、角色出场、结果、伏笔与章末钩子。", source.BodyPath, source.BodySHA256))
+	structure["continuity_checks"] = checks
+	return nil
+}
+
+func bindPlanStructureToSources(s *store.Store, chapter int, structure map[string]any, simulation *domain.ChapterWorldSimulation) {
+	if simulation != nil {
+		structure[planStructureWorldSimulationKey] = simulation.SimulationID
+	}
+	if source, _, _, err := loadChapterRewriteSource(s, chapter); err == nil && source != nil {
+		structure[planStructureRewriteSHAKey] = source.BodySHA256
+	}
+}
+
+func planStructureBoundToSources(s *store.Store, chapter int, partial map[string]any, simulation *domain.ChapterWorldSimulation) bool {
+	structure, _ := partial["structure"].(map[string]any)
+	if structure == nil {
+		return false
+	}
+	if simulation != nil {
+		got, _ := structure[planStructureWorldSimulationKey].(string)
+		if strings.TrimSpace(got) != strings.TrimSpace(simulation.SimulationID) {
+			return false
+		}
+	}
+	if source, _, _, err := loadChapterRewriteSource(s, chapter); err != nil {
+		return false
+	} else if source != nil {
+		got, _ := structure[planStructureRewriteSHAKey].(string)
+		if strings.TrimSpace(got) != source.BodySHA256 {
+			return false
+		}
+	}
+	return true
+}
+
+func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[string]any) {
+	if s == nil || chapter <= 0 || structure == nil {
+		return
+	}
+	entry, err := s.Outline.GetChapterOutline(chapter)
+	if err != nil || entry == nil {
+		return
+	}
+	required := stringSliceFromAny(structure["required_beats"])
+	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
+		// 大纲核心事件决定本章“要完成什么”。允许 Planner 自由设计冲突、场景和
+		// 因果，但不能把后续章项目拿来替换当前章目标。
+		structure["goal"] = "完整兑现本章大纲核心事件：" + event
+		required = appendUniqueString(required, "必须完整兑现大纲核心事件："+event)
+	}
+	if hook := strings.TrimSpace(entry.Hook); hook != "" {
+		// 章末钩子是章节边界。过去仅追加 required beat，会出现标题仍是本章、
+		// 正文却一路写到数章后的“成熟钩子”；这里直接钉住正式 hook。
+		structure["hook"] = hook
+		required = appendUniqueString(required, "必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末："+hook)
+	}
+	if len(required) > 0 {
+		structure["required_beats"] = required
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	switch items := value.(type) {
+	case []string:
+		return append([]string(nil), items...)
+	case []any:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // PlanDetailsTool 两阶段规划第 2 步：分批合并 causal_simulation，finalize 时收口。
@@ -148,14 +254,7 @@ func (t *PlanDetailsTool) Schema() map[string]any {
 // inProgressChapter 从进度推断当前正在写作的章号：优先 in_progress_chapter，
 // 回退到下一待写章。弱模型丢 chapter 参数时用它兜底。
 func (t *PlanDetailsTool) inProgressChapter() int {
-	progress, err := t.store.Progress.Load()
-	if err != nil || progress == nil {
-		return 0
-	}
-	if progress.InProgressChapter > 0 {
-		return progress.InProgressChapter
-	}
-	return progress.NextChapter()
+	return inProgressChapterOf(t.store)
 }
 
 func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
@@ -180,6 +279,13 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if partial == nil {
 		return nil, fmt.Errorf("第 %d 章没有两阶段规划中间态：请先调用 plan_structure 提交核心字段，或改用 plan_chapter 一次性提交: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
+	worldSimulation, err := ensureChapterWorldSimulationReadyForPlanning(t.store, a.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	if !planStructureBoundToSources(t.store, a.Chapter, partial, worldSimulation) {
+		return nil, fmt.Errorf("第 %d 章 plan_structure 不是由当前 world_simulation/rewrite_source 生成；请先重新调用 plan_structure，再提交 plan_details: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
 
 	merged, _ := partial["causal_simulation"].(map[string]any)
 	if merged == nil {
@@ -192,7 +298,11 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		)
 	}
 	mergeCausalSimulationPatch(merged, a.CausalSimulation)
+	normalizations := normalizePartialVisibleCharacterScope(t.store, a.Chapter, merged)
 	partial["causal_simulation"] = merged
+	if len(normalizations) > 0 {
+		partial["scope_normalizations"] = append(stringSliceFromAny(partial["scope_normalizations"]), normalizations...)
+	}
 	partial["updated_at"] = time.Now().Format(time.RFC3339)
 	if err := validateProjectContaminationFree(t.store, "plan_details", partial); err != nil {
 		return nil, err
@@ -208,17 +318,54 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		if result, finalized, err := t.autoFinalizePartialIfComplete(a.Chapter, partial, merged); finalized || err != nil {
 			return result, err
 		}
-		return json.Marshal(map[string]any{
+		response := map[string]any{
 			"staged":              "details",
 			"chapter":             a.Chapter,
 			"fields_present":      sortedKeys(merged),
 			"gap_summary":         planDetailsGapSummary(t.store, a.Chapter, partial, merged),
 			"next_step":           "继续 plan_details 提交剩余字段；每次只补一个 recommended_batches 分组；全部就绪后最后一批再传 finalize=true；若字段已齐，本工具会自动收口为正式 plan",
 			"recommended_batches": planDetailsRecommendedBatches(),
-		})
+		}
+		if len(normalizations) > 0 {
+			response["scope_normalizations"] = normalizations
+		}
+		return json.Marshal(response)
 	}
 
 	return t.finalizePartial(a.Chapter, partial, merged)
+}
+
+func normalizePartialVisibleCharacterScope(s *store.Store, chapter int, merged map[string]any) []string {
+	items, ok := merged["offscreen_character_stage"].([]any)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	allowed := map[string]struct{}{}
+	for _, name := range chapterOutlineCharacterNames(s, chapter) {
+		allowed[strings.TrimSpace(name)] = struct{}{}
+	}
+	known := knownCharacterNameSet(s)
+	var changes []string
+	for index, item := range items {
+		stage, ok := item.(map[string]any)
+		if !ok || stage["visible_in_chapter"] != true {
+			continue
+		}
+		name, _ := stage["character"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := allowed[name]; ok {
+			continue
+		}
+		if _, ok := known[name]; !ok {
+			continue
+		}
+		stage["visible_in_chapter"] = false
+		changes = append(changes, fmt.Sprintf("offscreen_character_stage[%d] %s 未获本章大纲授权，已自动改为 visible_in_chapter=false", index, name))
+	}
+	return changes
 }
 
 func mergeCausalSimulationPatch(dst, patch map[string]any) {
@@ -341,47 +488,53 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 
 func planDetailsRecommendedBatches() []string {
 	return []string{
-		"batch1_context_and_stage: context_sources + offscreen_character_stage；若 initial_state 已有，只补缺失 action_tendency 等小字段，不重发超大 initial_state",
+		"batch1_scope_and_state: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state（只需覆盖主角）",
 		"batch2_scene_causality: environment_state + causal_beats + decision_points + outcome_shift",
-		"batch3_voice_dialogue: voice_logic + dialogue_scene_blueprints",
-		"batch4_character_emotion: character_arc_tests + emotional_logic + relationship_emotion_arcs + dormant_character_policy",
-		"batch5_world_pressure: world_background_layers + information_asymmetry + hidden_rule_pressure + social_mood_rumors + ritual_calendar + structural_resources + cosmology_checks + conflict_web + narrative_tension_matrix",
+		"batch3_prose_control: voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan",
+		"batch4_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；返工章同时补 review_refinement",
 	}
 }
 
 func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[string]any) []string {
 	var gaps []string
+	if chapterWorldSimulationRequired(s) {
+		for _, field := range []string{"world_simulation_id", "protagonist_decision"} {
+			if _, ok := merged[field]; !ok {
+				gaps = append(gaps, "missing "+field)
+			}
+		}
+	}
 	for _, field := range []string{
+		"project_promise",
+		"chapter_function",
 		"context_sources",
-		"offscreen_character_stage",
+		"initial_state",
 		"environment_state",
 		"causal_beats",
 		"decision_points",
 		"outcome_shift",
 		"voice_logic",
 		"dialogue_scene_blueprints",
-		"character_arc_tests",
-		"dormant_character_policy",
 		"emotional_logic",
-		"relationship_emotion_arcs",
-		"world_background_layers",
-		"information_asymmetry",
-		"hidden_rule_pressure",
-		"social_mood_rumors",
-		"ritual_calendar",
-		"structural_resources",
-		"cosmology_checks",
-		"conflict_web",
-		"narrative_tension_matrix",
+		"anti_ai_execution_plan",
+		"reader_reward_plan",
+		"reader_retention_plan",
+		"ending_consequence_contract",
 	} {
 		if _, ok := merged[field]; !ok {
 			gaps = append(gaps, "missing "+field)
 		}
 	}
+	if rewrite, _ := partial["rewrite"].(bool); rewrite {
+		if _, ok := merged["review_refinement"]; !ok {
+			gaps = append(gaps, "missing review_refinement")
+		}
+	}
 	plan, err := chapterPlanFromPartial(chapter, partial, merged)
 	if err == nil {
-		required := requiredDossierCharacterNames(s, chapter)
-		if missing := missingInitialStateCoverage(required, plan.CausalSimulation.InitialState); len(missing) > 0 {
+		protagonist := inferCommitProtagonist(s)
+		protagonistOnly := compactStrings([]string{protagonist})
+		if missing := missingInitialStateCoverage(protagonistOnly, plan.CausalSimulation.InitialState); len(missing) > 0 {
 			gaps = append(gaps, formatMissingCharacterCoverage("initial_state", missing))
 		}
 		for _, state := range plan.CausalSimulation.InitialState {
@@ -389,11 +542,11 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 				gaps = append(gaps, fmt.Sprintf("initial_state(%s).action_tendency", state.Character))
 			}
 		}
-		if missing := missingArcTestCoverage(required, plan.CausalSimulation.CharacterArcTests); len(missing) > 0 {
-			gaps = append(gaps, formatMissingCharacterCoverage("character_arc_tests", missing))
-		}
-		if missing := missingEmotionalLogicCoverage(required, plan.CausalSimulation.EmotionalLogic); len(missing) > 0 {
+		if missing := missingEmotionalLogicCoverage(protagonistOnly, plan.CausalSimulation.EmotionalLogic); len(missing) > 0 {
 			gaps = append(gaps, formatMissingCharacterCoverage("emotional_logic", missing))
+		}
+		if protagonist != "" && !voiceLogicContainsCharacter(plan.CausalSimulation.VoiceLogic, protagonist) {
+			gaps = append(gaps, formatMissingCharacterCoverage("voice_logic", []string{protagonist}))
 		}
 	}
 	if len(gaps) == 0 {

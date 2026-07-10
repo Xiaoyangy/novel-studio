@@ -287,20 +287,372 @@
   .loading { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
   a { color: var(--accent1); }
 </style>
+<style id="refined-workbench-theme">
+  :root {
+    --bg: #f2f5f3;
+    --surface: #ffffff;
+    --surface-soft: #f7f9f8;
+    --surface-strong: #eef2f0;
+    --line: #d9e0dc;
+    --line-strong: #bcc7c1;
+    --text: #202824;
+    --muted: #66736d;
+    --subtle: #89938e;
+    --accent1: #0f766e;
+    --accent2: #1d4ed8;
+    --ok: #16803a;
+    --warn: #b45309;
+    --bad: #be123c;
+    --info: #1d4ed8;
+    --cyan: #0e7490;
+    --purple: #6d28d9;
+    --shadow: 0 12px 28px rgba(31, 42, 36, .08);
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  * { letter-spacing: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    min-width: 320px;
+  }
+  ::selection { background: #ccebe5; color: #143d38; }
+  header {
+    min-height: 62px;
+    padding: 10px max(22px, calc((100vw - 1480px) / 2));
+    gap: 12px;
+    background: rgba(255, 255, 255, .92);
+    border-color: var(--line);
+    box-shadow: 0 1px 0 rgba(28, 39, 33, .03);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand-mark {
+    width: 30px; height: 30px; display: grid; place-items: center;
+    color: #fff; background: #163f3a; border-radius: 6px;
+    font: 700 11px/1 var(--mono); flex: none;
+  }
+  .brand-copy { min-width: 0; }
+  .brand-copy h1 { font-size: 15px; line-height: 1.25; color: var(--text); }
+  .brand-copy p { margin-top: 2px; color: var(--muted); font-size: 11px; }
+  h1 em { color: inherit; background: none; -webkit-text-fill-color: currentColor; }
+  .logo { display: none; }
+  .head-meta { gap: 14px; font-size: 11px; }
+  .head-meta code { color: var(--muted); }
+  .dot { width: 6px; height: 6px; }
+  .dot.live { background: var(--ok); box-shadow: none; animation: none; }
+  .dot.err { background: var(--bad); box-shadow: none; }
+  .icon-btn {
+    width: 32px; height: 32px; display: grid; place-items: center;
+    border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+    border-radius: 6px; cursor: pointer; font-size: 17px;
+  }
+  .icon-btn:hover { border-color: var(--line-strong); color: var(--text); }
+  .icon-btn:disabled { opacity: .45; cursor: wait; }
+
+  main { max-width: 1480px; padding: 24px 22px 72px; }
+  .portfolio {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 3px 12px rgba(31, 42, 36, .035);
+  }
+  .portfolio-head {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
+    padding: 17px 18px 14px; border-bottom: 1px solid var(--line);
+  }
+  .portfolio-head h2 { font-size: 17px; line-height: 1.25; }
+  .portfolio-head p { margin-top: 4px; color: var(--muted); font-size: 12px; }
+  .scan-meta { color: var(--subtle); font-size: 11px; text-align: right; }
+  .portfolio-metrics {
+    display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+  .portfolio-metric { padding: 14px 16px 13px; border-right: 1px solid var(--line); min-width: 0; }
+  .portfolio-metric:last-child { border-right: 0; }
+  .portfolio-metric .k { color: var(--muted); font-size: 10px; line-height: 1.35; }
+  .portfolio-metric .v { margin-top: 4px; font-size: 20px; font-weight: 720; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .portfolio-metric .s { margin-top: 3px; color: var(--subtle); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .portfolio-metric.attn .v { color: var(--bad); }
+  .portfolio-metric.live .v { color: var(--ok); }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; margin: 16px 0 10px;
+  }
+  .search-box { position: relative; width: min(320px, 38vw); }
+  .search-box input {
+    width: 100%; height: 36px; padding: 0 12px 0 34px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+    color: var(--text); outline: none; font: inherit; font-size: 12px;
+  }
+  .search-box input:focus { border-color: var(--accent1); box-shadow: 0 0 0 3px rgba(15, 118, 110, .1); }
+  .search-box span { position: absolute; left: 12px; top: 9px; color: var(--subtle); font-size: 14px; pointer-events: none; }
+  .segmented { display: inline-flex; height: 36px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
+  .segmented button {
+    min-width: 66px; padding: 0 12px; border: 0; border-right: 1px solid var(--line);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 11px;
+  }
+  .segmented button:last-child { border-right: 0; }
+  .segmented button.on { background: #e9f4f1; color: #0c5f58; font-weight: 650; }
+  .toolbar select {
+    height: 36px; padding: 0 30px 0 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--text); font-size: 11px;
+  }
+  .result-count { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+  .grid, .project-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .project-card {
+    position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    cursor: pointer; overflow: hidden; transition: border-color .16s ease, box-shadow .16s ease;
+  }
+  .project-card:hover { border-color: #aab8b1; box-shadow: var(--shadow); transform: none; }
+  .project-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #aeb8b3; }
+  .project-card.status-running::before { background: var(--ok); }
+  .project-card.status-error::before, .project-card.status-attention::before { background: var(--bad); }
+  .project-top {
+    min-height: 58px; display: flex; align-items: center; gap: 16px;
+    padding: 11px 14px 10px 18px; border-bottom: 1px solid var(--line);
+  }
+  .project-identity { min-width: 220px; flex: 1; }
+  .project-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .project-name-row h2 { font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+  .project-sub { margin-top: 4px; color: var(--subtle); font-size: 10px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-badges { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #9aa5a0; flex: none; }
+  .status-dot.running { background: var(--ok); box-shadow: 0 0 0 3px rgba(22, 128, 58, .11); animation: breathe 1.8s ease-in-out infinite; }
+  .status-dot.error, .status-dot.attention { background: var(--bad); }
+  .open-detail { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); width: 30px; height: 30px; font-size: 18px; flex: none; }
+  .open-detail:hover { color: var(--text); }
+  .pill, .tag {
+    border-radius: 4px; letter-spacing: 0; border: 1px solid transparent; font-weight: 520;
+  }
+  .pill { padding: 3px 7px; }
+  .pill.phase-writing { color: #8a4305; border-color: #f0d5ad; background: #fff8eb; }
+  .pill.phase-complete, .tag.accept, .tag.ok { color: #11642e; border-color: #bfdfca; background: #f0f8f2; }
+  .pill.phase-outline, .tag.blue, .tag.pass { color: #164ca1; border-color: #c9d8f1; background: #f2f6fd; }
+  .pill.gen, .tag.purple { color: #5b21a8; border-color: #ddcef1; background: #f8f5fc; }
+  .tag.rewrite, .tag.fail { color: #9f1239; border-color: #f0c6d3; background: #fff3f6; }
+  .tag.now { color: #8a4305; border-color: #efd4ac; background: #fff8eb; }
+  .tag.pending { color: var(--muted); border-color: var(--line); background: var(--surface-soft); }
+  .tag.health-ok { color: #11642e; border-color: #bfdfca; background: #f0f8f2; }
+  .tag.health-warning { color: #8a4305; border-color: #efd4ac; background: #fff8eb; }
+  .tag.health-error { color: #9f1239; border-color: #f0c6d3; background: #fff3f6; }
+
+  .project-body { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(360px, 1.5fr) minmax(320px, 1.15fr); }
+  .project-section { padding: 14px 18px 13px; min-width: 0; border-right: 1px solid var(--line); }
+  .project-section:last-child { border-right: 0; }
+  .section-kicker { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; color: var(--muted); font-size: 10px; }
+  .section-kicker b { color: var(--text); font-size: 12px; }
+  .progress-line { display: grid; grid-template-columns: 58px 1fr 52px; align-items: center; gap: 8px; margin-top: 9px; font-size: 10px; color: var(--muted); }
+  .progress-line strong { color: var(--text); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+  .trackbar { height: 5px; background: var(--surface-strong); overflow: hidden; border-radius: 3px; }
+  .trackbar i { display: block; height: 100%; background: var(--accent1); border-radius: 3px; box-shadow: none; transition: width .35s ease; }
+  .progress-line.plan .trackbar i { background: var(--info); }
+  .progress-line.quality .trackbar i { background: var(--warn); }
+  .progress-facts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 11px; color: var(--muted); font-size: 10px; }
+  .progress-facts b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .current-title { margin-top: 5px; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .current-title b { font-size: 14px; }
+  .current-title span { color: var(--muted); font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .steps { margin-top: 11px; gap: 3px; }
+  .steps .lbl { display: none; }
+  .step { padding: 4px 2px; font-size: 9px; border-radius: 3px; background: var(--surface-strong); }
+  .step.done { color: #11642e; background: #eaf5ee; }
+  .step.now { color: #7a3b05; background: #fff3df; border-color: #e5bd82; animation: none; }
+  .latest-event { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+  .latest-event b { color: var(--text); font-weight: 620; }
+  .runtime-error { margin-top: 8px; padding-left: 8px; border-left: 2px solid var(--bad); color: #8c2742; font-size: 10px; line-height: 1.45; }
+  .runtime-error.recovered { border-left-color: var(--warn); color: #78501f; }
+
+  .quality-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 9px; }
+  .quality-metric .v { font-size: 15px; font-weight: 720; font-variant-numeric: tabular-nums; }
+  .quality-metric .k { color: var(--muted); font-size: 9px; margin-top: 2px; }
+  .quality-note { margin-top: 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+  .quality-note strong { color: var(--text); }
+  .project-footer {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 14px;
+    min-height: 34px; padding: 7px 14px 7px 18px; border-top: 1px solid var(--line);
+    background: var(--surface-soft); color: var(--muted); font-size: 10px;
+  }
+  .project-footer b { color: var(--text); font-weight: 620; }
+  .project-footer .updated { margin-left: auto; }
+  .empty { padding: 70px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+
+  .overlay { background: rgba(21, 30, 26, .32); backdrop-filter: blur(2px); }
+  .drawer {
+    width: min(1240px, 97vw); background: var(--surface); border-color: var(--line);
+    box-shadow: -18px 0 48px rgba(25, 34, 29, .14);
+  }
+  .drawer-head { padding: 14px 22px 0; background: var(--surface); border-color: var(--line); }
+  .drawer-head h2 { font-size: 18px; }
+  .drawer-head .close { border-color: var(--line); color: var(--muted); border-radius: 6px; }
+  .tabs { overflow-x: auto; margin-top: 10px; scrollbar-width: thin; }
+  .tab { padding: 9px 13px; color: var(--muted); white-space: nowrap; font-size: 12px; }
+  .tab.on { color: #0d5f58; border-bottom-color: var(--accent1); }
+  .drawer-body { padding: 18px 22px 46px; }
+  .sec { margin-bottom: 22px; }
+  .sec h3 { margin-bottom: 8px; color: #4f5d56; font-size: 11px; font-weight: 700; }
+  .panel, .pcard, .lifeline, .dcard, .clockcard, .log {
+    background: var(--surface-soft); border-color: var(--line); border-radius: 6px;
+  }
+  .panel { padding: 13px 14px; }
+  .prose, .md, .pcard .desc, .facts, .clockcard .cbody .cons { color: #46544d; }
+  .detail-kpis { display: grid; grid-template-columns: repeat(6, 1fr); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 18px; }
+  .detail-kpi { padding: 11px 12px; border-right: 1px solid var(--line); }
+  .detail-kpi:last-child { border-right: 0; }
+  .detail-kpi .k { color: var(--muted); font-size: 9px; }
+  .detail-kpi .v { margin-top: 3px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .health-list { display: grid; gap: 6px; margin-top: 9px; }
+  .health-item { display: flex; gap: 8px; align-items: flex-start; color: #48554e; font-size: 11px; line-height: 1.55; }
+  .health-item::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); margin-top: 5px; flex: none; }
+  .health-item.error::before { background: var(--bad); }
+  .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; margin-top: 10px; }
+  .source-item { padding: 7px 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; min-width: 0; }
+  .source-item b { display: block; font-size: 10px; }
+  .source-item span { display: block; margin-top: 2px; color: var(--subtle); font: 9px/1.35 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .asset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+  .asset-item { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-soft); font-size: 10px; }
+  .asset-item i { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); flex: none; }
+  .asset-item.ok i { background: var(--ok); }
+  .asset-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .asset-item code { margin-left: auto; color: var(--subtle); font-size: 8px; }
+  table { font-size: 11px; }
+  th { color: var(--muted); padding: 7px 8px; background: var(--surface-soft); position: sticky; top: 0; z-index: 1; }
+  td { padding: 7px 8px; border-color: #e7ebe9; }
+  tr:hover td { background: #f7faf8; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+  .table-wrap table { min-width: 720px; }
+  .pgrid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
+  .pcard { padding: 13px 14px; }
+  .character-details { margin-top: 9px; border-top: 1px solid var(--line); padding-top: 8px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 10px; }
+  details[open] summary { color: var(--text); margin-bottom: 7px; }
+  .route-time { font-family: var(--mono); white-space: nowrap; }
+  .journey-list { display: grid; gap: 7px; }
+  .journey-row { display: grid; grid-template-columns: 110px 150px minmax(180px, 1fr) minmax(220px, 1.35fr); gap: 10px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); font-size: 10px; line-height: 1.5; }
+  .journey-row b { font-size: 11px; }
+  .journey-row .muted { color: var(--muted); }
+  .quality-chapter { margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .quality-chapter-head { display: flex; align-items: center; gap: 7px; padding: 10px 12px; background: var(--surface-soft); border-bottom: 1px solid var(--line); }
+  .quality-chapter-head b { font-size: 12px; }
+  .quality-chapter-head .spacer { margin-left: auto; }
+  .quality-chapter-body { padding: 11px 12px; }
+  .quality-summary-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 10px; }
+  .quality-summary-grid .cell { padding-right: 8px; border-right: 1px solid var(--line); }
+  .quality-summary-grid .cell:last-child { border-right: 0; }
+  .quality-summary-grid .cell b { display: block; font-size: 13px; }
+  .quality-summary-grid .cell span { color: var(--muted); font-size: 9px; }
+  .event-list { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .event-row { display: grid; grid-template-columns: 132px 72px 74px minmax(260px, 1fr); gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); font-size: 10px; align-items: baseline; }
+  .event-row:last-child { border-bottom: 0; }
+  .event-row.failed { background: #fff5f7; color: #8f2643; }
+  .event-row time { color: var(--subtle); font-family: var(--mono); }
+  .log { background: #18201c; color: #c2cec8; border-color: #26352d; border-radius: 6px; }
+  .log .hl { color: #ff9aae; }
+  .clockcard, .lifeline { padding: 13px 14px; }
+  .segs i.f, .ocean .ax .t i, .track .span, .dstream::before { background: var(--accent1); box-shadow: none; }
+  .track .node { background: var(--accent2); box-shadow: none; }
+  .ring text { fill: var(--text); }
+  .loading { color: var(--muted); }
+
+  @media (max-width: 1120px) {
+    .portfolio-metrics { grid-template-columns: repeat(4, 1fr); }
+    .portfolio-metric:nth-child(4n) { border-right: 0; }
+    .portfolio-metric:nth-child(-n+4) { border-bottom: 1px solid var(--line); }
+    .project-body { grid-template-columns: 1fr 1fr; }
+    .project-section:nth-child(2) { border-right: 0; }
+    .project-section:last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+    .detail-kpis { grid-template-columns: repeat(3, 1fr); }
+    .detail-kpi:nth-child(3) { border-right: 0; }
+    .detail-kpi:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+  }
+  @media (max-width: 760px) {
+    header { padding: 9px 12px; }
+    .head-meta #runs-source-wrap, .head-meta #tick { display: none; }
+    .brand-copy p { display: none; }
+    main { padding: 14px 10px 50px; }
+    .portfolio-head { align-items: flex-start; padding: 14px; }
+    .scan-meta { display: none; }
+    .portfolio-metrics { grid-template-columns: repeat(2, 1fr); }
+    .portfolio-metric { border-bottom: 1px solid var(--line); }
+    .portfolio-metric:nth-child(2n) { border-right: 0; }
+    .portfolio-metric:nth-last-child(-n+2) { border-bottom: 0; }
+    .toolbar { flex-wrap: wrap; }
+    .search-box { width: 100%; }
+    .segmented { width: 100%; }
+    .segmented button { flex: 1; min-width: 0; padding: 0 5px; }
+    .toolbar select { flex: 1; }
+    .result-count { margin-left: 0; }
+    .project-top { align-items: flex-start; padding: 11px 10px 10px 14px; }
+    .project-badges { display: none; }
+    .project-body { grid-template-columns: 1fr; }
+    .project-section, .project-section:nth-child(2), .project-section:last-child { border-right: 0; border-top: 1px solid var(--line); grid-column: auto; }
+    .project-section:first-child { border-top: 0; }
+    .project-footer { gap: 8px; padding-left: 14px; }
+    .project-footer .updated { width: 100%; margin-left: 0; }
+    .drawer { width: 100vw; }
+    .drawer-head { padding: 12px 12px 0; }
+    .drawer-body { padding: 14px 10px 36px; }
+    .tabs { margin-right: -12px; }
+    .detail-kpis { grid-template-columns: repeat(2, 1fr); }
+    .detail-kpi, .detail-kpi:nth-child(3) { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .detail-kpi:nth-child(2n) { border-right: 0; }
+    .detail-kpi:nth-last-child(-n+2) { border-bottom: 0; }
+    .pgrid { grid-template-columns: 1fr; }
+    .journey-row { grid-template-columns: 1fr; gap: 4px; }
+    .quality-summary-grid { grid-template-columns: repeat(2, 1fr); }
+    .quality-summary-grid .cell { border-right: 0; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+    .event-row { grid-template-columns: 100px 62px 1fr; }
+    .event-row span:last-child { grid-column: 1 / -1; }
+  }
+</style>
 </head>
 <body>
 <header>
-  <div class="logo"></div>
-  <h1><em>novel-studio</em>&nbsp;· 创作进度看板</h1>
+  <div class="brand">
+    <div class="brand-mark">NS</div>
+    <div class="brand-copy">
+      <h1>novel-studio</h1>
+      <p>创作进度控制台</p>
+    </div>
+  </div>
   <div class="head-meta">
     <span id="conn"><span class="dot live"></span><span>已连接</span></span>
-    <span>数据源 <code id="runs-dir">data/runs/</code></span>
+    <span id="runs-source-wrap">数据源 <code id="runs-dir">data/runs/</code></span>
     <span id="tick">—</span>
+    <button class="icon-btn" id="manual-refresh" type="button" title="立即刷新" aria-label="立即刷新">↻</button>
   </div>
 </header>
 
 <main>
-  <div class="grid" id="grid"></div>
+  <section class="portfolio" aria-labelledby="portfolio-title">
+    <div class="portfolio-head">
+      <div>
+        <h2 id="portfolio-title">创作全局</h2>
+        <p>正文、评审、运行队列与沉淀资产的实时汇总</p>
+      </div>
+      <div class="scan-meta" id="scan-meta">等待首次扫描</div>
+    </div>
+    <div class="portfolio-metrics" id="portfolio-metrics"></div>
+  </section>
+
+  <div class="toolbar">
+    <label class="search-box">
+      <span aria-hidden="true">⌕</span>
+      <input id="project-search" type="search" placeholder="搜索书名、目录、模型" autocomplete="off">
+    </label>
+    <div class="segmented" id="project-filter" aria-label="项目状态筛选">
+      <button type="button" class="on" data-filter="all">全部</button>
+      <button type="button" data-filter="running">运行中</button>
+      <button type="button" data-filter="attention">待处理</button>
+      <button type="button" data-filter="idle">空闲</button>
+    </div>
+    <select id="project-sort" aria-label="项目排序">
+      <option value="activity">按最近活动</option>
+      <option value="attention">按待处理优先</option>
+      <option value="progress">按完成进度</option>
+      <option value="name">按书名</option>
+    </select>
+    <span class="result-count" id="result-count">0 个项目</span>
+  </div>
+
+  <div class="project-list" id="grid"></div>
   <div class="empty" id="empty" style="display:none">
     <b>还没有书目工程</b>
     在 <code>data/runs/&lt;书名&gt;/</code> 下用 <code>novel-studio --pipeline</code> 开一本书，这里会自动出现它的进度。
@@ -322,7 +674,8 @@
       <button class="tab" data-tab="growth">成长轨迹</button>
       <button class="tab" data-tab="plan">计划</button>
       <button class="tab" data-tab="offscreen">离屏世界</button>
-      <button class="tab" data-tab="log">日志</button>
+      <button class="tab" data-tab="quality">质量</button>
+      <button class="tab" data-tab="log">运行</button>
     </div>
   </div>
   <div class="drawer-body" id="d-body"><div class="loading">加载中…</div></div>
@@ -334,11 +687,14 @@ const $ = (s, el = document) => el.querySelector(s);
 const grid = $("#grid"), empty = $("#empty");
 const overlay = $("#overlay"), drawer = $("#drawer");
 let currentDetail = null, currentTab = "overview", detailTimer = null;
+let allNovels = [], activeFilter = "all", refreshing = false;
 
 const fmtNum = n => (n >= 10000 ? (n / 10000).toFixed(1) + " 万" : String(n ?? 0));
 const fmtMoney = n => "$" + (n ?? 0).toFixed(2);
 const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
-const stepName = { plan: "构思", draft: "落稿", check: "校验", commit: "提交", review: "评审" };
+const stepName = { simulate: "推演", plan: "计划", draft: "落稿", check: "校验", commit: "提交", review: "评审", rewrite: "返工", deliver: "交付" };
+const runtimeName = { running: "运行中", error: "运行异常", attention: "待处理", idle: "空闲", complete: "已完结" };
+const healthName = { ok: "数据一致", warning: "有差异", error: "数据冲突" };
 const ago = ts => {
   if (!ts) return "—";
   const s = Math.max(0, Date.now() / 1000 - ts);
@@ -347,10 +703,19 @@ const ago = ts => {
   if (s < 86400) return Math.floor(s / 3600) + " 小时前";
   return Math.floor(s / 86400) + " 天前";
 };
+const pct = n => Math.max(0, Math.min(100, Number(n) || 0));
+const shortTime = value => value ? new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+const travelTime = days => {
+  if (days == null || Number.isNaN(Number(days))) return "—";
+  const minutes = Math.round(Number(days) * 24 * 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  if (minutes < 24 * 60) return `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)} 小时`;
+  return `${Number(days).toFixed(1)} 天`;
+};
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const api = p => fetch(p, { cache: "no-store" }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
-/* ---------- 卡片 ---------- */
+/* ---------- 项目列表 ---------- */
 function stepChain(w, compact) {
   if (!w || !w.chapter) return "";
   const chain = (w.chain || []).map((s, i) => {
@@ -361,82 +726,154 @@ function stepChain(w, compact) {
   return `<div class="steps"><span class="lbl">第 ${w.chapter} 章${compact ? "" : " 进展"}</span>${chain}</div>`;
 }
 
-function pipelineChips(b) {
-  const done = new Set(b.pipeline_completed || []);
-  const stages = (b.pipeline_stages && b.pipeline_stages.length) ? b.pipeline_stages : ["write", "review", "rewrite", "deliver"];
-  let nowMarked = false;
-  return stages.map(s => {
-    let cls = "";
-    if (done.has(s)) cls = "done";
-    else if (!nowMarked) { cls = b.active ? "now" : ""; nowMarked = true; }
-    return `<span class="chip ${cls}">${esc(s)}</span>`;
-  }).join("");
-}
-
-function sparkline(b) {
-  const entries = Object.entries(b.chapter_words || {});
-  if (!entries.length) return "";
-  const max = Math.max(...entries.map(([, v]) => v), 1);
-  const bars = entries.slice(-24).map(([k, v]) =>
-    `<i style="height:${Math.max(8, Math.round(v / max * 100))}%" title="第${k}章 ${v}字"></i>`).join("");
-  return `<div class="spark">${bars}</div>`;
-}
-
 function card(b) {
-  const pct = b.chapters_total ? Math.min(100, Math.round(b.chapters_completed / b.chapters_total * 100)) : 0;
-  return `<div class="card ${b.active ? "active-run" : ""}" data-dir="${esc(b.dir)}">
-    <h2>${b.active ? '<span class="pulse"></span>' : ""}${esc(b.name)}</h2>
-    <div class="badges">
-      <span class="pill phase-${esc(b.phase)}">${phaseName[b.phase] || esc(b.phase)}</span>
-      ${b.flow && b.flow !== b.phase ? `<span class="pill">${esc(b.flow)}</span>` : ""}
-      ${b.generation_mode ? `<span class="pill gen">推演线 ${esc(b.generation_mode.replace(/_/g, " "))}</span>` : ""}
-    </div>
-    <div class="prog">
-      <div class="nums"><span><b>${b.chapters_completed}</b> / ${b.chapters_total || "?"} 章</span><span>${pct}%</span></div>
-      <div class="bar"><i style="width:${pct}%"></i></div>
-      <div class="tri">
-        <span>目标 <b>${b.chapters_total || "?"}</b> 章</span>
-        <span>已细化规划 <b>${b.chapters_planned}</b></span>
-        <span>已完成 <b>${b.chapters_completed}</b></span>
-        <span>落盘 <b>${b.chapters_on_disk}</b></span>
+  const runtime = b.runtime || {}, health = b.health || {}, w = b.working || {};
+  const status = runtime.status || (b.active ? "running" : "idle");
+  const workLabel = w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : w.chapter ? `第 ${w.chapter} 章` : "尚未进入章节";
+  const latest = w.last_step || (runtime.last_event || {}).summary || "等待下一步";
+  const err = w.last_error || runtime.last_error;
+  const errRecovered = err && w.last_at && new Date(w.last_at).getTime() > new Date(err.time || 0).getTime() && !w.last_failed;
+  const target = b.chapter_word_target || {};
+  const targetText = target.min || target.max ? `${target.min || "?"}–${target.max || "?"}` : "未设置";
+  const healthCls = `health-${health.status || "warning"}`;
+  const model = runtime.model || "模型未记录";
+  return `<article class="project-card status-${esc(status)}" data-dir="${esc(b.dir)}" tabindex="0" role="button" aria-label="查看 ${esc(b.name)} 详情">
+    <div class="project-top">
+      <div class="project-identity">
+        <div class="project-name-row"><span class="status-dot ${esc(status)}"></span><h2>${esc(b.name)}</h2></div>
+        <div class="project-sub">${esc(b.dir)} · ${esc(b.generation_id || "无 generation id")}</div>
       </div>
+      <div class="project-badges">
+        <span class="pill phase-${esc(b.phase)}">${phaseName[b.phase] || esc(b.phase)}</span>
+        <span class="tag ${status === "running" ? "ok" : status === "error" || status === "attention" ? "rewrite" : "pending"}">${runtimeName[status] || esc(status)}</span>
+        <span class="tag ${healthCls}">${healthName[health.status] || "待校验"}</span>
+        ${b.archived ? '<span class="tag pending">历史工程</span>' : ""}
+        ${b.rewrite_pending ? `<span class="tag rewrite">${b.rewrite_pending} 章待返工</span>` : ""}
+      </div>
+      <span class="open-detail" aria-hidden="true">›</span>
     </div>
-    ${stepChain(b.working, true)}
-    <div class="stats">
-      <div class="stat"><div class="k">总字数</div><div class="v">${fmtNum(b.words_total)}</div></div>
-      <div class="stat"><div class="k">成本</div><div class="v">${fmtMoney(b.cost_usd)}</div></div>
-      <div class="stat"><div class="k">卷 · 弧</div><div class="v">${b.volume || "-"} · ${b.arc || "-"}</div></div>
-      <div class="stat"><div class="k">评审/门禁</div><div class="v">${b.reviews_accepted}/${b.gate_passed}</div></div>
+    <div class="project-body">
+      <section class="project-section">
+        <div class="section-kicker"><span>全书进度</span><b>${b.chapters_completed} / ${b.chapters_total || "?"} 章</b></div>
+        <div class="progress-line"><span>已归档</span><span class="trackbar"><i style="width:${pct(b.progress_percent)}%"></i></span><strong>${pct(b.progress_percent).toFixed(1)}%</strong></div>
+        <div class="progress-line plan"><span>已细化</span><span class="trackbar"><i style="width:${pct(b.plan_percent)}%"></i></span><strong>${pct(b.plan_percent).toFixed(1)}%</strong></div>
+        <div class="progress-line quality"><span>质检通过</span><span class="trackbar"><i style="width:${pct(b.quality_percent)}%"></i></span><strong>${b.reviews_accepted}/${b.chapters_on_disk}</strong></div>
+        <div class="progress-facts"><span>主线 <b>第 ${b.current_chapter || "?"} 章</b></span><span>卷/弧 <b>${b.volume || "-"}/${b.arc || "-"}</b></span><span>落盘 <b>${b.chapters_on_disk}</b></span><span>细纲 <b>${b.chapters_planned}</b></span></div>
+      </section>
+      <section class="project-section">
+        <div class="section-kicker"><span>当前执行</span><b>${runtimeName[status] || esc(status)}</b></div>
+        <div class="current-title"><b>${workLabel}</b><span>${w.step ? stepName[w.step] || esc(w.step) : "等待 pipeline 动作"}</span></div>
+        ${stepChain(w, true)}
+        <div class="latest-event"><b>${esc(latest)}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""} · ${shortTime(w.last_at)}</div>
+        ${err && (runtime.active || status === "error") ? `<div class="runtime-error ${errRecovered ? "recovered" : ""}">${errRecovered ? "近期错误后已继续：" : "当前错误："}${esc(err.summary || err.detail)}</div>` : ""}
+      </section>
+      <section class="project-section">
+        <div class="section-kicker"><span>质量与产出</span><b>${fmtNum(b.words_total)} 字</b></div>
+        <div class="quality-grid">
+          <div class="quality-metric"><div class="v">${b.reviews_accepted}/${b.reviews_total}</div><div class="k">评审通过</div></div>
+          <div class="quality-metric"><div class="v">${b.gate_passed}/${b.gate_total}</div><div class="k">AI 门禁</div></div>
+          <div class="quality-metric"><div class="v">${b.rewritten_count}</div><div class="k">已返工章</div></div>
+          <div class="quality-metric"><div class="v">${fmtNum(b.average_chapter_words)}</div><div class="k">章均字数</div></div>
+          <div class="quality-metric"><div class="v">${targetText}</div><div class="k">字数契约</div></div>
+          <div class="quality-metric"><div class="v">${b.assets_ready}/${b.assets_total}</div><div class="k">核心资产</div></div>
+        </div>
+        <div class="quality-note">${b.rewrite_reason ? `<strong>返工原因：</strong>${esc(b.rewrite_reason)}` : `pipeline ${esc((b.pipeline_stages || []).join(" → ") || "未记录")} · RAG ${fmtNum(b.rag_chunks)} chunks`}</div>
+      </section>
     </div>
-    ${sparkline(b)}
-    <div class="chips">${pipelineChips(b)}</div>
-    <div class="foot">
-      <span>${b.rewrite_pending ? `<span class="tag rewrite">${b.rewrite_pending} 章待返工</span> ` : ""}${b.rewritten_count ? `已返工 ${b.rewritten_count} 章` : (b.working && b.working.last_step ? `最近 ${esc(b.working.last_step)}` : "")}</span>
-      <span>更新于 ${ago(b.updated_at)}</span>
-    </div>
-  </div>`;
+    <footer class="project-footer">
+      <span>模型 <b>${esc(model)}</b>${runtime.planning_tier ? ` · ${esc(runtime.planning_tier)}` : ""}</span>
+      <span>输入/输出 <b>${fmtNum(b.tokens_in)} / ${fmtNum(b.tokens_out)}</b></span>
+      <span>成本 <b>${fmtMoney(b.cost_usd)}</b></span>
+      <span>RAG <b>${fmtNum(b.rag_chunks)}</b></span>
+      ${b.generation_mode ? `<span>模式 <b>${esc(b.generation_mode.replace(/_/g, " "))}</b></span>` : ""}
+      <span class="updated">更新 ${ago(b.updated_at)}</span>
+    </footer>
+  </article>`;
+}
+
+function renderPortfolio(novels) {
+  const sum = key => novels.reduce((n, x) => n + Number(x[key] || 0), 0);
+  const running = novels.filter(n => ["running", "error"].includes((n.runtime || {}).status)).length;
+  const attention = novels.filter(n => ["error", "attention"].includes((n.runtime || {}).status) || n.rewrite_pending || (n.health || {}).status === "error").length;
+  const issues = novels.reduce((n, x) => n + ((x.health || {}).issues || []).length, 0);
+  const metrics = [
+    ["项目", novels.length, `${sum("chapters_total")} 章总目标`, ""],
+    ["正在执行", running, running ? "运行队列持续更新" : "当前无活跃任务", "live"],
+    ["待处理", attention, `${sum("rewrite_pending")} 章返工队列`, attention ? "attn" : ""],
+    ["已归档章节", sum("chapters_completed"), `${sum("chapters_on_disk")} 章正文落盘`, ""],
+    ["评审通过", sum("reviews_accepted"), `${sum("gate_passed")} 章通过 AI 门禁`, ""],
+    ["正文实算", fmtNum(sum("words_total")), `${fmtNum(sum("tokens_out"))} 输出 tokens`, ""],
+    ["累计成本", fmtMoney(sum("cost_usd")), `缓存节省 ${fmtMoney(sum("saved_usd"))}`, ""],
+    ["数据差异", issues, issues ? "展开项目查看明细" : "进度与正文一致", issues ? "attn" : ""],
+  ];
+  $("#portfolio-metrics").innerHTML = metrics.map(([k, v, s, cls]) => `<div class="portfolio-metric ${cls}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+}
+
+function isAttention(n) {
+  const status = (n.runtime || {}).status;
+  return status === "error" || status === "attention" || n.rewrite_pending > 0 || (n.health || {}).status !== "ok";
+}
+
+function applyView() {
+  const q = $("#project-search").value.trim().toLowerCase();
+  let list = allNovels.filter(n => {
+    const status = (n.runtime || {}).status || "idle";
+    const matchesFilter = activeFilter === "all" || (activeFilter === "running" && ["running", "error"].includes(status)) || (activeFilter === "attention" && isAttention(n)) || (activeFilter === "idle" && ["idle", "complete"].includes(status));
+    const haystack = [n.name, n.dir, (n.runtime || {}).model, n.generation_mode].join(" ").toLowerCase();
+    return matchesFilter && (!q || haystack.includes(q));
+  });
+  const sort = $("#project-sort").value;
+  if (sort === "name") list.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  else if (sort === "progress") list.sort((a, b) => b.progress_percent - a.progress_percent || b.updated_at - a.updated_at);
+  else if (sort === "attention") list.sort((a, b) => Number(isAttention(b)) - Number(isAttention(a)) || b.updated_at - a.updated_at);
+  else list.sort((a, b) => b.updated_at - a.updated_at);
+  list.sort((a, b) => Number(Boolean(a.archived)) - Number(Boolean(b.archived)));
+  empty.style.display = allNovels.length ? "none" : "";
+  grid.innerHTML = list.map(card).join("");
+  $("#result-count").textContent = `${list.length} / ${allNovels.length} 个项目`;
+  grid.querySelectorAll(".project-card").forEach(el => {
+    el.addEventListener("click", () => openDetail(el.dataset.dir));
+    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(el.dataset.dir); } });
+  });
 }
 
 function render(novels) {
-  empty.style.display = novels.length ? "none" : "";
-  grid.innerHTML = novels.map(card).join("");
-  grid.querySelectorAll(".card").forEach(el =>
-    el.addEventListener("click", () => openDetail(el.dataset.dir)));
-  const running = novels.filter(n => n.active).length;
-  document.title = (running ? `▶ ${running} 本在写 · ` : "") + "novel-studio · 创作进度看板";
+  allNovels = novels;
+  renderPortfolio(novels);
+  applyView();
+  const running = novels.filter(n => ["running", "error"].includes((n.runtime || {}).status)).length;
+  document.title = (running ? `${running} 本执行中 · ` : "") + "novel-studio · 创作进度看板";
 }
 
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  $("#manual-refresh").disabled = true;
   try {
     const data = await api("/api/novels");
     $("#runs-dir").textContent = data.runs_dir || "data/runs/";
     render(data.novels || []);
     $("#conn").innerHTML = '<span class="dot live"></span>实时刷新';
+    $("#scan-meta").textContent = `每 4 秒扫描 · 最近 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
   } catch {
     $("#conn").innerHTML = '<span class="dot err"></span>连接断开，重试中…';
+  } finally {
+    refreshing = false;
+    $("#manual-refresh").disabled = false;
   }
   $("#tick").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
+
+$("#project-search").addEventListener("input", applyView);
+$("#project-sort").addEventListener("change", applyView);
+$("#project-filter").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-filter]");
+  if (!btn) return;
+  activeFilter = btn.dataset.filter;
+  $("#project-filter").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === btn));
+  applyView();
+});
+$("#manual-refresh").addEventListener("click", refresh);
 
 /* ---------- Markdown 渲染（轻量：标题/列表/粗体/代码/引用/分隔线） ---------- */
 function mdToHtml(src) {
@@ -471,6 +908,7 @@ const verdictTag = v => v === "accept" ? '<span class="tag accept">通过</span>
 
 function renderOverview(d) {
   const w = d.working || {};
+  const runtime = d.runtime || {}, health = d.health || {}, assets = d.assets || {}, pos = d.position || {};
   const planned = new Map((d.planned || []).map(p => [p.chapter, p]));
   const disk = new Map((d.chapters || []).map(c => [c.n, c]));
   const nums = [...new Set([...planned.keys(), ...disk.keys()])].sort((a, b) => a - b);
@@ -480,13 +918,13 @@ function renderOverview(d) {
     if (c && c.rewrite_pending) status = '<span class="tag rewrite">待返工</span>';
     else if (c && c.verdict === "accept") status = '<span class="tag accept">已完成</span>';
     else if (c) status = '<span class="tag blue">已落盘</span>';
-    else if (n === w.chapter && d.active) status = `<span class="tag now">写作中 · ${stepName[w.step] || w.step || "…"}</span>`;
-    else if (n === w.chapter) status = '<span class="tag now">当前章</span>';
+    else if (n === w.chapter && runtime.active) status = `<span class="tag now">${w.mode === "rewrite" ? "返工中" : "写作中"} · ${stepName[w.step] || w.step || "…"}</span>`;
+    else if (n === w.chapter) status = `<span class="tag now">${w.mode === "rewrite" ? "待返工" : "当前章"}</span>`;
     else status = '<span class="tag pending">未开始</span>';
     let rework = "—";
     if (c && c.rewrite_pending) rework = `<span class="tag rewrite">待返工${c.rewrite_rounds > 1 ? " · 第" + c.rewrite_rounds + "轮" : ""}</span>`;
     else if (c && c.rewritten) rework = `<span class="tag now">已返工 ${c.rewrite_rounds || 1} 轮</span>`;
-    else if (c) rework = '<span class="tag ok">一稿通过</span>';
+    else if (c && c.verdict === "accept") rework = '<span class="tag ok">一稿通过</span>';
     return `<tr>
       <td>第 ${n} 章</td>
       <td>${esc((c && c.title) || (p && p.title) || "")}${!c && p && p.core_event ? `<br><small style="color:var(--muted)">${esc(p.core_event)}</small>` : ""}</td>
@@ -500,21 +938,57 @@ function renderOverview(d) {
   const agentRows = (d.per_agent || []).map(a => `<tr>
     <td>${esc(a.agent)}</td><td>${fmtNum(a.input)}</td><td>${fmtNum(a.output)}</td><td>${fmtMoney(a.cost_usd)}</td>
   </tr>`).join("");
+  const healthIssues = (health.issues || []).map(i => `<div class="health-item ${i.level === "error" ? "error" : ""}">${esc(i.message)}</div>`).join("");
+  const sources = (health.sources || []).map(s => `<div class="source-item"><b>${esc(s.label)}</b><span title="${esc(s.path)}">${esc(s.path)} · ${ago(s.updated_at)}</span></div>`).join("");
+  const assetItems = (assets.items || []).map(a => `<div class="asset-item ${a.exists ? "ok" : ""}"><i></i><span title="${esc(a.path)}">${esc(a.label)}</span><code>${a.exists ? "ready" : "missing"}</code></div>`).join("");
+  const rag = assets.rag || {}, sediment = assets.sediment || {};
+  const lastError = runtime.last_error;
+  const lastEvent = runtime.last_event || {};
+  const errorRecovered = lastError && lastEvent.time && new Date(lastEvent.time).getTime() > new Date(lastError.time || 0).getTime() && !lastEvent.failed;
+  const healthTag = `<span class="tag health-${health.status || "warning"}">${healthName[health.status] || "待校验"}</span>`;
+  const workTitle = w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : `第 ${w.chapter || "?"} 章`;
   return `
-    <div class="sec"><h3>当前章进展</h3>
+    <div class="detail-kpis">
+      <div class="detail-kpi"><div class="k">主线下一章</div><div class="v">第 ${d.current_chapter || "?"} 章</div></div>
+      <div class="detail-kpi"><div class="k">实际工作</div><div class="v">${workTitle}</div></div>
+      <div class="detail-kpi"><div class="k">完成 / 目标</div><div class="v">${d.chapters_completed} / ${d.chapters_total || "?"}</div></div>
+      <div class="detail-kpi"><div class="k">正文实算</div><div class="v">${fmtNum(d.words_total)}</div></div>
+      <div class="detail-kpi"><div class="k">评审 / 门禁</div><div class="v">${d.reviews_accepted} / ${d.gate_passed}</div></div>
+      <div class="detail-kpi"><div class="k">累计成本</div><div class="v">${fmtMoney(d.cost_usd)}</div></div>
+    </div>
+    <div class="sec"><h3>当前执行</h3>
       <div class="panel">
-        ${stepChain(w) || '<span style="color:var(--muted);font-size:13px">尚未进入章节写作。</span>'}
-        <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span>${esc(w.last_step || "—")}${w.last_kind === "chapter" && w.last_chapter ? `（第 ${w.last_chapter} 章）` : w.last_kind ? `（${esc(w.last_kind)}）` : ""} <em style="color:var(--muted);font-style:normal">${esc((w.last_at || "").replace("T", " ").slice(0, 19))}</em></span></div>
-        <div class="kv"><span class="k">进度口径</span><span>目标 ${d.chapters_total || "?"} 章 · 已细化规划 ${d.chapters_planned} · 已完成 ${d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 交付沉淀 ${d.deliveries} 次</span></div>
-        <div class="kv"><span class="k">返工情况</span><span>${d.rewritten_count ? `已返工 <b>${d.rewritten_count}</b> 章` : "暂无返工"}${d.rewrite_pending ? `　<span class="tag rewrite">${d.rewrite_pending} 章待返工</span>` : ""}　<span style="color:var(--muted)">评审通过 ${d.reviews_accepted} · 门禁通过 ${d.gate_passed}</span></span></div>
+        <div class="kv"><span class="k">状态</span><span><span class="tag ${runtime.status === "running" ? "ok" : runtime.status === "error" ? "rewrite" : "pending"}">${runtimeName[runtime.status] || esc(runtime.status)}</span>　${esc(runtime.provider || "—")} / <b>${esc(runtime.model || "—")}</b>${runtime.planning_tier ? ` / ${esc(runtime.planning_tier)}` : ""}</span></div>
+        <div class="kv"><span class="k">当前位置</span><span>${pos.volume_title ? `卷 ${pos.volume}《${esc(pos.volume_title)}》 · 弧 ${pos.arc}「${esc(pos.arc_title)}」` : `卷 ${d.volume || "?"} · 弧 ${d.arc || "?"}`}${pos.arc_total ? `　${pos.arc_completed}/${pos.arc_total} 章` : ""}</span></div>
+        ${pos.arc_goal ? `<div class="kv"><span class="k">弧目标</span><span>${esc(pos.arc_goal)}</span></div>` : ""}
+        <div class="kv"><span class="k">工作章</span><span><b>${workTitle}</b>${w.next_chapter && w.next_chapter !== w.chapter ? `　主线下一章为第 ${w.next_chapter} 章` : ""}</span></div>
+        ${stepChain(w) || '<span style="color:var(--muted);font-size:11px">尚未进入章节 pipeline。</span>'}
+        <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span><b>${esc(w.last_step || "—")}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""}　<span style="color:var(--muted)">${shortTime(w.last_at)}</span></span></div>
+        ${lastError ? `<div class="runtime-error ${errorRecovered ? "recovered" : ""}">${errorRecovered ? "近期错误后已继续：" : "最近错误："}${esc(lastError.summary || lastError.detail)} · ${shortTime(lastError.time)}</div>` : ""}
+      </div>
+    </div>
+    <div class="sec"><h3>数据口径与一致性 ${healthTag}</h3>
+      <div class="panel">
+        <div class="kv"><span class="k">章节口径</span><span>台账完成 ${health.reported_completed ?? d.chapters_reported_completed} · 正文交叉验证 ${health.verified_completed ?? d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 细化规划 ${d.chapters_planned}</span></div>
+        <div class="kv"><span class="k">字数口径</span><span>正文 rune 实算 <b>${health.actual_words ?? d.words_total}</b> · 进度台账 <b>${health.reported_words ?? d.words_reported}</b>${health.actual_words !== health.reported_words ? ` · 差值 ${(health.actual_words || 0) - (health.reported_words || 0)}` : " · 一致"}</span></div>
+        ${healthIssues || '<div class="health-list"><div class="health-item" style="color:var(--ok)">正文、进度、评审版本与返工队列当前一致。</div></div>'}
+        <div class="source-grid">${sources}</div>
+      </div>
+    </div>
+    <div class="sec"><h3>核心资产与检索</h3>
+      <div class="panel">
+        <div class="kv"><span class="k">资产覆盖</span><span><b>${assets.ready ?? d.assets_ready}/${assets.total ?? d.assets_total}</b> 项核心资产就绪</span></div>
+        <div class="asset-grid">${assetItems}</div>
+        <div class="kv" style="margin-top:10px"><span class="k">RAG 引擎</span><span>${rag.ready ? `<b>${fmtNum(rag.chunks)}</b> chunks · ${esc(rag.store || "—")} / ${esc(rag.provider || "—")} / ${esc(rag.model || "—")} · 检索 ${rag.retrievals || 0} 次 · 写法召回 ${rag.craft_recalls || 0} 次` : "尚未建立索引"}</span></div>
+        <div class="kv"><span class="k">章节沉淀</span><span>人物状态 ${sediment.character_stage_files || 0} · 配角经历 ${sediment.side_journey_files || 0} · 世界增量 ${sediment.world_delta_files || 0} · 世界事件 ${sediment.world_events || 0} · 交付快照 ${sediment.delivery_snapshots || 0}</span></div>
       </div>
     </div>
     <div class="sec"><h3>章节状态（规划 ∪ 落盘）</h3>
-      ${rows ? `<table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>返工</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table>`
+      ${rows ? `<div class="table-wrap"><table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>返工</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table></div>`
              : '<div class="loading">还没有规划或落盘的章节。</div>'}
     </div>
     <div class="sec"><h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
-      ${agentRows ? `<table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table>`
+      ${agentRows ? `<div class="table-wrap"><table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table></div>`
                   : '<div class="loading">暂无用量数据。</div>'}
     </div>`;
 }
@@ -537,16 +1011,14 @@ function ringGauge(segs, prog, size = 58) {
     const x1 = cx + r * Math.cos(rad(a1)), y1 = cy + r * Math.sin(rad(a1));
     const large = a1 - a0 > 180 ? 1 : 0;
     return `<path d="M${x0.toFixed(1)} ${y0.toFixed(1)} A${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}"
-      fill="none" stroke="${filled ? "url(#rg)" : "rgba(255,255,255,.10)"}" stroke-width="5" stroke-linecap="round"/>`;
+      fill="none" stroke="${filled ? "#0f766e" : "#dce3df"}" stroke-width="5" stroke-linecap="round"/>`;
   };
   let paths = "";
   for (let i = 0; i < (segs || 1); i++) paths += arc(i * per + gap / 2, (i + 1) * per - gap / 2, i < prog);
   const pctText = segs ? `${prog}/${segs}` : "—";
   return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-    <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6d8dff"/><stop offset="1" stop-color="#b06dff"/></linearGradient></defs>
     ${paths}
-    <text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="13" font-weight="700" fill="#e8ebf4" font-family="monospace">${pctText}</text>
+    <text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="13" font-weight="700" fill="#202824" font-family="monospace">${pctText}</text>
   </svg>`;
 }
 
@@ -565,6 +1037,17 @@ function renderSetting(s) {
     clockHTML(f.name + (f.stance ? `（${f.stance}）` : ""), f.clock || {},
       f.goal ? `<div style="font-size:11.5px;color:#b9c1d4;margin-top:3px">目标：${esc(f.goal)}</div>` : "")).join("");
   const cal = s.story_calendar || {};
+  const placeNames = new Map((s.place_details || []).map(p => [p.id, p.name]));
+  const places = (s.place_details || []).map(p => `<tr>
+    <td><b>${esc(p.name)}</b><br><small style="color:var(--subtle);font-family:var(--mono)">${esc(p.id)}</small></td>
+    <td><span class="tag blue">${esc(p.kind) || "—"}</span></td>
+    <td style="color:#46544d">${esc(p.description)}</td>
+    <td>${(p.rules || []).map(x => `· ${esc(x)}`).join("<br>") || "—"}</td>
+    <td style="color:var(--muted)">${(p.tags || []).map(esc).join("、") || "—"}</td></tr>`).join("");
+  const routes = (s.route_details || []).map(r => `<tr>
+    <td><b>${esc(placeNames.get(r.from) || r.from)}</b> → <b>${esc(placeNames.get(r.to) || r.to)}</b></td>
+    <td class="route-time">${travelTime(r.travel_days)}${r.travel_days != null ? `<br><small style="color:var(--subtle)">${r.travel_days} 天口径</small>` : ""}</td>
+    <td style="color:#46544d">${esc(r.description)}</td><td style="color:var(--muted)">${esc(r.risk) || "—"}</td></tr>`).join("");
   const tl = (s.timeline || []).map(t => `<tr>
     <td>第 ${t.chapter ?? "?"} 章</td><td>${esc(t.time)}</td>
     <td style="color:#c6cddc">${esc(t.event)}</td>
@@ -578,13 +1061,18 @@ function renderSetting(s) {
         <div class="md">${mdToHtml(s.world_md) || esc(s.world_summary) || "（暂无）"}</div>
       </div>
     </div>
+    <div class="sec"><h3>世界地图与交通（${(s.place_details || []).length} 地点 · ${(s.route_details || []).length} 路线）</h3>
+      ${(s.map_notes || []).length ? `<div class="panel" style="margin-bottom:8px"><div class="kv"><span class="k">地图说明</span><span>${s.map_notes.map(esc).join("<br>")}</span></div></div>` : ""}
+      ${places ? `<div class="table-wrap" style="margin-bottom:8px"><table><thead><tr><th>地点</th><th>类型</th><th>场景与功能</th><th>局部规则</th><th>标签</th></tr></thead><tbody>${places}</tbody></table></div>` : '<div class="loading">暂无地点数据。</div>'}
+      ${routes ? `<div class="table-wrap"><table><thead><tr><th>路线</th><th>现实耗时</th><th>叙事用途</th><th>风险</th></tr></thead><tbody>${routes}</tbody></table></div>` : '<div class="loading">暂无交通路线。</div>'}
+    </div>
     <div class="sec"><h3>背景时间线（${(s.timeline || []).length} 条）</h3>
-      ${tl ? `<table><thead><tr><th>章</th><th>故事内时间</th><th>事件</th><th>人物</th></tr></thead><tbody>${tl}</tbody></table>`
+      ${tl ? `<div class="table-wrap"><table><thead><tr><th>章</th><th>故事内时间</th><th>事件</th><th>人物</th></tr></thead><tbody>${tl}</tbody></table></div>`
            : '<div class="loading">时间线尚未生成——首章 commit 后由时间线账本累积。</div>'}
     </div>
     <div class="sec"><h3>势力与进度钟（${(s.factions || []).length}）</h3><div class="panel">${factions || '<span style="color:var(--muted);font-size:13px">暂无势力。</span>'}</div></div>
     <div class="sec"><h3>世界规则（${(s.world_rules || []).length} 条）</h3>
-      ${rules ? `<table><thead><tr><th>类别</th><th>规则</th><th>边界</th><th>可见性</th></tr></thead><tbody>${rules}</tbody></table>` : '<div class="loading">暂无。</div>'}
+      ${rules ? `<div class="table-wrap"><table><thead><tr><th>类别</th><th>规则</th><th>边界</th><th>可见性</th></tr></thead><tbody>${rules}</tbody></table></div>` : '<div class="loading">暂无。</div>'}
     </div>
     ${(s.physics_axioms || []).length ? `<div class="sec"><h3>物理公理</h3><div class="panel prose">${s.physics_axioms.map(esc).join("\n")}</div></div>` : ""}`;
 }
@@ -610,9 +1098,11 @@ function dnaHTML(dna) {
 }
 
 function personCard(x) {
-  const st = x.state || {}, emo = x.emotion || {};
+  const st = x.state || {}, emo = x.emotion || {}, stage = x.stage || {}, knowledge = x.knowledge || {}, frame = x.decision_frame || {}, limits = x.constraints || {}, arcAxis = x.arc_axis || {};
   const hasState = st.goal || st.pressure || st.likely_action;
   const hasEmo = emo.visible || emo.suppressed || emo.coping;
+  const lineList = arr => (arr || []).map(v => `· ${esc(v)}`).join("<br>") || "—";
+  const hasDeep = Object.values(knowledge).some(v => Array.isArray(v) && v.length) || frame.rule || Object.values(limits).some(v => Array.isArray(v) && v.length);
   return `<div class="pcard">
     <div class="phead"><b>${esc(x.name)}</b>
       ${x.tier ? `<span class="tag ${x.group === "core" ? "now" : x.group === "important" ? "blue" : "pending"}">${TIER_LABEL[x.tier] || esc(x.tier)}</span>` : ""}
@@ -631,6 +1121,26 @@ function personCard(x) {
       ${st.want ? `<div class="kv"><span class="k">欲望弧线</span><span>${esc(st.want)}</span></div>` : ""}
       ${st.known || st.unknown ? `<div class="kv"><span class="k">知识账本</span><span>已知 ${st.known} 条 · 未知 ${st.unknown} 条</span></div>` : ""}
     </div>` : ""}
+    ${stage.chapter || stage.action ? `<div class="statebox">
+      <div class="kv"><span class="k">最新位置</span><span>${stage.chapter ? `第 ${stage.chapter} 章 · ` : ""}${esc(stage.location) || "—"}${stage.time ? `<br><small style="color:var(--muted)">${esc(stage.time)}</small>` : ""}</span></div>
+      ${stage.status ? `<div class="kv"><span class="k">当前状态</span><span>${esc(stage.status)}${stage.death_state && stage.death_state !== "无" ? `　<span class="tag rewrite">${esc(stage.death_state)}</span>` : ""}</span></div>` : ""}
+      ${stage.action ? `<div class="kv"><span class="k">当前行动</span><span>${esc(stage.action)}</span></div>` : ""}
+      ${stage.decision ? `<div class="kv"><span class="k">最新决定</span><span>${esc(stage.decision)}</span></div>` : ""}
+      ${stage.personality_delta ? `<div class="kv"><span class="k">性格变化</span><span>${esc(stage.personality_delta)}</span></div>` : ""}
+    </div>` : ""}
+    ${hasDeep ? `<div class="character-details"><details>
+      <summary>知识、决策框架与能力边界</summary>
+      ${frame.rule ? `<div class="kv"><span class="k">决策规则</span><span>${esc(frame.rule)}</span></div>` : ""}
+      ${frame.tradeoff ? `<div class="kv"><span class="k">权衡</span><span>${esc(frame.tradeoff)}</span></div>` : ""}
+      ${frame.cost || frame.risk ? `<div class="kv"><span class="k">代价/风险</span><span>${[frame.cost, frame.risk].filter(Boolean).map(esc).join("<br>")}</span></div>` : ""}
+      ${(knowledge.known || []).length ? `<div class="kv"><span class="k">已知事实</span><span>${lineList(knowledge.known)}</span></div>` : ""}
+      ${(knowledge.unknown || []).length ? `<div class="kv"><span class="k">未知事实</span><span>${lineList(knowledge.unknown)}</span></div>` : ""}
+      ${(knowledge.false_beliefs || []).length ? `<div class="kv"><span class="k">错误认知</span><span>${lineList(knowledge.false_beliefs)}</span></div>` : ""}
+      ${(limits.skill_limits || []).length ? `<div class="kv"><span class="k">能力上限</span><span>${lineList(limits.skill_limits)}</span></div>` : ""}
+      ${(limits.plausible_mistakes || []).length ? `<div class="kv"><span class="k">合理犯错</span><span>${lineList(limits.plausible_mistakes)}</span></div>` : ""}
+      ${(limits.correction_triggers || []).length ? `<div class="kv"><span class="k">修正触发</span><span>${lineList(limits.correction_triggers)}</span></div>` : ""}
+      ${arcAxis.need || arcAxis.lie ? `<div class="kv"><span class="k">长期弧轴</span><span>${arcAxis.need ? `需要：${esc(arcAxis.need)}` : ""}${arcAxis.lie ? `<br>核心谎言：${esc(arcAxis.lie)}` : ""}</span></div>` : ""}
+    </details></div>` : ""}
     ${x.arc ? `<div class="kv" style="margin-top:8px"><span class="k">弧线</span><span style="color:var(--muted)">${esc(x.arc)}</span></div>` : ""}
   </div>`;
 }
@@ -655,11 +1165,11 @@ function renderCast(c) {
   return `
     ${sections || '<div class="loading">暂无角色档案。</div>'}
     <div class="sec"><h3>群众 / 背景 NPC（${(c.crowd || []).length}）</h3>
-      ${crowd ? `<table><thead><tr><th>名字</th><th>当前目标 / 备注</th><th>来源</th></tr></thead><tbody>${crowd}</tbody></table>`
+      ${crowd ? `<div class="table-wrap"><table><thead><tr><th>名字</th><th>当前目标 / 备注</th><th>来源</th></tr></thead><tbody>${crowd}</tbody></table></div>`
               : '<div class="loading">暂无群众名册——crowd_life 与配角名册会随写作累积。</div>'}
     </div>
     <div class="sec"><h3>人物关系契约（${(c.relations || []).length}${c.relationship_scope ? " · " + esc(c.relationship_scope) : ""}${c.relationship_chapter ? " · 截至第 " + c.relationship_chapter + " 章" : ""}）</h3>
-      ${rels ? `<table><thead><tr><th>关系</th><th>信任</th><th>同盟状态</th><th>承诺 / 债 / 筹码</th></tr></thead><tbody>${rels}</tbody></table>` : '<div class="loading">暂无关系数据。</div>'}
+      ${rels ? `<div class="table-wrap"><table><thead><tr><th>关系</th><th>信任</th><th>同盟状态</th><th>承诺 / 债 / 筹码</th></tr></thead><tbody>${rels}</tbody></table></div>` : '<div class="loading">暂无关系数据。</div>'}
     </div>`;
 }
 
@@ -685,12 +1195,12 @@ function renderPlan(p) {
     </div></div>` : ""}
     <div class="sec"><h3>卷 / 弧骨架</h3><div class="panel tree">${tree || '<span style="color:var(--muted);font-size:13px">暂无分层大纲。</span>'}</div></div>
     <div class="sec"><h3>已细化章节规划（${(p.outline || []).length}）</h3>
-      ${outline ? `<table><thead><tr><th>章</th><th>标题</th><th>核心事件</th><th>钩子</th></tr></thead><tbody>${outline}</tbody></table>` : '<div class="loading">暂无细纲。</div>'}
+      ${outline ? `<div class="table-wrap"><table><thead><tr><th>章</th><th>标题</th><th>核心事件</th><th>钩子</th></tr></thead><tbody>${outline}</tbody></table></div>` : '<div class="loading">暂无细纲。</div>'}
     </div>
     <div class="sec"><h3>伏笔台账（${(p.foreshadows || []).length}）</h3>
-      ${seeds ? `<table><thead><tr><th>ID</th><th>描述</th><th>状态</th><th>回收目标</th></tr></thead><tbody>${seeds}</tbody></table>` : '<div class="loading">暂无伏笔。</div>'}
+      ${seeds ? `<div class="table-wrap"><table><thead><tr><th>ID</th><th>描述</th><th>状态</th><th>回收目标</th></tr></thead><tbody>${seeds}</tbody></table></div>` : '<div class="loading">暂无伏笔。</div>'}
     </div>
-    ${tl ? `<div class="sec"><h3>时间线（近 ${(p.timeline || []).length} 条）</h3><table><thead><tr><th>章</th><th>时间</th><th>事件</th></tr></thead><tbody>${tl}</tbody></table></div>` : ""}`;
+    ${tl ? `<div class="sec"><h3>时间线（近 ${(p.timeline || []).length} 条）</h3><div class="table-wrap"><table><thead><tr><th>章</th><th>时间</th><th>事件</th></tr></thead><tbody>${tl}</tbody></table></div></div>` : ""}`;
 }
 
 function renderOffscreen(o) {
@@ -711,6 +1221,17 @@ function renderOffscreen(o) {
   const tierBar = Object.entries(o.tier_counts || {}).map(([k, v]) =>
     `<span style="display:inline-block;height:100%;width:${v / tierTotal * 100}%;background:${tierColors[k] || "var(--muted)"}" title="${esc(k)} × ${v}"></span>`).join("");
   const tiers = Object.entries(o.tier_counts || {}).map(([k, v]) => `<span class="tag ${k.startsWith("protagonist") ? "now" : k === "supporting" ? "blue" : "pending"}" style="margin-right:6px">${esc(k)} × ${v}</span>`).join("");
+  const journeys = (o.journeys || []).map(j => `<div class="journey-row">
+    <div><b>${esc(j.character)}</b><br><span class="muted">第 ${j.chapter ?? "?"} 章 · ${j.visible_in_chapter ? "视角可见" : "离屏"}</span></div>
+    <div><b>${esc(j.location) || "位置未记"}</b><br><span class="muted">${esc(j.time) || "时间未记"}<br>${esc(j.travel_time)}</span></div>
+    <div><b>行动</b><br>${esc(j.action) || "—"}<br><span class="muted">决定：${esc(j.decision) || "—"}</span></div>
+    <div><b>状态变化</b><br>${esc(j.personality_delta) || esc(j.status) || "—"}<br><span class="muted">下一推进：${esc(j.next_potential) || "—"}${j.death_state && j.death_state !== "无" ? `<br><span class="tag rewrite">${esc(j.death_state)}</span>` : ""}</span></div>
+  </div>`).join("");
+  const deltas = (o.world_deltas || []).map(d => `<details class="panel" style="margin-bottom:7px">
+    <summary>第 ${d.chapter ?? "?"} 章 · ${d.character_count} 人状态变化 · ${d.change_count} 条世界增量</summary>
+    <div class="prose" style="margin:8px 0">${esc(d.summary)}</div>
+    ${(d.changes || []).map(x => `<div class="kv"><span class="k"><span class="tag ${x.kind === "foreshadow" ? "purple" : x.kind === "state" ? "blue" : "pending"}">${esc(x.kind)}</span></span><span><b>${esc(x.entity)}</b> · ${esc(x.change)}${x.visible ? "" : ' <span class="tag pending">主角未知</span>'}</span></div>`).join("")}
+  </details>`).join("");
   return `
     <div class="sec"><h3>世界推演游标</h3><div class="panel">
       <div class="kv"><span class="k">tick</span><span class="tag purple">${esc(t.tick_id) || "—"}</span>　<span>已推演至第 <b>${t.through_chapter ?? 0}</b> 章 · 更新 ${esc((t.updated_at || "—").replace("T", " ").slice(0, 19))}</span></div>
@@ -721,17 +1242,23 @@ function renderOffscreen(o) {
     </div></div>
     <div class="sec"><h3>社会情绪</h3><div class="panel">
       <div class="kv" style="align-items:center"><span class="k">情绪强度</span><span style="flex:1">
-        ${moodPct != null ? `<span style="display:inline-block;width:100%;max-width:240px;height:8px;border-radius:5px;background:rgba(255,255,255,.07);overflow:hidden;vertical-align:middle"><span style="display:block;height:100%;width:${moodPct}%;background:linear-gradient(90deg,var(--warn),var(--bad))"></span></span> <b>${moodPct}%</b>　` : ""}${esc(mood.mood) || "—"}</span></div>
+        ${moodPct != null ? `<span style="display:inline-block;width:100%;max-width:240px;height:8px;border-radius:5px;background:var(--surface-strong);overflow:hidden;vertical-align:middle"><span style="display:block;height:100%;width:${moodPct}%;background:var(--warn)"></span></span> <b>${moodPct}%</b>　` : ""}${esc(mood.mood) || "—"}</span></div>
       ${(mood.rumors || []).length ? `<div class="kv"><span class="k">流言</span><span>${mood.rumors.map(r => "· " + esc(r)).join("<br>")}</span></div>` : ""}
     </div></div>
     <div class="sec"><h3>势力进度钟（Blades 式，${(o.clocks || []).length}）</h3>
       ${clocks ? `<div class="clockgrid">${clocks}</div>` : '<div class="loading">暂无进度钟——弧边界 save_world_tick 时拨动。</div>'}
     </div>
+    <div class="sec"><h3>角色位置与独立推进（近 ${(o.journeys || []).length} 条）</h3>
+      ${journeys ? `<div class="journey-list">${journeys}</div>` : '<div class="loading">尚无配角经历沉淀。</div>'}
+    </div>
+    <div class="sec"><h3>章节世界增量（近 ${(o.world_deltas || []).length} 章）</h3>
+      ${deltas || '<div class="loading">尚无章节世界增量。</div>'}
+    </div>
     <div class="sec"><h3>离屏日程（supporting 层 ${(o.agendas || []).length} 人）</h3>
-      ${agendas ? `<table><thead><tr><th>角色</th><th>层级</th><th>当前目标</th><th>状态</th></tr></thead><tbody>${agendas}</tbody></table>` : '<div class="loading">暂无离屏日程。</div>'}
+      ${agendas ? `<div class="table-wrap"><table><thead><tr><th>角色</th><th>层级</th><th>当前目标</th><th>状态</th></tr></thead><tbody>${agendas}</tbody></table></div>` : '<div class="loading">暂无离屏日程。</div>'}
     </div>
     <div class="sec"><h3>离屏事件流（近 ${(o.events || []).length} 条）</h3>
-      ${events ? `<table><thead><tr><th>发生</th><th>事件</th><th>参与者</th><th>传到主角</th></tr></thead><tbody>${events}</tbody></table>`
+      ${events ? `<div class="table-wrap"><table><thead><tr><th>发生</th><th>事件</th><th>参与者</th><th>传到主角</th></tr></thead><tbody>${events}</tbody></table></div>`
                : '<div class="loading">尚未发生世界推演 tick——Architect 会在弧 / 卷边界执行 save_world_tick。</div>'}
     </div>`;
 }
@@ -815,6 +1342,44 @@ function renderGrowth(g) {
     </div>`;
 }
 
+function renderQuality(q) {
+  const rows = q.chapters || [];
+  const cards = rows.map(c => {
+    const m = c.metrics || {};
+    const aiPct = c.aigc_percent == null ? "—" : `${Number(c.aigc_percent).toFixed(1)}%`;
+    const judgePct = c.judge_probability == null ? "—" : `${Number(c.judge_probability).toFixed(1)}%`;
+    const dialogue = m.dialogue_ratio == null ? "—" : `${(Number(m.dialogue_ratio) * 100).toFixed(1)}%`;
+    const voice = m.ai_voice_score == null ? "—" : Number(m.ai_voice_score).toFixed(2);
+    const dimensions = (c.dimensions || []).map(d => `<tr><td><b>${esc(d.name)}</b></td><td>${d.score ?? "—"}</td><td><span class="tag ${d.verdict === "pass" ? "ok" : "rewrite"}">${esc(d.verdict) || "—"}</span></td><td style="color:#46544d">${esc(d.comment)}</td></tr>`).join("");
+    const violations = (c.violations || []).map(v => `<tr><td><span class="tag ${v.severity === "error" ? "rewrite" : "now"}">${esc(v.severity) || "warning"}</span></td><td>${esc(v.type) || "—"}</td><td style="color:#46544d">${esc(v.description)}</td></tr>`).join("");
+    const freshTag = c.freshness === "fresh" ? '<span class="tag ok">版本一致</span>' : c.freshness === "stale" ? '<span class="tag rewrite">评审过期</span>' : '<span class="tag pending">版本未知</span>';
+    return `<article class="quality-chapter">
+      <div class="quality-chapter-head"><b>第 ${c.chapter} 章 · ${esc(c.title)}</b><span class="spacer"></span>${verdictTag(c.review_verdict)}<span class="tag ${c.gate === "pass" ? "ok" : c.gate === "fail" ? "rewrite" : "pending"}">门禁 ${esc(c.gate) || "未跑"}</span>${freshTag}</div>
+      <div class="quality-chapter-body">
+        <div class="quality-summary-grid">
+          <div class="cell"><b>${aiPct}</b><span>本地 AIGC · ${esc(c.aigc_risk) || "未评级"}</span></div>
+          <div class="cell"><b>${judgePct}</b><span>外部判定 · ${esc(c.judge_verdict) || "未跑"}</span></div>
+          <div class="cell"><b>${voice}</b><span>AI 腔分</span></div>
+          <div class="cell"><b>${dialogue}</b><span>对白占比</span></div>
+          <div class="cell"><b>${m.protagonist_waver == null ? "—" : m.protagonist_waver ? "有" : "无"}</b><span>主角真实动摇</span></div>
+        </div>
+        ${c.review_summary ? `<div class="kv"><span class="k">评审结论</span><span>${esc(c.review_summary)}</span></div>` : ""}
+        ${c.judge_summary ? `<div class="kv"><span class="k">外部判定</span><span>${esc(c.judge_summary)}${c.judge_model ? ` <span class="tag pending">${esc(c.judge_model)}</span>` : ""}</span></div>` : ""}
+        ${violations ? `<details style="margin-top:9px"><summary>门禁问题 ${c.gate_errors} error · ${c.gate_warnings} warning</summary><div class="table-wrap"><table><thead><tr><th>级别</th><th>类型</th><th>说明</th></tr></thead><tbody>${violations}</tbody></table></div></details>` : ""}
+        ${dimensions ? `<details style="margin-top:9px"><summary>评审维度 ${(c.dimensions || []).length} 项</summary><div class="table-wrap"><table><thead><tr><th>维度</th><th>分数</th><th>结论</th><th>说明</th></tr></thead><tbody>${dimensions}</tbody></table></div></details>` : ""}
+      </div>
+    </article>`;
+  }).join("");
+  return `<div class="detail-kpis">
+    <div class="detail-kpi"><div class="k">评审通过</div><div class="v">${q.accepted || 0}</div></div>
+    <div class="detail-kpi"><div class="k">待返工</div><div class="v">${q.rewrite || 0}</div></div>
+    <div class="detail-kpi"><div class="k">门禁通过</div><div class="v">${q.gate_passed || 0}</div></div>
+    <div class="detail-kpi"><div class="k">门禁失败</div><div class="v">${q.gate_failed || 0}</div></div>
+    <div class="detail-kpi"><div class="k">过期评审</div><div class="v">${q.stale || 0}</div></div>
+    <div class="detail-kpi"><div class="k">平均 AIGC</div><div class="v">${q.average_aigc_percent == null ? "—" : Number(q.average_aigc_percent).toFixed(1) + "%"}</div></div>
+  </div><div class="sec"><h3>逐章质量明细（${rows.length}）</h3>${cards || '<div class="loading">尚无质量产物。</div>'}</div>`;
+}
+
 // 决策筛选：事件委托，切换不重取数据
 document.addEventListener("click", e => {
   const fb = e.target.closest(".dfilter .fb");
@@ -826,10 +1391,20 @@ document.addEventListener("click", e => {
 });
 
 function renderLog(d) {
+  const runtime = d.runtime || {};
+  const events = [...(runtime.recent_events || [])].reverse().map(e => `<div class="event-row ${e.failed ? "failed" : ""}"><time>${shortTime(e.time)}</time><span>${esc(e.agent) || "system"}</span><span>${esc(e.category) || "event"}</span><span>${esc(e.summary) || esc(e.detail)}</span></div>`).join("");
   const lines = (d.log || []).map(l =>
     `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
-  return `<div class="sec"><h3>运行日志（末尾 ${(d.log || []).length} 行，自动刷新）</h3>
-    <div class="log" id="d-log">${lines || "（暂无日志）"}</div></div>`;
+  return `<div class="detail-kpis">
+    <div class="detail-kpi"><div class="k">运行状态</div><div class="v">${runtimeName[runtime.status] || "—"}</div></div>
+    <div class="detail-kpi"><div class="k">Provider</div><div class="v">${esc(runtime.provider) || "—"}</div></div>
+    <div class="detail-kpi"><div class="k">模型</div><div class="v">${esc(runtime.model) || "—"}</div></div>
+    <div class="detail-kpi"><div class="k">规划档位</div><div class="v">${esc(runtime.planning_tier) || "—"}</div></div>
+    <div class="detail-kpi"><div class="k">Pipeline</div><div class="v">${(d.pipeline_completed || []).length}/${(d.pipeline_stages || []).length}</div></div>
+    <div class="detail-kpi"><div class="k">最近活动</div><div class="v">${ago(runtime.updated_at)}</div></div>
+  </div>
+  <div class="sec"><h3>实时事件（近 ${(runtime.recent_events || []).length} 条）</h3>${events ? `<div class="event-list">${events}</div>` : '<div class="loading">暂无运行事件。</div>'}</div>
+  <div class="sec"><h3>原始日志（末尾 ${(d.log || []).length} 行，自动刷新）</h3><div class="log" id="d-log">${lines || "（暂无日志）"}</div></div>`;
 }
 
 /* ---------- 抽屉驱动 ---------- */
@@ -857,6 +1432,7 @@ async function loadTab(keepScroll) {
     else if (currentTab === "growth") body.innerHTML = renderGrowth(d);
     else if (currentTab === "plan") body.innerHTML = renderPlan(d);
     else if (currentTab === "offscreen") body.innerHTML = renderOffscreen(d);
+    else if (currentTab === "quality") body.innerHTML = renderQuality(d);
   } catch (e) {
     body.innerHTML = `<div class="loading">加载失败：${esc(e.message)}，稍后自动重试…</div>`;
   }

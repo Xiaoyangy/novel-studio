@@ -72,6 +72,8 @@ type CharacterStageRecord struct {
 	CurrentAction       string   `json:"current_action"`
 	Pressure            string   `json:"pressure"`
 	Decision            string   `json:"decision"`
+	DecisionReason      string   `json:"decision_reason,omitempty"`
+	ButterflyEffects    []string `json:"butterfly_effects,omitempty"`
 	MistakeOrMisbelief  string   `json:"mistake_or_misbelief,omitempty"`
 	KnowledgeBoundary   string   `json:"knowledge_boundary"`
 	VisibleInChapter    bool     `json:"visible_in_chapter,omitempty"`
@@ -270,20 +272,22 @@ type ChapterWorldDelta struct {
 }
 
 type CharacterChapterDelta struct {
-	Character           string `json:"character"`
-	Location            string `json:"location,omitempty"`
-	Status              string `json:"status,omitempty"`
-	VisibleInChapter    bool   `json:"visible_in_chapter,omitempty"`
-	CurrentAction       string `json:"current_action,omitempty"`
-	Decision            string `json:"decision,omitempty"`
-	MistakeOrMisbelief  string `json:"mistake_or_misbelief,omitempty"`
-	KnowledgeBoundary   string `json:"knowledge_boundary,omitempty"`
-	PersonalityDelta    string `json:"personality_delta,omitempty"`
-	DeathState          string `json:"death_state,omitempty"`
-	ProtagonistNotice   string `json:"protagonist_notice,omitempty"`
-	WorldImpact         string `json:"world_impact,omitempty"`
-	NextPotential       string `json:"next_potential,omitempty"`
-	TimelineConsistency string `json:"timeline_consistency,omitempty"`
+	Character           string   `json:"character"`
+	Location            string   `json:"location,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	VisibleInChapter    bool     `json:"visible_in_chapter,omitempty"`
+	CurrentAction       string   `json:"current_action,omitempty"`
+	Decision            string   `json:"decision,omitempty"`
+	DecisionReason      string   `json:"decision_reason,omitempty"`
+	ButterflyEffects    []string `json:"butterfly_effects,omitempty"`
+	MistakeOrMisbelief  string   `json:"mistake_or_misbelief,omitempty"`
+	KnowledgeBoundary   string   `json:"knowledge_boundary,omitempty"`
+	PersonalityDelta    string   `json:"personality_delta,omitempty"`
+	DeathState          string   `json:"death_state,omitempty"`
+	ProtagonistNotice   string   `json:"protagonist_notice,omitempty"`
+	WorldImpact         string   `json:"world_impact,omitempty"`
+	NextPotential       string   `json:"next_potential,omitempty"`
+	TimelineConsistency string   `json:"timeline_consistency,omitempty"`
 }
 
 type WorldChapterDelta struct {

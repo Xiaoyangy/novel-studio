@@ -41,7 +41,35 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 		}
 	}
 
-	// 2) cast 与角色档一致性（warn）：计划里推演到的角色若不在 characters.json，
+	// 2) POV 可见性（hard）：世界模拟已经决定角色本章是否能被主角感知。
+	// required beat 或对白蓝图不能再把 hidden/delayed 角色直接搬进现场。
+	if sim, err := s.LoadChapterWorldSimulation(plan.Chapter); err == nil && sim != nil {
+		hidden := map[string]struct{}{}
+		for _, decision := range sim.CharacterDecisions {
+			if name := strings.TrimSpace(decision.Character); name != "" && !decision.VisibleToPOV {
+				hidden[name] = struct{}{}
+			}
+		}
+		for _, beat := range plan.Contract.RequiredBeats {
+			if rewriteBeatIsExplicitlyOffscreen(beat) {
+				continue
+			}
+			for name := range hidden {
+				if strings.Contains(beat, name) {
+					hard = append(hard, fmt.Sprintf("POV 越界：required_beats 把世界模拟中 visible_to_pov=false 的角色 %q 直接写入本章行动 —— %q", name, strings.TrimSpace(beat)))
+				}
+			}
+		}
+		for _, blueprint := range plan.CausalSimulation.DialogueBlueprints {
+			for _, turn := range blueprint.TurnProgression {
+				if _, blocked := hidden[strings.TrimSpace(turn.Speaker)]; blocked {
+					hard = append(hard, fmt.Sprintf("POV 越界：对白蓝图让世界模拟中 visible_to_pov=false 的角色 %q 在场发言（scene_id=%s）", turn.Speaker, blueprint.SceneID))
+				}
+			}
+		}
+	}
+
+	// 3) cast 与角色档一致性（warn）：计划里推演到的角色若不在 characters.json，
 	//    可能是计划外新角色或笔误——正文引入新角色应是有意为之，让 planner/drafter 确认。
 	known := knownCharacterNames(s)
 	if len(known) > 0 {
@@ -56,12 +84,21 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 		}
 	}
 
-	// 3) 卷弧结构对齐（warn）：本章号超出已规划的总章数，说明计划可能越界。
+	// 4) 卷弧结构对齐（warn）：本章号超出已规划的总章数，说明计划可能越界。
 	if total := plannedChapterTotal(s); total > 0 && plan.Chapter > total {
 		warn = append(warn, fmt.Sprintf("本章号 %d 超出已规划总章数 %d —— 确认是否需要先扩展卷弧大纲，正文不应写入大纲未覆盖的情节", plan.Chapter, total))
 	}
 
 	return hard, warn
+}
+
+func rewriteBeatIsExplicitlyOffscreen(beat string) bool {
+	for _, marker := range []string{"不得", "不能", "不要", "禁止", "不让", "未出场", "不出场", "离屏", "延迟", "隐藏"} {
+		if strings.Contains(beat, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeBeat 归一化推进项文本用于比对（去空白、转小写）。

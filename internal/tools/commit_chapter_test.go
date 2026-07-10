@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -76,6 +77,33 @@ func testCharacterStageRecords(protagonist string, sideCharacters ...string) []d
 	return records
 }
 
+func writeCleanMechanicalGate(t *testing.T, s *store.Store, chapter int) {
+	t.Helper()
+	body, err := s.Drafts.LoadChapterText(chapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := reviewreport.MechanicalGatePayload{
+		Chapter:    chapter,
+		BodySHA256: reviewreport.BodySHA256(body),
+		AIGCReport: aigc.Report{
+			AIGCPercent: 1, AIRatioPercent: 1, BlendedAIGCPercent: 1,
+			Stats: aigc.Stats{Hanzi: 3000},
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.Dir(), "reviews", fmt.Sprintf("%02d_ai_gate.json", chapter))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommitChapterSchemaDescribesFeedbackAsObject(t *testing.T) {
 	tool := NewCommitChapterTool(store.NewStore(t.TempDir()))
 	schema := tool.Schema()
@@ -93,6 +121,58 @@ func TestCommitChapterSchemaDescribesFeedbackAsObject(t *testing.T) {
 	}
 	if got := feedback["type"]; got != "object" {
 		t.Fatalf("feedback type = %v, want object", got)
+	}
+}
+
+func TestRequireCurrentDraftConsistencyRejectsMissingAndStaleCheck(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const first = "# 第一章 测试\n\n第一版正文。"
+	if err := s.Drafts.SaveDraft(1, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, first); err == nil || !strings.Contains(err.Error(), "check_consistency") {
+		t.Fatalf("missing consistency check should block commit, got %v", err)
+	}
+	args, _ := json.Marshal(map[string]any{"chapter": 1})
+	if _, err := NewCheckConsistencyTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatalf("check_consistency: %v", err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, first); err != nil {
+		t.Fatalf("current consistency check rejected: %v", err)
+	}
+
+	const second = "# 第一章 测试\n\n第二版正文。"
+	if err := s.Drafts.SaveDraft(1, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, second); err == nil || !strings.Contains(err.Error(), "check_consistency") {
+		t.Fatalf("stale consistency check should block commit, got %v", err)
+	}
+}
+
+func TestRequireDraftPlanTitleMatchBlocksDrift(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "失业饭桌"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireDraftPlanTitleMatch(s, 1, "# 第一章 失业饭桌\n\n正文。"); err != nil {
+		t.Fatalf("matching title rejected: %v", err)
+	}
+	if err := requireDraftPlanTitleMatch(s, 1, "# 第一章 回乡第一天\n\n正文。"); err == nil || !strings.Contains(err.Error(), "标题与计划标题不一致") {
+		t.Fatalf("title drift should block commit, got %v", err)
 	}
 }
 
@@ -779,7 +859,7 @@ func TestCommitChapterUpdatesCastLedger(t *testing.T) {
 		"summary":                 "林墨入住客栈",
 		"characters":              []string{"林墨", "李清砚", "老周", "阿云"},
 		"key_events":              []string{"入住"},
-		"character_stage_records": testCharacterStageRecords("林墨", "老周", "阿云"),
+		"character_stage_records": testCharacterStageRecords("林墨", "李清砚", "老周", "阿云"),
 		"cast_intros": []any{
 			map[string]any{"name": "老周", "brief_role": "客栈老板"},
 			map[string]any{"name": "阿云", "brief_role": "客栈小厮"},
@@ -919,6 +999,9 @@ func TestCommitChapterNonLayeredRecompletesAfterRework(t *testing.T) {
 	}
 
 	// 两章写完并完结。第 2 章备齐 drafts/chapters，供返工提交。
+	if err := s.Drafts.SaveFinalChapter(1, "第一章已提交终稿。"); err != nil {
+		t.Fatalf("SaveFinalChapter ch1: %v", err)
+	}
 	ch2 := "第二章原始正文，用于模拟已提交终稿。"
 	if err := s.Drafts.SaveDraft(2, ch2); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
@@ -948,7 +1031,7 @@ func TestCommitChapterNonLayeredRecompletesAfterRework(t *testing.T) {
 	}
 
 	// 返工提交（草稿需与终稿不同才放行）
-	if err := s.Drafts.SaveDraft(2, ch2+"\n\n返工新增段落。"); err != nil {
+	if err := s.Drafts.SaveDraft(2, ch2+"\n\n配角问：“你真决定这样收尾？”主角迟疑了一下：“先改完这一处，我再签字。”"); err != nil {
 		t.Fatalf("SaveDraft (reworked): %v", err)
 	}
 	tool := NewCommitChapterTool(s)
@@ -979,6 +1062,7 @@ func TestCommitChapterNonLayeredRecompletesAfterRework(t *testing.T) {
 		t.Errorf("PendingRewrites = %v, want empty", p.PendingRewrites)
 	}
 
+	writeCleanMechanicalGate(t, s, 2)
 	reviewArgs, _ := json.Marshal(map[string]any{
 		"chapter":         2,
 		"scope":           "chapter",
@@ -994,7 +1078,10 @@ func TestCommitChapterNonLayeredRecompletesAfterRework(t *testing.T) {
 	}
 	p, _ = s.Progress.Load()
 	if p.Phase != domain.PhaseComplete {
-		t.Errorf("phase = %s, want complete after renewed review", p.Phase)
+		r1, _ := s.World.LoadReview(1)
+		r2, _ := s.World.LoadReview(2)
+		voice, _ := s.AIVoice.LoadRedFlags(2)
+		t.Errorf("phase = %s, want complete after renewed review; pending=%v r1=%+v r2=%+v voice=%+v", p.Phase, p.PendingRewrites, r1, r2, voice)
 	}
 }
 
@@ -1063,7 +1150,7 @@ func TestCommitChapterLayeredReopenRecompletesDespiteOpenThread(t *testing.T) {
 	if err := s.Progress.Reopen([]int{2}, "返工"); err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
-	if err := s.Drafts.SaveDraft(2, ch2+"\n\n返工新增段落。"); err != nil {
+	if err := s.Drafts.SaveDraft(2, ch2+"\n\n配角问：“你真决定这样收尾？”主角迟疑了一下：“先改完这一处，我再签字。”"); err != nil {
 		t.Fatalf("SaveDraft reworked: %v", err)
 	}
 	tool := NewCommitChapterTool(s)
@@ -1086,6 +1173,7 @@ func TestCommitChapterLayeredReopenRecompletesDespiteOpenThread(t *testing.T) {
 	if p.Phase == domain.PhaseComplete {
 		t.Errorf("phase = %s, want writing before renewed review", p.Phase)
 	}
+	writeCleanMechanicalGate(t, s, 2)
 	reviewArgs, _ := json.Marshal(map[string]any{
 		"chapter":         2,
 		"scope":           "chapter",
@@ -1101,7 +1189,10 @@ func TestCommitChapterLayeredReopenRecompletesDespiteOpenThread(t *testing.T) {
 	}
 	p, _ = s.Progress.Load()
 	if p.Phase != domain.PhaseComplete {
-		t.Errorf("phase = %s, want complete after renewed review", p.Phase)
+		r1, _ := s.World.LoadReview(1)
+		r2, _ := s.World.LoadReview(2)
+		voice, _ := s.AIVoice.LoadRedFlags(2)
+		t.Errorf("phase = %s, want complete after renewed review; pending=%v r1=%+v r2=%+v voice=%+v", p.Phase, p.PendingRewrites, r1, r2, voice)
 	}
 	if p.ReopenedFromComplete {
 		t.Error("重新完结后 ReopenedFromComplete 应被清除")

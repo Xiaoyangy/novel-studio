@@ -55,6 +55,8 @@ type ChapterContract struct {
 // ChapterCausalSimulation 是正文前的角色/世界推演层。
 // 它不替代章节契约，而是说明本章事件为什么会由这些人、这些规则自然推出。
 type ChapterCausalSimulation struct {
+	WorldSimulationID   string                       `json:"world_simulation_id,omitempty"`         // 章前全角色世界模拟的稳定 ID
+	ProtagonistDecision string                       `json:"protagonist_decision,omitempty"`        // 从世界模拟投影出的主角选择
 	ProjectPromise      string                       `json:"project_promise,omitempty"`             // 本章承接的整本书核心承诺
 	ChapterFunction     string                       `json:"chapter_function,omitempty"`            // 本章在全书/卷/弧中的功能
 	ContextSources      []string                     `json:"context_sources,omitempty"`             // 本次推演实际使用的上下文来源

@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1537,6 +1539,22 @@ func TestPlanChapterAllowsRewritePlanForPendingCompletedChapter(t *testing.T) {
 	if err := st.Progress.SetPendingRewrites([]int{1}, "审核指出江烬声口和因果链偏移"); err != nil {
 		t.Fatalf("SetPendingRewrites: %v", err)
 	}
+	if err := st.Drafts.SaveFinalChapter(1, "第一章 午夜欠费单\n\n江烬在门口看见欠费单。"); err != nil {
+		t.Fatalf("SaveFinalChapter: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(st.Dir(), "reviews"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir(), "reviews", "01_rewrite_brief.md"), []byte("# ch01 rewrite brief\n"), 0o644); err != nil {
+		t.Fatalf("write rewrite brief: %v", err)
+	}
+	rewriteSource, _, _, err := loadChapterRewriteSource(st, 1)
+	if err != nil {
+		t.Fatalf("loadChapterRewriteSource: %v", err)
+	}
+	simulation := testCausalSimulation(true)
+	sources := simulation["context_sources"].([]string)
+	simulation["context_sources"] = append(sources, rewriteSourceToken(rewriteSource), rewriteBriefToken(rewriteSource))
 
 	args, _ := json.Marshal(map[string]any{
 		"chapter":           1,
@@ -1544,7 +1562,7 @@ func TestPlanChapterAllowsRewritePlanForPendingCompletedChapter(t *testing.T) {
 		"goal":              "按审核结论重建首章推演",
 		"conflict":          "名字抵扣与黑卡试刷诱导",
 		"hook":              "欠费单背面浮出姓名抵扣",
-		"causal_simulation": testCausalSimulation(true),
+		"causal_simulation": simulation,
 	})
 
 	result, err := NewPlanChapterTool(st).Execute(context.Background(), args)

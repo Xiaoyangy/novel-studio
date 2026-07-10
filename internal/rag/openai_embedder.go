@@ -21,6 +21,9 @@ type OpenAIEmbedderConfig struct {
 	UserAgent string
 	Headers   map[string]string
 	Timeout   time.Duration
+	// DisableKeepAlives is useful for local llama-server processes that may be
+	// restarted in place while an old pooled socket still exists.
+	DisableKeepAlives bool
 }
 
 type OpenAIEmbedder struct {
@@ -41,10 +44,13 @@ func NewOpenAIEmbedder(cfg OpenAIEmbedderConfig) (*OpenAIEmbedder, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60 * time.Second
 	}
-	return &OpenAIEmbedder{
-		cfg:    cfg,
-		client: &http.Client{Timeout: cfg.Timeout},
-	}, nil
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = cfg.DisableKeepAlives
+	transport.MaxIdleConns = 16
+	transport.MaxIdleConnsPerHost = 4
+	transport.IdleConnTimeout = 30 * time.Second
+	transport.ResponseHeaderTimeout = minDuration(cfg.Timeout, 30*time.Second)
+	return &OpenAIEmbedder{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout, Transport: transport}}, nil
 }
 
 func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -75,6 +81,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 		if !isRetryableEmbeddingError(err) || attempt == defaultEmbeddingMaxAttempts {
 			break
 		}
+		e.closeIdleConnections()
 		if err := sleepEmbeddingRetry(ctx, embeddingRetryBackoff(attempt)); err != nil {
 			return nil, err
 		}
@@ -91,6 +98,7 @@ func (e *OpenAIEmbedder) embedOnce(ctx context.Context, data []byte) ([]float32,
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Close = e.cfg.DisableKeepAlives
 	if e.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+e.cfg.APIKey)
 	}
@@ -127,12 +135,20 @@ func (e *OpenAIEmbedder) embedOnce(ctx context.Context, data []byte) ([]float32,
 		Error any `json:"error,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, fmt.Errorf("parse embedding response: %w", err)
+		parseErr := fmt.Errorf("parse embedding response: %w", err)
+		if IsTransientRAGError(parseErr) {
+			return nil, retryableEmbeddingError{err: parseErr}
+		}
+		return nil, parseErr
 	}
 	if len(payload.Data) == 0 || len(payload.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedding response missing vector")
+		return nil, retryableEmbeddingError{err: fmt.Errorf("embedding response missing vector")}
 	}
-	return payload.Data[0].Embedding, nil
+	vector := payload.Data[0].Embedding
+	if err := ValidateVector(vector); err != nil {
+		return nil, fmt.Errorf("embedding response contains invalid vector: %w", err)
+	}
+	return vector, nil
 }
 
 type retryableEmbeddingError struct {
@@ -144,7 +160,7 @@ func (e retryableEmbeddingError) Unwrap() error { return e.err }
 
 func isRetryableEmbeddingError(err error) bool {
 	var retryable retryableEmbeddingError
-	return errors.As(err, &retryable)
+	return errors.As(err, &retryable) || IsTransientRAGError(err)
 }
 
 func isRetryableEmbeddingStatus(status int) bool {
@@ -177,6 +193,19 @@ func embeddingRetryBackoff(attempt int) time.Duration {
 		return 3 * time.Second
 	}
 	return d
+}
+
+func (e *OpenAIEmbedder) closeIdleConnections() {
+	if closer, ok := e.client.Transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func truncateForError(text string, limit int) string {

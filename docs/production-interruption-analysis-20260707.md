@@ -34,7 +34,7 @@ planner 的 novel_context 注入被方法论前置的大工件主导：
 - world_tick 双硬卡点 + 故事时钟锚定 + accept 后进 RAG；主角关系契约 bug 修复。
 
 ## 根治路径（二选一，均需 provider 侧动作）
-1. **换能力更强的 provider 跑推演+渲染**（首选）：GPT-5.5 / Claude 对 130K 上下文 + 50 字段结构化计划游刃有余，本类失败整体消失，今晚所有代码改动继续生效。当前障碍：OpenAI key 是占位符、Anthropic 欠费、Codex/Claude 为订阅制（OAuth，非 HTTP API）——见订阅接入方案。
+1. **换能力更强的 provider 跑推演+渲染**（首选）：GPT-5.6-Sol / Claude 对 130K 上下文 + 50 字段结构化计划游刃有余，本类失败整体消失，今晚所有代码改动继续生效。当前障碍：OpenAI key 是占位符、Anthropic 欠费、Codex/Claude 为订阅制（OAuth，非 HTTP API）——见订阅接入方案。
 2. **降低计划的硬性复杂度以适配 MiniMax**：把 MiniMax 反复搞不定的少数字段（对话蓝图深层子字段、collected_source 等）从 finalize 硬阻塞降为 warning，保留其余 ~45 个字段的丰富度。属质量取舍，需用户拍板。
 
 ## 订阅接入的技术现实（供决策）
@@ -42,7 +42,7 @@ planner 的 novel_context 注入被方法论前置的大工件主导：
 - Codex 订阅：`auth_mode=chatgpt`（OAuth）。`codex exec-server` 是 **ws/stdio** 协议、`codex exec` 是**带自有工具的 agent**（非 completion API）——都不能直接插进 litellm；要用需较大改造（把 writer/architect 从"LLM 调我方工具"改成"codex exec 按 output-schema 生成结构化计划、我方解析"）。
 - Claude 订阅：`claude -p` 同理是 agent。
 - 既有桥：cc-switch 的本地代理（:15721）把订阅桥接成 anthropic 式 HTTP，但当前未监听且此前报 base_url 配置问题。
-- 落地建议：短期启用/修好 cc-switch 代理把 gpt-5.5 暴露成 HTTP 给 novel-studio 用；长期在 novel-studio 里加"codex-exec 结构化生成"provider 作为原生订阅支持。
+- 落地建议：短期启用/修好 cc-switch 代理把 gpt-5.6-sol 暴露成 HTTP 给 novel-studio 用；长期在 novel-studio 里加"codex-exec 结构化生成"provider 作为原生订阅支持。
 
 ## 补充：provider 可用性实测（决策关键）
 - **OpenAI**：config 里 api_key 是占位符 `REPLACE_..._KEY`，无有效 key。

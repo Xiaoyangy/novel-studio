@@ -183,23 +183,20 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 	chaptersDir := filepath.Join(eng.Dir(), "chapters")
 	reviewsDir := filepath.Join(eng.Dir(), "reviews")
 
-	matches, _ := filepath.Glob(filepath.Join(chaptersDir, "[0-9][0-9].md"))
-	if len(matches) == 0 {
+	chapters, err := chapterNumbersFromFiles(chaptersDir)
+	if err != nil {
+		return err
+	}
+	if len(chapters) == 0 {
 		return fmt.Errorf("未在 %s 找到任何章节", chaptersDir)
 	}
 
-	start, end := flags.Start, flags.End
-	if start == 0 {
-		start = 1
+	selectedChapters := filterChaptersForPipelineRange(chapters, pipelineFlags{Start: flags.Start, End: flags.End})
+	if len(selectedChapters) == 0 {
+		return fmt.Errorf("指定重写范围内没有章节")
 	}
-	if end == 0 {
-		end = len(matches)
-	}
-	if end > len(matches) {
-		end = len(matches)
-	}
-
-	fmt.Fprintf(os.Stderr, "[rewrite-existing] 待重写章节：%d - %d（共 %d 章）\n", start, end, end-start+1)
+	start, end := selectedChapters[0], selectedChapters[len(selectedChapters)-1]
+	fmt.Fprintf(os.Stderr, "[rewrite-existing] 待重写章节：%d - %d（共 %d 章）\n", start, end, len(selectedChapters))
 
 	maxRounds := flags.MaxRounds
 	if maxRounds <= 0 {
@@ -209,13 +206,18 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 	totalBriefs := 0
 	for round := 1; round <= maxRounds; round++ {
 		successCount, failureCount, skippedCount := 0, 0, 0
-		for chNum := start; chNum <= end; chNum++ {
+		for _, chNum := range selectedChapters {
 			chapterRel := filepath.ToSlash(filepath.Join("chapters", fmt.Sprintf("%02d.md", chNum)))
 			briefRel := filepath.ToSlash(filepath.Join("reviews", fmt.Sprintf("%02d_rewrite_brief.md", chNum)))
 			chapterPath := filepath.Join(chaptersDir, fmt.Sprintf("%02d.md", chNum))
 			original, err := os.ReadFile(chapterPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 读原文失败：%v\n", chNum, err)
+				failureCount++
+				continue
+			}
+			if err := currentChapterReviewError(eng.Dir(), chNum); err != nil {
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 拒绝使用过期审核：%v\n", chNum, err)
 				failureCount++
 				continue
 			}
@@ -286,6 +288,15 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 					fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 拒绝写回：%v\n", chNum, err)
 					break
 				}
+				if err := validateRewriteChapterTitle(chNum, outlineEntry.Title, newText); err != nil {
+					if attempt < maxRewriteWriterAttempts {
+						fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 标题未通过，按大纲标题重试一次：%v\n", chNum, err)
+						retryFeedback = err.Error()
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 拒绝写回：%v\n", chNum, err)
+					break
+				}
 				if err := validateRewritePreflight(st, chNum, newText, flags.PolishWarnings); err != nil {
 					if attempt < maxRewriteWriterAttempts {
 						fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 写回前门禁未通过，重试一次：%v\n", chNum, err)
@@ -310,6 +321,11 @@ func rewriteExistingPipeline(opts cliOptions, args []string) error {
 			}
 			if err := os.WriteFile(chapterPath, []byte(newText), 0o644); err != nil {
 				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 写回失败：%v\n", chNum, err)
+				failureCount++
+				continue
+			}
+			if err := st.World.ClearChapterReview(chNum); err != nil {
+				fmt.Fprintf(os.Stderr, "[rewrite-existing] ch%02d 清理过期审核失败：%v\n", chNum, err)
 				failureCount++
 				continue
 			}
@@ -407,11 +423,8 @@ func completeResolvedRewrites(projectDir string, start, end int, includeYellow .
 		if requireNoYellow && plan.HasYellow {
 			continue
 		}
-		var reviewEntry domain.ReviewEntry
-		if !readJSONIfExists(filepath.Join(projectDir, "reviews", fmt.Sprintf("%02d.json", ch)), &reviewEntry) {
-			continue
-		}
-		if reviewEntry.Verdict != "accept" {
+		currentReview := inspectCurrentChapterReview(projectDir, ch)
+		if len(currentReview.Issues) > 0 || currentReview.Verdict != "accept" || currentReview.Disposition == "是" || currentReview.Disposition == "待定" {
 			continue
 		}
 		if err := st.Progress.CompleteRewrite(ch); err != nil {
@@ -1045,6 +1058,38 @@ func validatePatchRewriteWithBounds(original, rewritten string, bounds rewritePa
 		return fmt.Errorf("新稿新增普通正文不应外溢的审计术语 \"标的\"")
 	}
 	return nil
+}
+
+func validateRewriteChapterTitle(chapter int, outlineTitle, rewritten string) error {
+	want := strings.TrimSpace(outlineTitle)
+	if want == "" {
+		return nil
+	}
+	heading := firstRewriteChapterHeading(rewritten)
+	if heading == "" || normalizeRewriteChapterTitle(heading) != normalizeRewriteChapterTitle(want) {
+		return fmt.Errorf("第 %d 章重写标题与大纲不一致：正文首行=%q，outline.title=%q；必须保留大纲章名", chapter, heading, want)
+	}
+	return nil
+}
+
+func firstRewriteChapterHeading(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return strings.TrimSpace(strings.TrimLeft(line, "#"))
+		}
+	}
+	return ""
+}
+
+func normalizeRewriteChapterTitle(title string) string {
+	title = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(title), "#"))
+	if strings.HasPrefix(title, "第") {
+		if idx := strings.Index(title, "章"); idx >= 0 {
+			title = strings.TrimSpace(title[idx+len("章"):])
+		}
+	}
+	title = strings.TrimLeft(title, " ：:.-")
+	return strings.ToLower(strings.Join(strings.Fields(title), ""))
 }
 
 func validateRewritePreflight(st *store.Store, chapter int, rewritten string, includeYellowAIVoice ...bool) error {

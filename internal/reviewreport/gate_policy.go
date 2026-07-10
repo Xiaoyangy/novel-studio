@@ -10,9 +10,11 @@ import (
 )
 
 const blockingAIGCDimensionThreshold = 40.0
+const supportingDialogueRatioNearMissTolerance = 0.005
 
 var blockingMechanicalRules = map[string]bool{
 	"aigc_ratio":                   true,
+	"external_aigc_ratio":          true,
 	"micro_action_overuse":         true,
 	"dramatic_negation_overuse":    true,
 	"paragraph_start_repetition":   true,
@@ -81,10 +83,20 @@ func IsBlockingAIVoiceFlagInAnalysis(flag domain.AIVoiceRedFlag, analysis domain
 		return false
 	}
 	if strings.TrimSpace(flag.Rule) == "supporting_dialogue_ratio" &&
-		strings.TrimSpace(flag.Severity) == "warning" &&
-		analysis.Metrics.SentenceCount > 0 &&
-		analysis.Metrics.SentenceCount < 20 {
-		return false
+		strings.TrimSpace(flag.Severity) == "warning" {
+		if analysis.Metrics.SentenceCount > 0 && analysis.Metrics.SentenceCount < 20 {
+			return false
+		}
+		actual, limit := flag.Actual, flag.Limit
+		if actual <= 0 {
+			actual = analysis.Metrics.DialogueRatio
+		}
+		if limit <= 0 && analysis.Metrics.DialogueRatio > 0 {
+			limit = 0.30
+		}
+		if limit > 0 && actual > 0 && actual >= limit-supportingDialogueRatioNearMissTolerance {
+			return false
+		}
 	}
 	return true
 }
@@ -179,10 +191,10 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 			}
 		}
 	}
-	return len(mechanical.RuleViolations) > 0 || hasAIVoiceWarnings(aiVoice)
+	return len(mechanical.RuleViolations) > 0 || hasBlockingAIVoiceWarnings(aiVoice)
 }
 
-func hasAIVoiceWarnings(analysis *domain.AIVoiceAnalysis) bool {
+func hasBlockingAIVoiceWarnings(analysis *domain.AIVoiceAnalysis) bool {
 	if analysis == nil {
 		return false
 	}
@@ -194,7 +206,9 @@ func hasAIVoiceWarnings(analysis *domain.AIVoiceAnalysis) bool {
 		case "", "info", "note":
 			continue
 		default:
-			return true
+			if IsBlockingAIVoiceFlagInAnalysis(flag, *analysis) {
+				return true
+			}
 		}
 	}
 	return false

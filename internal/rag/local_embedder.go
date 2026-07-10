@@ -28,7 +28,10 @@ func NewLocalHashEmbedder(model string) *LocalHashEmbedder {
 	}
 }
 
-func (e *LocalHashEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+func (e *LocalHashEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, fmt.Errorf("local embedding input is empty")

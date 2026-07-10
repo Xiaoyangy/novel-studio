@@ -55,3 +55,36 @@ func TestReviewExistingAIGCGatePercentAllowsBlendedForLongChapter(t *testing.T) 
 		t.Fatalf("long chapter gate percent = %.2f, want blended 4.80", got)
 	}
 }
+
+func TestParseReviewIssuesSkipsNonActionablePraiseAndOptionalAdvice(t *testing.T) {
+	md := `# ch01 评审
+
+## 主要问题（按严重度排序）
+1. **无严重问题。** 本章各项 red flag 检测的"警告"实为优秀写作的表现。
+2. **次要优化建议（审美，非必要）：** 某句可以更含混，但非必需。
+
+## 结论
+通过，不建议改写。`
+
+	if issues := parseReviewIssues(md); len(issues) != 0 {
+		t.Fatalf("expected non-actionable lines to be skipped, got %+v", issues)
+	}
+}
+
+func TestParseReviewIssuesKeepsActionableIssue(t *testing.T) {
+	md := `# ch01 评审
+
+## 主要问题（按严重度排序）
+1. 第12段总结腔仍需改成动作后果。
+
+## 结论
+建议打磨。`
+
+	issues := parseReviewIssues(md)
+	if len(issues) != 1 {
+		t.Fatalf("expected one actionable issue, got %+v", issues)
+	}
+	if issues[0].Description != "第12段总结腔仍需改成动作后果。" {
+		t.Fatalf("unexpected issue: %+v", issues[0])
+	}
+}

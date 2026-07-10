@@ -52,6 +52,7 @@ type DimensionScore struct {
 // ReviewEntry Editor 的审阅条目。
 type ReviewEntry struct {
 	Chapter          int                `json:"chapter"`
+	BodySHA256       string             `json:"body_sha256,omitempty"`
 	Scope            string             `json:"scope"` // chapter / global / arc
 	Issues           []ConsistencyIssue `json:"issues"`
 	Dimensions       []DimensionScore   `json:"dimensions,omitempty"`      // 分维度评分

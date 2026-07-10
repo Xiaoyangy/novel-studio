@@ -445,8 +445,13 @@ func blockingRevisionChapters(projectDir string, start, end int) ([]int, error) 
 }
 
 func revisionChaptersNeedingWork(projectDir string, start, end int, includeYellow bool) ([]int, error) {
+	available, err := chapterNumbersFromFiles(filepath.Join(projectDir, "chapters"))
+	if err != nil {
+		return nil, err
+	}
+	selected := filterChaptersForPipelineRange(available, pipelineFlags{Start: start, End: end})
 	var chapters []int
-	for ch := start; ch <= end; ch++ {
+	for _, ch := range selected {
 		text, err := os.ReadFile(filepath.Join(projectDir, "chapters", fmt.Sprintf("%02d.md", ch)))
 		if err != nil {
 			return nil, fmt.Errorf("读取第 %d 章用于复核红旗失败: %w", ch, err)

@@ -407,6 +407,32 @@ def paragraph_fragmentation_stats(paras: list[str]) -> dict:
     }
 
 
+def quoted_hanzi_ratio(text: str, n_hanzi: int) -> float:
+    if n_hanzi <= 0:
+        return 0.0
+    quoted = 0
+    for left, right in [("“", "”"), ("「", "」"), ("『", "』"), ('"', '"')]:
+        if left == right:
+            matches = re.findall(r'"([^"]+)"', text)
+        else:
+            matches = re.findall(re.escape(left) + r"(.*?)" + re.escape(right), text)
+        quoted += sum(len(hanzi(item)) for item in matches)
+    return round(min(1.0, quoted / max(n_hanzi, 1)), 3)
+
+
+def dialogue_ratio_estimate(text: str, n_hanzi: int) -> float:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return 0.0
+    line_ratio = sum(1 for line in lines if "“" in line or "\"" in line) / len(lines)
+    quote_ratio = quoted_hanzi_ratio(text, n_hanzi)
+    if len(lines) <= 2 and quote_ratio > 0:
+        return round(min(line_ratio, quote_ratio * 1.15), 3)
+    if quote_ratio > 0:
+        return round(min(line_ratio, max(quote_ratio * 1.15, 0.12)), 3)
+    return round(line_ratio, 3)
+
+
 def paragraph_similarity_stats(rows: list[dict]) -> dict:
     vectors = []
     for row in rows:
@@ -1251,7 +1277,6 @@ def high_quality_human_anchor_stats(
         and fragment_stats.get("bracket_line_ratio", 0) >= 0.08
     ):
         blockers.append("短段与条款块同时密集，疑似人味化后处理")
-
     credits = []
     score = 0
 
@@ -1517,6 +1542,7 @@ def raw_component_score(component: dict | None) -> float:
 def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float) -> tuple[float, list[str]]:
     latest = segment_report.get("latest_detector_proxy", {}).get("components", {})
     zhuque = segment_report.get("zhuque_dimensions", {})
+    zhuque_dimensions_map = zhuque.get("dimensions", {})
     weak = latest.get("weak_lm_uniformity", {}).get("score", 0)
     probability_curve = latest.get("probability_curvature_proxy", {}).get("score", 0)
     entropy = latest.get("local_entropy_uniformity", {}).get("score", 0)
@@ -1534,6 +1560,10 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
     perplexity_stats = zhuque.get("dimensions", {}).get("perplexity_proxy", {}).get("stats", {})
     ttr = perplexity_stats.get("ttr", 1)
     normalized_entropy = perplexity_stats.get("normalized_entropy", 1)
+    zhuque_composite = float(zhuque.get("composite_percent", 0) or 0)
+    burstiness = float(zhuque_dimensions_map.get("burstiness", {}).get("score", 0) or 0)
+    structure = float(zhuque_dimensions_map.get("structure_fingerprint", {}).get("score", 0) or 0)
+    cross_paragraph = float(zhuque_dimensions_map.get("cross_paragraph_consistency", {}).get("score", 0) or 0)
 
     score = max(probability_curve, entropy, layout)
     evidence = []
@@ -1561,13 +1591,31 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
     )
     if char_count >= 1800 and proportion >= 0.95 and narrative_like and anchor_type != "technical_expository":
         raw_curve = max(raw_probability_curve, raw_entropy, raw_weak)
-        if raw_curve >= 80:
+        current_curve = max(probability_curve, entropy, weak)
+        blockers = human_anchor.get("blockers", [])
+        strong_anchor = (
+            bool(human_anchor.get("eligible"))
+            and human_anchor.get("strength") == "strong"
+            and not blockers
+        )
+        multi_signal_support = (
+            current_curve >= 60
+            or zhuque_composite >= 38
+            or (burstiness >= 35 and (structure >= 45 or cross_paragraph >= 30))
+            or (structure >= 65 and concrete < 18 and dialogue_ratio < 0.35)
+            or (not strong_anchor and raw_curve >= 90)
+        )
+        if raw_curve >= 80 and multi_signal_support:
             external_like_score = min(86.0, max(76.0, 62.0 + raw_curve * 0.20))
             if external_like_score > score:
                 score = external_like_score
                 evidence.append(
-                    f"整章单段疑似朱雀形态：曲线原始高值 {raw_curve:.2f}%，本地不再用小说人工锚点压低整段风险"
+                    f"整章单段疑似朱雀形态：曲线原始高值 {raw_curve:.2f}%，且存在当前曲线/结构节奏复合支撑"
                 )
+        elif raw_curve >= 80:
+            evidence.append(
+                f"整章单段原始曲线高值 {raw_curve:.2f}%，但当前曲线、人味锚点和结构节奏未形成复合高风险"
+            )
     blockers = human_anchor.get("blockers", [])
     length_only_blocker = blockers and all(str(item).startswith("文本长度不足") for item in blockers)
     segment_anchor_eligible = human_anchor.get("eligible") or (
@@ -1637,12 +1685,13 @@ def zhuque_segment_proxy(raw: str) -> dict:
     ai_ratio = round(ai_chars / max(len(visible), 1) * 100, 2)
     human_ratio = round(100 - suspected_ratio - ai_ratio, 2)
     risk_floor = 0
-    if len(segments) == 1 and suspected_ratio >= 99 and max_score >= 50:
+    risk_ratio = round(suspected_ratio + ai_ratio, 2)
+    if len(segments) == 1 and risk_ratio >= 99 and max_score >= 50:
         risk_floor = max_score
-    elif max_score >= 80 and suspected_ratio >= 60:
-        risk_floor = round(suspected_ratio * 0.90, 2)
-    elif max_score >= 60 and suspected_ratio >= 35:
-        risk_floor = round(suspected_ratio * 0.70, 2)
+    elif max_score >= 80 and risk_ratio >= 60:
+        risk_floor = round(risk_ratio * 0.90, 2)
+    elif max_score >= 60 and risk_ratio >= 35:
+        risk_floor = round(risk_ratio * 0.70, 2)
     return {
         "enabled": True,
         "segments": segments,
@@ -1656,25 +1705,44 @@ def zhuque_segment_proxy(raw: str) -> dict:
     }
 
 
+def whole_text_single_segment_risk(segment_proxy: dict | None) -> float:
+    """朱雀把约 3000 字正文当整章/整段检测时，不能用 human anchor 压低高风险片段。"""
+    if not segment_proxy or not segment_proxy.get("enabled"):
+        return 0.0
+    segments = segment_proxy.get("segments") or []
+    if len(segments) != 1:
+        return 0.0
+    segment = segments[0]
+    proportion = float(segment.get("proportion", 0) or 0)
+    if proportion < 0.95:
+        return 0.0
+    risk_floor = float(segment_proxy.get("risk_floor_percent", 0) or 0)
+    max_segment = float(segment_proxy.get("max_segment_percent", 0) or 0)
+    risk = max(risk_floor, max_segment)
+    return round(risk, 2) if risk >= 50 else 0.0
+
+
 def score_zhuque_segment_proxy(segment_proxy: dict) -> dict:
     signals = []
     suspected_ratio = segment_proxy.get("suspected_ai_ratio_percent", 0)
+    ai_ratio = segment_proxy.get("ai_feature_ratio_percent", 0)
+    risk_ratio = round(suspected_ratio + ai_ratio, 2)
     max_score = segment_proxy.get("max_segment_percent", 0)
     max_index = segment_proxy.get("max_segment_index", 0)
-    if suspected_ratio >= 60 and max_score >= 80:
+    if risk_ratio >= 60 and max_score >= 80:
         signals.append(
             risk_item(
                 "zhuque_like_suspected_span_ratio_high",
-                suspected_ratio / 100,
-                f"疑似AI片段占比 {suspected_ratio}% 且最高片段 {max_index} 为 {max_score}%",
+                risk_ratio / 100,
+                f"疑似/AI特征片段占比 {risk_ratio}% 且最高片段 {max_index} 为 {max_score}%",
             )
         )
-    elif suspected_ratio >= 35 or max_score >= 70:
+    elif risk_ratio >= 35 or max_score >= 70:
         signals.append(
             risk_item(
                 "zhuque_like_suspected_span_ratio_mid",
-                max(suspected_ratio, max_score) / 100,
-                f"疑似AI片段占比 {suspected_ratio}%；最高片段 {max_index} 为 {max_score}%",
+                max(risk_ratio, max_score) / 100,
+                f"疑似/AI特征片段占比 {risk_ratio}%；最高片段 {max_index} 为 {max_score}%",
             )
         )
     return {
@@ -1788,8 +1856,7 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
     fragment_stats = paragraph_fragmentation_stats(paras)
     para_lens = [len(hanzi(para)) for para in paras if len(hanzi(para)) > 0]
     para_cv = coefficient_of_variation(para_lens)
-    dialogue_lines = sum(1 for line in body.splitlines() if "“" in line or "\"" in line)
-    dialogue_ratio = round(dialogue_lines / max(len([line for line in body.splitlines() if line.strip()]), 1), 3)
+    dialogue_ratio = dialogue_ratio_estimate(body, n_hanzi)
 
     per_k, total_cliche = cliche_densities(body, n_hanzi)
     rep8 = repeated_ngrams(chars, 8)
@@ -1939,10 +2006,11 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
     ):
         human_anchor_final_cap = 4.8
         blended_percent = round(min(blended_percent, human_anchor_final_cap), 2)
-    if human_anchor_final_cap is not None and content_floor == 0.0:
+    whole_text_gate = whole_text_single_segment_risk(segment_proxy)
+    if human_anchor_final_cap is not None and content_floor == 0.0 and whole_text_gate == 0:
         percent = round(max(blended_percent, content_floor), 2)
     else:
-        percent = round(max(blended_percent, segment_proxy.get("risk_floor_percent", 0), content_floor), 2)
+        percent = round(max(blended_percent, segment_proxy.get("risk_floor_percent", 0), content_floor, whole_text_gate), 2)
     score = percent / 100
     return {
         "engine": ENGINE,
@@ -1951,6 +2019,7 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
         "ai_ratio_percent": percent,
         "blended_aigc_percent": blended_percent,
         "segment_risk_floor_percent": segment_proxy.get("risk_floor_percent", 0),
+        "whole_text_single_segment_gate_percent": whole_text_gate,
         "content_integrity_floor_percent": content_floor,
         "zhuque_dimensions": zhuque,
         "latest_detector_proxy": latest_proxy,
@@ -2044,7 +2113,8 @@ def main() -> None:
         f"  四维综合: {report['zhuque_dimensions']['composite_percent']:.2f}% | "
         f"最新代理综合: {report['latest_detector_proxy']['composite_percent']:.2f}% | "
         f"既有启发式: {report['legacy_heuristic_percent']:.2f}% | "
-        f"分片下限: {report.get('segment_risk_floor_percent', 0):.2f}%"
+        f"分片下限: {report.get('segment_risk_floor_percent', 0):.2f}% | "
+        f"整章合段门禁: {report.get('whole_text_single_segment_gate_percent', 0):.2f}%"
     )
     seg = report.get("zhuque_segment_proxy") or {}
     if seg.get("enabled"):

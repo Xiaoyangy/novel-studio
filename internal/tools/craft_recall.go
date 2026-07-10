@@ -23,6 +23,8 @@ type CraftRecallTool struct {
 	store         *store.Store
 	mu            sync.Mutex
 	chapterCounts map[int]int
+	catalogState  *domain.RAGIndexState
+	catalog       *rag.CraftCatalog
 }
 
 func NewCraftRecallTool(store *store.Store) *CraftRecallTool {
@@ -73,8 +75,16 @@ func (t *CraftRecallTool) Execute(_ context.Context, args json.RawMessage) (json
 		a.Limit = 12
 	}
 	effectiveChapter := t.effectiveChapter(a.Chapter)
+	if effectiveChapter > 0 {
+		if partial, _ := t.store.Drafts.LoadChapterPlanPartial(effectiveChapter); partial != nil {
+			return nil, fmt.Errorf("第 %d 章已进入 staged plan repair，禁止 craft_recall；请按 novel_context 的 gap_summary 直接补全世界模拟或 plan_details: %w", effectiveChapter, errs.ErrToolPrecondition)
+		}
+		if partial, _ := t.store.LoadChapterWorldSimulationPartial(effectiveChapter); partial != nil {
+			return nil, fmt.Errorf("第 %d 章全角色世界推演已分批开始，禁止中途 craft_recall 扩张上下文；请继续 simulate_chapter_world 直到 finalize: %w", effectiveChapter, errs.ErrToolPrecondition)
+		}
+	}
 	callCount := t.recordChapterCall(effectiveChapter)
-	if effectiveChapter > 0 && callCount > 4 {
+	if effectiveChapter > 0 && callCount > 3 {
 		entry := map[string]any{
 			"at":                time.Now().Format(time.RFC3339),
 			"field":             a.Field,
@@ -100,12 +110,12 @@ func (t *CraftRecallTool) Execute(_ context.Context, args json.RawMessage) (json
 			"method_scope":      "craft_recall 已达到同章预算；继续检索会造成规划 loop。",
 		})
 	}
-	state, err := t.store.RAG.LoadIndexState()
+	state, err := t.store.RAG.LoadIndexStateReadOnly()
 	if err != nil || state == nil || len(state.Chunks) == 0 {
 		return nil, fmt.Errorf("RAG 索引不存在或为空；先运行 novel-studio --build-rag --add-source <writing-techniques 路径>: %w", errs.ErrToolPrecondition)
 	}
 	chunks, filtered := t.filterCrossProjectCraftChunks(state.Chunks)
-	result := rag.CraftRecall(chunks, rag.CraftDesignField(a.Field), a.Topic, a.Limit)
+	result := t.craftCatalogFor(state, chunks).Recall(rag.CraftDesignField(a.Field), a.Topic, a.Limit)
 
 	type hitPayload struct {
 		SourcePath string  `json:"source_path"`
@@ -158,6 +168,9 @@ func (t *CraftRecallTool) Execute(_ context.Context, args json.RawMessage) (json
 }
 
 func (t *CraftRecallTool) effectiveChapter(requested int) int {
+	if target, ok := pendingRewriteTarget(t.store); ok {
+		return target
+	}
 	if requested > 0 {
 		return requested
 	}
@@ -188,6 +201,17 @@ func (t *CraftRecallTool) recordChapterCall(chapter int) int {
 	}
 	t.chapterCounts[chapter]++
 	return t.chapterCounts[chapter]
+}
+
+func (t *CraftRecallTool) craftCatalogFor(state *domain.RAGIndexState, chunks []domain.RAGChunk) *rag.CraftCatalog {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.catalog != nil && t.catalogState == state {
+		return t.catalog
+	}
+	t.catalog = rag.NewCraftCatalog(chunks)
+	t.catalogState = state
+	return t.catalog
 }
 
 func (t *CraftRecallTool) filterCrossProjectCraftChunks(chunks []domain.RAGChunk) ([]domain.RAGChunk, int) {

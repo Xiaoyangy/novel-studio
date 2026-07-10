@@ -47,11 +47,40 @@ func (c LocalGGUFConfig) baseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", c.Port)
 }
 
+func localGGUFServerArgs(cfg LocalGGUFConfig) []string {
+	cfg.fillDefaults()
+	batchSize := min(cfg.CtxSize, 512)
+	ubatchSize := min(batchSize, 128)
+	return []string{
+		"-m", cfg.GGUFPath,
+		"--embedding",
+		"--pooling", "last",
+		"-c", fmt.Sprint(cfg.CtxSize),
+		"-b", fmt.Sprint(batchSize),
+		"-ub", fmt.Sprint(ubatchSize),
+		"--parallel", "1",
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprint(cfg.Port),
+	}
+}
+
+var (
+	localGGUFLaunchMu sync.Mutex
+	managedGGUFMu     sync.Mutex
+	managedGGUF       = map[int]*exec.Cmd{}
+)
+
 // EnsureLocalGGUFServer 确保本地 embedding 服务可用：健康则直接返回；
 // 否则用 llama-server 拉起（detached，模型加载最多等 120s）。
 func EnsureLocalGGUFServer(ctx context.Context, cfg LocalGGUFConfig) error {
 	cfg.fillDefaults()
-	if localGGUFHealthy(cfg.baseURL()) {
+	if localGGUFHealthy(ctx, cfg.baseURL()) {
+		return nil
+	}
+	localGGUFLaunchMu.Lock()
+	defer localGGUFLaunchMu.Unlock()
+	// Another caller may have completed startup while this caller waited.
+	if localGGUFHealthy(ctx, cfg.baseURL()) {
 		return nil
 	}
 	if _, err := os.Stat(cfg.GGUFPath); err != nil {
@@ -61,23 +90,33 @@ func EnsureLocalGGUFServer(ctx context.Context, cfg LocalGGUFConfig) error {
 	if err != nil {
 		return fmt.Errorf("未找到 llama-server（brew install llama.cpp）: %w", err)
 	}
-	cmd := exec.Command(bin,
-		"-m", cfg.GGUFPath,
-		"--embedding",
-		"--pooling", "last",
-		"-c", fmt.Sprint(cfg.CtxSize),
-		"-ub", fmt.Sprint(cfg.CtxSize),
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprint(cfg.Port),
-	)
-	detachQdrantCommand(cmd)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("拉起 llama-server 失败: %w", err)
+	stopManagedLocalGGUF(cfg.Port)
+	logPath := fmt.Sprintf("%s/novel-studio-llama-embedding-%d.log", os.TempDir(), cfg.Port)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("创建 llama-server 日志失败: %w", err)
 	}
-	// detach：进程由系统接管，随用随在；健康检查决定可用性。
-	go func() { _ = cmd.Wait() }()
+	cmd := exec.Command(bin, localGGUFServerArgs(cfg)...)
+	detachQdrantCommand(cmd)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("拉起 llama-server 失败: %w（日志: %s）", err, logPath)
+	}
+	managedGGUFMu.Lock()
+	managedGGUF[cfg.Port] = cmd
+	managedGGUFMu.Unlock()
+	// detach：进程由系统接管；仍保留句柄，以便健康失败时只重启本工具拉起的进程。
+	go func() {
+		_ = cmd.Wait()
+		_ = logFile.Close()
+		managedGGUFMu.Lock()
+		if managedGGUF[cfg.Port] == cmd {
+			delete(managedGGUF, cfg.Port)
+		}
+		managedGGUFMu.Unlock()
+	}()
 
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
@@ -86,16 +125,24 @@ func EnsureLocalGGUFServer(ctx context.Context, cfg LocalGGUFConfig) error {
 			return ctx.Err()
 		case <-time.After(1 * time.Second):
 		}
-		if localGGUFHealthy(cfg.baseURL()) {
+		if localGGUFHealthy(ctx, cfg.baseURL()) {
 			return nil
 		}
 	}
-	return fmt.Errorf("llama-server 启动超时（模型加载 >120s）: %s", cfg.GGUFPath)
+	stopManagedLocalGGUF(cfg.Port)
+	return fmt.Errorf("llama-server 启动超时（模型加载 >120s）: %s（日志: %s）", cfg.GGUFPath, logPath)
 }
 
-func localGGUFHealthy(baseURL string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(baseURL + "/health")
+func localGGUFHealthy(ctx context.Context, baseURL string) bool {
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(healthCtx, http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		return false
+	}
+	req.Close = true
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -103,12 +150,22 @@ func localGGUFHealthy(baseURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+func stopManagedLocalGGUF(port int) {
+	managedGGUFMu.Lock()
+	cmd := managedGGUF[port]
+	delete(managedGGUF, port)
+	managedGGUFMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
 // localGGUFEmbedder 包装 OpenAIEmbedder：输入补 <|endoftext|>，输出 L2 归一化。
 type localGGUFEmbedder struct {
 	inner *OpenAIEmbedder
 	cfg   LocalGGUFConfig
 	model string
-	mu    sync.Mutex
+	gate  chan struct{}
 }
 
 // NewLocalGGUFEmbedder 构建指向本地 llama-server 的 embedder。
@@ -118,14 +175,15 @@ func NewLocalGGUFEmbedder(cfg LocalGGUFConfig, model string) (Embedder, error) {
 		model = "qwen3-embedding-0.6b"
 	}
 	inner, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
-		BaseURL: cfg.baseURL() + "/v1",
-		Model:   model,
-		Timeout: cfg.Timeout,
+		BaseURL:           cfg.baseURL() + "/v1",
+		Model:             model,
+		Timeout:           cfg.Timeout,
+		DisableKeepAlives: true,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &localGGUFEmbedder{inner: inner, cfg: cfg, model: model}, nil
+	return &localGGUFEmbedder{inner: inner, cfg: cfg, model: model, gate: make(chan struct{}, 1)}, nil
 }
 
 func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -136,8 +194,12 @@ func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 	if !strings.HasSuffix(text, "<|endoftext|>") {
 		text += "<|endoftext|>"
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	select {
+	case e.gate <- struct{}{}:
+		defer func() { <-e.gate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	vec, err := e.inner.Embed(ctx, text)
 	if err == nil {
 		l2Normalize(vec)
@@ -151,9 +213,10 @@ func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 		return nil, fmt.Errorf("local gguf embedding failed and restart failed: %w (original: %v)", err, firstErr)
 	}
 	inner, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
-		BaseURL: e.cfg.baseURL() + "/v1",
-		Model:   e.model,
-		Timeout: e.cfg.Timeout,
+		BaseURL:           e.cfg.baseURL() + "/v1",
+		Model:             e.model,
+		Timeout:           e.cfg.Timeout,
+		DisableKeepAlives: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rebuild local gguf embedder: %w (original: %v)", err, firstErr)

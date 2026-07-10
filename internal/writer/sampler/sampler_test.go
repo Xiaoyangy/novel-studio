@@ -11,12 +11,37 @@ import (
 type fakeModel struct {
 	responses []*agentcore.LLMResponse
 	calls     int
+	thinking  []agentcore.ThinkingLevel
 }
 
-func (m *fakeModel) Generate(_ context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+func (m *fakeModel) Generate(_ context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	m.thinking = append(m.thinking, agentcore.ResolveCallConfig(opts).ThinkingLevel)
 	resp := m.responses[m.calls]
 	m.calls++
 	return resp, nil
+}
+
+func TestSamplerPreservesUltraThinking(t *testing.T) {
+	base := &fakeModel{responses: []*agentcore.LLMResponse{
+		draftResponse("a", 1, "第一份正文。"),
+		draftResponse("b", 1, "第二份正文。"),
+		draftResponse("c", 1, "第三份正文。"),
+	}}
+	model := New(base)
+	_, err := model.Generate(context.Background(), []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("next_step: 请调用 draft_chapter 写章节草稿正文")}},
+	}, nil, agentcore.WithThinking(agentcore.ThinkingLevel("ultra")))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(base.thinking) != 3 {
+		t.Fatalf("thinking calls = %d, want 3", len(base.thinking))
+	}
+	for i, level := range base.thinking {
+		if level != "ultra" {
+			t.Fatalf("thinking[%d] = %q, want ultra", i, level)
+		}
+	}
 }
 
 func (m *fakeModel) GenerateStream(context.Context, []agentcore.Message, []agentcore.ToolSpec, ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {

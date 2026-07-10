@@ -17,7 +17,8 @@
 
 ## 本工程门禁
 
-- `EffectiveGatePercent` 是唯一门禁采用值。短章（`hanzi <= 5000`）按整章单检测片段处理，`segment_risk_floor` 或 raw AI 占比高时，不得被普通 `blended_aigc_percent` 稀释放行；只有 `human_anchor_final_cap_percent` 已触发、无脏码/真重复、AI voice 与 Editor 均通过时，强人工锚点 cap 才能成为门禁采用值，同时仍展示 raw floor。
+- `EffectiveGatePercent` 是唯一门禁采用值。短章（`hanzi <= 5000`）按整章单检测片段处理，`segment_risk_floor` 或 raw AI 占比高时，不得被普通 `blended_aigc_percent` 稀释放行；如果朱雀式代理显示整章单段高风险，`human_anchor_final_cap_percent` 不能覆盖该风险。只有不存在整章单段高风险、无脏码/真重复、AI voice 与 Editor 均通过时，强人工锚点 cap 才能成为门禁采用值，同时仍展示 raw floor。
+- 整章单段高风险必须有复合证据支撑：底层曲线原始高值之外，还需要当前曲线、朱雀四维综合、结构/段落节奏或人味锚点缺失等信号共同成立；不能只凭一个被校准前的曲线值把强叙事章节锁死为高风险。
 - 统一审核报告必须同时展示 `AI 占比`、`门禁采用值`、`融合值`、`朱雀分片风险下限`。交付判断看 `门禁采用值`，不是只看 `融合值`。
 - `aigc_ratio >= 35%` 是 error，必须返工；`5% <= aigc_ratio < 35%` 是 warning，也不得作为交付完成。
 - 报告中“主要问题”不是装饰文字。只要主要问题仍列出机械 error、阻断 warning、Editor warning 或功能性风险，就不能称为完全通过；应继续改到机械规则清空、AI voice 通过、Editor 主要问题为空或只剩非交付阻断的题材取舍。
@@ -38,6 +39,6 @@
 ## 审核策略
 
 - 先看 `mechanical_gate.effective_gate_percent` / `gate_percent`，再看四维、latest detector proxy 和 `zhuque_segment_proxy.segments`。
-- 若 `segment_risk_floor >= 50`，必须把整章当一个风险片段读，检查局部熵/TTR曲线是否过平、语义功能是否过稳、段落是否均匀正确；若报告同时出现 `human_anchor_final_cap_percent`，可在机械规则清空、AI voice 通过、Editor accept 后按 cap 交付，但 raw floor 仍进入风险提示。
+- 若 `segment_risk_floor >= 50`，必须把整章当一个风险片段读，检查局部熵/TTR曲线是否过平、语义功能是否过稳、段落是否均匀正确；若报告同时出现 `human_anchor_final_cap_percent`，只能说明文本有部分人工叙事锚点，不能压过整章合段门禁。
 - Editor 不得因为正文“看起来不错”而覆盖机械 error。Editor accept 只能说明设定/角色/钩子可用，不代表可交付。
 - 返工建议必须具体到段落功能：例如“第18-24段连续流程辩论，改成安全组甩锅、投屏同事自保、记录员怕签错、主角被私人消息打断”，不能只写“增加人味”。

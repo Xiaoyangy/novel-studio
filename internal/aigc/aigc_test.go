@@ -76,7 +76,6 @@ func TestEffectiveGatePercentUsesHumanAnchorFinalCap(t *testing.T) {
 	report := Report{
 		AIGCPercent:         80,
 		BlendedAIGCPercent:  4.8,
-		SegmentRiskFloor:    80,
 		Stats:               Stats{Hanzi: 3000},
 		HumanAnchorFinalCap: &capValue,
 	}
@@ -87,5 +86,28 @@ func TestEffectiveGatePercentUsesHumanAnchorFinalCap(t *testing.T) {
 	report.ContentIntegrityFloor = 82
 	if got := EffectiveGatePercent(report); got != 80 {
 		t.Fatalf("content integrity should bypass cap, got %.2f", got)
+	}
+}
+
+func TestEffectiveGatePercentUsesWholeTextSegmentRiskOverHumanAnchorCap(t *testing.T) {
+	capValue := 4.8
+	report := Report{
+		AIGCPercent:         4.8,
+		BlendedAIGCPercent:  4.8,
+		SegmentRiskFloor:    82,
+		Stats:               Stats{Hanzi: 3000},
+		HumanAnchorFinalCap: &capValue,
+		ZhuqueSegmentProxy: ZhuqueSegmentProxy{
+			Enabled:                 true,
+			SuspectedAIRatioPercent: 100,
+			MaxSegmentPercent:       82,
+			RiskFloorPercent:        82,
+			Segments: []ZhuqueSegment{
+				{Index: 1, Proportion: 1, AIGCPercent: 82, Category: "疑似AI"},
+			},
+		},
+	}
+	if got := EffectiveGatePercent(report); got != 82 {
+		t.Fatalf("whole-text single segment risk should override human anchor cap, got %.2f", got)
 	}
 }

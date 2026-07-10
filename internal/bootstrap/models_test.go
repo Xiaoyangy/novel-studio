@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"fmt"
 	"testing"
+
+	"github.com/voocel/agentcore"
 )
 
 func TestIsBillingExhaustedError(t *testing.T) {
@@ -22,6 +24,16 @@ func TestIsBillingExhaustedError(t *testing.T) {
 		if got := isBillingExhaustedError(errFromString(c.msg)); got != c.want {
 			t.Errorf("isBillingExhaustedError(%q) = %v, want %v", c.msg, got, c.want)
 		}
+	}
+}
+
+func TestCallOptionsForTargetOverridesInheritedReasoning(t *testing.T) {
+	opts := callOptionsForTarget(
+		[]agentcore.CallOption{agentcore.WithThinking(agentcore.ThinkingLevel("ultra"))},
+		modelTarget{reasoningEffort: "high"},
+	)
+	if got := agentcore.ResolveCallConfig(opts).ThinkingLevel; got != agentcore.ThinkingHigh {
+		t.Fatalf("fallback thinking = %q, want high", got)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	editrules "github.com/chenhongyang/novel-studio/internal/editor/rules"
 	"github.com/voocel/agentcore"
+	"github.com/voocel/agentcore/llm"
 )
 
 const candidateCount = 3
@@ -32,6 +33,20 @@ func (m *Model) SupportsTools() bool {
 	return m.Base.SupportsTools()
 }
 
+func (m *Model) Info() llm.ModelInfo {
+	if info, ok := m.Base.(interface{ Info() llm.ModelInfo }); ok {
+		return info.Info()
+	}
+	return llm.ModelInfo{}
+}
+
+func (m *Model) Capabilities() llm.Capabilities {
+	if provider, ok := m.Base.(llm.CapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	return llm.Capabilities{}
+}
+
 func (m *Model) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	if !shouldAttemptSampling(messages) {
 		return m.Base.Generate(ctx, messages, tools, opts...)
@@ -51,7 +66,6 @@ func (m *Model) GenerateStream(ctx context.Context, messages []agentcore.Message
 }
 
 func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
-	filteredOpts := withoutThinking(opts)
 	type candidate struct {
 		response *agentcore.LLMResponse
 		call     *agentcore.ToolCall
@@ -60,7 +74,7 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 	}
 	candidates := make([]candidate, 0, candidateCount)
 	for i := 1; i <= candidateCount; i++ {
-		resp, err := m.Base.Generate(ctx, messages, tools, filteredOpts...)
+		resp, err := m.Base.Generate(ctx, messages, tools, opts...)
 		if err != nil {
 			if i == 1 {
 				return nil, err
@@ -176,27 +190,6 @@ func containsAny(s string, needles ...string) bool {
 		}
 	}
 	return false
-}
-
-func withoutThinking(opts []agentcore.CallOption) []agentcore.CallOption {
-	cfg := agentcore.ResolveCallConfig(opts)
-	out := make([]agentcore.CallOption, 0, len(opts))
-	if cfg.APIKey != "" {
-		out = append(out, agentcore.WithAPIKey(cfg.APIKey))
-	}
-	if cfg.SessionID != "" {
-		out = append(out, agentcore.WithCallSessionID(cfg.SessionID))
-	}
-	if cfg.MaxTokens > 0 {
-		out = append(out, agentcore.WithMaxTokens(cfg.MaxTokens))
-	}
-	if cfg.ToolChoice != nil {
-		out = append(out, agentcore.WithToolChoice(cfg.ToolChoice))
-	}
-	if cfg.ResponseFormat != nil {
-		out = append(out, agentcore.WithResponseFormat(cfg.ResponseFormat))
-	}
-	return out
 }
 
 func streamResponse(resp *agentcore.LLMResponse) <-chan agentcore.StreamEvent {

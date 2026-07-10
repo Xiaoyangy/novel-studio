@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -48,9 +49,23 @@ func TestRoute_PendingRewritesFirst(t *testing.T) {
 	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
 	p.PendingRewrites = []int{3, 5}
 	// 阶段拆分：计划未按审阅重推演 → planner 先重做计划。
-	got := Route(State{Progress: p, NextActionPlanReady: false})
+	got := Route(State{
+		Progress:            p,
+		NextActionPlanReady: false,
+		NextActionTitle:     "第三章标题",
+		NextActionCoreEvent: "第三章核心事件",
+		NextActionHook:      "第三章章末钩子",
+	})
 	if got == nil || got.Agent != "writer" || got.Chapter != 3 {
 		t.Fatalf("expected planner(writer) re-plan for rewrite ch3, got %+v", got)
+	}
+	for _, want := range []string{
+		"返工目标锁定第 3 章", "严禁规划第 4 章", "chapter=3",
+		"《第三章标题》", "第三章核心事件", "第三章章末钩子",
+	} {
+		if !strings.Contains(got.Task, want) {
+			t.Fatalf("rewrite planning task missing %q: %s", want, got.Task)
+		}
 	}
 	// 计划就绪 → drafter 渲染重写。
 	got = Route(State{Progress: p, NextActionPlanReady: true})

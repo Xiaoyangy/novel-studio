@@ -251,7 +251,7 @@ if err != nil {
 }
 
 resp, err := oai.Responses(ctx, &openai.ResponsesRequest{
-	Model: "gpt-5.5",
+	Model: "gpt-5.6-sol",
 	Messages: []litellm.Message{
 		litellm.UserText("逐步计算 15*8。"),
 	},
@@ -273,7 +273,7 @@ oai, err := openai.New(openai.Config{
 })
 
 stream, err := oai.ResponsesStream(ctx, &openai.ResponsesRequest{
-	Model:    "gpt-5.5",
+	Model:    "gpt-5.6-sol",
 	Messages: []litellm.Message{litellm.UserText("搜索并总结。")},
 })
 ```

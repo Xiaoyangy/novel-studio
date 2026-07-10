@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -190,14 +191,70 @@ type CraftRecallResult struct {
 	NoMaterial bool
 }
 
+// CraftCatalog caches the deterministic field filter and BM25 corpus lazily.
+// A tool instance can reuse it across several design-time recalls without
+// rebuilding an index over the same large technique library each time.
+type CraftCatalog struct {
+	chunks  []domain.RAGChunk
+	mu      sync.Mutex
+	corpora map[CraftDesignField]*craftCorpus
+}
+
+type craftCorpus struct {
+	subset []domain.RAGChunk
+	index  *BM25Index
+}
+
+func NewCraftCatalog(chunks []domain.RAGChunk) *CraftCatalog {
+	return &CraftCatalog{
+		chunks:  append([]domain.RAGChunk(nil), chunks...),
+		corpora: make(map[CraftDesignField]*craftCorpus),
+	}
+}
+
 // CraftRecall 对 chunk 集执行「字段绑定 filter → 子集内 BM25 排序」的设计检索。
 // topic 为空时按字段描述排序（等价于取该类目的代表性材料）。
 func CraftRecall(chunks []domain.RAGChunk, field CraftDesignField, topic string, limit int) CraftRecallResult {
+	return NewCraftCatalog(chunks).Recall(field, topic, limit)
+}
+
+func (c *CraftCatalog) Recall(field CraftDesignField, topic string, limit int) CraftRecallResult {
 	recipe, ok := craftFieldRecipes[field]
 	result := CraftRecallResult{Field: field, Filter: recipe}
-	if !ok || limit <= 0 {
+	if c == nil || !ok || limit <= 0 {
 		result.NoMaterial = true
 		return result
+	}
+	corpus := c.corpus(field, recipe)
+	subset := corpus.subset
+	if len(subset) == 0 {
+		result.NoMaterial = true
+		return result
+	}
+	query := strings.TrimSpace(topic)
+	if query == "" {
+		query = recipe.Description
+	}
+	hits := corpus.index.Search(query, limit)
+	if len(hits) == 0 {
+		// filter 命中但词法排序无得分：退化为子集头部，保证"命中即有料"。
+		for i, chunk := range subset {
+			if i >= limit {
+				break
+			}
+			hits = append(hits, BM25Hit{Chunk: chunk})
+		}
+	}
+	result.Hits = hits
+	result.NoMaterial = len(hits) == 0
+	return result
+}
+
+func (c *CraftCatalog) corpus(field CraftDesignField, recipe craftFieldRecipe) *craftCorpus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing := c.corpora[field]; existing != nil {
+		return existing
 	}
 	allowedKinds := recipe.SourceKinds
 	if len(allowedKinds) == 0 {
@@ -205,7 +262,7 @@ func CraftRecall(chunks []domain.RAGChunk, field CraftDesignField, topic string,
 	}
 	// 1) 确定性 filter：source_kind + craft_category 集合运算
 	var subset []domain.RAGChunk
-	for _, chunk := range chunks {
+	for _, chunk := range c.chunks {
 		chunk = NormalizeChunk(chunk)
 		if !containsFold(allowedKinds, strings.TrimSpace(chunk.SourceKind)) {
 			continue
@@ -224,28 +281,9 @@ func CraftRecall(chunks []domain.RAGChunk, field CraftDesignField, topic string,
 		}
 		subset = append(subset, chunk)
 	}
-	if len(subset) == 0 {
-		result.NoMaterial = true
-		return result
-	}
-	// 2) 子集内排序：BM25（topic 为空用配方描述当查询）
-	query := strings.TrimSpace(topic)
-	if query == "" {
-		query = recipe.Description
-	}
-	hits := BuildBM25Index(subset).Search(query, limit)
-	if len(hits) == 0 {
-		// filter 命中但词法排序无得分：退化为子集头部，保证"命中即有料"。
-		for i, chunk := range subset {
-			if i >= limit {
-				break
-			}
-			hits = append(hits, BM25Hit{Chunk: chunk})
-		}
-	}
-	result.Hits = hits
-	result.NoMaterial = len(hits) == 0
-	return result
+	corpus := &craftCorpus{subset: subset, index: BuildBM25Index(subset)}
+	c.corpora[field] = corpus
+	return corpus
 }
 
 func chunkCraftCategory(chunk domain.RAGChunk) (category, subcategory string) {

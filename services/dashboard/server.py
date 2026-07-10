@@ -10,11 +10,13 @@ Go 侧健康检查依赖 /api/health 与 /api/novels 均返回 2xx。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import time
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,8 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("NOVEL_STUDIO_RUNS_DIR", ROOT / "data" / "runs"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-ACTIVE_WINDOW_SECONDS = 180  # 日志/进度文件 3 分钟内有更新即视为运行中
+ACTIVE_WINDOW_SECONDS = 300  # 运行事件 5 分钟内有更新即视为执行中
 LOG_TAIL_LINES = 80
+RUNTIME_EVENT_LINES = 120
 
 
 # ---------- 数据读取（全部防御式，缺文件返回空） ----------
@@ -34,6 +37,42 @@ def read_json(path: Path):
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_jsonl_tail(path: Path, lines: int = 80) -> list[dict]:
+    out = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 256 * 1024))
+            raw = f.read().decode("utf-8", errors="replace").splitlines()[-lines:]
+    except OSError:
+        return out
+    for line in raw:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def timestamp(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def iso_time(ts: float) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
 
 
 def novel_dir(run: Path) -> Path:
@@ -123,9 +162,75 @@ def chapter_title(nd: Path, ch: int) -> str:
 def count_words(nd: Path, ch: int) -> int:
     try:
         text = (nd / "chapters" / f"{ch:02d}.md").read_text(encoding="utf-8")
-        return len(re.sub(r"\s", "", text))
+        # 与 internal/domain.WordCount 一致：按 Unicode rune 计数，包含换行与标点。
+        return len(text)
     except OSError:
         return 0
+
+
+def file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def line_count(path: Path) -> int:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def rag_index_summary(nd: Path) -> dict:
+    """读取轻量 RAG 摘要，避免轮询时反复反序列化近百 MB 的 chunk 正文。"""
+    json_path = nd / "meta" / "rag" / "index_state.json"
+    md_path = nd / "meta" / "rag" / "index_state.md"
+    if not json_path.is_file() and not md_path.is_file():
+        return {"ready": False, "chunks": 0, "provider": "", "model": "", "store": "",
+                "collection": "", "updated_at": "", "retrievals": 0, "craft_recalls": 0}
+    try:
+        md = md_path.read_text(encoding="utf-8")[:12000]
+    except OSError:
+        md = ""
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            prefix = f.read(8192)
+    except OSError:
+        prefix = ""
+
+    def md_value(label: str) -> str:
+        match = re.search(rf"^-\s*{re.escape(label)}[：:]\s*(.+?)\s*$", md, re.M)
+        return match.group(1).strip() if match else ""
+
+    def json_string(key: str) -> str:
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', prefix)
+        if not match:
+            return ""
+        try:
+            return json.loads('"' + match.group(1) + '"')
+        except json.JSONDecodeError:
+            return match.group(1)
+
+    raw_chunks = md_value("Chunk 数")
+    chunks = int(raw_chunks.replace(",", "")) if raw_chunks.replace(",", "").isdigit() else 0
+    facets = {}
+    for key, value in re.findall(r"^-\s*([^：:\n]+)[：:]\s*(\d+)\s*$", md, re.M):
+        if key not in ("Chunk 数", "Chunk hash 数"):
+            facets[key.strip()] = int(value)
+    return {
+        "ready": True,
+        "chunks": chunks,
+        "provider": json_string("embedding_provider"),
+        "model": json_string("embedding_model"),
+        "store": json_string("vector_store"),
+        "collection": json_string("collection") or md_value("Collection"),
+        "updated_at": md_value("更新时间") or iso_time(latest_mtime(json_path, md_path)),
+        "retrievals": line_count(nd / "meta" / "rag" / "retrieval_trace.jsonl"),
+        "craft_recalls": line_count(nd / "meta" / "rag" / "craft_recall_log.jsonl"),
+        "facets": facets,
+    }
 
 
 def log_tail(nd: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
@@ -141,60 +246,291 @@ def log_tail(nd: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
         return []
 
 
-CHAPTER_STEP_CHAIN = ["plan", "draft", "check", "commit", "review"]
+CHAPTER_STEP_CHAIN = ["simulate", "plan", "draft", "check", "commit", "review", "rewrite", "deliver"]
 
 
 def checkpoint_tail(nd: Path, n: int = 60) -> list[dict]:
-    path = nd / "meta" / "checkpoints.jsonl"
-    out = []
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 32 * 1024))
-            lines = f.read().decode("utf-8", errors="replace").splitlines()[-n:]
-        for line in lines:
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(e, dict):
-                out.append(e)
-    except OSError:
-        pass
-    return out
+    return read_jsonl_tail(nd / "meta" / "checkpoints.jsonl", n)
 
 
-def working_state(nd: Path, prog: dict) -> dict:
-    """当前章进展：checkpoint 步骤链 + 草稿落盘事实 + 最近一次全局动作。"""
+def normalize_step(value: str) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if not raw:
+        return ""
+    if "simulate-chapter-world" in raw or "chapter-world-simulation" in raw or "world-simulation" in raw:
+        return "simulate"
+    if "plan-structure" in raw or "plan-details" in raw or "plan-chapter" in raw or raw == "plan":
+        return "plan"
+    if "rewrite" in raw:
+        return "rewrite"
+    if "deepseek-ai-judge" in raw or "review" in raw or "ai-gate" in raw or "aigc" in raw:
+        return "review"
+    if "check-consistency" in raw or "consistency" in raw or "content-lint" in raw or raw == "check":
+        return "check"
+    if "commit" in raw:
+        return "commit"
+    if "deliver" in raw:
+        return "deliver"
+    if "draft" in raw or raw == "write" or "draft-chapter" in raw:
+        return "draft"
+    return ""
+
+
+def runtime_events(nd: Path, n: int = RUNTIME_EVENT_LINES) -> list[dict]:
+    events = []
+    for item in read_jsonl_tail(nd / "meta" / "runtime" / "queue.jsonl", n):
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        category = str(item.get("category") or payload.get("Category") or "")
+        level = str(payload.get("Level") or item.get("level") or "").lower()
+        failed = bool(payload.get("Failed")) or category.upper() == "ERROR" or level == "error"
+        detail = str(payload.get("Detail") or item.get("detail") or "")
+        summary = str(item.get("summary") or payload.get("Summary") or "")
+        chapter_match = re.search(r"第\s*(\d+)\s*章|\bch(?:apter)?[-_ ]?(\d+)\b", summary + " " + detail, re.I)
+        event_chapter = int(chapter_match.group(1) or chapter_match.group(2)) if chapter_match else None
+        events.append({
+            "seq": item.get("seq"),
+            "time": str(item.get("time") or payload.get("Time") or ""),
+            "timestamp": timestamp(item.get("time") or payload.get("Time")),
+            "category": category,
+            "agent": str(item.get("agent") or payload.get("Agent") or ""),
+            "summary": clip(summary, 260),
+            "detail": clip(detail, 480),
+            "failed": failed,
+            "step": normalize_step(summary or detail),
+            "chapter": event_chapter,
+        })
+    return events
+
+
+def runtime_state(nd: Path, prog: dict) -> dict:
+    events = runtime_events(nd)
+    run = read_json(nd / "meta" / "run.json") or {}
+    last = events[-1] if events else {}
+    last_error = next((e for e in reversed(events) if e.get("failed")), None)
+    event_ts = max((e.get("timestamp") or 0 for e in events), default=0)
+    file_ts = latest_mtime(
+        nd / "logs" / "headless.log",
+        nd / "meta" / "checkpoints.jsonl",
+        nd / "meta" / "progress.json",
+        nd / "meta" / "pipeline.json",
+    )
+    updated = max(event_ts, file_ts)
+    age = max(0.0, time.time() - updated) if updated else None
+    pending = prog.get("pending_rewrites") or []
+    if prog.get("phase") == "complete":
+        status = "complete"
+    elif updated and age is not None and age < ACTIVE_WINDOW_SECONDS:
+        status = "error" if last.get("failed") else "running"
+    elif pending or prog.get("flow") == "rewriting":
+        status = "attention"
+    else:
+        status = "idle"
+    recent = events[-16:]
+    errors = [e for e in events if e.get("failed")][-8:]
+    return {
+        "status": status,
+        "active": status in ("running", "error"),
+        "updated_at": updated,
+        "updated_iso": iso_time(updated),
+        "age_seconds": round(age, 1) if age is not None else None,
+        "last_event": last,
+        "last_error": last_error,
+        "recent_events": recent,
+        "recent_errors": errors,
+        "provider": run.get("provider") or "",
+        "model": run.get("model") or "",
+        "planning_tier": run.get("planning_tier") or "",
+        "started_at": run.get("started_at") or "",
+    }
+
+
+def working_state(nd: Path, prog: dict, runtime=None) -> dict:
+    """当前执行进展：优先返工/在途章，并将新 pipeline 细步骤归一到阶段链。"""
     entries = checkpoint_tail(nd)
     chapter_steps: dict[int, str] = {}
     last = entries[-1] if entries else {}
     for e in entries:
         scope = e.get("scope") or {}
         if scope.get("kind") == "chapter" and isinstance(scope.get("chapter"), int):
-            chapter_steps[scope["chapter"]] = str(e.get("step") or "")
-    cur = prog.get("current_chapter") or 0
+            normalized = normalize_step(e.get("step") or "")
+            if normalized:
+                chapter_steps[scope["chapter"]] = normalized
+    pending = prog.get("pending_rewrites") or []
+    if isinstance(pending, int):
+        pending = [pending]
+    cur = prog.get("in_progress_chapter") or 0
+    if not cur and prog.get("flow") == "rewriting" and pending:
+        cur = pending[0]
+    if not cur:
+        cur = prog.get("current_chapter") or 0
     if not cur and chapter_steps:
         cur = max(chapter_steps)
     if not cur:
         cur = (len(prog.get("completed_chapters") or []) or 0) + 1
-    step = chapter_steps.get(cur, "")
+    runtime = runtime or runtime_state(nd, prog)
+    live = runtime.get("last_event") or {}
+    if live and not runtime.get("active") and live.get("chapter") != cur:
+        live = {}
+    step = live.get("step") or chapter_steps.get(cur, "")
     if not step:
         # checkpoint 还没到章级：看 drafts 目录里的最新事实
-        if (nd / "drafts" / f"{cur:02d}.md").exists():
+        if (nd / "drafts" / f"{cur:02d}.draft.md").exists() or (nd / "drafts" / f"{cur:02d}.md").exists():
             step = "draft"
         elif list((nd / "drafts").glob(f"{cur:02d}.plan*")) if (nd / "drafts").is_dir() else []:
             step = "plan"
     last_scope = last.get("scope") or {}
+    last_step = live.get("summary") or str(last.get("step") or "")
+    last_at = live.get("time") or str(last.get("occurred_at") or "")
+    mode = "rewrite" if prog.get("flow") == "rewriting" or cur in pending else "write"
     return {
         "chapter": cur,
+        "next_chapter": prog.get("current_chapter") or cur,
+        "mode": mode,
         "step": step,
         "chain": CHAPTER_STEP_CHAIN,
         "chain_pos": CHAPTER_STEP_CHAIN.index(step) if step in CHAPTER_STEP_CHAIN else -1,
-        "last_step": str(last.get("step") or ""),
-        "last_kind": str(last_scope.get("kind") or ""),
+        "last_step": last_step,
+        "last_kind": "runtime" if live else str(last_scope.get("kind") or ""),
         "last_chapter": last_scope.get("chapter"),
-        "last_at": str(last.get("occurred_at") or ""),
+        "last_at": last_at,
+        "last_agent": live.get("agent") or "",
+        "last_failed": bool(live.get("failed")),
+        "last_error": runtime.get("last_error"),
+    }
+
+
+def completed_chapters(raw) -> list[int]:
+    if isinstance(raw, int):
+        return list(range(1, max(0, raw) + 1))
+    if not isinstance(raw, list):
+        return []
+    return sorted({n for n in raw if isinstance(n, int) and n > 0})
+
+
+def artifact_inventory(nd: Path) -> dict:
+    specs = [
+        ("世界基线", [nd / "book_world.json"]),
+        ("世界法则", [nd / "world_rules.json"]),
+        ("人物档案", [nd / "characters.json"]),
+        ("分层大纲", [nd / "layered_outline.json"]),
+        ("章节细纲", [nd / "outline.json"]),
+        ("写作规则", [nd / "meta" / "user_rules.json"]),
+        ("项目进度", [nd / "meta" / "project_progress.json"]),
+        ("人物连续性", [nd / "meta" / "character_continuity.json"]),
+        ("人物关系", [nd / "relationship_state.json", nd / "relationship_state.initial.json"]),
+        ("伏笔台账", [nd / "foreshadow_ledger.json", nd / "foreshadow_ledger.initial.json"]),
+        ("资源台账", [nd / "meta" / "resource_ledger.json", nd / "meta" / "initial_resource_ledger.json"]),
+        ("离屏日程", [nd / "meta" / "offscreen_agenda.json"]),
+        ("世界推演游标", [nd / "meta" / "world_tick.json"]),
+        ("RAG 索引", [nd / "meta" / "rag" / "index_state.json"]),
+    ]
+    items = []
+    for label, candidates in specs:
+        path = next((p for p in candidates if p.is_file()), candidates[0])
+        exists = path.is_file()
+        try:
+            stat = path.stat()
+            updated = stat.st_mtime
+            size = stat.st_size
+        except OSError:
+            updated, size = 0.0, 0
+        items.append({
+            "label": label,
+            "path": str(path.relative_to(nd)),
+            "exists": exists,
+            "updated_at": updated,
+            "size": size,
+        })
+    rag_info = rag_index_summary(nd)
+    sediment = {
+        "character_stage_files": len(list((nd / "meta" / "character_stage").glob("*.json"))),
+        "side_journey_files": len(list((nd / "meta" / "side_character_journeys").glob("*.json"))),
+        "world_delta_files": len(list((nd / "meta" / "chapter_world_deltas").glob("*.json"))),
+        "world_events": line_count(nd / "meta" / "world_events.jsonl"),
+        "delivery_snapshots": len(list((nd / "meta" / "delivery_snapshots").glob("*.json"))),
+    }
+    return {
+        "ready": sum(1 for item in items if item["exists"]),
+        "total": len(items),
+        "items": items,
+        "rag": rag_info,
+        "sediment": sediment,
+    }
+
+
+def progress_health(nd: Path, prog: dict, files: list[int], actual_counts: dict[int, int]) -> dict:
+    issues = []
+    reported = completed_chapters(prog.get("completed_chapters"))
+    reported_set, disk_set = set(reported), set(files)
+    missing_files = sorted(reported_set - disk_set)
+    untracked_files = sorted(disk_set - reported_set)
+    if missing_files:
+        issues.append({"level": "error", "code": "completed_missing_body",
+                       "message": "进度台账标记完成，但正文缺失：" + "、".join(f"第 {n} 章" for n in missing_files)})
+    if untracked_files:
+        issues.append({"level": "warning", "code": "body_not_committed",
+                       "message": "正文已落盘但未进入完成台账：" + "、".join(f"第 {n} 章" for n in untracked_files)})
+
+    actual_total = sum(actual_counts.values())
+    reported_total = int(prog.get("total_word_count") or 0)
+    if files and actual_total != reported_total:
+        issues.append({"level": "warning", "code": "word_total_mismatch",
+                       "message": f"正文实算 {actual_total} 字，进度台账为 {reported_total} 字，相差 {actual_total - reported_total:+d}。"})
+    reported_counts = prog.get("chapter_word_counts") or {}
+    mismatched = []
+    for ch, actual in actual_counts.items():
+        reported_ch = reported_counts.get(str(ch), reported_counts.get(ch))
+        if reported_ch is not None and int(reported_ch or 0) != actual:
+            mismatched.append(f"第 {ch} 章 {actual}/{reported_ch}")
+    if mismatched:
+        issues.append({"level": "warning", "code": "chapter_word_mismatch",
+                       "message": "章节字数实算/台账不一致：" + "；".join(mismatched[:8])})
+
+    pending = prog.get("pending_rewrites") or []
+    if isinstance(pending, int):
+        pending = [pending]
+    pending_missing = sorted(n for n in pending if isinstance(n, int) and n not in disk_set)
+    if pending_missing:
+        issues.append({"level": "error", "code": "rewrite_body_missing",
+                       "message": "待返工章节没有可用正文：" + "、".join(f"第 {n} 章" for n in pending_missing)})
+
+    total_chapters = int(prog.get("total_chapters") or 0)
+    if total_chapters and max(files + reported + [0]) > total_chapters:
+        issues.append({"level": "error", "code": "chapter_overflow",
+                       "message": "已出现超出全书目标章数的章节。"})
+
+    stale_reviews = []
+    for ch in files:
+        body_hash = file_sha256(nd / "chapters" / f"{ch:02d}.md")
+        for suffix in (".json", "_ai_gate.json", "_deepseek_ai_judge.json"):
+            review = read_json(nd / "reviews" / f"{ch:02d}{suffix}") or {}
+            review_hash = str(review.get("body_sha256") or "")
+            if review_hash and body_hash and review_hash != body_hash:
+                stale_reviews.append(f"第 {ch} 章 {suffix.lstrip('_').replace('.json', '')}")
+    if stale_reviews:
+        issues.append({"level": "warning", "code": "stale_review",
+                       "message": "评审对应的正文版本已过期：" + "、".join(stale_reviews[:8])})
+
+    status = "error" if any(i["level"] == "error" for i in issues) else "warning" if issues else "ok"
+    sources = []
+    for label, path in (
+        ("进度台账", nd / "meta" / "progress.json"),
+        ("正文目录", nd / "chapters"),
+        ("评审目录", nd / "reviews"),
+        ("检查点", nd / "meta" / "checkpoints.jsonl"),
+        ("运行队列", nd / "meta" / "runtime" / "queue.jsonl"),
+    ):
+        sources.append({"label": label, "updated_at": latest_mtime(path), "path": str(path.relative_to(nd))})
+    verified = sorted(reported_set & disk_set)
+    return {
+        "status": status,
+        "issues": issues,
+        "verified_completed": len(verified),
+        "reported_completed": len(reported),
+        "actual_words": actual_total,
+        "reported_words": reported_total,
+        "sources": sources,
+        "scanned_at": time.time(),
     }
 
 
@@ -206,28 +542,27 @@ def summarize_run(run: Path) -> dict:
     overall = usage.get("overall") or {}
     outline = read_json(nd / "outline.json") or []
 
-    completed = prog.get("completed_chapters") or []
-    if isinstance(completed, int):
-        completed_count = completed
-    else:
-        completed_count = len(completed)
     files = chapter_files(nd)
-
-    updated = latest_mtime(
-        nd / "meta" / "progress.json",
-        nd / "logs" / "headless.log",
-        nd / "meta" / "pipeline.json",
-    )
+    actual_counts = {ch: count_words(nd, ch) for ch in files}
+    runtime = runtime_state(nd, prog)
+    health = progress_health(nd, prog, files, actual_counts)
+    assets = artifact_inventory(nd)
     reviews_dir = nd / "reviews"
     accepted = 0
+    reviewed = 0
     gate_pass = 0
+    gated = 0
     rewritten_count = 0
     rewrite_pending = 0
     if reviews_dir.is_dir():
         for ch in files:
             verdict, gate, _, rw = review_state(nd, ch)
+            if verdict:
+                reviewed += 1
             if verdict == "accept":
                 accepted += 1
+            if gate:
+                gated += 1
             if gate == "pass":
                 gate_pass += 1
             if rw["rewritten"]:
@@ -235,10 +570,18 @@ def summarize_run(run: Path) -> dict:
             if rw["pending"]:
                 rewrite_pending += 1
 
-    word_counts = prog.get("chapter_word_counts") or {}
+    pending_rewrites = prog.get("pending_rewrites") or []
+    if isinstance(pending_rewrites, int):
+        pending_rewrites = [pending_rewrites]
+    word_rules = ((read_json(nd / "meta" / "user_rules.json") or {}).get("structured") or {}).get("chapter_words") or {}
+    completed_count = health["verified_completed"]
+    total_chapters = int(prog.get("total_chapters") or 0)
+    planned_count = len(outline) if isinstance(outline, list) else 0
+    words_total = health["actual_words"] if files else health["reported_words"]
     return {
         "name": prog.get("novel_name") or run.name,
         "dir": run.name,
+        "archived": run.name.startswith(("废弃-", "归档-", "archive-", "_archive")),
         "phase": prog.get("phase") or "unknown",
         "flow": prog.get("flow") or "",
         "generation_id": prog.get("generation_id") or "",
@@ -246,25 +589,43 @@ def summarize_run(run: Path) -> dict:
         "volume": prog.get("current_volume") or 0,
         "arc": prog.get("current_arc") or 0,
         "current_chapter": prog.get("current_chapter") or 0,
-        "chapters_total": prog.get("total_chapters") or 0,
-        "chapters_planned": len(outline) if isinstance(outline, list) else 0,
+        "in_progress_chapter": prog.get("in_progress_chapter"),
+        "chapters_total": total_chapters,
+        "chapters_planned": planned_count,
         "chapters_completed": completed_count,
+        "chapters_reported_completed": health["reported_completed"],
         "chapters_on_disk": len(files),
-        "working": working_state(nd, prog),
-        "words_total": prog.get("total_word_count") or 0,
-        "chapter_words": {str(k): v for k, v in sorted(word_counts.items(), key=lambda kv: int(kv[0]))},
+        "working": working_state(nd, prog, runtime),
+        "runtime": runtime,
+        "health": health,
+        "words_total": words_total,
+        "words_reported": health["reported_words"],
+        "chapter_words": {str(k): v for k, v in sorted(actual_counts.items())},
+        "chapter_word_target": {"min": word_rules.get("min"), "max": word_rules.get("max")},
+        "average_chapter_words": round(words_total / len(files)) if files else 0,
         "cost_usd": round(float(overall.get("cost_usd") or 0.0), 4),
         "saved_usd": round(float(overall.get("saved_usd") or 0.0), 4),
         "tokens_in": overall.get("input") or 0,
         "tokens_out": overall.get("output") or 0,
         "pipeline_stages": pipe.get("stages") or [],
         "pipeline_completed": pipe.get("completed") or [],
+        "pipeline_updated_at": pipe.get("updated_at") or "",
         "reviews_accepted": accepted,
+        "reviews_total": reviewed,
         "gate_passed": gate_pass,
+        "gate_total": gated,
         "rewritten_count": rewritten_count,
-        "rewrite_pending": rewrite_pending,
-        "updated_at": updated,
-        "active": bool(updated and time.time() - updated < ACTIVE_WINDOW_SECONDS),
+        "rewrite_pending": max(rewrite_pending, len(pending_rewrites)),
+        "pending_rewrites": pending_rewrites,
+        "rewrite_reason": clip(prog.get("rewrite_reason"), 260),
+        "progress_percent": round(completed_count / total_chapters * 100, 2) if total_chapters else 0,
+        "plan_percent": round(planned_count / total_chapters * 100, 2) if total_chapters else 0,
+        "quality_percent": round(accepted / len(files) * 100, 2) if files else 0,
+        "assets_ready": assets["ready"],
+        "assets_total": assets["total"],
+        "rag_chunks": assets["rag"]["chunks"],
+        "updated_at": runtime["updated_at"],
+        "active": runtime["active"],
     }
 
 
@@ -272,6 +633,7 @@ def run_detail(run: Path) -> dict:
     nd = novel_dir(run)
     base = summarize_run(run)
     usage = read_json(nd / "meta" / "usage.json") or {}
+    assets = artifact_inventory(nd)
     chapters = []
     for ch in chapter_files(nd):
         verdict, gate, warns, rw = review_state(nd, ch)
@@ -311,11 +673,29 @@ def run_detail(run: Path) -> dict:
                 "title": ch.get("title") or "",
                 "core_event": clip(ch.get("core_event"), 140),
             })
+    position = {}
+    project_progress = read_json(nd / "meta" / "project_progress.json") or {}
+    for item in project_progress.get("outline_status") or []:
+        if isinstance(item, dict) and item.get("status") == "current":
+            position = {
+                "volume": item.get("volume"),
+                "volume_title": item.get("volume_title") or "",
+                "arc": item.get("arc"),
+                "arc_title": item.get("arc_title") or "",
+                "arc_goal": clip(item.get("goal"), 260),
+                "start_chapter": item.get("start_chapter"),
+                "end_chapter": item.get("end_chapter"),
+                "arc_completed": item.get("completed_chapters") or 0,
+                "arc_total": item.get("total_chapters") or item.get("estimated_chapters") or 0,
+            }
+            break
     base.update({
         "chapters": chapters,
         "planned": planned,
         "per_agent": per_agent,
         "deliveries": deliveries,
+        "position": position,
+        "assets": assets,
         "log": log_tail(nd),
     })
     return base
@@ -345,9 +725,41 @@ def clip(s, n: int = 200) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
+def text_list(value, limit: int = 20, width: int = 220) -> list[str]:
+    if isinstance(value, list):
+        return [clip(x, width) for x in value if str(x or "").strip()][:limit]
+    if str(value or "").strip():
+        return [clip(value, width)]
+    return []
+
+
 def setting_payload(run: Path) -> dict:
     nd = novel_dir(run)
     bw = read_json(nd / "book_world.json") or {}
+    place_details = []
+    for p in bw.get("places") or []:
+        if not isinstance(p, dict):
+            continue
+        place_details.append({
+            "id": p.get("id") or "",
+            "name": p.get("name") or "",
+            "kind": p.get("kind") or "",
+            "description": clip(p.get("description"), 260),
+            "rules": [clip(x, 140) for x in (p.get("rules") or [])][:6],
+            "factions": (p.get("factions") or [])[:8],
+            "tags": (p.get("tags") or [])[:8],
+        })
+    route_details = []
+    for r in bw.get("routes") or []:
+        if not isinstance(r, dict):
+            continue
+        route_details.append({
+            "from": r.get("from") or "",
+            "to": r.get("to") or "",
+            "description": clip(r.get("description"), 220),
+            "risk": clip(r.get("risk"), 180),
+            "travel_days": r.get("travel_days"),
+        })
     factions = []
     for f in bw.get("factions") or []:
         if not isinstance(f, dict):
@@ -386,6 +798,11 @@ def setting_payload(run: Path) -> dict:
         "world_summary": clip(bw.get("summary"), 400),
         "places": [clip((p or {}).get("name"), 30) for p in (bw.get("places") or []) if isinstance(p, dict)][:40],
         "routes": len(bw.get("routes") or []),
+        "place_details": place_details,
+        "route_details": route_details,
+        "map_notes": text_list(bw.get("map_notes")),
+        "world_pillars": text_list(bw.get("world_pillars")),
+        "vision_pillars": text_list(bw.get("vision_pillars")),
         "factions": factions,
         "world_rules": rules,
         "physics_axioms": [clip(n, 200) for n in (axioms.get("notes") or [])][:20],
@@ -406,6 +823,14 @@ def cast_payload(run: Path) -> dict:
     for item in dyn.get("characters") or []:
         if isinstance(item, dict) and item.get("character"):
             dynamics[item["character"]] = item
+    latest_stage = {}
+    for path in sorted((nd / "meta" / "character_stage").glob("*.json"))[-8:]:
+        records = read_json(path) or []
+        if isinstance(records, dict):
+            records = records.get("characters") or records.get("records") or []
+        for record in records:
+            if isinstance(record, dict) and record.get("character"):
+                latest_stage[record["character"]] = record
     chars = []
     for c in read_json(nd / "characters.json") or []:
         if not isinstance(c, dict):
@@ -417,6 +842,8 @@ def cast_payload(run: Path) -> dict:
         emo = d.get("emotion_appraisal") or {}
         arcax = d.get("arc_axis") or {}
         know = d.get("knowledge_ledger") or {}
+        frame = d.get("decision_frame") or {}
+        stage = latest_stage.get(name) or {}
         chars.append({
             "name": name,
             "role": c.get("role") or "",
@@ -441,11 +868,54 @@ def cast_payload(run: Path) -> dict:
                 "known": len(know.get("known_facts") or []),
                 "unknown": len(know.get("unknown_facts") or []),
             },
+            "stage": {
+                "chapter": stage.get("chapter"),
+                "time": clip(stage.get("time"), 90),
+                "location": clip(stage.get("location"), 100),
+                "status": clip(stage.get("status"), 100),
+                "action": clip(stage.get("current_action"), 220),
+                "decision": clip(stage.get("decision"), 220),
+                "personality_delta": clip(stage.get("personality_delta"), 180),
+                "death_state": clip(stage.get("death_state"), 100),
+                "next_potential": clip(stage.get("next_potential"), 180),
+            },
+            "knowledge": {
+                "known": text_list(know.get("known_facts"), 8, 180),
+                "unknown": text_list(know.get("unknown_facts"), 8, 180),
+                "suspicions": text_list(know.get("suspicions"), 6, 180),
+                "false_beliefs": text_list(know.get("false_beliefs"), 6, 180),
+                "forbidden": text_list(know.get("forbidden_knowledge"), 6, 180),
+            },
+            "decision_frame": {
+                "rule": clip(frame.get("decision_rule"), 220),
+                "tradeoff": clip(frame.get("tradeoff"), 200),
+                "cost": clip(frame.get("cost_paid"), 180),
+                "risk": clip(frame.get("risk_accepted"), 180),
+                "evidence": clip(frame.get("minimum_evidence_required"), 200),
+                "options": text_list(frame.get("available_options"), 8, 140),
+                "rejected": text_list(frame.get("rejected_options"), 8, 140),
+            },
+            "constraints": {
+                "resources": text_list(d.get("resources"), 8, 160),
+                "secrets": text_list(d.get("secrets"), 8, 160),
+                "misbeliefs": text_list(d.get("misbeliefs"), 8, 160),
+                "skill_limits": text_list(d.get("skill_limits"), 8, 160),
+                "plausible_mistakes": text_list(d.get("plausible_mistakes"), 8, 160),
+                "correction_triggers": text_list(d.get("correction_triggers"), 8, 160),
+            },
             "emotion": {
                 "trigger": clip(emo.get("trigger_event"), 160),
                 "visible": clip(emo.get("visible_expression"), 140),
                 "suppressed": clip(emo.get("suppressed_expression"), 140),
                 "coping": clip(emo.get("coping_strategy"), 140),
+            },
+            "arc_axis": {
+                "want": clip(arcax.get("want"), 200),
+                "need": clip(arcax.get("need"), 200),
+                "lie": clip(arcax.get("core_lie"), 180),
+                "stage": clip(arcax.get("arc_stage"), 120),
+                "growth_signal": clip(arcax.get("growth_signal"), 180),
+                "regression_signal": clip(arcax.get("regression_signal"), 180),
             },
         })
     # 群众：crowd_life NPC + 配角名册
@@ -613,6 +1083,53 @@ def offscreen_payload(run: Path) -> dict:
         "name": f.get("name") or "",
         "clock": f.get("clock") or {},
     } for f in (bw.get("factions") or []) if isinstance(f, dict) and f.get("clock")]
+    journeys = []
+    for path in sorted((nd / "meta" / "side_character_journeys").glob("*.json"))[-8:]:
+        records = read_json(path) or []
+        if isinstance(records, dict):
+            records = records.get("records") or records.get("characters") or []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            journeys.append({
+                "chapter": item.get("chapter"),
+                "character": item.get("character") or "",
+                "time": clip(item.get("time"), 80),
+                "location": clip(item.get("location"), 100),
+                "status": clip(item.get("status"), 100),
+                "action": clip(item.get("current_action"), 220),
+                "pressure": clip(item.get("pressure"), 180),
+                "decision": clip(item.get("decision"), 200),
+                "mistake": clip(item.get("mistake_or_misbelief"), 180),
+                "knowledge_boundary": clip(item.get("knowledge_boundary"), 220),
+                "transport": clip(item.get("transport"), 120),
+                "travel_time": clip(item.get("travel_time"), 100),
+                "meeting_constraint": clip(item.get("meeting_constraint"), 180),
+                "personality_delta": clip(item.get("personality_delta"), 180),
+                "death_state": clip(item.get("death_state"), 100),
+                "protagonist_notice": clip(item.get("protagonist_notice"), 180),
+                "next_potential": clip(item.get("next_potential"), 180),
+                "visible_in_chapter": bool(item.get("visible_in_chapter")),
+            })
+    journeys = journeys[-60:]
+    world_deltas = []
+    for path in sorted((nd / "meta" / "chapter_world_deltas").glob("*.json"))[-8:]:
+        item = read_json(path) or {}
+        if not isinstance(item, dict):
+            continue
+        changes = item.get("world_deltas") or []
+        world_deltas.append({
+            "chapter": item.get("chapter"),
+            "summary": clip(item.get("summary"), 300),
+            "character_count": len(item.get("character_deltas") or []),
+            "change_count": len(changes),
+            "changes": [{
+                "kind": c.get("kind") or "",
+                "entity": clip(c.get("entity"), 100),
+                "change": clip(c.get("change"), 220),
+                "visible": bool(c.get("visible_to_protagonist")),
+            } for c in changes[-12:] if isinstance(c, dict)],
+        })
     return {
         "tick": tick,
         "agendas": agendas,
@@ -626,6 +1143,8 @@ def offscreen_payload(run: Path) -> dict:
         "info_nodes": len(info.get("nodes") or []),
         "readiness": {"ready": readiness.get("ready"), "generated_at": readiness.get("generated_at") or ""},
         "clocks": clocks,
+        "journeys": journeys,
+        "world_deltas": world_deltas,
     }
 
 
@@ -700,10 +1219,82 @@ def growth_payload(run: Path) -> dict:
     }
 
 
+def quality_payload(run: Path) -> dict:
+    nd = novel_dir(run)
+    rows = []
+    for ch in chapter_files(nd):
+        body_hash = file_sha256(nd / "chapters" / f"{ch:02d}.md")
+        review = read_json(nd / "reviews" / f"{ch:02d}.json") or {}
+        gate = read_json(nd / "reviews" / f"{ch:02d}_ai_gate.json") or {}
+        judge = read_json(nd / "reviews" / f"{ch:02d}_deepseek_ai_judge.json") or {}
+        metrics = read_json(nd / "meta" / "chapter_metrics" / f"{ch:02d}.json") or {}
+        violations = gate.get("rule_violations") or []
+        errors = sum(1 for v in violations if isinstance(v, dict) and str(v.get("severity") or "").lower() == "error")
+        warnings = sum(1 for v in violations if isinstance(v, dict) and str(v.get("severity") or "").lower() == "warning")
+        aigc = gate.get("aigc_report") or {}
+        known_hashes = [str(x.get("body_sha256") or "") for x in (review, gate, judge) if isinstance(x, dict)]
+        known_hashes = [h for h in known_hashes if h]
+        freshness = "unknown" if not known_hashes else "fresh" if all(h == body_hash for h in known_hashes) else "stale"
+        dimensions = []
+        for d in review.get("dimensions") or []:
+            if isinstance(d, dict):
+                dimensions.append({
+                    "name": d.get("dimension") or "",
+                    "score": d.get("score"),
+                    "verdict": d.get("verdict") or "",
+                    "comment": clip(d.get("comment"), 240),
+                })
+        rows.append({
+            "chapter": ch,
+            "title": chapter_title(nd, ch),
+            "review_verdict": review.get("verdict") or "",
+            "contract_status": review.get("contract_status") or "",
+            "review_summary": clip(review.get("summary"), 320),
+            "dimensions": dimensions,
+            "gate": "fail" if errors else "pass" if gate else "",
+            "gate_errors": errors,
+            "gate_warnings": warnings,
+            "violations": [{
+                "severity": v.get("severity") or "",
+                "type": v.get("type") or "",
+                "description": clip(v.get("description") or v.get("evidence"), 260),
+            } for v in violations[:16] if isinstance(v, dict)],
+            "aigc_percent": aigc.get("aigc_percent"),
+            "aigc_risk": aigc.get("risk_label") or "",
+            "aigc_confidence": aigc.get("confidence") or "",
+            "judge_verdict": judge.get("verdict") or "",
+            "judge_risk": judge.get("risk_level") or "",
+            "judge_probability": judge.get("ai_probability_percent"),
+            "judge_confidence": judge.get("confidence") or "",
+            "judge_model": judge.get("model") or "",
+            "judge_summary": clip(judge.get("summary"), 280),
+            "freshness": freshness,
+            "metrics": {
+                "ai_voice_score": metrics.get("ai_voice_score"),
+                "revision_round": metrics.get("revision_round"),
+                "protagonist_waver": metrics.get("protagonist_waver"),
+                "dialogue_ratio": metrics.get("dialogue_ratio"),
+                "figurative_density": metrics.get("figurative_density"),
+                "paragraph_count": metrics.get("paragraph_count"),
+                "sentence_count": metrics.get("sentence_count"),
+            },
+        })
+    values = [r["aigc_percent"] for r in rows if isinstance(r.get("aigc_percent"), (int, float))]
+    return {
+        "chapters": rows,
+        "accepted": sum(1 for r in rows if r["review_verdict"] == "accept"),
+        "rewrite": sum(1 for r in rows if r["review_verdict"] == "rewrite"),
+        "gate_passed": sum(1 for r in rows if r["gate"] == "pass"),
+        "gate_failed": sum(1 for r in rows if r["gate"] == "fail"),
+        "stale": sum(1 for r in rows if r["freshness"] == "stale"),
+        "average_aigc_percent": round(sum(values) / len(values), 2) if values else None,
+    }
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "novel-studio-dashboard/2.0"
+    server_version = "novel-studio-dashboard/3.0"
 
     def log_message(self, fmt, *args):  # 静默访问日志
         pass
@@ -731,7 +1322,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/novels":
                 return self._json({"runs_dir": str(RUNS_DIR),
                                    "novels": [summarize_run(r) for r in list_runs()]})
-            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen|growth))?$", path)
+            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen|growth|quality))?$", path)
             if m:
                 run = RUNS_DIR / m.group(1)
                 if not is_run_dir(run) or run.parent != RUNS_DIR:
@@ -747,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(offscreen_payload(run))
                 if section == "growth":
                     return self._json(growth_payload(run))
+                if section == "quality":
+                    return self._json(quality_payload(run))
                 return self._json(run_detail(run))
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:

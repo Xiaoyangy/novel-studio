@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -195,8 +197,14 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 
 	for _, stage := range state.Stages {
 		if state.Done(stage) {
-			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+			storedEvidence := state.Evidence[stage]
+			evidence := storedEvidence
+			err := verifyStoredPipelineArtifactDigests(cfg.OutputDir, storedEvidence)
 			if err == nil {
+				evidence, err = verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+			}
+			if err == nil {
+				evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
 				state.MarkDone(stage, evidence)
 				if err := savePipelineState(statePath, state); err != nil {
 					return fmt.Errorf("保存流水线状态失败: %w", err)
@@ -226,15 +234,82 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			_ = savePipelineState(statePath, state)
 			return fmt.Errorf("阶段 %s 完成证据不足（未标记完成）: %w", stage, err)
 		}
+		evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
 		state.MarkDone(stage, evidence)
 		if err := savePipelineState(statePath, state); err != nil {
 			return fmt.Errorf("保存流水线状态失败: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "[pipeline] 阶段完成：%s\n", stage)
 	}
+	// Later stages intentionally mutate earlier-stage artifacts (rewrite updates
+	// chapters and re-review replaces reports). Reconcile every completed stage
+	// against the final state so persisted digests describe the delivered graph,
+	// not a transient midpoint that is stale by design.
+	for _, stage := range state.Stages {
+		if !state.Done(stage) {
+			continue
+		}
+		evidence, verifyErr := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+		if verifyErr != nil {
+			evidence.Status = "stale"
+			evidence.Message = verifyErr.Error()
+			state.ClearDone(stage, evidence)
+			_ = savePipelineState(statePath, state)
+			return fmt.Errorf("pipeline 最终证据对账失败（阶段 %s）: %w", stage, verifyErr)
+		}
+		state.MarkDone(stage, stampPipelineArtifactDigests(cfg.OutputDir, evidence))
+	}
+	if err := savePipelineState(statePath, state); err != nil {
+		return fmt.Errorf("保存流水线最终证据失败: %w", err)
+	}
 
 	fmt.Fprintln(os.Stderr, "\n[pipeline] 全部阶段完成 ✓")
 	return nil
+}
+
+func verifyStoredPipelineArtifactDigests(outputDir string, evidence domain.PipelineStageEvidence) error {
+	for artifact, expected := range evidence.ArtifactDigests {
+		if strings.TrimSpace(expected) == "" {
+			continue
+		}
+		path := artifact
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(outputDir, filepath.FromSlash(artifact))
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("阶段产物 %s 无法读取: %w", artifact, err)
+		}
+		sum := sha256.Sum256(raw)
+		actual := "sha256:" + hex.EncodeToString(sum[:])
+		if actual != expected {
+			return fmt.Errorf("阶段产物 %s 指纹漂移（expected=%s actual=%s）", artifact, expected, actual)
+		}
+	}
+	return nil
+}
+
+func stampPipelineArtifactDigests(outputDir string, evidence domain.PipelineStageEvidence) domain.PipelineStageEvidence {
+	if len(evidence.Artifacts) == 0 {
+		return evidence
+	}
+	evidence.ArtifactDigests = make(map[string]string, len(evidence.Artifacts))
+	for _, artifact := range evidence.Artifacts {
+		path := artifact
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(outputDir, filepath.FromSlash(artifact))
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		sum := sha256.Sum256(raw)
+		evidence.ArtifactDigests[artifact] = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	if len(evidence.ArtifactDigests) == 0 {
+		evidence.ArtifactDigests = nil
+	}
+	return evidence
 }
 
 func pipelineStageArgs(flags pipelineFlags) map[string][]string {
@@ -301,6 +376,9 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		if err != nil {
 			return err
 		}
+		if err := ensurePipelineRAGReady(cfg); err != nil {
+			return fmt.Errorf("deliver 阶段 RAG 就绪检查失败: %w", err)
+		}
 		return settlePipelineDelivery(cfg.OutputDir, flags)
 	default:
 		return fmt.Errorf("未知阶段：%s", stage)
@@ -309,7 +387,8 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 
 // warnStaleZeroInitReadiness 写前检查零章就绪指纹（Task 052）：readiness 缺 schema_version
 // 或低于当前版本时一律视为 not ready 并告警——防止旧版生成器的 ready:true 被误信。
-// 只告警不阻塞：readiness 是零章推演资产的门禁，不是 pipeline 的硬前置。
+// 这里只负责提前告警；第 1 章前的实际阻断由共享的
+// tools.ZeroInitReadinessState 执行。已完成第 1 章的历史项目不会被倒逼重跑。
 func warnStaleZeroInitReadiness(outputDir string) {
 	data, err := os.ReadFile(filepath.Join(outputDir, "meta", "first_chapter_generation_readiness.json"))
 	if err != nil {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -23,6 +25,13 @@ type Embedder interface {
 // VectorWriter 负责把向量写入后端。真实实现可对接 Qdrant。
 type VectorWriter interface {
 	Write(ctx context.Context, point VectorPoint) error
+}
+
+// BatchVectorWriter lets remote stores persist a small idempotent batch in one
+// request. BuildIndex falls back to VectorWriter when a backend does not expose
+// batch support.
+type BatchVectorWriter interface {
+	WriteBatch(ctx context.Context, points []VectorPoint) error
 }
 
 type VectorPoint struct {
@@ -60,87 +69,20 @@ func BuildIndex(
 	if cfg.QdrantWriteConcurrency <= 0 {
 		cfg.QdrantWriteConcurrency = 2
 	}
+	if cfg.VectorBatchSize <= 0 {
+		cfg.VectorBatchSize = 32
+	}
+	if cfg.VectorBatchSize > 128 {
+		cfg.VectorBatchSize = 128
+	}
+
 	known := make(map[string]struct{}, len(existingHashes)+len(chunks))
-	for _, h := range existingHashes {
-		if h != "" {
-			known[h] = struct{}{}
+	for _, hash := range existingHashes {
+		if hash = strings.TrimSpace(hash); hash != "" {
+			known[hash] = struct{}{}
 		}
 	}
-
-	type embedJob struct {
-		chunk domain.RAGChunk
-	}
-	type writeJob struct {
-		chunk  domain.RAGChunk
-		vector []float32
-	}
-
-	embedJobs := make(chan embedJob)
-	writeJobs := make(chan writeJob)
-	errCh := make(chan error, 1)
-	var embeddedMu sync.Mutex
-	var embedded int
-	var writtenMu sync.Mutex
-	var written int
-
-	sendErr := func(err error) {
-		if err == nil {
-			return
-		}
-		select {
-		case errCh <- err:
-		default:
-		}
-	}
-
-	var embedWG sync.WaitGroup
-	for i := 0; i < cfg.EmbeddingConcurrency; i++ {
-		embedWG.Add(1)
-		go func() {
-			defer embedWG.Done()
-			for job := range embedJobs {
-				vec, err := embedder.Embed(ctx, EmbeddingText(job.chunk))
-				if err != nil {
-					sendErr(err)
-					continue
-				}
-				embeddedMu.Lock()
-				embedded++
-				embeddedMu.Unlock()
-				select {
-				case writeJobs <- writeJob{chunk: job.chunk, vector: vec}:
-				case <-ctx.Done():
-					sendErr(ctx.Err())
-					return
-				}
-			}
-		}()
-	}
-
-	var writeWG sync.WaitGroup
-	for i := 0; i < cfg.QdrantWriteConcurrency; i++ {
-		writeWG.Add(1)
-		go func() {
-			defer writeWG.Done()
-			for job := range writeJobs {
-				point := VectorPoint{
-					ID:      job.chunk.ID,
-					Vector:  job.vector,
-					Chunk:   job.chunk,
-					Payload: chunkPayload(job.chunk),
-				}
-				if err := writer.Write(ctx, point); err != nil {
-					sendErr(err)
-					continue
-				}
-				writtenMu.Lock()
-				written++
-				writtenMu.Unlock()
-			}
-		}()
-	}
-
-	var accepted []domain.RAGChunk
+	accepted := make([]domain.RAGChunk, 0, len(chunks))
 	skippedDup := 0
 	for _, chunk := range chunks {
 		chunk = NormalizeChunk(chunk)
@@ -153,43 +95,227 @@ func BuildIndex(
 		}
 		known[chunk.Hash] = struct{}{}
 		accepted = append(accepted, chunk)
+	}
+	if len(accepted) == 0 {
+		hashes := make([]string, 0, len(known))
+		for hash := range known {
+			hashes = append(hashes, hash)
+		}
+		slices.Sort(hashes)
+		return IndexResult{
+			State: domain.RAGIndexState{
+				SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+				Config:        cfg, ChunkHashes: hashes, UpdatedAt: time.Now().Format(time.RFC3339),
+			},
+			SkippedDup: skippedDup,
+		}, nil
+	}
+
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	vectors := make([][]float32, len(accepted))
+	jobs := make(chan int)
+	var embedWG sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+	for worker := 0; worker < cfg.EmbeddingConcurrency; worker++ {
+		embedWG.Add(1)
+		go func() {
+			defer embedWG.Done()
+			for index := range jobs {
+				var vector []float32
+				err := retryRAGIO(workCtx, 3, func(_ int) error {
+					var err error
+					vector, err = embedder.Embed(workCtx, EmbeddingText(accepted[index]))
+					return err
+				})
+				if err != nil {
+					setErr(fmt.Errorf("embed chunk %s: %w", accepted[index].ID, err))
+					return
+				}
+				if err := ValidateVector(vector); err != nil {
+					setErr(fmt.Errorf("embed chunk %s returned invalid vector: %w", accepted[index].ID, err))
+					return
+				}
+				vectors[index] = vector
+			}
+		}()
+	}
+sendEmbeds:
+	for index := range accepted {
 		select {
-		case embedJobs <- embedJob{chunk: chunk}:
-		case <-ctx.Done():
-			close(embedJobs)
-			embedWG.Wait()
-			close(writeJobs)
-			writeWG.Wait()
-			return IndexResult{}, ctx.Err()
+		case jobs <- index:
+		case <-workCtx.Done():
+			break sendEmbeds
 		}
 	}
-	close(embedJobs)
+	close(jobs)
 	embedWG.Wait()
-	close(writeJobs)
-	writeWG.Wait()
-
-	select {
-	case err := <-errCh:
+	errMu.Lock()
+	embedErr := firstErr
+	errMu.Unlock()
+	if embedErr != nil {
+		return IndexResult{}, embedErr
+	}
+	if err := ctx.Err(); err != nil {
 		return IndexResult{}, err
-	default:
+	}
+
+	vectorDimension := len(vectors[0])
+	for index, vector := range vectors {
+		if len(vector) != vectorDimension {
+			return IndexResult{}, fmt.Errorf("embedding dimension drift: chunk=%s got=%d want=%d", accepted[index].ID, len(vector), vectorDimension)
+		}
+	}
+	if cfg.VectorDimension > 0 && cfg.VectorDimension != vectorDimension {
+		return IndexResult{}, fmt.Errorf("embedding dimension changed: got=%d configured=%d", vectorDimension, cfg.VectorDimension)
+	}
+	cfg.VectorDimension = vectorDimension
+
+	points := make([]VectorPoint, 0, len(accepted))
+	for index, chunk := range accepted {
+		points = append(points, VectorPoint{
+			ID: chunk.ID, Vector: vectors[index], Chunk: chunk, Payload: chunkPayload(chunk),
+		})
+	}
+	written, err := WriteVectorPoints(ctx, writer, points, cfg)
+	if err != nil {
+		return IndexResult{}, err
 	}
 
 	hashes := make([]string, 0, len(known))
-	for h := range known {
-		hashes = append(hashes, h)
+	for hash := range known {
+		hashes = append(hashes, hash)
 	}
 	slices.Sort(hashes)
 	return IndexResult{
 		State: domain.RAGIndexState{
-			Config:      cfg,
-			Chunks:      accepted,
-			ChunkHashes: hashes,
-			UpdatedAt:   time.Now().Format(time.RFC3339),
+			SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+			Config:        cfg, Chunks: accepted, ChunkHashes: hashes, UpdatedAt: time.Now().Format(time.RFC3339),
 		},
-		Embedded:   embedded,
-		Written:    written,
-		SkippedDup: skippedDup,
+		Embedded: len(accepted), Written: written, SkippedDup: skippedDup,
 	}, nil
+}
+
+// WriteVectorPoints writes precomputed vectors in bounded, idempotent batches.
+// It is exported so callers can finish all embedding work before replacing a
+// remote source, then replay the staged vectors without embedding them again.
+func WriteVectorPoints(ctx context.Context, writer VectorWriter, points []VectorPoint, cfg domain.RAGIndexConfig) (int, error) {
+	if writer == nil {
+		return 0, ErrNilBackend("vector_writer")
+	}
+	if len(points) == 0 {
+		return 0, nil
+	}
+	vectorDimension := len(points[0].Vector)
+	for _, point := range points {
+		if len(point.Vector) != vectorDimension {
+			return 0, fmt.Errorf("vector batch dimension drift: point=%s got=%d want=%d", point.ID, len(point.Vector), vectorDimension)
+		}
+		if err := ValidateVector(point.Vector); err != nil {
+			return 0, fmt.Errorf("invalid vector point %s: %w", point.ID, err)
+		}
+	}
+	if cfg.VectorBatchSize <= 0 {
+		cfg.VectorBatchSize = 32
+	}
+	if cfg.VectorBatchSize > 128 {
+		cfg.VectorBatchSize = 128
+	}
+	if cfg.QdrantWriteConcurrency <= 0 {
+		cfg.QdrantWriteConcurrency = 2
+	}
+	batches := make([][]VectorPoint, 0, (len(points)+cfg.VectorBatchSize-1)/cfg.VectorBatchSize)
+	for start := 0; start < len(points); start += cfg.VectorBatchSize {
+		end := min(start+cfg.VectorBatchSize, len(points))
+		batches = append(batches, points[start:end])
+	}
+
+	writeCtx, cancelWrites := context.WithCancel(ctx)
+	defer cancelWrites()
+	writeJobs := make(chan []VectorPoint)
+	var writeErrMu sync.Mutex
+	var firstWriteErr error
+	setWriteErr := func(err error) {
+		if err == nil {
+			return
+		}
+		writeErrMu.Lock()
+		if firstWriteErr == nil {
+			firstWriteErr = err
+			cancelWrites()
+		}
+		writeErrMu.Unlock()
+	}
+	written := 0
+	var writtenMu sync.Mutex
+	var writeWG sync.WaitGroup
+	for worker := 0; worker < cfg.QdrantWriteConcurrency; worker++ {
+		writeWG.Add(1)
+		go func() {
+			defer writeWG.Done()
+			for batch := range writeJobs {
+				if err := writeVectorBatch(writeCtx, writer, batch); err != nil {
+					setWriteErr(fmt.Errorf("write vector batch: %w", err))
+					return
+				}
+				writtenMu.Lock()
+				written += len(batch)
+				writtenMu.Unlock()
+			}
+		}()
+	}
+sendWrites:
+	for _, batch := range batches {
+		select {
+		case writeJobs <- batch:
+		case <-writeCtx.Done():
+			break sendWrites
+		}
+	}
+	close(writeJobs)
+	writeWG.Wait()
+	writeErrMu.Lock()
+	writeErr := firstWriteErr
+	writeErrMu.Unlock()
+	if writeErr != nil {
+		return written, writeErr
+	}
+	if err := ctx.Err(); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
+func writeVectorBatch(ctx context.Context, writer VectorWriter, points []VectorPoint) error {
+	if len(points) == 0 {
+		return nil
+	}
+	if batchWriter, ok := writer.(BatchVectorWriter); ok {
+		return retryRAGIO(ctx, defaultRAGIOAttempts, func(_ int) error {
+			return batchWriter.WriteBatch(ctx, points)
+		})
+	}
+	for _, point := range points {
+		point := point
+		if err := retryRAGIO(ctx, defaultRAGIOAttempts, func(_ int) error {
+			return writer.Write(ctx, point)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NormalizeChunk(chunk domain.RAGChunk) domain.RAGChunk {
@@ -207,20 +333,55 @@ func NormalizeChunk(chunk domain.RAGChunk) domain.RAGChunk {
 		chunk.Keywords = deriveChunkKeywords(chunk)
 	}
 	if chunk.Hash == "" {
+		metadata, _ := json.Marshal(chunk.Metadata)
 		sum := sha256.Sum256([]byte(strings.Join([]string{
 			chunk.SourcePath,
 			chunk.SourceKind,
 			chunk.Facet,
 			chunk.ParentID,
 			chunk.Context,
+			chunk.Summary,
+			strings.Join(chunk.Keywords, "\x1f"),
 			chunk.Text,
+			string(metadata),
 		}, "\x00")))
 		chunk.Hash = hex.EncodeToString(sum[:])
 	}
 	if chunk.ID == "" {
-		chunk.ID = "chunk:" + chunk.Hash[:16]
+		idHash := chunk.Hash
+		if len(idHash) < 16 {
+			sum := sha256.Sum256([]byte(idHash))
+			idHash = hex.EncodeToString(sum[:])
+		}
+		chunk.ID = "chunk:" + idHash[:16]
 	}
 	return chunk
+}
+
+// RehashChunk migrates a chunk to the current semantic hash while preserving
+// its stable logical ID. This intentionally ignores a persisted legacy hash.
+func RehashChunk(chunk domain.RAGChunk) domain.RAGChunk {
+	chunk.Hash = ""
+	return NormalizeChunk(chunk)
+}
+
+// ValidateVector rejects values that would poison cosine ranking or be refused
+// by a remote vector store.
+func ValidateVector(vector []float32) error {
+	if len(vector) == 0 {
+		return fmt.Errorf("empty vector")
+	}
+	var norm float64
+	for _, value := range vector {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return fmt.Errorf("non-finite value")
+		}
+		norm += float64(value) * float64(value)
+	}
+	if norm == 0 {
+		return fmt.Errorf("zero vector")
+	}
+	return nil
 }
 
 func chunkPayload(chunk domain.RAGChunk) map[string]any {

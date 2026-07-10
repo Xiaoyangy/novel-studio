@@ -57,7 +57,7 @@ func TestCraftRecallInfersChapterAndStopsBudgetLoop(t *testing.T) {
 
 	tool := NewCraftRecallTool(st)
 	args := json.RawMessage(`{"field":"methodology","topic":"人物刻画 情感叙事"}`)
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 3; i++ {
 		raw, err := tool.Execute(context.Background(), args)
 		if err != nil {
 			t.Fatalf("call %d Execute: %v", i, err)
@@ -83,5 +83,26 @@ func TestCraftRecallInfersChapterAndStopsBudgetLoop(t *testing.T) {
 	}
 	if got["budget_exhausted"] != true || got["chapter"].(float64) != 1 {
 		t.Fatalf("expected budget exhausted for inferred chapter 1, got %s", raw)
+	}
+}
+
+func TestCraftRecallEffectiveChapterPrefersPendingRewrite(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Progress.Init("test", 3); err != nil {
+		t.Fatalf("Progress.Init: %v", err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 2000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if err := st.Progress.SetPendingRewrites([]int{1}, "rewrite"); err != nil {
+		t.Fatalf("SetPendingRewrites: %v", err)
+	}
+
+	tool := NewCraftRecallTool(st)
+	if got := tool.effectiveChapter(2); got != 1 {
+		t.Fatalf("pending rewrite target must override requested next chapter: got %d", got)
 	}
 }

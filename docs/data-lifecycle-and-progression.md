@@ -113,16 +113,16 @@ flowchart TD
 - `Host.New` 和 `--pipeline` 启动都会调用 `bootstrap.EnsureRAGQdrant`。
 - embedding 启用时，默认使用本机 Qdrant：`http://127.0.0.1:6333`，容器名 `novel-studio-qdrant`。
 - `docker-compose.yml` 也提供 `qdrant` 服务，适合显式 `docker compose up`。
-- `pipelineWrite` 在写作前调用 `ensurePipelineRAGReady`：先确保本地 `index_state` 可用，再把 chunk embed 后写入 Qdrant，并保存 `vector_store.json` 作为 fallback。
+- `pipelineWrite` 与交付阶段在执行前调用 `ensurePipelineRAGReady`：先迁移/校验 schema、回填已生成章节摘要并处理 `pending_upserts.json`；已有本地向量可复用时只校验或恢复 Qdrant，不重新 embedding。
 - 如果 embedding 未启用，系统仍使用本地关键词 RAG，不强制启动向量链路。
 
 ### 4.2 召回顺序
 
 `novel_context` 的召回顺序是：
 
-1. Qdrant 向量召回。
-2. `meta/rag/vector_store.json` 本地向量 fallback。
-3. `meta/rag/index_state.json` 本地关键词/上下文 hybrid。
+1. Qdrant 向量 + BM25 混合召回。
+2. Qdrant 错误或空结果时，`meta/rag/vector_store.json` 本地向量 + BM25。
+3. embedding 错误或向量不可用时，`meta/rag/index_state.json` 的缓存 BM25 / 关键词召回。
 
 每次召回会写 `meta/rag/retrieval_trace.jsonl`，记录 query、strategy、命中来源、分数和 reason，便于判断召回强弱。
 
@@ -132,8 +132,10 @@ flowchart TD
 
 - chunk 先规范化，过滤禁入来源。
 - 按 `source_path` 替换旧 chunk，避免同一章节或同一评审多版本堆积。
-- 如果接了 Qdrant writer，会先删除同 `source_path` 的旧 points，再写新 points。
+- 来源 hash 未变化且本地向量齐全时直接 no-op。
+- 变化来源先在内存完成全部 embedding 和维度/数值校验；成功后才删除同 `source_path` 的旧 points，并按小批量幂等写入。
 - 同时写一份 `vector_store.json`，作为没有 Qdrant 或 Qdrant 失效时的本地向量 fallback。
+- `vector_store.json` 成功后才提交 `index_state.json`；任一步失败会保留旧提交并写 `meta/rag/pending_upserts.json`，下次调用或 pipeline 启动自动重放。
 - `save_review` 会把每次审阅的 issue、contract miss、低分维度和门禁升级原因写入 `meta/writing_assets.json.feedback`，并把可复用写法建议去重为 `active_rules`；对应 review chunk 关键词包含 `审阅反馈` / `历史反馈` / 维度名。
 - `save_review(verdict=accept, scope=chapter)` 额外调用项目记忆 RAG sink，覆盖 `meta/chapter_progress.md`、`meta/character_continuity.md`、`meta/project_progress.md`、`meta/evolution_report.md`、`timeline.md`、`foreshadow_ledger.md`、`relationship_state.md`、`meta/state_changes.json`、`meta/resource_ledger.md`、`world_rules.md`、`book_world.md`、`outline.md`、`layered_outline.md`、`meta/compass.json`、`meta/writing_assets.md`。如果存在零章初始化资产，也会把 `meta/zero_chapter_context_manifest.md`、`meta/initial_character_dynamics.md`、`relationship_state.initial.md`、`meta/initial_resource_ledger.md`、`foreshadow_ledger.initial.md`、`meta/character_return_plan.md`、`meta/crowd_role_policy.md`、`meta/ch01_zero_init_plan.md` 和 `meta/initial_review_lessons.md` 纳入项目记忆。
 
@@ -188,12 +190,13 @@ flowchart TD
 
 `meta/pipeline.json` 是阶段级恢复状态：
 
-- 阶段顺序默认 `write -> review -> rewrite -> export`。
+- 阶段顺序默认 `architect -> zero-init -> write -> review -> rewrite -> deliver`。
 - 已完成阶段重跑时先验证证据；证据缺失会清除完成标记并重跑。
 - `write` 证据看 `progress + chapters + commit_chapter checkpoint`。
-- `review` 证据看 `reviews/*.md + review-summary`。
-- `rewrite` 证据看章节更新和 `.pre-rewrite.md`。
-- `export` 证据看导出文件和 delivery snapshot。
+- `review` 证据要求机械门禁、AI voice、Editor JSON、DeepSeek 裸正文判定、统一报告和 `review-summary` 都绑定当前正文 SHA-256。
+- `rewrite` 只使用当前正文版本的审核证据，并核对章节更新和 `.pre-rewrite.md`。
+- `deliver` 要求当前章审 `accept`、交付日志和 delivery snapshot。
+- 每个阶段保存 artifact digest；最终对账刷新合法跨阶段变更，`diag` 报告后续内容漂移。
 
 Pipeline 只负责阶段编排。章内下一步仍由 `progress.json`、checkpoint、pending signal 和 Host reminder 决定。
 
@@ -218,7 +221,7 @@ go run ./cmd/novel-studio --diag
 1. 配置加载成功，`output_dir` 已确定。
 2. Qdrant 按配置可启动或可连接；失败时 pipeline 直接报错。
 3. `ensureDefaultRAGIndex` 只索引当前项目内 `prompt.md`、`input/` 和 `output/novel`；手动 `--build-rag` 默认还会从 `summaries/` + `chapters/` 回填已完成章节事实，避免重建索引时丢失 `chapter_summary_facts`。第一章开写前可先跑 `--zero-init`，它使用更窄的白名单，只索引 foundation 和零章写前资产，不回填旧章节、审稿或实验稿。
-4. embedding 启用时，`ensurePipelineRAGReady` 必须把当前 chunk 写入 Qdrant 和本地 vector fallback。
+4. embedding 启用时，`ensurePipelineRAGReady` 必须证明当前 schema/chunk/model/dimension/向量数值一致，并保证 Qdrant 点数正确；允许从本地 vector fallback 恢复 Qdrant。
 5. 已有进度时，优先恢复，不用新 prompt 重开。
 6. `pending_rewrites` 非空时，先走返工，不开新章。
 

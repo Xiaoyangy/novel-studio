@@ -43,18 +43,47 @@ func (w *TeeVectorWriter) Write(ctx context.Context, point VectorPoint) error {
 	return nil
 }
 
-func (w *MemoryVectorWriter) Write(_ context.Context, point VectorPoint) error {
-	chunk := NormalizeChunk(point.Chunk)
+func (w *TeeVectorWriter) WriteBatch(ctx context.Context, points []VectorPoint) error {
+	for _, writer := range w.writers {
+		if batchWriter, ok := writer.(BatchVectorWriter); ok {
+			if err := batchWriter.WriteBatch(ctx, points); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, point := range points {
+			if err := writer.Write(ctx, point); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (w *MemoryVectorWriter) Write(ctx context.Context, point VectorPoint) error {
+	return w.WriteBatch(ctx, []VectorPoint{point})
+}
+
+func (w *MemoryVectorWriter) WriteBatch(_ context.Context, points []VectorPoint) error {
+	now := time.Now().Format(time.RFC3339)
+	converted := make([]domain.RAGVectorPoint, 0, len(points))
+	for _, point := range points {
+		if err := ValidateVector(point.Vector); err != nil {
+			return err
+		}
+		chunk := NormalizeChunk(point.Chunk)
+		converted = append(converted, domain.RAGVectorPoint{
+			ID:        point.ID,
+			Hash:      chunk.Hash,
+			Vector:    append([]float32(nil), point.Vector...),
+			Payload:   clonePayload(point.Payload),
+			Chunk:     chunk,
+			UpdatedAt: now,
+		})
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.points = append(w.points, domain.RAGVectorPoint{
-		ID:        point.ID,
-		Hash:      chunk.Hash,
-		Vector:    append([]float32(nil), point.Vector...),
-		Payload:   clonePayload(point.Payload),
-		Chunk:     chunk,
-		UpdatedAt: time.Now().Format(time.RFC3339),
-	})
+	w.points = append(w.points, converted...)
 	return nil
 }
 
@@ -92,7 +121,7 @@ func SearchVectorStore(store *domain.RAGVectorStore, query []float32, maxResults
 	}
 	var hits []VectorSearchHit
 	for _, point := range store.Points {
-		if IsForbiddenChunk(point.Chunk) || len(point.Vector) == 0 {
+		if IsForbiddenChunk(point.Chunk) || len(point.Vector) != len(query) {
 			continue
 		}
 		score := cosineFloat32(query, point.Vector)
@@ -182,6 +211,9 @@ func mergeVectorStoreConfig(base, update domain.RAGIndexConfig) domain.RAGIndexC
 	if update.QdrantWriteConcurrency != 0 {
 		out.QdrantWriteConcurrency = update.QdrantWriteConcurrency
 	}
+	if update.VectorBatchSize != 0 {
+		out.VectorBatchSize = update.VectorBatchSize
+	}
 	if update.EmbeddingProvider != "" {
 		out.EmbeddingProvider = update.EmbeddingProvider
 	}
@@ -198,10 +230,10 @@ func mergeVectorStoreConfig(base, update domain.RAGIndexConfig) domain.RAGIndexC
 }
 
 func cosineFloat32(left, right []float32) float64 {
-	n := len(left)
-	if len(right) < n {
-		n = len(right)
+	if len(left) != len(right) {
+		return 0
 	}
+	n := len(left)
 	if n == 0 {
 		return 0
 	}
@@ -209,6 +241,9 @@ func cosineFloat32(left, right []float32) float64 {
 	for i := 0; i < n; i++ {
 		l := float64(left[i])
 		r := float64(right[i])
+		if math.IsNaN(l) || math.IsInf(l, 0) || math.IsNaN(r) || math.IsInf(r, 0) {
+			return 0
+		}
 		dot += l * r
 		leftNorm += l * l
 		rightNorm += r * r

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -328,6 +329,184 @@ func TestBackfillChapterRAGUpsertsGeneratedChapterSummaries(t *testing.T) {
 	}
 	if counts["summaries/01.json"] != 1 || counts["summaries/02.json"] != 1 || !foundUpdated {
 		t.Fatalf("unexpected chapter rag chunks counts=%v foundUpdated=%v", counts, foundUpdated)
+	}
+	indexPath := filepath.Join(outputDir, "meta", "rag", "index_state.json")
+	before, err := os.Stat(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := backfillChapterRAG(outputDir, 1, 0); err != nil {
+		t.Fatalf("second backfillChapterRAG: %v", err)
+	}
+	after, err := os.Stat(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("unchanged chapter facts rewrote index: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestPipelineRAGArtifactsReusableSkipsUnchangedFactEmbeddings(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config: domain.RAGIndexConfig{
+			EmbeddingProvider: "codex",
+			EmbeddingModel:    "qwen3-embedding-0.6b",
+			VectorStore:       "qdrant",
+			VectorDimension:   3,
+			Collection:        "novel_test",
+			QdrantURL:         "http://127.0.0.1:6333",
+		},
+		Chunks: []domain.RAGChunk{
+			{ID: "fact", Hash: "fact-hash", SourceKind: "chapter_summary_facts", Text: "当前项目事实"},
+			{ID: "craft", Hash: "craft-hash", SourceKind: "craft_technique", Text: "只走 BM25 的写作手法"},
+		},
+	}
+	vectorStore := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "fact-hash", Vector: []float32{1, 2, 3}}},
+	}
+	ok, reason, count := pipelineRAGArtifactsReusable(
+		state,
+		vectorStore,
+		bootstrap.RAGEmbeddingConfig{Provider: "codex", Model: "qwen3-embedding-0.6b"},
+		bootstrap.RAGQdrantConfig{URL: "http://127.0.0.1:6333", Collection: "novel_test"},
+		true,
+	)
+	if !ok || count != 1 {
+		t.Fatalf("expected reusable fact embedding, ok=%v count=%d reason=%s", ok, count, reason)
+	}
+}
+
+func TestPipelineRAGArtifactsReusableRejectsChangedChunkHash(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config: domain.RAGIndexConfig{
+			EmbeddingProvider: "codex", EmbeddingModel: "embed", VectorStore: "qdrant",
+			VectorDimension: 2, Collection: "novel_test", QdrantURL: "http://127.0.0.1:6333",
+		},
+		Chunks: []domain.RAGChunk{{ID: "fact", Hash: "new-hash", SourceKind: "chapter_summary_facts", Text: "new"}},
+	}
+	vectorStore := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "old-hash", Vector: []float32{1, 2}}},
+	}
+	ok, reason, _ := pipelineRAGArtifactsReusable(
+		state,
+		vectorStore,
+		bootstrap.RAGEmbeddingConfig{Provider: "codex", Model: "embed"},
+		bootstrap.RAGQdrantConfig{URL: "http://127.0.0.1:6333", Collection: "novel_test"},
+		true,
+	)
+	if ok || !strings.Contains(reason, "过期 chunk hash") {
+		t.Fatalf("changed hash must force rebuild, ok=%v reason=%s", ok, reason)
+	}
+}
+
+func TestPipelineRAGLocalArtifactsReusableAcrossBackendChange(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config: domain.RAGIndexConfig{
+			EmbeddingProvider: "codex", EmbeddingModel: "embed", VectorDimension: 2,
+			VectorStore: "qdrant", Collection: "old_collection", QdrantURL: "http://127.0.0.1:6333",
+		},
+		Chunks: []domain.RAGChunk{{ID: "fact", Hash: "fact-hash", SourceKind: "chapter_summary_facts", Text: "fact"}},
+	}
+	vectorStore := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "fact-hash", Vector: []float32{1, 2}}},
+	}
+	localOK, reason, count := pipelineRAGLocalArtifactsReusable(state, vectorStore, bootstrap.RAGEmbeddingConfig{Provider: "codex", Model: "embed"})
+	if !localOK || count != 1 {
+		t.Fatalf("local vectors should remain reusable: ok=%v reason=%s count=%d", localOK, reason, count)
+	}
+	fullOK, _, _ := pipelineRAGArtifactsReusable(
+		state, vectorStore,
+		bootstrap.RAGEmbeddingConfig{Provider: "codex", Model: "embed"},
+		bootstrap.RAGQdrantConfig{URL: "http://127.0.0.1:6333", Collection: "new_collection"}, true,
+	)
+	if fullOK {
+		t.Fatal("backend metadata change must require Qdrant replay")
+	}
+}
+
+func TestMigrateRAGIndexSchemaRehashesSemanticContent(t *testing.T) {
+	state := &domain.RAGIndexState{
+		Chunks: []domain.RAGChunk{{
+			ID: "stable-id", Hash: "legacy-hash", SourcePath: "outline.md", SourceKind: "planning",
+			Summary: "青山县返乡经营", Text: "第一间门店开始试营业。", Metadata: map[string]any{"chapter": 1},
+		}},
+		ChunkHashes: []string{"legacy-hash"},
+	}
+	if !migrateRAGIndexSchema(state) {
+		t.Fatal("legacy state should migrate")
+	}
+	if state.SchemaVersion != domain.CurrentRAGIndexSchemaVersion || state.Chunks[0].Hash == "legacy-hash" {
+		t.Fatalf("state was not rehashed: %+v", state)
+	}
+	if state.Chunks[0].ID != "stable-id" || len(state.ChunkHashes) != 1 || state.ChunkHashes[0] != state.Chunks[0].Hash {
+		t.Fatalf("migration broke stable ID/hash list: %+v", state)
+	}
+	if migrateRAGIndexSchema(state) {
+		t.Fatal("current state migration must be idempotent")
+	}
+}
+
+func TestEnsureDefaultRAGIndexRemapsCompatibleLegacyVectors(t *testing.T) {
+	outputDir := t.TempDir()
+	st := store.NewStore(outputDir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	legacy := domain.RAGChunk{
+		ID: "stable-id", Hash: "legacy-hash", SourcePath: "outline.md", SourceKind: "planning",
+		Summary: "青山县返乡经营", Text: "第一间门店开始试营业。", Metadata: map[string]any{"chapter": 1},
+	}
+	cfg := domain.RAGIndexConfig{EmbeddingProvider: "codex", EmbeddingModel: "embed", VectorDimension: 2}
+	if err := st.RAG.SaveIndexState(domain.RAGIndexState{Config: cfg, Chunks: []domain.RAGChunk{legacy}, ChunkHashes: []string{legacy.Hash}}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+	if err := st.RAG.SaveVectorStore(domain.RAGVectorStore{
+		Config: cfg,
+		Points: []domain.RAGVectorPoint{{ID: legacy.ID, Hash: legacy.Hash, Vector: []float32{1, 0}, Chunk: legacy}},
+	}); err != nil {
+		t.Fatalf("SaveVectorStore: %v", err)
+	}
+	if err := ensureDefaultRAGIndex(outputDir); err != nil {
+		t.Fatalf("ensureDefaultRAGIndex: %v", err)
+	}
+	state, err := st.RAG.LoadIndexState()
+	if err != nil {
+		t.Fatalf("LoadIndexState: %v", err)
+	}
+	vectors, err := st.RAG.LoadVectorStore()
+	if err != nil {
+		t.Fatalf("LoadVectorStore: %v", err)
+	}
+	if len(vectors.Points) != 1 || vectors.Points[0].Hash != state.Chunks[0].Hash || vectors.Points[0].Hash == legacy.Hash {
+		t.Fatalf("compatible legacy vector was not remapped: state=%+v vectors=%+v", state, vectors)
+	}
+}
+
+func TestMergePendingRAGStateReplacesSource(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	old := rag.NormalizeChunk(domain.RAGChunk{SourcePath: "outline.md", SourceKind: "planning", Text: "旧大纲"})
+	keep := rag.NormalizeChunk(domain.RAGChunk{SourcePath: "world_rules.md", SourceKind: "world", Text: "保留规则"})
+	replacement := rag.NormalizeChunk(domain.RAGChunk{SourcePath: "outline.md", SourceKind: "planning", Text: "青山县新大纲"})
+	state := &domain.RAGIndexState{Chunks: []domain.RAGChunk{old, keep}}
+	mergePendingRAGState(st, state, []domain.RAGChunk{replacement})
+	if len(state.Chunks) != 2 || len(state.ChunkHashes) != 2 {
+		t.Fatalf("unexpected merged state: %+v", state)
+	}
+	for _, chunk := range state.Chunks {
+		if chunk.Hash == old.Hash {
+			t.Fatalf("old source survived pending merge: %+v", state.Chunks)
+		}
 	}
 }
 

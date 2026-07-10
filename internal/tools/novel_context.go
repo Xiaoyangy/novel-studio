@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
@@ -51,6 +52,9 @@ type ContextTool struct {
 	style             string
 	ragEmbedder       rag.Embedder
 	ragVectorSearcher rag.VectorSearcher
+	ragBM25Mu         sync.Mutex
+	ragBM25State      *domain.RAGIndexState
+	ragBM25Index      *rag.BM25Index
 }
 
 // NewContextTool 创建上下文工具。
@@ -87,7 +91,7 @@ func (t *ContextTool) Schema() map[string]any {
 	)
 }
 
-func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		Chapter int `json:"chapter"`
 	}
@@ -95,7 +99,27 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 		return nil, fmt.Errorf("invalid args: %w", err)
 	}
 
+	requestedChapter := a.Chapter
+	rewriteTarget, hasRewriteTarget := pendingRewriteTarget(t.store)
+	if requestedChapter > 0 && hasRewriteTarget {
+		a.Chapter = rewriteTarget
+	}
+	if a.Chapter > 0 {
+		if staged, ok, err := t.stagedPlanRepairContext(a.Chapter, requestedChapter, hasRewriteTarget); ok || err != nil {
+			return staged, err
+		}
+	}
+
 	result := make(map[string]any)
+	if hasRewriteTarget && requestedChapter > 0 {
+		result["active_chapter_task"] = map[string]any{
+			"mode":              "rewrite",
+			"chapter":           rewriteTarget,
+			"requested_chapter": requestedChapter,
+			"corrected":         requestedChapter != rewriteTarget,
+			"policy":            "pending_rewrites 队首章是本轮唯一目标；next_plan 和未来大纲只供后续承接，不得改写本轮章号",
+		}
+	}
 	var warnings []string
 	seenWarnings := make(map[string]struct{})
 	warn := func(scope string, err error) {
@@ -116,7 +140,17 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 		seed := newChapterContextEnvelope()
 		state := t.prepareChapterContext(a.Chapter, &seed, warn)
 		seed.apply(result)
-		t.buildChapterContext(result, state, warn)
+		t.buildChapterContext(ctx, result, state, warn)
+		t.buildChapterWorldSimulationContext(result, a.Chapter, warn)
+		if hasRewriteTarget {
+			// 返工只需要当前章契约、原文与 review brief。完整 outline 和未来章窗口会让
+			// planner 把已完成的目标章误当作“上一章”，继而规划 next chapter。
+			delete(result, "outline")
+			result["rewrite_outline_scope"] = map[string]any{
+				"chapter": rewriteTarget,
+				"policy":  "返工阶段只允许使用 current_chapter_outline；完整大纲与未来章窗口已隐藏，待本章提交并通过审核后恢复",
+			}
+		}
 		// 数据语义标注（治复读交代）：episodic 是已写入正文的备忘，不是待写素材。
 		// 只挂容器内，不进顶层镜像。
 		if epi, ok := result["episodic_memory"].(map[string]any); ok && len(epi) > 0 {
@@ -143,9 +177,10 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 		result["_warnings"] = warnings
 	}
 
-	// 优先级预算：总大小超过阈值时自动裁剪低优先级数据
+	// 优先级预算：章节推演会携带较丰富的 causal plan，允许约 192KB；但必须
+	// 真正收敛到预算内，避免一次 novel_context 把长上下文窗口顶满并触发反复压缩。
 	if a.Chapter > 0 {
-		trimByBudget(result, 100*1024) // Writer: 100KB
+		trimByBudget(result, 188*1024) // reserve space for loading summary and reading guide
 	} else {
 		trimByBudget(result, 60*1024) // Coordinator/Architect: 60KB
 	}
@@ -155,6 +190,191 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 		result["_reading_guide"] = contextReadingGuide
 	}
 	return marshalOrderedContext(result)
+}
+
+func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, chapter int, warn func(string, error)) {
+	if !chapterWorldSimulationRequired(t.store) {
+		return
+	}
+	result["simulation_characters"] = requiredDossierCharacterNames(t.store, chapter)
+	result["visible_characters"] = chapterOutlineCharacterNames(t.store, chapter)
+	if partial, err := t.store.LoadChapterWorldSimulationPartial(chapter); err != nil {
+		warn("chapter_world_simulation_partial", err)
+	} else if partial != nil {
+		result["chapter_world_simulation"] = map[string]any{
+			"status":             "partial",
+			"base_tick_id":       partial.BaseTickID,
+			"time_window":        partial.TimeWindow,
+			"characters_present": characterDecisionNames(partial.CharacterDecisions),
+			"gaps":               chapterWorldSimulationGaps(t.store, *partial),
+		}
+		return
+	}
+	if sim, err := t.store.LoadChapterWorldSimulation(chapter); err != nil {
+		warn("chapter_world_simulation", err)
+	} else if sim != nil {
+		gaps := chapterWorldSimulationGaps(t.store, *sim)
+		if len(gaps) > 0 {
+			result["chapter_world_simulation"] = map[string]any{
+				"status":             "invalid",
+				"simulation_id":      sim.SimulationID,
+				"characters_present": characterDecisionNames(sim.CharacterDecisions),
+				"gaps":               gaps,
+				"next_step":          "当前正式模拟已因返工源或角色可见性变化失效；重新分批调用 simulate_chapter_world 并 finalize。",
+			}
+			return
+		}
+		result["chapter_world_simulation"] = map[string]any{
+			"status":                 "ready",
+			"simulation_id":          sim.SimulationID,
+			"base_tick_id":           sim.BaseTickID,
+			"time_window":            sim.TimeWindow,
+			"character_count":        len(sim.CharacterDecisions),
+			"character_decisions":    sim.CharacterDecisions,
+			"protagonist_projection": sim.ProtagonistProjection,
+			"rewrite_source":         sim.RewriteSource,
+			"rewrite_fact_coverage":  sim.RewriteFactCoverage,
+			"render_policy":          "character_decisions 仅用于全角色连续性与 commit 回填；正文只能渲染 protagonist_projection.observable_effects 和主角合法获得的信息，hidden/delayed 不得泄露。",
+		}
+		return
+	}
+	result["chapter_world_simulation"] = map[string]any{
+		"status":    "missing",
+		"next_step": "先调用 simulate_chapter_world 推演全部实名角色并 finalize，再开始 plan_structure。",
+	}
+}
+
+func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rewrite bool) (json.RawMessage, bool, error) {
+	partial, err := t.store.Drafts.LoadChapterPlanPartial(chapter)
+	if err != nil || partial == nil {
+		return nil, false, err
+	}
+	structure, _ := partial["structure"].(map[string]any)
+	merged, _ := partial["causal_simulation"].(map[string]any)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	fields := sortedKeys(merged)
+	savedCore := map[string]any{}
+	for _, field := range []string{
+		"world_simulation_id", "protagonist_decision", "project_promise", "chapter_function", "context_sources", "initial_state",
+		"environment_state", "causal_beats", "decision_points", "outcome_shift",
+	} {
+		if value, ok := merged[field]; ok {
+			savedCore[field] = value
+		}
+	}
+	stage := map[string]any{
+		"status":                "partial",
+		"chapter":               chapter,
+		"causal_fields_present": fields,
+		"policy":                "当前 staged plan 是唯一规划真相；只用 plan_details 补缺并收口，不重新检索、不重做骨架、不写正文。",
+	}
+	nextStep := "直接调用 plan_details，只补 gap_summary 最靠前的一组；禁止 craft_recall/read_chapter，禁止重新 plan_structure。"
+	var simulationStage any
+	var readySimulation *domain.ChapterWorldSimulation
+	if chapterWorldSimulationRequired(t.store) {
+		if partialSim, partialErr := t.store.LoadChapterWorldSimulationPartial(chapter); partialErr == nil && partialSim != nil {
+			simulationStage = map[string]any{
+				"status":             "partial",
+				"characters_present": characterDecisionNames(partialSim.CharacterDecisions),
+				"gaps":               chapterWorldSimulationGaps(t.store, *partialSim),
+			}
+			nextStep = "先继续分批调用 simulate_chapter_world，完成全角色决定、理由、蝴蝶效应和 protagonist_projection 并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
+		} else if final, loadErr := t.store.LoadChapterWorldSimulation(chapter); loadErr == nil && final != nil {
+			if gaps := chapterWorldSimulationGaps(t.store, *final); len(gaps) > 0 {
+				simulationStage = map[string]any{
+					"status":             "invalid",
+					"simulation_id":      final.SimulationID,
+					"characters_present": characterDecisionNames(final.CharacterDecisions),
+					"gaps":               gaps,
+				}
+				nextStep = "当前正式模拟未绑定返工源或未覆盖保留事实；重新分批调用 simulate_chapter_world 并 finalize，随后重新 plan_structure。"
+			} else {
+				readySimulation = final
+				simulationStage = map[string]any{
+					"status":                 "ready",
+					"simulation_id":          final.SimulationID,
+					"character_count":        len(final.CharacterDecisions),
+					"protagonist_projection": final.ProtagonistProjection,
+					"rewrite_source":         final.RewriteSource,
+					"rewrite_fact_coverage":  final.RewriteFactCoverage,
+				}
+			}
+		} else {
+			simulationStage = map[string]any{"status": "missing"}
+			nextStep = "先调用 simulate_chapter_world 完成全角色世界推演并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
+		}
+	}
+	structureStatus := "waiting_for_simulation"
+	if readySimulation != nil {
+		if planStructureBoundToSources(t.store, chapter, partial, readySimulation) {
+			structureStatus = "ready"
+		} else {
+			structureStatus = "stale"
+			nextStep = "当前 plan_structure 未绑定最新 world_simulation/rewrite_source；先重新调用 plan_structure，再用 plan_details 补缺并 finalize。"
+		}
+	}
+	switch structureStatus {
+	case "stale":
+		stage["policy"] = "当前骨架绑定的是旧 world_simulation/rewrite_source，必须先重新 plan_structure；新骨架提交后再用 plan_details 补缺，不检索、不写正文。"
+	case "waiting_for_simulation":
+		stage["policy"] = "先完成或重建 world simulation；模拟 finalize 后重新 plan_structure，再用 plan_details 收口。不检索、不写正文。"
+	}
+	result := map[string]any{
+		"active_chapter_task": map[string]any{
+			"mode":              "staged_plan_repair",
+			"chapter":           chapter,
+			"requested_chapter": requestedChapter,
+			"corrected":         requestedChapter > 0 && requestedChapter != chapter,
+		},
+		"current_chapter_outline": func() any {
+			entry, _ := t.store.Outline.GetChapterOutline(chapter)
+			return entry
+		}(),
+		"structure":               structure,
+		"structure_source_status": structureStatus,
+		"saved_core":              savedCore,
+		"fields_present":          fields,
+		"gap_summary":             planDetailsGapSummary(t.store, chapter, partial, merged),
+		"recommended_batches":     planDetailsRecommendedBatches(),
+		"simulation_characters":   requiredDossierCharacterNames(t.store, chapter),
+		"visible_characters":      chapterOutlineCharacterNames(t.store, chapter),
+		"working_memory": map[string]any{
+			"chapter_plan_stage": stage,
+		},
+		"next_step":        nextStep,
+		"_loading_summary": fmt.Sprintf("ch=%d | staged_plan_repair | fields=%d", chapter, len(fields)),
+	}
+	if simulationStage != nil {
+		result["chapter_world_simulation"] = simulationStage
+	}
+	if rewrite {
+		brief := map[string]any{}
+		if progress, loadErr := t.store.Progress.Load(); loadErr == nil && progress != nil && strings.TrimSpace(progress.RewriteReason) != "" {
+			brief["reason"] = progress.RewriteReason
+		}
+		if review, loadErr := t.store.World.LoadReview(chapter); loadErr == nil && review != nil {
+			brief["review_summary"] = review.Summary
+			brief["issues"] = review.Issues
+			brief["contract_misses"] = review.ContractMisses
+		}
+		if len(brief) > 0 {
+			result["rewrite_brief"] = brief
+		}
+		source, body, markdown, loadErr := loadChapterRewriteSource(t.store, chapter)
+		if loadErr != nil {
+			return nil, true, loadErr
+		}
+		if source != nil {
+			result["rewrite_source"] = rewriteSourceContext(source, body, markdown)
+		}
+	}
+	if issues := ChapterPlanIdentityIssues(t.store, chapter, partial); len(issues) > 0 {
+		result["scope_warnings"] = issues
+	}
+	raw, err := marshalOrderedContext(result)
+	return raw, true, err
 }
 
 // buildLoadingSummary 从已组装的 result 中统计各项数据量，生成一行可读摘要。
@@ -619,7 +839,46 @@ func trimByBudget(result map[string]any, budget int) {
 		return
 	}
 
-	// 按优先级从低到高列出可裁剪的 key
+	var trimmed []string
+
+	// chapterContextEnvelope 同时保留 canonical 容器与旧版顶层镜像。上下文较大时
+	// 先删镜像，模型仍可从 working_memory/episodic_memory/reference_pack/
+	// selected_memory 读取同一份数据，且不会为完全相同的内容支付两次窗口成本。
+	for _, containerKey := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
+		section, ok := result[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		for key := range section {
+			if _, mirrored := result[key]; !mirrored {
+				continue
+			}
+			delete(result, key)
+			trimmed = append(trimmed, "mirror:"+key)
+		}
+	}
+
+	// chapter_plan 已内含 causal_simulation，而 working_memory 还提供同级的
+	// causal_simulation。保留同级版本供 Drafter 使用，把计划内副本清空即可。
+	if working, ok := result["working_memory"].(map[string]any); ok {
+		if _, hasCausal := working["causal_simulation"]; hasCausal {
+			if stripChapterPlanCausalDuplicate(working) {
+				trimmed = append(trimmed, "chapter_plan.causal_simulation")
+			}
+		}
+	}
+
+	data, err = json.Marshal(result)
+	if err != nil || len(data) <= budget {
+		if len(trimmed) > 0 {
+			result["_trimmed"] = trimmed
+		}
+		return
+	}
+
+	// 按优先级从低到高列出可裁剪的 key。后半段是大项目的阶段性历史快照：
+	// 当前章已有完整 causal plan 时，它们与计划中的人物/世界推演高度重复；新章
+	// 尚无 plan 时则通常会在达到这些项之前收敛，因此仍能拿到角色档案。
 	trimOrder := []string{
 		"references",
 		"voice_samples",
@@ -635,11 +894,21 @@ func trimByBudget(result map[string]any, budget int) {
 		"recent_state_changes",
 		"foreshadow_ledger",
 		"relationship_state",
+		"character_continuity",
+		"evolution_report",
+		"project_progress",
+		"world_codex",
+		"book_world",
+		"world_foundation",
+		"premise_sections",
+		"character_dossiers",
+		"characters",
+		"world_rules",
+		"premise",
 	}
 
-	var trimmed []string
 	for _, key := range trimOrder {
-		if _, ok := result[key]; !ok {
+		if !hasContextKey(result, key) {
 			continue
 		}
 		deleteContextKey(result, key)
@@ -651,6 +920,63 @@ func trimByBudget(result map[string]any, budget int) {
 	}
 	if len(trimmed) > 0 {
 		result["_trimmed"] = trimmed
+	}
+}
+
+func hasContextKey(result map[string]any, key string) bool {
+	if _, ok := result[key]; ok {
+		return true
+	}
+	for _, containerKey := range []string{
+		"working_memory",
+		"episodic_memory",
+		"planning_memory",
+		"foundation_memory",
+		"reference_pack",
+		"selected_memory",
+	} {
+		section, ok := result[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := section[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func stripChapterPlanCausalDuplicate(working map[string]any) bool {
+	switch plan := working["chapter_plan"].(type) {
+	case *domain.ChapterPlan:
+		if plan == nil || !hasChapterCausalSimulation(plan.CausalSimulation) {
+			return false
+		}
+		clone := *plan
+		clone.CausalSimulation = domain.ChapterCausalSimulation{}
+		working["chapter_plan"] = clone
+		return true
+	case domain.ChapterPlan:
+		if !hasChapterCausalSimulation(plan.CausalSimulation) {
+			return false
+		}
+		plan.CausalSimulation = domain.ChapterCausalSimulation{}
+		working["chapter_plan"] = plan
+		return true
+	case map[string]any:
+		if _, ok := plan["causal_simulation"]; !ok {
+			return false
+		}
+		clone := make(map[string]any, len(plan)-1)
+		for key, value := range plan {
+			if key != "causal_simulation" {
+				clone[key] = value
+			}
+		}
+		working["chapter_plan"] = clone
+		return true
+	default:
+		return false
 	}
 }
 

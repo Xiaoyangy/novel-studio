@@ -204,7 +204,7 @@ func TestMergeConfig_RoleFallbacksCanBeCleared(t *testing.T) {
 		Roles: map[string]RoleConfig{
 			"writer": {
 				Provider:  "openai",
-				Model:     "gpt-5.5",
+				Model:     "gpt-5.6-sol",
 				Fallbacks: []ModelRef{},
 			},
 		},
@@ -212,8 +212,8 @@ func TestMergeConfig_RoleFallbacksCanBeCleared(t *testing.T) {
 
 	cfg := mergeConfig(base, overlay)
 	writer := cfg.Roles["writer"]
-	if writer.Provider != "openai" || writer.Model != "gpt-5.5" {
-		t.Fatalf("writer model = %s/%s, want openai/gpt-5.5", writer.Provider, writer.Model)
+	if writer.Provider != "openai" || writer.Model != "gpt-5.6-sol" {
+		t.Fatalf("writer model = %s/%s, want openai/gpt-5.6-sol", writer.Provider, writer.Model)
 	}
 	if len(writer.Fallbacks) != 0 {
 		t.Fatalf("writer fallbacks should be cleared, got %#v", writer.Fallbacks)

@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,81 @@ type fakeEmbedder struct{}
 
 func (fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
 	return []float32{float32(len([]rune(text)))}, nil
+}
+
+type eofThenEmbedder struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (e *eofThenEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	if e.calls <= e.failures {
+		return nil, io.EOF
+	}
+	return []float32{1, 0}, nil
+}
+
+type eofBatchWriter struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+	points   []VectorPoint
+}
+
+func (w *eofBatchWriter) Write(ctx context.Context, point VectorPoint) error {
+	return w.WriteBatch(ctx, []VectorPoint{point})
+}
+
+func (w *eofBatchWriter) WriteBatch(_ context.Context, points []VectorPoint) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.calls <= w.failures {
+		return io.ErrUnexpectedEOF
+	}
+	w.points = append(w.points, points...)
+	return nil
+}
+
+func TestBuildIndexRetriesEOFInEmbeddingAndBatchWrite(t *testing.T) {
+	embedder := &eofThenEmbedder{failures: 2}
+	writer := &eofBatchWriter{failures: 2}
+	result, err := BuildIndex(context.Background(), []domain.RAGChunk{
+		{SourcePath: "outline.md", SourceKind: "planning", Text: "青山县第一家返乡门店。"},
+		{SourcePath: "world_rules.md", SourceKind: "world", Text: "投资必须留下真实经营结果。"},
+	}, nil, domain.RAGIndexConfig{
+		EmbeddingConcurrency: 1, QdrantWriteConcurrency: 1, VectorBatchSize: 16,
+	}, embedder, writer)
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if embedder.calls != 4 {
+		t.Fatalf("embedding calls=%d, want 4", embedder.calls)
+	}
+	if writer.calls != 3 || len(writer.points) != 2 {
+		t.Fatalf("batch retries not applied: calls=%d points=%d", writer.calls, len(writer.points))
+	}
+	if result.Embedded != 2 || result.Written != 2 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestBuildIndexPermanentEOFWritesNothing(t *testing.T) {
+	embedder := &eofThenEmbedder{failures: 100}
+	writer := &eofBatchWriter{}
+	_, err := BuildIndex(context.Background(), []domain.RAGChunk{
+		{SourcePath: "outline.md", SourceKind: "planning", Text: "第一章经营计划。"},
+	}, nil, domain.RAGIndexConfig{EmbeddingConcurrency: 1}, embedder, writer)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "eof") {
+		t.Fatalf("expected EOF failure, got %v", err)
+	}
+	if writer.calls != 0 || len(writer.points) != 0 {
+		t.Fatalf("vectors were written before all embeddings succeeded: calls=%d points=%d", writer.calls, len(writer.points))
+	}
 }
 
 type fakeWriter struct {

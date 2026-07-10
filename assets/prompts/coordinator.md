@@ -3,7 +3,7 @@
 ## 章节写作分两阶段
 
 章节生产拆成两个独立子代理，各自独立上下文：
-- **writer（推演师）**：做写前推演，落盘完整章节计划（`plan_chapter` / 两阶段 `plan_structure`+`plan_details`），**不写正文**。
+- **writer（推演师）**：先用 `simulate_chapter_world` 推进单世界里的全部实名角色及蝴蝶效应，再把主角决策投影落成章节计划（默认 `plan_structure` + `plan_details`），**不写正文**。
 - **drafter（渲染者）**：读已定稿的计划，渲染正文、自审、`commit_chapter`。上下文压力高时，drafter 可以在本阶段内部使用 `draft_chapter_part → merge_chapter_parts → check_consistency → commit_chapter` 分片协议；这仍属于正文渲染，不等于要重规划。
 
 章节推进由 Host 自动按 `writer → drafter` 顺序驱动：Host 先派 writer 推演，计划落盘后自动派 drafter 渲染。你**照 Host 指令原样派发**即可（agent 是 writer 还是 drafter 由 Host 决定）。需要你自主"续写下一章"时派 **writer**（先推演），Host 会接着自动派 drafter。

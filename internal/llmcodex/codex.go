@@ -38,8 +38,8 @@ const (
 // CodexModel 实现 agentcore.ChatModel，经 codex CLI 调 GPT（订阅）。
 type CodexModel struct {
 	binary        string // codex 可执行路径
-	model         string // 如 gpt-5.5
-	reasoning     string // low/medium/high；空=用 codex 配置默认
+	model         string // 如 gpt-5.6-sol
+	reasoning     string // low/medium/high/xhigh/max/ultra；空=用 codex 配置默认
 	providerLabel string
 }
 
@@ -69,6 +69,34 @@ func detectCodexBinary() string {
 func (m *CodexModel) SupportsTools() bool  { return true }
 func (m *CodexModel) ProviderName() string { return m.providerLabel }
 
+func (m *CodexModel) Capabilities() llm.Capabilities {
+	return llm.Capabilities{
+		Provider: m.providerLabel,
+		Model:    m.model,
+		Thinking: llm.ThinkingCapabilities{
+			Supported: llm.SupportYes,
+			Disable:   llm.SupportNo,
+			Efforts: []agentcore.ThinkingLevel{
+				agentcore.ThinkingLow,
+				agentcore.ThinkingMedium,
+				agentcore.ThinkingHigh,
+				agentcore.ThinkingXHigh,
+				agentcore.ThinkingMax,
+				"ultra",
+			},
+		},
+		Tools: llm.ToolCapabilities{
+			Calls:         llm.SupportYes,
+			StrictSchema:  llm.SupportYes,
+			ParallelCalls: llm.SupportNo,
+		},
+		Structured: llm.StructuredCapabilities{
+			JSONSchema: llm.SupportYes,
+			Strict:     llm.SupportYes,
+		},
+	}
+}
+
 // Info 暴露模型名，供 bootstrap.ModelName 用于按模型解析上下文窗口等。不实现它时
 // ModelName 返回空串 → ResolveContextWindow 落到默认 200K，writer 会过早压缩。
 func (m *CodexModel) Info() llm.ModelInfo {
@@ -78,13 +106,14 @@ func (m *CodexModel) Info() llm.ModelInfo {
 	}
 }
 
-func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	reasoning := m.resolveReasoning(opts)
 	// 无工具 = 纯文本补全（规则归一化、摘要、审阅等）：不套 action/tool_call/final schema，
 	// 直接把模型输出当消息文本返回——否则调用方拿到的是被 schema 包裹的内容，解析会失败
 	// （"规则归一化失败：返回非合法 JSON" 即此）。
 	if len(tools) == 0 {
 		plain := buildPlainPrompt(messages)
-		text, err := m.runCodex(ctx, plain, nil)
+		text, err := m.runCodex(ctx, plain, nil, reasoning)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +127,7 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 	}
 	prompt := buildCodexPrompt(messages, tools)
 	schema := buildResponseSchema(tools)
-	raw, err := m.runCodex(ctx, prompt, schema)
+	raw, err := m.runCodex(ctx, prompt, schema, reasoning)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +139,7 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 	// 会让 token 分布过于均匀（weak_lm 曲线过稳）→ segment_risk_floor 飙高、正文更"像 AI"
 	// （实测同一份计划：自由文本 AIGC 4.8% vs 结构化 80%）。改用自由文本重新生成正文，
 	// 替换回工具参数，兼顾 tool-calling 框架与正文自然度。
-	m.regenerateProseArgs(ctx, messages, &msg)
+	m.regenerateProseArgs(ctx, messages, &msg, reasoning)
 	msg.Usage = m.estimateUsage(prompt, raw)
 	return &agentcore.LLMResponse{Message: msg}, nil
 }
@@ -122,7 +151,7 @@ var proseToolContentField = map[string]string{
 
 // regenerateProseArgs 若本轮是正文类工具调用，用自由文本（无 schema）重新生成正文，
 // 替换 arguments 里的正文字段，规避结构化输出对正文统计自然度的损伤。
-func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentcore.Message, msg *agentcore.Message) {
+func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentcore.Message, msg *agentcore.Message, reasoning string) {
 	for _, block := range msg.Content {
 		if block.Type != agentcore.ContentToolCall || block.ToolCall == nil {
 			continue
@@ -139,7 +168,7 @@ func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentco
 			continue // 非写正文的调用（如 mode=edit 无 content）跳过
 		}
 		start := time.Now()
-		prose, err := m.runCodex(ctx, buildProsePrompt(messages), nil)
+		prose, err := m.runCodex(ctx, buildProsePrompt(messages), nil, reasoning)
 		if err != nil {
 			slog.Warn("正文自由文本渲染失败，回退结构化正文（质量会偏低）",
 				"module", "codex", "tool", block.ToolCall.Name, "err", err, "elapsed_ms", time.Since(start).Milliseconds())
@@ -384,17 +413,23 @@ func stripCodeFence(s string) string {
 }
 
 // runCodex 执行一次 `codex exec`，用订阅额度跑 GPT，返回 output-schema 约束的最终 JSON。
-func (m *CodexModel) runCodex(ctx context.Context, prompt string, schema map[string]any) (string, error) {
+func (m *CodexModel) resolveReasoning(opts []agentcore.CallOption) string {
+	if level := strings.TrimSpace(string(agentcore.ResolveCallConfig(opts).ThinkingLevel)); level != "" {
+		return level
+	}
+	if level := strings.TrimSpace(m.reasoning); level != "" {
+		return level
+	}
+	return "xhigh"
+}
+
+func (m *CodexModel) runCodex(ctx context.Context, prompt string, schema map[string]any, reasoning string) (string, error) {
 	tmp, err := os.MkdirTemp("", "codex-turn-*")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
 	outPath := filepath.Join(tmp, "out.json")
-	reasoning := m.reasoning
-	if reasoning == "" {
-		reasoning = "xhigh" // 用 gpt-5.5 最高推理档，质量优先（用户明确要求）；比 medium 慢但正文质量显著更好
-	}
 	args := []string{"exec", "-",
 		"-o", outPath,
 		"--skip-git-repo-check",

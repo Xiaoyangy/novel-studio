@@ -125,17 +125,19 @@ type FlowBoundaryHook func(toolName string)
 // writer/editor → 对应子代理。空 level = 沿用模型/provider 默认。其它 role 名忽略。
 type ApplyThinking func(role string, level agentcore.ThinkingLevel)
 
+const ThinkingUltra agentcore.ThinkingLevel = "ultra"
+
 // ParseThinkingLevel 把配置字符串转 agentcore.ThinkingLevel。
-// "" 合法（= 不覆盖/继承）；其余须是 off/low/medium/high/xhigh/max 之一，
+// "" 合法（= 不覆盖/继承）；其余须是 off/low/medium/high/xhigh/max/ultra 之一，
 // 否则返回 error（启动时降级当空并 warn，运行时把 error 回显给用户）。
 func ParseThinkingLevel(s string) (agentcore.ThinkingLevel, error) {
 	lv := agentcore.NormalizeThinkingLevel(agentcore.ThinkingLevel(s))
 	switch lv {
 	case "", agentcore.ThinkingOff, agentcore.ThinkingLow, agentcore.ThinkingMedium,
-		agentcore.ThinkingHigh, agentcore.ThinkingXHigh, agentcore.ThinkingMax:
+		agentcore.ThinkingHigh, agentcore.ThinkingXHigh, agentcore.ThinkingMax, ThinkingUltra:
 		return lv, nil
 	default:
-		return "", fmt.Errorf("无效推理强度 %q（可选：off/low/medium/high/xhigh/max）", s)
+		return "", fmt.Errorf("无效推理强度 %q（可选：off/low/medium/high/xhigh/max/ultra）", s)
 	}
 }
 
@@ -229,6 +231,8 @@ func BuildCoordinator(
 		craftRecall,
 		// 联网研究：推演时按本章需要动态补题材现实支架、生活/职业/平台细节、描写素材。
 		webResearch,
+		// 单世界先运行：所有实名角色自主决策与蝴蝶效应完成后，才允许生成 POV plan。
+		tools.NewSimulateChapterWorldTool(store),
 		tools.NewPlanChapterTool(store),
 		// 两阶段规划：plan_structure 先落核心骨架，plan_details 分批补 causal_simulation；
 		// 与单发 plan_chapter 同一校验口径，长章/大 plan 用它降低单次输出压力。

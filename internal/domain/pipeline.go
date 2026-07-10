@@ -17,16 +17,17 @@ type PipelineState struct {
 // PipelineStageEvidence is the durable proof attached to a completed pipeline
 // stage. The pipeline CLI writes this after verifying artifacts/checkpoints.
 type PipelineStageEvidence struct {
-	Stage             string    `json:"stage"`
-	Status            string    `json:"status"`
-	CheckedAt         time.Time `json:"checked_at"`
-	Message           string    `json:"message,omitempty"`
-	ProgressPhase     string    `json:"progress_phase,omitempty"`
-	ProgressFlow      string    `json:"progress_flow,omitempty"`
-	CompletedChapters int       `json:"completed_chapters,omitempty"`
-	Artifacts         []string  `json:"artifacts,omitempty"`
-	Checkpoints       []string  `json:"checkpoints,omitempty"`
-	Missing           []string  `json:"missing,omitempty"`
+	Stage             string            `json:"stage"`
+	Status            string            `json:"status"`
+	CheckedAt         time.Time         `json:"checked_at"`
+	Message           string            `json:"message,omitempty"`
+	ProgressPhase     string            `json:"progress_phase,omitempty"`
+	ProgressFlow      string            `json:"progress_flow,omitempty"`
+	CompletedChapters int               `json:"completed_chapters,omitempty"`
+	Artifacts         []string          `json:"artifacts,omitempty"`
+	ArtifactDigests   map[string]string `json:"artifact_digests,omitempty"`
+	Checkpoints       []string          `json:"checkpoints,omitempty"`
+	Missing           []string          `json:"missing,omitempty"`
 }
 
 func (s *PipelineState) Done(stage string) bool {

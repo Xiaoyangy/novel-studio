@@ -68,6 +68,139 @@ func TestPlanStructureRejectsGenericIdentityAnchors(t *testing.T) {
 	}
 }
 
+func TestPlanStructureRejectsGenericMaleProjectAndTitleDrift(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1, Title: "失业饭桌", CoreEvent: "林澈返乡饭桌受挤兑", Hook: "手机弹出县城花钱系统绑定提示",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1)); err == nil || !strings.Contains(err.Error(), "身份锚点") {
+		t.Fatalf("expected male project identity/title rejection, got %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter":  1,
+		"title":    "失业饭桌",
+		"goal":     "林澈在返乡饭桌护住父母体面，并直面失业压力。",
+		"conflict": "林澈想用玩笑挡住亲戚挤兑，现实账单却让他无法轻松脱身。",
+		"hook":     "错误的章末钩子",
+	})
+	if _, err := NewPlanStructureTool(st).Execute(context.Background(), args); err != nil {
+		t.Fatalf("grounded male project plan should pass: %v", err)
+	}
+	partial, err := st.Drafts.LoadChapterPlanPartial(1)
+	if err != nil || partial == nil {
+		t.Fatalf("LoadChapterPlanPartial: partial=%v err=%v", partial, err)
+	}
+	raw, _ := json.Marshal(partial)
+	for _, want := range []string{
+		"手机弹出县城花钱系统绑定提示",
+		"必须完整兑现大纲核心事件：林澈返乡饭桌受挤兑",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("outline anchor %q missing from partial: %s", want, raw)
+		}
+	}
+	structure := partial["structure"].(map[string]any)
+	if got := structure["goal"]; got != "完整兑现本章大纲核心事件：林澈返乡饭桌受挤兑" {
+		t.Fatalf("outline goal must pin chapter scope, got %#v", got)
+	}
+	if got := structure["hook"]; got != "手机弹出县城花钱系统绑定提示" {
+		t.Fatalf("outline hook must pin chapter boundary, got %#v", got)
+	}
+}
+
+func TestIdentityGuardUsesExplicitProtagonistGenderAndRecentCast(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := os.WriteFile(filepath.Join(st.Dir(), "premise.md"), []byte("男频单女主小说，男主林澈，女主沈知遥。"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Cast.Save([]domain.CastEntry{
+		{Name: "赵航", LastSeenChapter: 1, AppearanceCount: 1},
+		{Name: "老丁", LastSeenChapter: 1, AppearanceCount: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if projectHasFemaleProtagonist(st) {
+		t.Fatal("单女主只描述感情线配置，不能把男主识别为女性主角")
+	}
+	names := knownCharacterNameSet(st)
+	for _, name := range []string{"林澈", "沈知遥", "赵航", "老丁"} {
+		if _, ok := names[name]; !ok {
+			t.Fatalf("expected %s in project identity set: %+v", name, names)
+		}
+	}
+}
+
+func TestRewritePlanRejectsVisibleCharacterOutsideCurrentOutline(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "林建国", Role: "主角父亲", Tier: "important"},
+		{Name: "周曼", Role: "主角母亲", Tier: "important"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+		{Name: "马玉芬", Role: "商户代表", Tier: "secondary"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "失业饭桌",
+		CoreEvent: "林澈在饭桌被亲戚阴阳失业，父母嘴硬护短。",
+		Hook:      "手机弹出系统绑定提示",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	progress, _ := st.Progress.Load()
+	progress.CompletedChapters = []int{1}
+	progress.PendingRewrites = []int{1}
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"structure": map[string]any{
+			"chapter":  1,
+			"title":    "失业饭桌",
+			"goal":     "林澈在饭桌承认失业",
+			"conflict": "父母想护住林澈的面子",
+			"hook":     "手机弹出系统绑定提示",
+		},
+		"causal_simulation": map[string]any{
+			"offscreen_character_stage": []any{
+				map[string]any{"character": "林澈", "visible_in_chapter": true},
+				map[string]any{"character": "林建国", "visible_in_chapter": true},
+				map[string]any{"character": "周曼", "visible_in_chapter": true},
+				map[string]any{"character": "沈知遥", "visible_in_chapter": false},
+				map[string]any{"character": "马玉芬", "visible_in_chapter": true},
+			},
+		},
+	}
+	issues := ChapterPlanIdentityIssues(st, 1, payload)
+	joined := strings.Join(issues, "\n")
+	if !strings.Contains(joined, "马玉芬") || !strings.Contains(joined, "未授权该角色出场") {
+		t.Fatalf("expected out-of-outline visible character issue, got %v", issues)
+	}
+	for _, allowed := range []string{"林澈", "林建国", "周曼", "沈知遥"} {
+		if strings.Contains(joined, "将 "+allowed+" 标为本章可见") {
+			t.Fatalf("allowed/offscreen character %s was rejected: %v", allowed, issues)
+		}
+	}
+}
+
 func TestPlanDetailsRejectsGenericCharacterPlaceholder(t *testing.T) {
 	st := newPhaseTestStore(t)
 	enableFemaleIdentityGuard(t, st)
@@ -299,12 +432,35 @@ func TestPlanStructureRejectsMissingCore(t *testing.T) {
 	}
 }
 
+func TestPlanningFallbackPrefersPendingRewriteTarget(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Progress.MarkChapterComplete(1, 2000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if err := st.Progress.SetPendingRewrites([]int{1}, "rewrite"); err != nil {
+		t.Fatalf("SetPendingRewrites: %v", err)
+	}
+	if got := inProgressChapterOf(st); got != 1 {
+		t.Fatalf("planning fallback must prefer pending rewrite chapter, got %d", got)
+	}
+	if got := NewPlanDetailsTool(st).inProgressChapter(); got != 1 {
+		t.Fatalf("plan_details fallback must prefer pending rewrite chapter, got %d", got)
+	}
+}
+
 func TestPlanDetailsRejectsSecondAlgorithmCrossProjectContamination(t *testing.T) {
 	st := newPhaseTestStore(t)
 	if err := st.Characters.Save([]domain.Character{{Name: "许闻溪", Role: "主角", Tier: "core"}}); err != nil {
 		t.Fatalf("SaveCharacters: %v", err)
 	}
-	if _, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1)); err != nil {
+	structure, _ := json.Marshal(map[string]any{
+		"chapter":  1,
+		"title":    "测试章",
+		"goal":     "许闻溪核对发布会资料。",
+		"conflict": "许闻溪必须在时间压力下保留证据。",
+		"hook":     "许闻溪发现确认单仍待签。",
+	})
+	if _, err := NewPlanStructureTool(st).Execute(context.Background(), structure); err != nil {
 		t.Fatalf("plan_structure: %v", err)
 	}
 	args, _ := json.Marshal(map[string]any{

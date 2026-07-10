@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -140,26 +141,20 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	// 找所有 chapters/
 	chaptersDir := filepath.Join(eng.Dir(), "chapters")
-	matches, err := filepath.Glob(filepath.Join(chaptersDir, "[0-9][0-9].md"))
+	chapters, err := chapterNumbersFromFiles(chaptersDir)
 	if err != nil {
 		return fmt.Errorf("列章节失败: %w", err)
 	}
-	if len(matches) == 0 {
+	if len(chapters) == 0 {
 		return fmt.Errorf("未在 %s 找到任何章节文件（*.md）。请先跑 --pipeline 写作阶段产出章节", chaptersDir)
 	}
 
-	// 确定起止
-	start, end := flags.Start, flags.End
-	if start == 0 {
-		start = 1
+	selectedChapters := filterChaptersForPipelineRange(chapters, pipelineFlags{Start: flags.Start, End: flags.End})
+	if len(selectedChapters) == 0 {
+		return fmt.Errorf("指定评审范围内没有章节")
 	}
-	if end == 0 {
-		end = len(matches)
-	}
-	if end > len(matches) {
-		end = len(matches)
-	}
-	fmt.Fprintf(os.Stderr, "[review-existing] 待评审章节：%d - %d（共 %d 章）\n", start, end, end-start+1)
+	start, end := selectedChapters[0], selectedChapters[len(selectedChapters)-1]
+	fmt.Fprintf(os.Stderr, "[review-existing] 待评审章节：%d - %d（共 %d 章）\n", start, end, len(selectedChapters))
 
 	reviewsDir := filepath.Join(eng.Dir(), "reviews")
 	if err := os.MkdirAll(reviewsDir, 0o755); err != nil {
@@ -176,9 +171,8 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		Explicit: reviewerExplicit,
 	}
 
-	summaries := make([]string, 0, end-start+1)
 	successCount, failureCount := 0, 0
-	for chNum := start; chNum <= end; chNum++ {
+	for _, chNum := range selectedChapters {
 		chPath := filepath.Join(chaptersDir, fmt.Sprintf("%02d.md", chNum))
 		body, err := os.ReadFile(chPath)
 		if err != nil {
@@ -187,8 +181,10 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 评审中（预算 %s）...\n", chNum, flags.Budget)
+		bodyHash := reviewreport.BodySHA256(string(body))
 		history, _ := st.AIVoice.LoadAllChapterMetrics()
 		analysis := editrules.AnalyzeChapter(chNum, string(body), history)
+		analysis.BodySHA256 = bodyHash
 		if err := st.AIVoice.SaveChapterMetrics(analysis.Metrics, false); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 指标写入失败：%v\n", chNum, err)
 		}
@@ -202,16 +198,15 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		review, err := callEditorOnChapter(model, premise, chNum, string(body), analysis, flags.Budget)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 评审失败：%v\n", chNum, err)
-			summaries = append(summaries, fmt.Sprintf("- ch%02d: 评审失败 %v", chNum, err))
 			failureCount++
 			continue
 		}
 		entry := structuredReviewFromMarkdown(chNum, review)
+		entry.BodySHA256 = bodyHash
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定中（reviewer=%s/%s effort=max）...\n", chNum, reviewerProvider, reviewerName)
 		deepseekJudge, err := runDeepSeekAIJudge(reviewerModel, reviewerSelection, chNum, string(body), flags.Budget)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 裸正文 AI 判定失败：%v\n", chNum, err)
-			summaries = append(summaries, fmt.Sprintf("- ch%02d: DeepSeek AI 判定失败 %v", chNum, err))
 			failureCount++
 			continue
 		}
@@ -227,6 +222,32 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			if mechanicalErr != nil {
 				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 机械门禁读取失败：%v\n", chNum, mechanicalErr)
 			}
+		}
+		if deepseekJudge.Blocking {
+			entry.Verdict = "rewrite"
+			entry.AffectedChapters = []int{chNum}
+		}
+		entryRaw, err := json.Marshal(entry)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 结构化评审编码失败：%v\n", chNum, err)
+			failureCount++
+			continue
+		}
+		saveTool := toolspkg.NewSaveReviewTool(st).WithRAGEmbedder(ragEmbedder).WithRAGVectorWriter(ragVectorWriter)
+		if _, err := saveTool.Execute(context.Background(), entryRaw); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 确定性评审门禁/状态沉淀失败：%v\n", chNum, err)
+			failureCount++
+			continue
+		}
+		if savedEntry, loadErr := st.World.LoadReview(chNum); loadErr != nil || savedEntry == nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 最终结构化评审读取失败：%v\n", chNum, loadErr)
+			failureCount++
+			continue
+		} else {
+			entry = *savedEntry
+		}
+		if savedVoice, loadErr := st.AIVoice.LoadRedFlags(chNum); loadErr == nil && savedVoice != nil {
+			analysis = *savedVoice
 		}
 		outPath := filepath.Join(reviewsDir, fmt.Sprintf("%02d.md", chNum))
 		if err := reviewreport.WriteUnifiedMarkdown(eng.Dir(), reviewreport.UnifiedMarkdownInput{
@@ -249,38 +270,20 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		if err := reviewreport.RemoveLegacyMarkdown(eng.Dir(), chNum); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 清理旧 AI味报告失败：%v\n", chNum, err)
 		}
-		if err := st.World.SaveReview(entry); err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 结构化评审写入失败：%v\n", chNum, err)
-		} else if _, _, err := st.WritingAssets.ApplyReviewFeedback(entry, entry.Verdict, ""); err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 写法历史反馈沉淀失败：%v\n", chNum, err)
-		} else if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "review", fmt.Sprintf("reviews/%02d.json", chNum)); err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d review checkpoint 写入失败：%v\n", chNum, err)
-		} else if err := toolspkg.UpsertRAGChunks(context.Background(), st, ragEmbedder, ragVectorWriter, toolspkg.ReviewRAGChunks(entry, entry.Verdict, entry.AffectedChapters, ""), domain.RAGIndexConfig{}); err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d RAG 评审沉淀失败：%v\n", chNum, err)
-		} else if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "deepseek-ai-judge", fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chNum)); err != nil {
+		if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chNum), "deepseek-ai-judge", fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chNum)); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定 checkpoint 写入失败：%v\n", chNum, err)
-		} else if err := sedimentDeepSeekAIJudgeRAG(context.Background(), st, ragEmbedder, ragVectorWriter, deepseekJudge); err != nil {
+		}
+		if err := sedimentDeepSeekAIJudgeRAG(context.Background(), st, ragEmbedder, ragVectorWriter, deepseekJudge); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定 RAG 沉淀失败：%v\n", chNum, err)
 		}
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d → %s\n", chNum, outPath)
-		summaryReview := review
-		if unified, err := os.ReadFile(outPath); err == nil && strings.TrimSpace(string(unified)) != "" {
-			summaryReview = string(unified)
-		}
-		// 提取统一报告口径作为 summary，避免原始 Editor 可选建议覆盖最终门禁结论。
-		summaries = append(summaries, summarizeReview(chNum, summaryReview))
 		successCount++
 	}
 
-	// 汇总
-	summaryPath := filepath.Join(eng.Dir(), "meta", "review-summary.md")
-	summary := "# review-summary\n\n" +
-		"> 生成时间 " + time.Now().Format("2006-01-02 15:04:05") + "\n\n" +
-		strings.Join(summaries, "\n") + "\n"
-	if err := os.MkdirAll(filepath.Dir(summaryPath), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(summaryPath, []byte(summary), 0o644); err != nil {
+	// 每次都从 reviews/ 下的全部章级报告重建汇总。局部复审只刷新选中章节，
+	// 但不能把其他章节从项目级审核视图中抹掉。
+	summaryPath, err := rebuildReviewSummary(eng.Dir())
+	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[review-existing] 汇总已写到 %s\n", summaryPath)
@@ -321,8 +324,27 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 			Severity:  severity,
 		})
 	}
+	if external, ok := latestExternalAIGCDetection(st.Dir(), chapter, body); ok && external.ScorePercent > 5 {
+		severity := rules.SeverityWarning
+		if external.ScorePercent >= 35 {
+			severity = rules.SeverityError
+		}
+		target := strings.TrimSpace(external.Detector)
+		if external.Mode != "" {
+			target += "/" + strings.TrimSpace(external.Mode)
+		}
+		violations = append(violations, rules.Violation{
+			Rule:      "external_aigc_ratio",
+			Target:    target,
+			Limit:     "5%",
+			Actual:    external.ScorePercent,
+			Deviation: external.ScorePercent / 100,
+			Severity:  severity,
+		})
+	}
 	payload := reviewreport.MechanicalGatePayload{
 		Chapter:        chapter,
+		BodySHA256:     reviewreport.BodySHA256(body),
 		AIGCReport:     report,
 		RuleViolations: violations,
 		GeneratedAt:    time.Now().Format(time.RFC3339),
@@ -345,6 +367,58 @@ func reviewExistingAIGCGatePercent(report aigc.Report) float64 {
 	// 与 commit_chapter 和统一审核降级策略共用同一口径：
 	// 短章按单检测片段/segment floor 真高判，不被 blended 平均值稀释放行。
 	return aigc.EffectiveGatePercent(report)
+}
+
+type externalAIGCDetection struct {
+	Chapter      int     `json:"chapter"`
+	Detector     string  `json:"detector"`
+	Mode         string  `json:"mode"`
+	Score        float64 `json:"score"`
+	Verdict      string  `json:"verdict"`
+	Note         string  `json:"note"`
+	BodySHA256   string  `json:"body_sha256"`
+	CheckedAt    string  `json:"checked_at"`
+	ScorePercent float64
+}
+
+func latestExternalAIGCDetection(root string, chapter int, body string) (externalAIGCDetection, bool) {
+	chapterPath := filepath.Join(root, "chapters", fmt.Sprintf("%02d.md", chapter))
+	chapterInfo, _ := os.Stat(chapterPath)
+	sum := sha256.Sum256([]byte(body))
+	currentHash := fmt.Sprintf("%x", sum)
+	raw, err := os.ReadFile(filepath.Join(root, "meta", "external_detection_log.jsonl"))
+	if err != nil {
+		return externalAIGCDetection{}, false
+	}
+	var latest externalAIGCDetection
+	found := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row externalAIGCDetection
+		if err := json.Unmarshal([]byte(line), &row); err != nil || row.Chapter != chapter {
+			continue
+		}
+		if row.BodySHA256 != "" && row.BodySHA256 != currentHash {
+			continue
+		}
+		if row.BodySHA256 == "" && chapterInfo != nil && !chapterInfo.ModTime().IsZero() && row.CheckedAt != "" {
+			checkedAt, err := time.ParseInLocation("2006-01-02T15:04:05", row.CheckedAt, time.Local)
+			if err == nil && checkedAt.Before(chapterInfo.ModTime().Add(-time.Second)) {
+				continue
+			}
+		}
+		score := row.Score
+		if score > 0 && score <= 1 {
+			score *= 100
+		}
+		row.ScorePercent = score
+		latest = row
+		found = true
+	}
+	return latest, found
 }
 
 var reviewDimensionNames = []string{
@@ -466,6 +540,9 @@ func parseReviewIssues(md string) []domain.ConsistencyIssue {
 		if desc == "" {
 			continue
 		}
+		if isNonActionableReviewIssue(desc) {
+			continue
+		}
 		issues = append(issues, domain.ConsistencyIssue{
 			Type:        "aesthetic",
 			Severity:    "warning",
@@ -478,6 +555,33 @@ func parseReviewIssues(md string) []domain.ConsistencyIssue {
 		}
 	}
 	return issues
+}
+
+func isNonActionableReviewIssue(desc string) bool {
+	desc = strings.TrimSpace(strings.ReplaceAll(desc, "**", ""))
+	if desc == "" {
+		return true
+	}
+	normalized := strings.Join(strings.Fields(desc), "")
+	switch {
+	case strings.HasPrefix(normalized, "无严重问题"):
+		return true
+	case strings.HasPrefix(normalized, "没有严重问题"):
+		return true
+	case strings.Contains(normalized, "不建议改写"):
+		return true
+	case strings.Contains(normalized, "无需修改"):
+		return true
+	case strings.Contains(normalized, "不需要修改"):
+		return true
+	case strings.Contains(normalized, "不构成问题"):
+		return true
+	case strings.Contains(normalized, "实为优秀写作"):
+		return true
+	case strings.Contains(normalized, "非必要"):
+		return true
+	}
+	return false
 }
 
 func stripMarkdownCell(s string) string {
@@ -591,6 +695,39 @@ func summarizeReview(chNum int, review string) string {
 	rewrite := extractLine(review, "## 是否需要改写")
 	diag := extractLine(review, "## 一句话诊断")
 	return fmt.Sprintf("- **ch%02d**：%s ｜ %s ｜ %s", chNum, score, rewrite, diag)
+}
+
+func rebuildReviewSummary(projectDir string) (string, error) {
+	reviewsDir := filepath.Join(projectDir, "reviews")
+	chapters, err := chapterNumbersFromFiles(reviewsDir)
+	if err != nil {
+		return "", err
+	}
+	rows := make([]string, 0, len(chapters))
+	for _, chapter := range chapters {
+		path := filepath.Join(reviewsDir, fmt.Sprintf("%02d.md", chapter))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("读取第 %d 章统一审核用于重建汇总: %w", chapter, err)
+		}
+		row := summarizeReview(chapter, string(raw))
+		if mechanical, _, loadErr := reviewreport.LoadMechanicalGate(projectDir, chapter); loadErr == nil && mechanical != nil && mechanical.BodySHA256 != "" {
+			row += fmt.Sprintf(" <!-- body_sha256=%s -->", mechanical.BodySHA256)
+		}
+		rows = append(rows, row)
+	}
+
+	summaryPath := filepath.Join(projectDir, "meta", "review-summary.md")
+	summary := "# review-summary\n\n" +
+		"> 生成时间 " + time.Now().Format("2006-01-02 15:04:05") + "\n\n" +
+		strings.Join(rows, "\n") + "\n"
+	if err := os.MkdirAll(filepath.Dir(summaryPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(summaryPath, []byte(summary), 0o644); err != nil {
+		return "", err
+	}
+	return summaryPath, nil
 }
 
 func extractLine(md, header string) string {

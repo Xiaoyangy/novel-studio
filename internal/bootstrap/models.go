@@ -44,9 +44,10 @@ type FailoverEvent struct {
 type FailoverReporter func(FailoverEvent)
 
 type modelTarget struct {
-	provider string
-	name     string
-	model    agentcore.ChatModel
+	provider        string
+	name            string
+	reasoningEffort string
+	model           agentcore.ChatModel
 }
 
 type modelCreateOptions struct {
@@ -145,9 +146,10 @@ func resolveRoleAlias(ms *ModelSet, role string) string {
 
 // FallbackTarget 描述某角色一个已构建好的备用模型，供自检逐个 ping。
 type FallbackTarget struct {
-	Provider  string
-	Model     string
-	ChatModel agentcore.ChatModel
+	Provider        string
+	Model           string
+	ReasoningEffort string
+	ChatModel       agentcore.ChatModel
 }
 
 // FallbackTargets 返回某角色按顺序配置的备用 provider/model（已构建实例），无则空。
@@ -155,7 +157,7 @@ func (ms *ModelSet) FallbackTargets(role string) []FallbackTarget {
 	targets := ms.fallbacks[resolveRoleAlias(ms, role)]
 	out := make([]FallbackTarget, 0, len(targets))
 	for _, t := range targets {
-		out = append(out, FallbackTarget{Provider: t.provider, Model: t.name, ChatModel: t.model})
+		out = append(out, FallbackTarget{Provider: t.provider, Model: t.name, ReasoningEffort: t.reasoningEffort, ChatModel: t.model})
 	}
 	return out
 }
@@ -294,9 +296,10 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 				return nil, fmt.Errorf("role %s fallback %s/%s: %w", role, fallback.Provider, fallback.Model, err)
 			}
 			targets = append(targets, modelTarget{
-				provider: fallback.Provider,
-				name:     fallback.Model,
-				model:    fm,
+				provider:        fallback.Provider,
+				name:            fallback.Model,
+				reasoningEffort: fallback.ReasoningEffort,
+				model:           fm,
 			})
 		}
 		ms.fallbacks[role] = targets
@@ -373,7 +376,7 @@ type failoverModel struct {
 
 func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	current := m.currentTarget()
-	resp, err := current.model.Generate(ctx, messages, tools, opts...)
+	resp, err := current.model.Generate(ctx, messages, tools, callOptionsForTarget(opts, current)...)
 	if err == nil {
 		return resp, nil
 	}
@@ -383,7 +386,7 @@ func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Messa
 		return nil, err
 	}
 	m.reportFailover(current, next, reason, err)
-	return next.model.Generate(ctx, messages, tools, opts...)
+	return next.model.Generate(ctx, messages, tools, callOptionsForTarget(opts, next)...)
 }
 
 func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
@@ -461,6 +464,13 @@ func (m *failoverModel) Info() llm.ModelInfo {
 		return llm.ModelInfo{}
 	}
 	return m.primary.Info()
+}
+
+func (m *failoverModel) Capabilities() llm.Capabilities {
+	if m.primary == nil {
+		return llm.Capabilities{}
+	}
+	return m.primary.Capabilities()
 }
 
 func (m *failoverModel) currentTarget() modelTarget {
@@ -542,14 +552,23 @@ func (m *failoverModel) startAttempt(ctx context.Context, target modelTarget, me
 		return nil, nil, fmt.Errorf("no model configured")
 	}
 
-	streamCh, err := target.model.GenerateStream(ctx, messages, tools, opts...)
+	targetOpts := callOptionsForTarget(opts, target)
+	streamCh, err := target.model.GenerateStream(ctx, messages, tools, targetOpts...)
 	if err == nil {
 		return streamCh, nil, nil
 	}
 
-	resp, genErr := target.model.Generate(ctx, messages, tools, opts...)
+	resp, genErr := target.model.Generate(ctx, messages, tools, targetOpts...)
 	if genErr != nil {
 		return nil, nil, genErr
 	}
 	return nil, resp, nil
+}
+
+func callOptionsForTarget(opts []agentcore.CallOption, target modelTarget) []agentcore.CallOption {
+	if strings.TrimSpace(target.reasoningEffort) == "" {
+		return opts
+	}
+	out := append([]agentcore.CallOption(nil), opts...)
+	return append(out, agentcore.WithThinking(agentcore.ThinkingLevel(target.reasoningEffort)))
 }

@@ -38,6 +38,11 @@ func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
 		return fmt.Errorf("交付沉淀找不到章节")
 	}
 	st := store.NewStore(outputDir)
+	if pending, err := st.RAG.LoadPendingUpserts(); err != nil {
+		return fmt.Errorf("读取待回填 RAG 队列失败: %w", err)
+	} else if pending != nil && len(pending.Chunks) > 0 {
+		return fmt.Errorf("交付前仍有 %d 个 RAG chunks 待回填；先执行 RAG 就绪修复", len(pending.Chunks))
+	}
 	now := time.Now()
 	deliveredAt := now.Format(time.RFC3339)
 	stamp := now.Format("20060102T150405")
@@ -48,6 +53,16 @@ func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
 
 	var snapshots []pipelineDeliverySnapshot
 	for _, ch := range chapters {
+		currentReview := inspectCurrentChapterReview(outputDir, ch)
+		if len(currentReview.Issues) > 0 {
+			return fmt.Errorf("第 %d 章不能交付：审核产物不是当前正文版本：%s", ch, strings.Join(currentReview.Issues, ", "))
+		}
+		if currentReview.Verdict != "accept" {
+			return fmt.Errorf("第 %d 章不能交付：当前章级审核 verdict=%q，必须先完成 rewrite/复审并达到 accept", ch, currentReview.Verdict)
+		}
+		if currentReview.Disposition == "是" || currentReview.Disposition == "待定" {
+			return fmt.Errorf("第 %d 章不能交付：统一审核裁决为‘是否需要改写=%s’，必须先完成 rewrite/复审", ch, currentReview.Disposition)
+		}
 		snap := pipelineDeliverySnapshot{Version: 1, DeliveredAt: deliveredAt, Chapter: ch}
 		review, err := st.World.LoadReview(ch)
 		if err != nil {
@@ -424,6 +439,7 @@ func worldRuleHits(corpus string, rule domain.WorldRule) []string {
 }
 
 func settlePipelineRAGFacts(st *store.Store, chapter int, deliveredAt string) (bool, bool, error) {
+	_ = deliveredAt
 	sourcePath := fmt.Sprintf("summaries/%02d.json", chapter)
 	state, err := st.RAG.LoadIndexState()
 	if err != nil {
@@ -441,27 +457,12 @@ func settlePipelineRAGFacts(st *store.Store, chapter int, deliveredAt string) (b
 		return false, false, err
 	}
 	if state == nil {
-		state = &domain.RAGIndexState{Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
+		state = &domain.RAGIndexState{SchemaVersion: domain.CurrentRAGIndexSchemaVersion, Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
 	}
 	if strings.TrimSpace(state.Config.Collection) == "" {
 		state.Config.Collection = "local_keyword"
 	}
-	text := pipelineRAGSummaryText(*sum, deliveredAt)
-	chunk := rag.NormalizeChunk(domain.RAGChunk{
-		ID:         fmt.Sprintf("chapter:%03d:pipeline_delivery_facts", chapter),
-		SourcePath: sourcePath,
-		SourceKind: "chapter",
-		Facet:      "plot",
-		Context:    fmt.Sprintf("第 %d 章交付确认 | pipeline deliver", chapter),
-		Text:       text,
-		Summary:    truncateForContext(strings.TrimSpace(sum.Summary), 120),
-		Keywords:   append(append([]string{}, sum.Characters...), sum.KeyEvents...),
-		Metadata: map[string]any{
-			"chapter":      chapter,
-			"source":       "pipeline_delivery",
-			"delivered_at": deliveredAt,
-		},
-	})
+	chunk := rag.NormalizeChunk(chunkFromChapterSummary(*sum))
 	state.Chunks = append(state.Chunks, chunk)
 	state.ChunkHashes = pipelineRAGChunkHashes(state.Chunks)
 	state.UpdatedAt = deliveredAt
@@ -469,28 +470,6 @@ func settlePipelineRAGFacts(st *store.Store, chapter int, deliveredAt string) (b
 		return false, false, err
 	}
 	return true, true, nil
-}
-
-func pipelineRAGSummaryText(sum domain.ChapterSummary, deliveredAt string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# 第 %d 章交付事实\n", sum.Chapter)
-	fmt.Fprintf(&b, "交付时间：%s\n", deliveredAt)
-	if strings.TrimSpace(sum.Summary) != "" {
-		fmt.Fprintf(&b, "摘要：%s\n", sum.Summary)
-	}
-	if len(sum.Characters) > 0 {
-		fmt.Fprintf(&b, "出场人物：%s\n", strings.Join(sum.Characters, "、"))
-	}
-	if len(sum.KeyEvents) > 0 {
-		fmt.Fprintf(&b, "关键事件：%s\n", strings.Join(sum.KeyEvents, "；"))
-	}
-	if sum.OpeningDevice != "" {
-		fmt.Fprintf(&b, "开头装置：%s\n", sum.OpeningDevice)
-	}
-	if sum.EndingDevice != "" {
-		fmt.Fprintf(&b, "结尾装置：%s\n", sum.EndingDevice)
-	}
-	return strings.TrimSpace(b.String())
 }
 
 func pipelineRAGChunkHashes(chunks []domain.RAGChunk) []string {
@@ -1243,9 +1222,6 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
 				return err
 			}
-			if err := pipelineClearStalePipelineSteer(store.NewStore(cfg.OutputDir)); err != nil {
-				return err
-			}
 			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
 			if pipelineWriteGoalReached(prog, flags.WriteTo) {
 				return nil
@@ -1255,15 +1231,12 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
 				return err
 			}
-			if err := pipelineClearStalePipelineSteer(store.NewStore(cfg.OutputDir)); err != nil {
-				return err
-			}
 			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
 			if pipelineWriteGoalReached(prog, flags.WriteTo) {
 				return nil
 			}
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterChapter: flags.WriteTo}); err != nil {
+		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterChapter: flags.WriteTo, SkipQueueReplay: true}); err != nil {
 			return err
 		}
 		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
@@ -1303,7 +1276,24 @@ func pipelineNeedsFreshWritingSession(outputDir string, prog *domain.Progress) (
 	}
 	st := store.NewStore(outputDir)
 	if partial, err := st.Drafts.LoadChapterPlanPartial(1); err == nil && partial != nil {
+		if _, migrateErr := tools.MigrateLegacyPlanStageToChapterSimulation(st, 1, partial); migrateErr != nil {
+			return false, fmt.Errorf("迁移第 1 章全角色推演失败: %w", migrateErr)
+		}
+		partial, err = st.Drafts.LoadChapterPlanPartial(1)
+		if err != nil {
+			return false, fmt.Errorf("重载第 1 章 staged plan 失败: %w", err)
+		}
 		if issues := tools.ChapterPlanIdentityIssues(st, 1, partial); len(issues) > 0 {
+			repairable := true
+			for _, issue := range issues {
+				if !strings.Contains(issue, "visible_in_chapter") {
+					repairable = false
+					break
+				}
+			}
+			if repairable {
+				return false, nil
+			}
 			fmt.Fprintf(os.Stderr, "[pipeline:write] 清理不合格第 1 章 staged plan：%s\n", strings.Join(issues, "；"))
 			return true, nil
 		}
@@ -1377,24 +1367,31 @@ func pipelineClearStalePipelineSteer(st *store.Store) error {
 }
 
 func pipelineFinalizeStagedPlans(outputDir string, writeTo int) error {
+	st := store.NewStore(outputDir)
 	matches, err := filepath.Glob(filepath.Join(outputDir, "drafts", "*.plan.partial.json"))
 	if err != nil {
 		return err
 	}
 	if len(matches) == 0 {
-		return nil
+		return pipelineClearStalePipelineSteer(st)
 	}
 	sort.Strings(matches)
-	st := store.NewStore(outputDir)
 	tool := tools.NewPlanDetailsTool(st)
+	hadFailure := false
 	for _, path := range matches {
 		chapter, ok := chapterFromPlanPartialPath(path)
 		if !ok || (writeTo > 0 && chapter > writeTo) {
 			continue
 		}
+		if partial, loadErr := st.Drafts.LoadChapterPlanPartial(chapter); loadErr != nil {
+			return loadErr
+		} else if _, migrateErr := tools.MigrateLegacyPlanStageToChapterSimulation(st, chapter, partial); migrateErr != nil {
+			return fmt.Errorf("迁移第 %d 章全角色推演失败: %w", chapter, migrateErr)
+		}
 		args, _ := json.Marshal(map[string]any{"chapter": chapter, "finalize": true})
 		raw, err := tool.Execute(context.Background(), args)
 		if err != nil {
+			hadFailure = true
 			fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章 staged plan 尚未可收口：%v\n", chapter, err)
 			if setErr := pipelineQueueStagedPlanRepair(st, chapter, err); setErr != nil {
 				return setErr
@@ -1406,11 +1403,11 @@ func pipelineFinalizeStagedPlans(outputDir string, writeTo int) error {
 		}
 		_ = json.Unmarshal(raw, &result)
 		if result.Planned {
-			if err := pipelineClearStalePipelineSteer(st); err != nil {
-				return err
-			}
 			fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章 staged plan 已收口为正式计划\n", chapter)
 		}
+	}
+	if !hadFailure {
+		return pipelineClearStalePipelineSteer(st)
 	}
 	return nil
 }
@@ -1429,7 +1426,7 @@ func pipelineQueueStagedPlanRepair(st *store.Store, chapter int, cause error) er
 }
 
 func pipelineStagedPlanRepairSteer(chapter int, cause string) string {
-	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 只补齐章节计划，不写正文；writer 本轮最多调用 novel_context 一次，禁止反复 craft_recall/novel_context/read_chapter。必须针对下列缺项调用 plan_details(chapter=%d, causal_simulation={...}) 分批补齐：每次只补一组，先不要 finalize=true；建议顺序 batch1=context_sources+offscreen_character_stage（initial_state 已有时只补缺失 action_tendency 等小字段）、batch2=environment_state+causal_beats+decision_points+outcome_shift、batch3=voice_logic+dialogue_scene_blueprints、batch4=character_arc_tests+emotional_logic+relationship_emotion_arcs+dormant_character_policy、batch5=world_background_layers+information_asymmetry+hidden_rule_pressure+social_mood_rumors+ritual_calendar+structural_resources+cosmology_checks+conflict_web+narrative_tension_matrix。全部补完后最后一批再调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
+	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 修复，不写正文，不调用 craft_recall/read_chapter。先调用 novel_context(chapter=%d) 一次读取紧凑状态并严格执行 next_step。返工章的 rewrite_source 已直接注入当前终稿、正文 hash、完整 brief 和 preserve_facts：若 chapter_world_simulation 未完成或 invalid，分批调用 simulate_chapter_world，让全部实名角色各自提交目标、压力、可选项、决定、决定理由、行动和蝴蝶效应，并用 rewrite_fact_coverage 逐条覆盖 preserve_facts 后 finalize；模拟更新或 structure_source_status=stale 时必须重新 plan_structure，不能沿用旧骨架。之后再调用 plan_details。POV plan 最小分组：batch1=world_simulation_id+protagonist_decision+project_promise+chapter_function+context_sources+initial_state（只覆盖主角；context_sources 必须含 rewrite_source 和 rewrite_brief 精确令牌），batch2=environment_state+causal_beats+decision_points+outcome_shift，batch3=voice_logic+dialogue_scene_blueprints+emotional_logic+anti_ai_execution_plan，batch4=reader_reward_plan+reader_retention_plan+ending_consequence_contract；返工章同时补 review_refinement，并将全部 preserve_facts 原样写入 preserve_constraints。最后调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
 		chapter, chapter, chapter, chapter, truncateForPipelineSteer(cause, 6000))
 }
 

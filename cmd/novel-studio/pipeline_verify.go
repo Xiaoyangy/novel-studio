@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -99,7 +100,8 @@ func verifyPipelineArchitectStage(outputDir string, evidence domain.PipelineStag
 
 func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
 	st := store.NewStore(outputDir)
-	if !tools.ChapterOnePendingFirstWrite(st) && !pipelineZeroInitEvidenceExists(outputDir) {
+	firstWritePending := tools.ChapterOnePendingFirstWrite(st)
+	if !firstWritePending && !pipelineZeroInitEvidenceExists(outputDir) {
 		evidence.Message = "zero-init skipped after chapter one (legacy project)"
 		return evidence, nil
 	}
@@ -114,9 +116,21 @@ func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStage
 			evidence.Missing = append(evidence.Missing, filepath.ToSlash(rel))
 		}
 	}
-	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok {
+	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok && firstWritePending {
 		sort.Strings(evidence.Missing)
 		return evidence, fmt.Errorf("zero-init 阶段 readiness 未就绪：%s", reason)
+	} else if !ok {
+		evidence.Missing = nil
+		for _, rel := range []string{
+			filepath.Join("meta", "world_tick.json"),
+			filepath.Join("meta", "world_events.jsonl"),
+		} {
+			if nonEmptyFile(filepath.Join(outputDir, rel)) {
+				evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
+			}
+		}
+		evidence.Message = "historical zero-init evidence is stale after chapter one: " + reason
+		return evidence, nil
 	}
 	if err := verifyPipelineZeroInitWorldTick(st); err != nil {
 		evidence.Missing = append(evidence.Missing, filepath.ToSlash(filepath.Join("meta", "world_tick.json")), filepath.ToSlash(filepath.Join("meta", "world_events.jsonl")))
@@ -266,22 +280,29 @@ func verifyPipelineReviewStage(outputDir string, flags pipelineFlags, evidence d
 		return evidence, fmt.Errorf("review 阶段找不到 chapters/*.md")
 	}
 	chapters = filterChaptersForPipelineRange(chapters, flags)
-	for _, ch := range chapters {
-		rel := fmt.Sprintf("reviews/%02d.md", ch)
-		if !nonEmptyFile(filepath.Join(outputDir, filepath.FromSlash(rel))) {
-			evidence.Missing = append(evidence.Missing, rel)
-			continue
-		}
-		evidence.Artifacts = append(evidence.Artifacts, rel)
+	if len(chapters) == 0 {
+		return evidence, fmt.Errorf("review 阶段指定范围内没有章节")
 	}
-	if !nonEmptyFile(filepath.Join(outputDir, "meta", "review-summary.md")) {
-		evidence.Missing = append(evidence.Missing, "meta/review-summary.md")
+	hashes := make(map[int]string, len(chapters))
+	progress, _ := store.NewStore(outputDir).Progress.Load()
+	for _, ch := range chapters {
+		current := inspectCurrentChapterReview(outputDir, ch)
+		hashes[ch] = current.BodySHA256
+		evidence.Artifacts = append(evidence.Artifacts, current.Artifacts...)
+		evidence.Missing = append(evidence.Missing, current.Issues...)
+		if current.Disposition == "是" && (progress == nil || !slices.Contains(progress.PendingRewrites, ch)) {
+			evidence.Missing = append(evidence.Missing, fmt.Sprintf("meta/progress.json (ch%02d blocking review not queued)", ch))
+		}
+	}
+	if summaryRel, issues := inspectReviewSummaryCurrent(outputDir, chapters, hashes); summaryRel != "" {
+		evidence.Artifacts = append(evidence.Artifacts, summaryRel)
+		evidence.Missing = append(evidence.Missing, issues...)
 	} else {
-		evidence.Artifacts = append(evidence.Artifacts, "meta/review-summary.md")
+		evidence.Missing = append(evidence.Missing, issues...)
 	}
 	sort.Strings(evidence.Missing)
 	if len(evidence.Missing) > 0 {
-		return evidence, fmt.Errorf("review 阶段缺少评审产物: %s", strings.Join(evidence.Missing, ", "))
+		return evidence, fmt.Errorf("review 阶段缺少或存在过期评审产物: %s", strings.Join(evidence.Missing, ", "))
 	}
 	evidence.CompletedChapters = len(chapters)
 	return evidence, nil
@@ -296,7 +317,16 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 		return evidence, fmt.Errorf("rewrite 阶段找不到 chapters/*.md")
 	}
 	chapters = filterChaptersForPipelineRange(chapters, flags)
+	if len(chapters) == 0 {
+		return evidence, fmt.Errorf("rewrite 阶段指定范围内没有章节")
+	}
 	for _, ch := range chapters {
+		currentReview := inspectCurrentChapterReview(outputDir, ch)
+		if len(currentReview.Issues) > 0 {
+			evidence.Missing = append(evidence.Missing, currentReview.Issues...)
+			continue
+		}
+		evidence.Artifacts = append(evidence.Artifacts, currentReview.Artifacts...)
 		chapterRel := fmt.Sprintf("chapters/%02d.md", ch)
 		backupRel := fmt.Sprintf("chapters/%02d.md.pre-rewrite.md", ch)
 		briefRel := fmt.Sprintf("reviews/%02d_rewrite_brief.md", ch)
@@ -335,7 +365,7 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 	}
 	sort.Strings(evidence.Missing)
 	if len(evidence.Missing) > 0 {
-		return evidence, fmt.Errorf("rewrite 阶段缺少重写证据: %s", strings.Join(evidence.Missing, ", "))
+		return evidence, fmt.Errorf("rewrite 阶段缺少重写证据或当前审核: %s", strings.Join(evidence.Missing, ", "))
 	}
 	evidence.CompletedChapters = len(chapters)
 	return evidence, nil
@@ -373,6 +403,25 @@ func filterChaptersForPipelineRange(chapters []int, flags pipelineFlags) []int {
 }
 
 func verifyPipelineDeliverStage(outputDir string, flags pipelineFlags, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+	chapters, err := chapterNumbersFromFiles(filepath.Join(outputDir, "chapters"))
+	if err != nil {
+		return evidence, err
+	}
+	chapters = filterChaptersForPipelineRange(chapters, flags)
+	if len(chapters) == 0 {
+		return evidence, fmt.Errorf("deliver 阶段指定范围内没有章节")
+	}
+	for _, chapter := range chapters {
+		current := inspectCurrentChapterReview(outputDir, chapter)
+		evidence.Artifacts = append(evidence.Artifacts, current.Artifacts...)
+		evidence.Missing = append(evidence.Missing, current.Issues...)
+		if len(current.Issues) == 0 && current.Verdict != "accept" {
+			evidence.Missing = append(evidence.Missing, fmt.Sprintf("reviews/%02d.json (verdict=%s, want accept)", chapter, current.Verdict))
+		}
+		if len(current.Issues) == 0 && (current.Disposition == "是" || current.Disposition == "待定") {
+			evidence.Missing = append(evidence.Missing, fmt.Sprintf("reviews/%02d.md (rewrite disposition=%s)", chapter, current.Disposition))
+		}
+	}
 	for _, rel := range []string{
 		filepath.Join("meta", "delivery_log.jsonl"),
 		filepath.Join("meta", "delivery_log.md"),

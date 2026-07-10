@@ -80,3 +80,24 @@ func TestLoadReferencesIncludesWebReferenceGuidelines(t *testing.T) {
 		t.Fatalf("expected web reference guidelines to define trend language handling")
 	}
 }
+
+func TestWritingPromptsRemainProjectNeutral(t *testing.T) {
+	bundle := Load("default")
+	if !strings.Contains(bundle.Prompts.Writer, "章节目标以本轮 task 为最高优先级") {
+		t.Fatal("writer prompt must pin every planning tool to the task chapter")
+	}
+
+	combined := strings.Join([]string{
+		bundle.Prompts.Writer,
+		bundle.Prompts.Drafter,
+		bundle.Prompts.Editor,
+	}, "\n")
+	for _, leaked := range []string{
+		"许闻溪", "梁渡", "夏岚", "傅行简", "程棠",
+		"澄光生活", "溪流助手", "江烬", "阴司银行", "黑伞先生",
+	} {
+		if strings.Contains(combined, leaked) {
+			t.Fatalf("builtin writing prompts leaked project-specific term %q", leaked)
+		}
+	}
+}

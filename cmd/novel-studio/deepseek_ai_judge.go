@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -115,7 +113,6 @@ func runDeepSeekAIJudge(
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	hash := sha256.Sum256([]byte(chapterBody))
 	resp, err := model.Generate(ctx,
 		[]agentcore.Message{
 			{Role: "system", Content: []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: deepseekAIJudgeSystemPrompt}}},
@@ -141,7 +138,7 @@ func runDeepSeekAIJudge(
 		ReasoningEffort:  string(deepseekAIJudgeReasoningEffort),
 		RawBodyOnly:      true,
 		UserPayloadKind:  "chapter_body_only",
-		BodySHA256:       hex.EncodeToString(hash[:]),
+		BodySHA256:       reviewreport.BodySHA256(chapterBody),
 		RawResponse:      raw,
 		ModelSelection:   selection,
 	}

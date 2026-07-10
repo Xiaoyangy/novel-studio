@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+var qdrantLaunchMu sync.Mutex
 
 type QdrantServiceConfig struct {
 	URL           string
@@ -40,6 +43,12 @@ func EnsureLocalQdrant(ctx context.Context, cfg QdrantServiceConfig) error {
 	}
 	if !cfg.AutoStart {
 		return fmt.Errorf("qdrant is not healthy at %s and auto_start=false", cfg.URL)
+	}
+	qdrantLaunchMu.Lock()
+	defer qdrantLaunchMu.Unlock()
+	// Avoid racing two binary/docker starts for the same local service.
+	if err := client.Health(ctx); err == nil {
+		return nil
 	}
 	if bin := qdrantBinaryPath(cfg.BinaryPath); bin != "" {
 		if err := os.MkdirAll(cfg.StorageDir, 0o755); err != nil {

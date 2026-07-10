@@ -22,6 +22,7 @@ type Options struct {
 	StopAfterChapter          int
 	StopAfterFoundation       bool
 	StopAfterInitialWorldTick bool
+	SkipQueueReplay           bool
 	Stdin                     io.Reader
 	Stdout                    io.Writer
 	Stderr                    io.Writer
@@ -76,13 +77,16 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return err
 		}
 	} else {
-		items, err := eng.ReplayQueue(0)
-		if err != nil {
-			return err
-		}
-		roundHasContent, err := replayQueue(items, stdout, stderr)
-		if err != nil {
-			return err
+		roundHasContent := false
+		if !opts.SkipQueueReplay {
+			items, err := eng.ReplayQueue(0)
+			if err != nil {
+				return err
+			}
+			roundHasContent, err = replayQueue(items, stdout, stderr)
+			if err != nil {
+				return err
+			}
 		}
 		label, err := eng.Resume()
 		if err != nil {

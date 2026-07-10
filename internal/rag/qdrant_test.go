@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -103,6 +104,86 @@ func TestQdrantClientWritesAndSearchesChunks(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+func TestQdrantClientRetriesTransportEOF(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/collections/eof_collection/points/count" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if atomic.AddInt32(&calls, 1) == 1 {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = w.Write([]byte(`{"result":{"count":7}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewQdrantClient(QdrantClientConfig{URL: server.URL, Collection: "eof_collection"})
+	if err != nil {
+		t.Fatalf("NewQdrantClient: %v", err)
+	}
+	count, err := client.Count(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 7 || atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("count=%d calls=%d", count, calls)
+	}
+}
+
+func TestQdrantClientRetriesServerFailureAndTruncatedSuccessJSON(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			http.Error(w, "warming up", http.StatusServiceUnavailable)
+		case 2:
+			_, _ = w.Write([]byte(`{"result":`))
+		default:
+			_, _ = w.Write([]byte(`{"result":{"collections":[]}}`))
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewQdrantClient(QdrantClientConfig{URL: server.URL, Collection: "health_collection"})
+	if err != nil {
+		t.Fatalf("NewQdrantClient: %v", err)
+	}
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if atomic.LoadInt32(&calls) != 3 {
+		t.Fatalf("calls=%d, want 3", calls)
+	}
+}
+
+func TestQdrantClientRejectsExistingDimensionMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/collections/dimension_collection" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewQdrantClient(QdrantClientConfig{URL: server.URL, Collection: "dimension_collection"})
+	if err != nil {
+		t.Fatalf("NewQdrantClient: %v", err)
+	}
+	err = client.EnsureCollection(context.Background(), 2)
+	if err == nil || !strings.Contains(err.Error(), "dimension mismatch") {
+		t.Fatalf("expected dimension mismatch, got %v", err)
 	}
 }
 

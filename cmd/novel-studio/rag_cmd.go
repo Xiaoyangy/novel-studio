@@ -60,6 +60,110 @@ func hasBuildRAGFlag(argv []string) bool {
 	return false
 }
 
+func hasRAGReadyFlag(argv []string) bool {
+	for _, arg := range argv {
+		if arg == "--rag-ready" {
+			return true
+		}
+	}
+	return false
+}
+
+func ragReadyPipeline(opts cliOptions, args []string) error {
+	fs := flag.NewFlagSet("rag-ready", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "用法: novel-studio --rag-ready [--dir <output/novel>]")
+		fmt.Fprintln(os.Stderr, "只执行 RAG schema 迁移、pending 回放、向量复用与 Qdrant 恢复，不启动写作。")
+		fs.PrintDefaults()
+	}
+	var dir string
+	fs.StringVar(&dir, "dir", "", "小说输出目录；为空时使用配置中的 output_dir")
+	if hasHelpToken(args) {
+		fs.Usage()
+		return nil
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("--rag-ready 不接受额外参数：%v", fs.Args())
+	}
+	cfg, _, err := loadCfgBundle(opts)
+	if err != nil && strings.TrimSpace(dir) == "" {
+		return err
+	}
+	if strings.TrimSpace(dir) != "" {
+		absDir, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			return absErr
+		}
+		refreshAutoRAGCollectionForOutputDir(&cfg, absDir, hasConfiguredRAGQdrantCollection(opts))
+	}
+	if err := ensurePipelineRAGReady(cfg); err != nil {
+		return err
+	}
+	st := store.NewStore(cfg.OutputDir)
+	state, err := st.RAG.LoadIndexState()
+	if err != nil {
+		return fmt.Errorf("读取 RAG index 状态失败: %w", err)
+	}
+	if state == nil {
+		return fmt.Errorf("读取 RAG index 状态失败: index_state 不存在")
+	}
+	vectorStore, err := st.RAG.LoadVectorStore()
+	if err != nil {
+		return err
+	}
+	pending, err := st.RAG.LoadPendingUpserts()
+	if err != nil {
+		return err
+	}
+	pendingCount := 0
+	if pending != nil {
+		pendingCount = len(pending.Chunks)
+	}
+	if pendingCount != 0 {
+		return fmt.Errorf("RAG 就绪后仍有 pending chunks=%d", pendingCount)
+	}
+	factHashes := make(map[string]struct{})
+	for _, chunk := range state.Chunks {
+		if !rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			factHashes[rag.NormalizeChunk(chunk).Hash] = struct{}{}
+		}
+	}
+	report := map[string]any{
+		"ready":            true,
+		"schema_version":   state.SchemaVersion,
+		"chunks":           len(state.Chunks),
+		"fact_chunks":      len(factHashes),
+		"pending_chunks":   pendingCount,
+		"collection":       state.Config.Collection,
+		"vector_store":     state.Config.VectorStore,
+		"vector_dimension": state.Config.VectorDimension,
+	}
+	if vectorStore != nil {
+		report["local_vector_points"] = len(vectorStore.Points)
+	}
+	if _, enabled := bootstrap.ResolveRAGQdrantConfig(cfg); enabled {
+		client, clientEnabled, clientErr := bootstrap.NewRAGQdrantClient(cfg, false)
+		if clientErr != nil {
+			return clientErr
+		}
+		if clientEnabled {
+			countCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			count, countErr := client.Count(countCtx, true)
+			if countErr != nil {
+				return countErr
+			}
+			report["qdrant_points"] = count
+		}
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(report)
+}
+
 func parseBuildRAGFlags(argv []string) (buildRAGFlags, []string, error) {
 	fs := flag.NewFlagSet("build-rag", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -153,6 +257,15 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 			return err
 		}
 	}
+	if pending, err := st.RAG.LoadPendingUpserts(); err != nil {
+		return err
+	} else if pending != nil && len(pending.Chunks) > 0 {
+		mergePendingRAGState(st, &result.State, pending.Chunks)
+		if err := st.RAG.SaveIndexState(result.State); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[build-rag] 已合并待回填 RAG chunks=%d\n", len(pending.Chunks))
+	}
 	if removed, err := sanitizeExistingRAGVectorStore(st, &result.State); err != nil {
 		return err
 	} else if removed > 0 {
@@ -171,10 +284,10 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 		result.State = embeddingResult.State
 		vectorEmbedded = embeddingResult.Embedded
 		vectorWritten = embeddingResult.Written
-		if err := st.RAG.SaveIndexState(result.State); err != nil {
+		if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
 			return err
 		}
-		if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
+		if err := st.RAG.SaveIndexState(result.State); err != nil {
 			return err
 		}
 	}
@@ -187,6 +300,9 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 	if vectorEnabled {
 		fmt.Fprintf(os.Stderr, "[build-rag] embeddings=%d，vector_points=%d，vector_store=%s，collection=%s，fallback=%s\n",
 			vectorEmbedded, vectorWritten, result.State.Config.VectorStore, result.State.Config.Collection, filepath.Join(absDir, "meta", "rag", "vector_store.json"))
+	}
+	if err := st.RAG.ClearPendingUpserts(); err != nil {
+		return err
 	}
 	fmt.Fprintf(os.Stdout, "%s\n", filepath.Join(absDir, "meta", "rag", "index_state.md"))
 
@@ -252,17 +368,23 @@ func hasConfiguredRAGQdrantCollection(opts cliOptions) bool {
 func ensureDefaultRAGIndex(outputDir string) error {
 	st := store.NewStore(outputDir)
 	if state, err := st.RAG.LoadIndexState(); err == nil && state != nil && len(state.Chunks) > 0 {
+		migrated := migrateRAGIndexSchema(state)
 		removed := sanitizeRAGIndexState(st, state)
 		vectorRemoved, vectorErr := sanitizeExistingRAGVectorStore(st, state)
 		if vectorErr != nil {
 			return vectorErr
 		}
-		if removed > 0 {
+		if removed > 0 || migrated {
 			if len(state.Chunks) > 0 {
 				if err := st.RAG.SaveIndexState(*state); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 参考库 chunks=%d\n", removed)
+				if migrated {
+					fmt.Fprintf(os.Stderr, "[build-rag] RAG 索引 schema 已迁移到 v%d，旧向量将按新语义 hash 重建\n", domain.CurrentRAGIndexSchemaVersion)
+				}
+				if removed > 0 {
+					fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 参考库 chunks=%d\n", removed)
+				}
 				if vectorRemoved > 0 {
 					fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", vectorRemoved)
 				}
@@ -290,6 +412,19 @@ func ensureDefaultRAGIndex(outputDir string) error {
 	return nil
 }
 
+func migrateRAGIndexSchema(state *domain.RAGIndexState) bool {
+	if state == nil || state.SchemaVersion >= domain.CurrentRAGIndexSchemaVersion {
+		return false
+	}
+	for index, chunk := range state.Chunks {
+		state.Chunks[index] = rag.RehashChunk(chunk)
+	}
+	state.ChunkHashes = rebuildRAGChunkHashList(state.Chunks)
+	state.SchemaVersion = domain.CurrentRAGIndexSchemaVersion
+	state.UpdatedAt = time.Now().Format(time.RFC3339)
+	return true
+}
+
 func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	if strings.TrimSpace(cfg.OutputDir) == "" {
 		cfg.OutputDir = filepath.Join("output", "novel")
@@ -300,8 +435,8 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	if err := ensureDefaultRAGIndex(cfg.OutputDir); err != nil {
 		return err
 	}
-	if _, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, bootstrap.RAGEmbeddingConfig{}); !enabled {
-		return nil
+	if _, err := backfillChapterRAG(cfg.OutputDir, 1, 0); err != nil {
+		return fmt.Errorf("回填已生成章节 RAG 事实: %w", err)
 	}
 	st := store.NewStore(cfg.OutputDir)
 	state, err := st.RAG.LoadIndexState()
@@ -311,18 +446,273 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	if state == nil || len(state.Chunks) == 0 {
 		return fmt.Errorf("RAG index 为空，无法构建 Qdrant 向量索引")
 	}
-	result, vectorStore, err := buildRAGEmbeddings(context.Background(), cfg, bootstrap.RAGEmbeddingConfig{}, state.Chunks)
+	pending, err := st.RAG.LoadPendingUpserts()
 	if err != nil {
 		return err
 	}
-	if err := st.RAG.SaveIndexState(result.State); err != nil {
+	pendingApplied := pending != nil && len(pending.Chunks) > 0
+	if pendingApplied {
+		mergePendingRAGState(st, state, pending.Chunks)
+		fmt.Fprintf(os.Stderr, "[build-rag] 检测到待回填 RAG chunks=%d，纳入本次恢复\n", len(pending.Chunks))
+	}
+	if _, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, bootstrap.RAGEmbeddingConfig{}); !enabled {
+		if pendingApplied {
+			if err := st.RAG.SaveIndexState(*state); err != nil {
+				return err
+			}
+			return st.RAG.ClearPendingUpserts()
+		}
+		return nil
+	}
+	embCfg, _ := bootstrap.ResolveRAGEmbeddingConfig(cfg, bootstrap.RAGEmbeddingConfig{})
+	qdrantCfg, qdrantEnabled := bootstrap.ResolveRAGQdrantConfig(cfg)
+	existingVectorStore, vectorErr := st.RAG.LoadVectorStore()
+	if vectorErr != nil {
+		return vectorErr
+	}
+	localReusable, localReason, expectedPoints := pipelineRAGLocalArtifactsReusable(state, existingVectorStore, embCfg)
+	if localReusable {
+		if !qdrantEnabled {
+			if err := persistPipelineRAGBackendConfig(st, state, existingVectorStore, embCfg, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[build-rag] 复用现有本地 RAG 向量：fact_chunks=%d（%s）\n", expectedPoints, localReason)
+			return st.RAG.ClearPendingUpserts()
+		}
+		qdrantCtx, cancelQdrant := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancelQdrant()
+		if _, err := bootstrap.EnsureRAGQdrant(qdrantCtx, cfg); err != nil {
+			return fmt.Errorf("恢复 RAG Qdrant 服务: %w", err)
+		}
+		client, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false)
+		if err != nil {
+			return fmt.Errorf("初始化 RAG Qdrant 复用客户端: %w", err)
+		}
+		if !enabled {
+			return fmt.Errorf("初始化 RAG Qdrant 复用客户端: Qdrant 未启用")
+		}
+		remoteReady := false
+		if err := client.EnsureCollection(qdrantCtx, existingVectorStore.Config.VectorDimension); err == nil {
+			if count, countErr := client.Count(qdrantCtx, true); countErr == nil && count == expectedPoints {
+				remoteReady = true
+			}
+		}
+		if !remoteReady {
+			if err := restoreQdrantFromLocalVectorStore(qdrantCtx, cfg, existingVectorStore, expectedPoints); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[build-rag] Qdrant 已从本地向量恢复：points=%d collection=%s（未重新 embedding）\n", expectedPoints, qdrantCfg.Collection)
+		} else {
+			fmt.Fprintf(os.Stderr, "[build-rag] 复用现有 RAG 向量：fact_chunks=%d qdrant_points=%d collection=%s\n", expectedPoints, expectedPoints, qdrantCfg.Collection)
+		}
+		if err := persistPipelineRAGBackendConfig(st, state, existingVectorStore, embCfg, client); err != nil {
+			return err
+		}
+		return st.RAG.ClearPendingUpserts()
+	}
+	fmt.Fprintf(os.Stderr, "[build-rag] 现有本地向量不可复用：%s；执行 embedding 重建\n", localReason)
+	result, vectorStore, err := buildRAGEmbeddings(context.Background(), cfg, bootstrap.RAGEmbeddingConfig{}, state.Chunks)
+	if err != nil {
 		return err
 	}
 	if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
 		return err
 	}
+	if err := st.RAG.SaveIndexState(result.State); err != nil {
+		return err
+	}
+	if err := st.RAG.ClearPendingUpserts(); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "[build-rag] 写作前 RAG 检查完成：chunks=%d embeddings=%d vector_points=%d collection=%s\n", len(result.State.Chunks), result.Embedded, result.Written, result.State.Config.Collection)
 	return nil
+}
+
+func mergePendingRAGState(st *store.Store, state *domain.RAGIndexState, pending []domain.RAGChunk) {
+	if state == nil || len(pending) == 0 {
+		return
+	}
+	sources := make(map[string]struct{})
+	normalized := make([]domain.RAGChunk, 0, len(pending))
+	seen := make(map[string]struct{})
+	for _, chunk := range pending {
+		chunk = rag.NormalizeChunk(chunk)
+		if chunk.SourcePath == "" || chunk.Hash == "" || rag.IsForbiddenChunk(chunk) || ragChunkHasProjectContamination(st, chunk) {
+			continue
+		}
+		if _, duplicate := seen[chunk.Hash]; duplicate {
+			continue
+		}
+		seen[chunk.Hash] = struct{}{}
+		sources[chunk.SourcePath] = struct{}{}
+		normalized = append(normalized, chunk)
+	}
+	merged := make([]domain.RAGChunk, 0, len(state.Chunks)+len(normalized))
+	for _, chunk := range state.Chunks {
+		if _, replace := sources[chunk.SourcePath]; replace {
+			continue
+		}
+		merged = append(merged, rag.NormalizeChunk(chunk))
+	}
+	merged = append(merged, normalized...)
+	state.Chunks = merged
+	state.ChunkHashes = rebuildRAGChunkHashList(merged)
+	state.SchemaVersion = domain.CurrentRAGIndexSchemaVersion
+	state.UpdatedAt = time.Now().Format(time.RFC3339)
+}
+
+func pipelineRAGArtifactsReusable(
+	state *domain.RAGIndexState,
+	vectorStore *domain.RAGVectorStore,
+	embCfg bootstrap.RAGEmbeddingConfig,
+	qdrantCfg bootstrap.RAGQdrantConfig,
+	qdrantEnabled bool,
+) (bool, string, int) {
+	localReusable, reason, expected := pipelineRAGLocalArtifactsReusable(state, vectorStore, embCfg)
+	if !localReusable {
+		return false, reason, expected
+	}
+	cfg := state.Config
+	if qdrantEnabled {
+		if cfg.VectorStore != "qdrant" || strings.TrimSpace(cfg.Collection) != strings.TrimSpace(qdrantCfg.Collection) ||
+			strings.TrimRight(strings.TrimSpace(cfg.QdrantURL), "/") != strings.TrimRight(strings.TrimSpace(qdrantCfg.URL), "/") {
+			return false, "Qdrant collection 或 URL 已变化", expected
+		}
+	} else if cfg.VectorStore != "local_json" {
+		return false, "向量后端配置已变化", expected
+	}
+	return true, "chunk/model/dimension/vector points 一致", expected
+}
+
+func pipelineRAGLocalArtifactsReusable(
+	state *domain.RAGIndexState,
+	vectorStore *domain.RAGVectorStore,
+	embCfg bootstrap.RAGEmbeddingConfig,
+) (bool, string, int) {
+	if state == nil || vectorStore == nil {
+		return false, "缺少 index_state 或 vector_store", 0
+	}
+	if state.SchemaVersion != domain.CurrentRAGIndexSchemaVersion {
+		return false, "RAG index schema 需要迁移", 0
+	}
+	factHashes := map[string]struct{}{}
+	for _, chunk := range state.Chunks {
+		if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			continue
+		}
+		chunk = rag.NormalizeChunk(chunk)
+		if strings.TrimSpace(chunk.Hash) != "" {
+			factHashes[chunk.Hash] = struct{}{}
+		}
+	}
+	expected := len(factHashes)
+	if expected == 0 {
+		return false, "事实层 chunk 为空", 0
+	}
+	cfg := state.Config
+	vectorCfg := vectorStore.Config
+	if !strings.EqualFold(strings.TrimSpace(cfg.EmbeddingProvider), strings.TrimSpace(embCfg.Provider)) ||
+		strings.TrimSpace(cfg.EmbeddingModel) != strings.TrimSpace(embCfg.Model) {
+		return false, "embedding provider/model 已变化", expected
+	}
+	if cfg.VectorDimension <= 0 || vectorCfg.VectorDimension != cfg.VectorDimension {
+		return false, "向量维度缺失或不一致", expected
+	}
+	if vectorCfg.EmbeddingProvider != cfg.EmbeddingProvider || vectorCfg.EmbeddingModel != cfg.EmbeddingModel {
+		return false, "index_state 与 vector_store 的模型不一致", expected
+	}
+	if len(vectorStore.Points) != expected {
+		return false, fmt.Sprintf("本地向量点数=%d，期望=%d", len(vectorStore.Points), expected), expected
+	}
+	seen := make(map[string]struct{}, len(vectorStore.Points))
+	for _, point := range vectorStore.Points {
+		hash := strings.TrimSpace(point.Hash)
+		if hash == "" {
+			hash = strings.TrimSpace(point.Chunk.Hash)
+		}
+		if _, ok := factHashes[hash]; !ok {
+			return false, "本地向量包含过期 chunk hash", expected
+		}
+		if _, duplicate := seen[hash]; duplicate {
+			return false, "本地向量含重复 chunk hash", expected
+		}
+		if len(point.Vector) != cfg.VectorDimension {
+			return false, "本地向量维度与索引配置不一致", expected
+		}
+		if err := rag.ValidateVector(point.Vector); err != nil {
+			return false, "本地向量包含无效数值", expected
+		}
+		seen[hash] = struct{}{}
+	}
+	return true, "chunk/model/dimension/vector points 一致", expected
+}
+
+func restoreQdrantFromLocalVectorStore(ctx context.Context, cfg bootstrap.Config, vectorStore *domain.RAGVectorStore, expected int) error {
+	if vectorStore == nil || len(vectorStore.Points) == 0 {
+		return fmt.Errorf("无法恢复 Qdrant：本地向量为空")
+	}
+	client, enabled, err := bootstrap.NewRAGQdrantClient(cfg, true)
+	if err != nil {
+		return fmt.Errorf("初始化 Qdrant 恢复客户端: %w", err)
+	}
+	if !enabled {
+		return fmt.Errorf("初始化 Qdrant 恢复客户端: Qdrant 未启用")
+	}
+	points := make([]rag.VectorPoint, 0, len(vectorStore.Points))
+	for _, point := range vectorStore.Points {
+		points = append(points, rag.VectorPoint{ID: point.ID, Vector: point.Vector, Payload: point.Payload, Chunk: point.Chunk})
+	}
+	writeCfg := vectorStore.Config
+	if writeCfg.VectorBatchSize <= 0 {
+		writeCfg.VectorBatchSize = 32
+	}
+	if writeCfg.QdrantWriteConcurrency <= 0 {
+		writeCfg.QdrantWriteConcurrency = 2
+	}
+	if _, err := rag.WriteVectorPoints(ctx, client, points, writeCfg); err != nil {
+		return fmt.Errorf("从本地向量恢复 Qdrant: %w", err)
+	}
+	count, err := client.Count(ctx, true)
+	if err != nil {
+		return fmt.Errorf("验证恢复后的 Qdrant 点数: %w", err)
+	}
+	if count != expected {
+		return fmt.Errorf("恢复后的 Qdrant 点数不一致: got=%d want=%d", count, expected)
+	}
+	return nil
+}
+
+func persistPipelineRAGBackendConfig(st *store.Store, state *domain.RAGIndexState, vectorStore *domain.RAGVectorStore, embCfg bootstrap.RAGEmbeddingConfig, client *rag.QdrantClient) error {
+	if state == nil || vectorStore == nil {
+		return fmt.Errorf("RAG 后端配置持久化缺少索引或向量状态")
+	}
+	cfg := vectorStore.Config
+	cfg.EmbeddingProvider = embCfg.Provider
+	cfg.EmbeddingModel = embCfg.Model
+	if cfg.VectorBatchSize <= 0 {
+		cfg.VectorBatchSize = 32
+	}
+	if client == nil {
+		cfg.VectorStore = "local_json"
+		cfg.Collection = "local_vector"
+		cfg.QdrantURL = ""
+	} else {
+		cfg.VectorStore = "qdrant"
+		cfg.Collection = client.Collection()
+		cfg.QdrantURL = client.URL()
+	}
+	if state.Config == cfg && vectorStore.Config == cfg {
+		return nil
+	}
+	now := time.Now().Format(time.RFC3339)
+	vectorStore.Config = cfg
+	vectorStore.UpdatedAt = now
+	state.Config = cfg
+	state.UpdatedAt = now
+	if err := st.RAG.SaveVectorStore(*vectorStore); err != nil {
+		return err
+	}
+	return st.RAG.SaveIndexState(*state)
 }
 
 type localRAGBuildResult struct {
@@ -376,6 +766,7 @@ func buildLocalRAGIndex(outputDir string, rawSources []string, maxChunkRunes, ma
 		Files:      len(files),
 		SkippedDup: skipped,
 		State: domain.RAGIndexState{
+			SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
 			Config: domain.RAGIndexConfig{
 				EmbeddingConcurrency:   0,
 				QdrantWriteConcurrency: 0,
@@ -452,6 +843,7 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	indexCfg := domain.RAGIndexConfig{
 		EmbeddingConcurrency:   embCfg.BuildConcurrency,
 		QdrantWriteConcurrency: embCfg.BuildConcurrency,
+		VectorBatchSize:        32,
 		Collection:             collection,
 		EmbeddingProvider:      embCfg.Provider,
 		EmbeddingModel:         embCfg.Model,
@@ -477,6 +869,9 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	if designOnly > 0 {
 		fmt.Fprintf(os.Stderr, "[build-rag] 设计库 chunk=%d 仅入词法索引（craft_recall/BM25），跳过 embedding；事实层 embedding=%d"+"\n", designOnly, len(factChunks))
 	}
+	if len(factChunks) == 0 {
+		return rag.IndexResult{}, domain.RAGVectorStore{}, fmt.Errorf("RAG 事实层 chunk 为空，不能构建语义向量")
+	}
 	result, err := rag.BuildIndex(ctx, factChunks, nil, indexCfg, embedder, writer)
 	if err != nil {
 		return rag.IndexResult{}, domain.RAGVectorStore{}, err
@@ -497,8 +892,8 @@ func sanitizeExistingRAGVectorStore(st *store.Store, state *domain.RAGIndexState
 	if vectorStore == nil {
 		return 0, nil
 	}
-	removed := sanitizeRAGVectorStore(st, vectorStore, state)
-	if removed == 0 {
+	removed, remapped := sanitizeRAGVectorStore(st, vectorStore, state)
+	if removed == 0 && remapped == 0 {
 		return 0, nil
 	}
 	if err := st.RAG.SaveVectorStore(*vectorStore); err != nil {
@@ -507,34 +902,53 @@ func sanitizeExistingRAGVectorStore(st *store.Store, state *domain.RAGIndexState
 	return removed, nil
 }
 
-func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore, state *domain.RAGIndexState) int {
+func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore, state *domain.RAGIndexState) (int, int) {
 	if vectorStore == nil {
-		return 0
+		return 0, 0
 	}
 	allowed := map[string]struct{}{}
+	allowedByID := map[string]domain.RAGChunk{}
 	if state != nil {
 		for _, chunk := range state.Chunks {
 			chunk = rag.NormalizeChunk(chunk)
-			if chunk.Hash != "" {
+			if chunk.Hash != "" && !rag.IsDesignOnlySourceKind(chunk.SourceKind) {
 				allowed[chunk.Hash] = struct{}{}
+				if chunk.ID != "" {
+					allowedByID[chunk.ID] = chunk
+				}
 			}
 		}
 	}
 	filtered := vectorStore.Points[:0]
 	removed := 0
+	remapped := 0
 	for _, point := range vectorStore.Points {
 		chunk := rag.NormalizeChunk(point.Chunk)
 		hash := strings.TrimSpace(point.Hash)
 		if hash == "" {
 			hash = chunk.Hash
 		}
-		if len(allowed) > 0 {
+		if state != nil {
 			if _, ok := allowed[hash]; !ok {
-				removed++
-				continue
+				candidate, candidateOK := allowedByID[point.ID]
+				if !candidateOK {
+					candidate, candidateOK = allowedByID[chunk.ID]
+				}
+				if !candidateOK || rag.RehashChunk(chunk).Hash != candidate.Hash {
+					removed++
+					continue
+				}
+				hash = candidate.Hash
+				chunk = candidate
+				point.ID = candidate.ID
+				remapped++
 			}
 		}
-		if rag.IsForbiddenChunk(chunk) || ragChunkHasProjectContamination(st, chunk) {
+		if rag.IsForbiddenChunk(chunk) || rag.IsDesignOnlySourceKind(chunk.SourceKind) || ragChunkHasProjectContamination(st, chunk) || rag.ValidateVector(point.Vector) != nil {
+			removed++
+			continue
+		}
+		if vectorStore.Config.VectorDimension > 0 && len(point.Vector) != vectorStore.Config.VectorDimension {
 			removed++
 			continue
 		}
@@ -543,10 +957,10 @@ func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore,
 		filtered = append(filtered, point)
 	}
 	vectorStore.Points = filtered
-	if removed > 0 {
+	if removed > 0 || remapped > 0 {
 		vectorStore.UpdatedAt = time.Now().Format(time.RFC3339)
 	}
-	return removed
+	return removed, remapped
 }
 
 func effectiveRAGEmbeddingBuildConcurrency(embCfg bootstrap.RAGEmbeddingConfig) int {
@@ -1022,7 +1436,7 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 		return 0, err
 	}
 	if len(chapters) == 0 {
-		return 0, fmt.Errorf("未发现可回填的章节文件")
+		return 0, nil
 	}
 	st := store.NewStore(outputDir)
 	state, err := st.RAG.LoadIndexState()
@@ -1030,9 +1444,9 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 		return 0, err
 	}
 	if state == nil {
-		state = &domain.RAGIndexState{Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
+		state = &domain.RAGIndexState{SchemaVersion: domain.CurrentRAGIndexSchemaVersion, Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
 	}
-	sanitizeRAGIndexState(st, state)
+	changed := sanitizeRAGIndexState(st, state) > 0
 	if strings.TrimSpace(state.Config.Collection) == "" {
 		state.Config.Collection = "local_keyword"
 	}
@@ -1046,7 +1460,20 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 		}
 		chunk := rag.NormalizeChunk(chunkFromChapterSummary(*sum))
 		sourcePath := chapterRAGSourcePath(chapter)
-		filtered := state.Chunks[:0]
+		sourceCount := 0
+		same := 0
+		for _, existing := range state.Chunks {
+			if existing.SourcePath == sourcePath {
+				sourceCount++
+				if rag.NormalizeChunk(existing).Hash == chunk.Hash {
+					same++
+				}
+			}
+		}
+		if sourceCount == 1 && same == 1 {
+			continue
+		}
+		filtered := make([]domain.RAGChunk, 0, len(state.Chunks)+1)
 		for _, existing := range state.Chunks {
 			if existing.SourcePath == sourcePath {
 				continue
@@ -1054,6 +1481,10 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 			filtered = append(filtered, existing)
 		}
 		state.Chunks = append(filtered, chunk)
+		changed = true
+	}
+	if !changed {
+		return len(chapters), nil
 	}
 	state.ChunkHashes = rebuildLocalRAGChunkHashes(state.Chunks)
 	state.UpdatedAt = time.Now().Format(time.RFC3339)
@@ -1066,6 +1497,9 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 func discoverGeneratedChapters(outputDir string, start, end int) ([]int, error) {
 	entries, err := os.ReadDir(filepath.Join(outputDir, "chapters"))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var chapters []int

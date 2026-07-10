@@ -50,6 +50,8 @@ var (
 	catalogSplitRe   = regexp.MustCompile(`[、，,；;]+`)
 )
 
+const dialogueRatioNearMissTolerance = 0.005
+
 // AnalyzeChapter 运行确定性 AI 腔规则引擎。
 func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMetrics) domain.AIVoiceAnalysis {
 	paragraphs := splitParagraphs(text)
@@ -591,7 +593,8 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 	}
 	dialogueLimit := dialogueRatioLimitForMetrics(metrics)
 	if metrics.DialogueRatio < dialogueLimit {
-		if !(dialogueLimit <= 0.25 && metrics.DialogueRatio >= 0.20) {
+		if !(dialogueLimit <= 0.25 && metrics.DialogueRatio >= 0.20) &&
+			!dialogueRatioNearMiss(metrics.DialogueRatio, dialogueLimit) {
 			severity := "warning"
 			if metrics.DialogueRatio < 0.15 {
 				severity = "error"
@@ -639,6 +642,10 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 		}
 	}
 	return flags
+}
+
+func dialogueRatioNearMiss(actual, limit float64) bool {
+	return limit > 0 && actual > 0 && actual >= limit-dialogueRatioNearMissTolerance
 }
 
 func dialogueRatioLimitForMetrics(metrics domain.ChapterAIVoiceMetrics) float64 {

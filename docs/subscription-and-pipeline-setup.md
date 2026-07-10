@@ -13,13 +13,14 @@ novel-studio 原本只支持 api_key+base_url 的 HTTP provider。现新增 **`c
 
 ### 配置（已写入 .novel-studio/config.json）
 ```jsonc
-"providers": { "codex": { "type": "codex-cli", "models": ["gpt-5.5"] } }  // 无需 api_key
+"providers": { "codex": { "type": "codex-cli", "models": ["gpt-5.6-sol"] } }  // 无需 api_key
 "roles": {
-  "coordinator/architect/writer/editor": provider=codex(gpt-5.5), 兜底 minimax,
+  "coordinator/architect/writer": provider=codex(gpt-5.6-sol), reasoning_effort=ultra, 兜底 minimax,
+  "editor/reviewer": provider=deepseek(deepseek-v4-pro), reasoning_effort=max, 兜底 codex/minimax
   "reviewer": provider=minimax, 兜底 codex
 }
 ```
-即：**GPT 跑推演+渲染，MiniMax review，互为兜底降级**。窗口设 400K（GPT 大上下文无压力）。
+即：**GPT-5.6-Sol 以 ultra 跑推演+渲染，DeepSeek 以 max 做异族复审，MiniMax 保留兜底**。每个 fallback 单独声明 `reasoning_effort`，所以切换 provider 时不会继承不兼容档位；`gpt-5.6-sol` 按当前 Codex 模型目录使用 372K 上下文窗口。
 
 ### 当前状态
 - `--check`：codex-cli provider 已被识别、配置合法；**主模型显示不可用只因 Codex 订阅触发用量上限

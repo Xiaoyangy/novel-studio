@@ -2,17 +2,22 @@
 
 本文档定义 `novel-studio` 后续创作任务的默认工作流：用户给题材、大纲、人物设定或直接说“继续开始创作”时，系统如何启动看板、恢复进度、写作、审核、返工和交付。
 
-## 第一章当前快照
+## 审核证据契约
 
-| 项目 | 当前值 |
-|---|---:|
-| 章节 | 第 1 / 70 章 |
-| 终稿字数 | 2610 |
-| 机械 AI 占比 | 4.80% |
-| AI 腔风险分 | 0.0800 |
-| 对话占比 | 34.90% |
-| DeepSeek 裸正文判定 | human_like / low / 8% |
-| 统一审核 | 通过，主要问题已清空 |
+章级审核不再以“目录里有一份报告”为完成条件。下列产物必须同时存在，并且
+`body_sha256` 全部等于当前 `chapters/NN.md` 的正文指纹：
+
+| 产物 | 责任 |
+|---|---|
+| `reviews/NN_ai_gate.json` | 机械规则与 AIGC 门禁 |
+| `reviews/NN_ai_voice_redflags.json` | 确定性 AI 腔/节奏信号 |
+| `reviews/NN.json` | Editor 八维章审与最终 verdict |
+| `reviews/NN_deepseek_ai_judge.json` | 异模型、整章裸正文判定 |
+| `reviews/NN.md` | 含当前正文指纹的统一报告 |
+| `meta/review-summary.md` | 保留全部已审章节及各章正文指纹的项目汇总 |
+
+正文被重写或手工修改后，旧审核立即失效；`rewrite` 不得读取过期审核，`deliver`
+只接受当前正文版本且 `verdict=accept` 的完整证据包。
 
 ```mermaid
 flowchart LR
@@ -114,9 +119,12 @@ nohup go run ./cmd/novel-studio service start --host 127.0.0.1 --port 8765 > out
 | `meta/checkpoints.jsonl` | 每个写入步骤的断点恢复证据 |
 | `chapters/NN.md` | 已提交终稿章节 |
 | `drafts/NN.draft.md` | 当前草稿或返工稿 |
-| `reviews/NN_ai_gate.json` | 机械审核结构化结果 |
+| `reviews/NN_ai_gate.json` | 机械审核结构化结果，含当前正文 `body_sha256` |
+| `reviews/NN_ai_voice_redflags.json` | AI 腔与节奏红旗，含当前正文 `body_sha256` |
+| `reviews/NN.json` | Editor 章级结构化 verdict，含当前正文 `body_sha256` |
+| `reviews/NN_deepseek_ai_judge.json` | 异模型整章裸正文判定，含当前正文 `body_sha256` |
 | `reviews/NN.md` | 统一审核报告：机械门禁、AI 味信号和 Editor 八维章级评审 |
-| `meta/review-summary.md` | 批量评审汇总 |
+| `meta/review-summary.md` | 从全部章级统一报告重建的批量评审汇总，不因局部复审丢章 |
 | `meta/chapter_progress.json/md` | 章节通过后沉淀的主线推进、主角变化、资源/时间线和下一章动态计划 |
 | `meta/character_continuity.json/md` | 人物回归、偶发露脸、后续大纲用途和状态保留建议；只指导写作，不作为审核通过条件 |
 | `meta/project_progress.json/md` | 项目级规划仪表盘：交付口径、卷弧推进、主角变化路线图、逐章承诺兑现、钩子节奏、资源清账、伏笔优先级、关系张力和资产运营动作 |
@@ -147,13 +155,13 @@ go run ./cmd/novel-studio --pipeline
 完整流水线阶段：
 
 ```text
-write -> review -> rewrite -> export
+architect -> zero-init -> write -> review -> rewrite -> deliver
 ```
 
 需要先共创澄清时显式加入：
 
 ```text
-cocreate -> write -> review -> rewrite -> export
+cocreate -> architect -> zero-init -> write -> review -> rewrite -> deliver
 ```
 
 写作阶段内部固定顺序：
@@ -177,7 +185,11 @@ novel_context -> read_chapter -> plan_chapter -> draft_chapter_part(1..N) -> mer
 - `merge_chapter_parts` 合并后才写 `drafts/NN.draft.md`，并进入原有整章 `check_consistency -> commit_chapter`。
 - 分片通过不等于章节通过；机械门禁、AI 味、Editor 审核仍只以完整章节为交付口径。
 
-`commit_chapter` 是章节完成的唯一交接点。只写出草稿不算完成；只有 `chapters/NN.md`、progress 和 checkpoint 都写好，才算本章进入审核。
+`commit_chapter` 是章节完成的唯一交接点。只写出草稿不算完成；正常 pipeline
+草稿一旦产生 `draft` checkpoint，提交时必须存在针对同一草稿指纹的
+`consistency_check` checkpoint。正文首行标题还必须与 `plan.title`（继承自大纲）
+一致。只有这些门禁通过并写好 `chapters/NN.md`、progress 和 commit checkpoint，
+本章才算进入审核。
 
 数据沉淀、RAG upsert、Qdrant 和状态推进的完整说明见 [`data-lifecycle-and-progression.md`](data-lifecycle-and-progression.md)。
 
@@ -185,12 +197,13 @@ novel_context -> read_chapter -> plan_chapter -> draft_chapter_part(1..N) -> mer
 
 每章提交后立即进入门禁：
 
-1. `commit_chapter` 自动运行机械审核，写入 `reviews/NN_ai_gate.json`，并先生成机械门禁版 `reviews/NN.md`。
+1. `commit_chapter` 自动运行机械审核，写入带正文指纹的 `reviews/NN_ai_gate.json`，并先生成机械门禁版 `reviews/NN.md`。
 2. 如果命中阻断级规则，章节进入 `pending_rewrites`，flow 切到 `polishing` 或 `rewriting`。
-3. Editor 章级评审通过 `save_review` 回写同一个 `reviews/NN.md`，补全 AI 味信号、八维评审和改写建议，裁定 `accept`、`polish` 或 `rewrite`；审阅中的 issue、contract miss、低分维度和门禁升级原因会同步沉淀到 `meta/writing_assets.json/md` 的历史反馈区。
+3. Editor 章级评审通过 `save_review` 回写同一个 `reviews/NN.md`，补全 AI 味信号、八维评审和改写建议，裁定 `accept`、`polish` 或 `rewrite`；独立 reviewer 同时生成整章裸正文判定。所有结构化产物绑定同一 `body_sha256`，审阅中的 issue、contract miss、低分维度和门禁升级原因会同步沉淀到 `meta/writing_assets.json/md` 的历史反馈区。
 4. Writer 只处理被入队的章节。若 `rewrite_brief` 存在，先用 `plan_chapter` 重建本章 `causal_simulation.review_refinement` 和 `voice_logic`：把审核来源、失败类型、局部目标、保留约束、重规划动作、验收条件和停止条件写入计划，再改写正文。返工后再次 `check_consistency -> commit_chapter`。
 5. 机械审核和 Editor 审核都通过后，才允许继续下一章或进入弧/卷/完本处理。
 6. 章级 `accept` 后刷新 `meta/chapter_progress.*`、`meta/character_continuity.*`、`meta/project_progress.*` 与 `meta/evolution_report.*`，把本章造成的人物目标/压力/资源/关系/秘密/误判/行动倾向、时间线、资源、关系、大纲续用建议、从第1章到交付线的主角变化路线、项目级规划动作、写法历史反馈和可审计进化候选沉淀为下一章写作输入。
+7. pipeline 最终对账会重新验证所有已完成阶段，并把各产物 SHA-256 写入 `meta/pipeline.json`；`--diag` 可在不重跑模型的情况下发现文件内容漂移。
 
 默认硬指标：
 

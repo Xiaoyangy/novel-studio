@@ -169,6 +169,15 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	if flags := redFlags(shortChapter, nil); !hasRedFlag(flags, "supporting_dialogue_ratio") {
 		t.Fatalf("expected short-chapter dialogue flag")
 	}
+
+	shortChapterNearLimit := domain.ChapterAIVoiceMetrics{
+		DialogueRatio:  0.297,
+		SentenceCount:  129,
+		ParagraphCount: 34,
+	}
+	if flags := redFlags(shortChapterNearLimit, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
+		t.Fatalf("near-limit short chapter should not be flagged: %+v", flags)
+	}
 }
 
 func hasRedFlag(flags []domain.AIVoiceRedFlag, rule string) bool {

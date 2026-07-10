@@ -1,6 +1,8 @@
 package diag
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -32,6 +34,12 @@ func loadPipelineEvidence(s *store.Store) (*domain.PipelineState, map[string][]s
 			}
 			if !pipelineArtifactExists(s.Dir(), artifact) {
 				missingArtifacts[stage] = append(missingArtifacts[stage], artifact)
+				continue
+			}
+			if expected := strings.TrimSpace(evidence.ArtifactDigests[artifact]); expected != "" {
+				if actual, err := pipelineArtifactDigest(s.Dir(), artifact); err != nil || actual != expected {
+					missingArtifacts[stage] = append(missingArtifacts[stage], artifact+" (digest mismatch)")
+				}
 			}
 		}
 		for _, ref := range evidence.Checkpoints {
@@ -45,6 +53,19 @@ func loadPipelineEvidence(s *store.Store) (*domain.PipelineState, map[string][]s
 	}
 
 	return &state, missingArtifacts, missingCheckpoints, nil
+}
+
+func pipelineArtifactDigest(root, artifact string) (string, error) {
+	path := artifact
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, filepath.FromSlash(artifact))
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func pipelineArtifactExists(root, artifact string) bool {

@@ -80,6 +80,34 @@ func TestLoadPipelineEvidenceAcceptsExistingArtifactAndCheckpoint(t *testing.T) 
 	}
 }
 
+func TestLoadPipelineEvidenceDetectsArtifactDigestDrift(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteDiagFile(t, filepath.Join(dir, "chapters", "01.md"), "正文已被替换")
+	state := domain.PipelineState{
+		Stages:    []string{"write"},
+		Completed: []string{"write"},
+		Evidence: map[string]domain.PipelineStageEvidence{
+			"write": {
+				Stage:           "write",
+				Status:          "verified",
+				Artifacts:       []string{"chapters/01.md"},
+				ArtifactDigests: map[string]string{"chapters/01.md": "sha256:old"},
+			},
+		},
+	}
+	writePipelineState(t, dir, state)
+
+	snap := Load(store.NewStore(dir))
+	got := strings.Join(snap.PipelineMissingArtifacts["write"], ",")
+	if !strings.Contains(got, "digest mismatch") {
+		t.Fatalf("digest drift not detected: %q", got)
+	}
+}
+
 func TestPipelineEvidenceDriftReportsCompletedStageDrift(t *testing.T) {
 	snap := &Snapshot{
 		Pipeline: &domain.PipelineState{

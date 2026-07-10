@@ -345,6 +345,58 @@ func TestBlockingAIVoiceWarning(t *testing.T) {
 	}
 }
 
+func TestNearThresholdAIVoiceWarningDoesNotBlockAcceptedReview(t *testing.T) {
+	payload := &MechanicalGatePayload{
+		Chapter: 1,
+		AIGCReport: aigc.Report{
+			AIGCPercent:        4.8,
+			AIRatioPercent:     4.8,
+			BlendedAIGCPercent: 4.8,
+		},
+	}
+	analysis := &domain.AIVoiceAnalysis{
+		Metrics: domain.ChapterAIVoiceMetrics{
+			DialogueRatio: 0.297,
+			SentenceCount: 129,
+		},
+		RedFlags: []domain.AIVoiceRedFlag{{
+			Rule:     "supporting_dialogue_ratio",
+			Severity: "warning",
+			Actual:   0.297,
+			Limit:    0.30,
+		}},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter:        1,
+		Verdict:        "accept",
+		ContractStatus: "met",
+		Summary:        "AI 腔 red flag 各项检查结果均为安全。",
+		Dimensions: []domain.DimensionScore{{
+			Dimension: "ai_voice_detection",
+			Score:     100,
+			Verdict:   "pass",
+		}},
+	}
+
+	if HasBlockingAIVoice(analysis) {
+		t.Fatal("near-threshold supporting dialogue warning should not block")
+	}
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
+		Chapter:    1,
+		Mechanical: payload,
+		AIVoice:    analysis,
+		Editor:     editor,
+	})
+	for _, want := range []string{"## 是否需要改写：否", "Editor 复审：通过", "主要问题已清空"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("unified markdown missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "AI warning｜supporting_dialogue_ratio") || strings.Contains(md, "主要问题仍未清空") {
+		t.Fatalf("near-threshold warning should not be rendered as a main issue:\n%s", md)
+	}
+}
+
 func TestUnifiedMarkdownStripsEditorRewriteSuggestions(t *testing.T) {
 	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{
 		Chapter:        1,

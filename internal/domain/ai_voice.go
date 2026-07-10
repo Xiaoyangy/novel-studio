@@ -53,6 +53,7 @@ type ChapterAIVoiceMetrics struct {
 // AIVoiceAnalysis 是规则引擎输出给 Editor 的红旗 JSON。
 type AIVoiceAnalysis struct {
 	Chapter     int                   `json:"chapter"`
+	BodySHA256  string                `json:"body_sha256,omitempty"`
 	Label       string                `json:"label"`
 	Summary     string                `json:"summary"`
 	Metrics     ChapterAIVoiceMetrics `json:"metrics"`

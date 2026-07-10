@@ -105,6 +105,16 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		}
 		a.Chapter = resolved
 	}
+	if (a.Source == "" || a.Source == "final") && t.rewritePlanningBlocksFinalRead(a.Chapter) {
+		return json.Marshal(map[string]any{
+			"chapter":  a.Chapter,
+			"withheld": true,
+			"stage":    "rewrite_replanning",
+			"reason":   "待返工终稿属于上一轮正文；在新 plan 正式收口前注入全文会把旧事件顺序重新带回规划。",
+			"next_step": "使用 novel_context(chapter=N).rewrite_brief、current_chapter_outline 与 chapter_plan_stage 完成 plan_structure/plan_details；" +
+				"正式 plan 生成后，Drafter 可再次读取旧终稿作局部借鉴。",
+		})
+	}
 
 	if a.Source == "draft_part" {
 		if a.Part <= 0 {
@@ -173,6 +183,21 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		"content":    content,
 		"word_count": len([]rune(content)),
 	})
+}
+
+func (t *ReadChapterTool) rewritePlanningBlocksFinalRead(chapter int) bool {
+	rewriteTarget, ok := pendingRewriteTarget(t.store)
+	if !ok || rewriteTarget != chapter {
+		return false
+	}
+	if partial, err := t.store.Drafts.LoadChapterPlanPartial(chapter); err == nil && partial != nil {
+		return true
+	}
+	plan, err := t.store.Drafts.LoadChapterPlan(chapter)
+	if err != nil || plan == nil {
+		return true
+	}
+	return chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.plan.json", chapter))
 }
 
 func (t *ReadChapterTool) defaultReadChapter() (int, error) {

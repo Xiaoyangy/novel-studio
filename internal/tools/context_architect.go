@@ -74,7 +74,7 @@ func (t *ContextTool) buildArchitectPlanning(envelope *architectContextEnvelope,
 	// 让架构师在裁定 complete_book / append_volume 时一眼看到对照面。
 	// 散落在 progress / compass / foreshadow / layered_outline 里靠 LLM 脑算容易漏。
 	envelope.Planning["completion_signals"] = t.completionSignals(layered, compass)
-	if ragState, err := t.store.RAG.LoadIndexState(); err == nil && ragState != nil {
+	if ragState, err := t.store.RAG.LoadIndexStateReadOnly(); err == nil && ragState != nil {
 		envelope.Planning["rag_index_state"] = map[string]any{
 			"config":       ragState.Config,
 			"chunks":       len(ragState.Chunks),

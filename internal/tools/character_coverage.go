@@ -8,14 +8,12 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-// requiredDossierCharacterNames 计算章级覆盖门禁（offscreen stage / arc tests /
-// emotional logic 等）必须覆盖的角色集合（Task 055）：
+// requiredDossierCharacterNames 是全角色模拟和提交回填的覆盖名单。
 //
-//	核心主线角色 ∪ 已出场角色 ∪ 本章大纲点名角色
-//
-// dossier 是可检索资产，不等于每章硬覆盖名单；未出场且未点名的角色不强制，
-// 避免逼 agent 为没上场的人编全套心理/视觉/关系矩阵。
+// 单世界模型要求 characters.json 中每个实名角色都持续做自己的选择；dossier
+// 中尚未同步回角色册的人也不能静默丢失。chapter 参数保留给现有调用签名。
 func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
+	_ = chapter
 	seen := map[string]struct{}{}
 	var names []string
 	add := func(name string) {
@@ -29,59 +27,91 @@ func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 		seen[name] = struct{}{}
 		names = append(names, name)
 	}
-
-	chars, err := s.Characters.Load()
-	if err != nil {
-		chars = nil
-	}
-
-	// 已出场：continuity 台账的 first_seen_chapter 有值即视为出过场。
-	appeared := map[string]bool{}
-	if ledger, err := s.LoadCharacterContinuityLedger(); err == nil && ledger != nil {
-		for _, entry := range ledger.Entries {
-			if entry.FirstSeenChapter > 0 {
-				appeared[strings.TrimSpace(entry.Name)] = true
-			}
-		}
-	}
-	// 本章点名：当前章 outline 文本与角色名/别名匹配。
-	mentioned := map[string]bool{}
-	if entry, err := s.Outline.GetChapterOutline(chapter); err == nil && entry != nil {
-		text := entry.Title + " " + entry.CoreEvent + " " + strings.Join(entry.Scenes, " ")
-		for _, name := range matchOutlineCharacters(text, chars) {
-			mentioned[strings.TrimSpace(name)] = true
-		}
-	}
-
-	charByName := make(map[string]domain.Character, len(chars))
-	for _, c := range chars {
-		name := strings.TrimSpace(c.Name)
-		if name == "" {
-			continue
-		}
-		charByName[name] = c
-		if characterRequiresChapterCoverage(c) || appeared[name] || mentioned[name] {
-			add(name)
+	if chars, err := s.Characters.Load(); err == nil {
+		for _, character := range chars {
+			add(character.Name)
 		}
 	}
 	if dossiers, err := s.LoadAllCharacterDossiers(); err == nil {
 		for _, dossier := range dossiers {
-			name := strings.TrimSpace(dossier.Character)
-			if name == "" {
-				continue
-			}
-			if c, ok := charByName[name]; ok {
-				if characterRequiresChapterCoverage(c) || appeared[name] || mentioned[name] {
-					add(name)
-				}
-				continue
-			}
-			if dossierRequiresChapterCoverage(dossier) || appeared[name] || mentioned[name] {
-				add(name)
-			}
+			add(dossier.Character)
 		}
 	}
 	return names
+}
+
+// chapterOutlineCharacterNames 是主视角正文的可见角色投影，不参与削减世界模拟。
+func chapterOutlineCharacterNames(s *store.Store, chapter int) []string {
+	seen := map[string]struct{}{}
+	var names []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	add(inferCommitProtagonist(s))
+	chars, err := s.Characters.Load()
+	if err != nil {
+		return names
+	}
+	entry, err := s.Outline.GetChapterOutline(chapter)
+	if err != nil || entry == nil {
+		return names
+	}
+	outlineText := entry.Title + "\n" + entry.CoreEvent + "\n" + entry.Hook + "\n" + strings.Join(entry.Scenes, "\n")
+	mentioned := map[string]bool{}
+	for _, name := range matchOutlineCharacters(outlineText, chars) {
+		mentioned[strings.TrimSpace(name)] = true
+	}
+	for _, character := range chars {
+		name := strings.TrimSpace(character.Name)
+		if mentioned[name] || outlineRoleAuthorizesCharacter(outlineText, strings.TrimSpace(character.Role)) {
+			add(name)
+		}
+	}
+	if source, body, _, loadErr := loadChapterRewriteSource(s, chapter); loadErr == nil && source != nil {
+		for _, name := range rewriteVisibleCharacterNames(s, body, source.PreserveFacts) {
+			add(name)
+		}
+	}
+	return names
+}
+
+func rewriteVisibleCharacterNames(s *store.Store, body string, preserveFacts []string) []string {
+	chars, err := s.Characters.Load()
+	if err != nil || len(chars) == 0 {
+		return nil
+	}
+	text := body + "\n" + strings.Join(preserveFacts, "\n")
+	return compactStrings(matchOutlineCharacters(text, chars))
+}
+func outlineRoleAuthorizesCharacter(outlineText, role string) bool {
+	switch {
+	case (strings.Contains(outlineText, "父母") || strings.Contains(outlineText, "爸妈")) &&
+		(strings.Contains(role, "父亲") || strings.Contains(role, "母亲")):
+		return true
+	case (strings.Contains(outlineText, "父亲") || strings.Contains(outlineText, "爸爸")) && strings.Contains(role, "父亲"):
+		return true
+	case (strings.Contains(outlineText, "母亲") || strings.Contains(outlineText, "妈妈")) && strings.Contains(role, "母亲"):
+		return true
+	case strings.Contains(outlineText, "女主") && strings.Contains(role, "女主"):
+		return true
+	case (strings.Contains(outlineText, "朋友") || strings.Contains(outlineText, "兄弟") || strings.Contains(outlineText, "闺蜜")) &&
+		(strings.Contains(role, "朋友") || strings.Contains(role, "主角团") || strings.Contains(role, "闺蜜")):
+		return true
+	case strings.Contains(outlineText, "亲戚") && strings.Contains(role, "亲戚"):
+		return true
+	case strings.Contains(outlineText, "反派") && strings.Contains(role, "反派"):
+		return true
+	default:
+		return false
+	}
 }
 
 func characterRequiresChapterCoverage(c domain.Character) bool {

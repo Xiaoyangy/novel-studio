@@ -103,6 +103,8 @@ func (t *CommitChapterTool) Schema() map[string]any {
 		schema.Property("current_action", schema.String("该角色此刻正在做什么；正文可不展示，但时间线必须成立")).Required(),
 		schema.Property("pressure", schema.String("推动此角色行动的具体压力")).Required(),
 		schema.Property("decision", schema.String("此阶段做出的选择或暂时不做的选择")).Required(),
+		schema.Property("decision_reason", schema.String("为何此人会这样选择；锚定目标、压力、资源、关系或误判")),
+		schema.Property("butterfly_effects", schema.Array("该决定对世界和主角后续选项造成的影响", schema.String(""))),
 		schema.Property("mistake_or_misbelief", schema.String("合理误判、错误操作、信息缺口或过度反应")),
 		schema.Property("knowledge_boundary", schema.String("此角色此刻知道/不知道什么，后续出场不能越界")).Required(),
 		schema.Property("visible_in_chapter", schema.Bool("本章正文是否直接展示")),
@@ -170,7 +172,7 @@ func (t *CommitChapterTool) Schema() map[string]any {
 	)
 }
 
-func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		Chapter             int                           `json:"chapter"`
 		Summary             string                        `json:"summary"`
@@ -219,7 +221,7 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 					return nil, err
 				}
 			}
-			return t.executeRewriteCommit(a.Chapter, a.Summary, a.Characters, a.KeyEvents,
+			return t.executeRewriteCommit(ctx, a.Chapter, a.Summary, a.Characters, a.KeyEvents,
 				a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
 				characterStage, a.ResourceUpdates, a.ResourceProposals,
 				a.HookType, a.DominantStrand, a.OpeningDevice, a.EndingDevice, progress)
@@ -267,6 +269,12 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 	}
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if err := requireCurrentDraftConsistency(t.store, a.Chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireDraftPlanTitleMatch(t.store, a.Chapter, content); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().Format(time.RFC3339)
@@ -447,7 +455,7 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 	a.methodologyCommitExtras.ChapterContent = content
 	violations = append(violations, t.methodologyViolations(a.Chapter, wordCount, a.HookType, a.methodologyCommitExtras)...)
 	violations = append(violations, consistencyReconcile(t.store, a.Chapter, content, a.ResourceUpdates)...)
-	if err := t.saveAIGCReviewFiles(a.Chapter, aigcReport, violations); err != nil {
+	if err := t.saveAIGCReviewFiles(a.Chapter, content, aigcReport, violations); err != nil {
 		return nil, fmt.Errorf("save aigc review: %w: %w", errs.ErrStoreWrite, err)
 	}
 	if reason := blockingViolationReason(violations); reason != "" {
@@ -484,7 +492,7 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 		return nil, fmt.Errorf("clear pending commit: %w: %w", errs.ErrStoreWrite, err)
 	}
 
-	ragIndexed, ragErr := t.sedimentChapterRAG(chapterRAGFacts{
+	ragIndexed, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
 		Chapter:             a.Chapter,
 		Summary:             a.Summary,
 		Characters:          a.Characters,
@@ -553,6 +561,8 @@ func (t *CommitChapterTool) saveChapterWorldDelta(
 			VisibleInChapter:    stage.VisibleInChapter,
 			CurrentAction:       stage.CurrentAction,
 			Decision:            stage.Decision,
+			DecisionReason:      stage.DecisionReason,
+			ButterflyEffects:    append([]string(nil), stage.ButterflyEffects...),
 			MistakeOrMisbelief:  stage.MistakeOrMisbelief,
 			KnowledgeBoundary:   stage.KnowledgeBoundary,
 			PersonalityDelta:    stage.PersonalityDelta,
@@ -675,12 +685,12 @@ type chapterRAGFacts struct {
 	WordCount           int
 }
 
-func (t *CommitChapterTool) sedimentChapterRAG(f chapterRAGFacts) (bool, error) {
+func (t *CommitChapterTool) sedimentChapterRAG(ctx context.Context, f chapterRAGFacts) (bool, error) {
 	chunks := buildChapterRAGChunks(f)
 	if len(chunks) == 0 {
 		return false, nil
 	}
-	if err := upsertRAGChunks(context.Background(), t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
+	if err := upsertRAGChunks(ctx, t.store, t.ragEmbedder, t.ragVectorWriter, chunks, domain.RAGIndexConfig{}); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -819,6 +829,7 @@ func errorString(err error) string {
 // 跳过所有世界状态追加（timeline / foreshadow / relationship / state_changes）与弧边界检测，
 // 这些已在章节原始提交时应用。
 func (t *CommitChapterTool) executeRewriteCommit(
+	ctx context.Context,
 	chapter int,
 	summary string,
 	characters, keyEvents []string,
@@ -840,6 +851,12 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	}
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", chapter, errs.ErrToolPrecondition)
+	}
+	if err := requireCurrentDraftConsistency(t.store, chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireDraftPlanTitleMatch(t.store, chapter, content); err != nil {
+		return nil, err
 	}
 
 	// 2. 硬校验：drafts 与现终稿完全相同 → 判定为未真正打磨/重写（writer 跳过了 draft_chapter）
@@ -960,7 +977,7 @@ func (t *CommitChapterTool) executeRewriteCommit(
 			gateBlocked = true
 		}
 	}
-	if err := t.saveAIGCReviewFiles(chapter, aigcReport, violations); err != nil {
+	if err := t.saveAIGCReviewFiles(chapter, content, aigcReport, violations); err != nil {
 		return nil, fmt.Errorf("rewrite: save aigc review: %w: %w", errs.ErrStoreWrite, err)
 	}
 	if gateBlocked {
@@ -989,7 +1006,7 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	if latest != nil {
 		t.clearStaleFinalGlobalReview(latest)
 	}
-	ragIndexed, ragErr := t.sedimentChapterRAG(chapterRAGFacts{
+	ragIndexed, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
 		Chapter:             chapter,
 		Summary:             summary,
 		Characters:          characters,
@@ -1101,6 +1118,7 @@ func (t *CommitChapterTool) saveFinalAIVoice(chapter int, content string, previo
 	}
 	analysis.Metrics.GeneratedAt = time.Now().Format(time.RFC3339)
 	analysis.GeneratedAt = analysis.Metrics.GeneratedAt
+	analysis.BodySHA256 = reviewreport.BodySHA256(content)
 	if err := t.store.AIVoice.SaveChapterMetrics(analysis.Metrics, false); err != nil {
 		return analysis, fmt.Errorf("save ai voice metrics: %w: %w", errs.ErrStoreWrite, err)
 	}
@@ -1128,13 +1146,50 @@ func summarizeBeforeAfter(before, after string) string {
 	return fmt.Sprintf("字数 %d→%d；公共前缀 %d 字，公共后缀 %d 字", len(beforeRunes), len(afterRunes), prefix, suffix)
 }
 
-func (t *CommitChapterTool) saveAIGCReviewFiles(chapter int, report aigc.Report, violations []rules.Violation) error {
+// requireCurrentDraftConsistency closes the draft -> consistency -> commit
+// contract mechanically. Legacy/imported drafts may have no draft checkpoint;
+// once draft_chapter has emitted one, commit only accepts a consistency check
+// over those exact bytes.
+func requireCurrentDraftConsistency(st *store.Store, chapter int, content string) error {
+	scope := domain.ChapterScope(chapter)
+	draftCheckpoint := st.Checkpoints.LatestByStep(scope, "draft")
+	if draftCheckpoint == nil {
+		return nil
+	}
+	wantDigest := "sha256:" + reviewreport.BodySHA256(content)
+	if draftCheckpoint.Digest != wantDigest {
+		return fmt.Errorf("第 %d 章草稿在 draft checkpoint 后发生变化；请重新调用 draft_chapter 或 check_consistency 后再提交: %w", chapter, errs.ErrToolPrecondition)
+	}
+	consistencyCheckpoint := st.Checkpoints.LatestByStep(scope, "consistency_check")
+	if consistencyCheckpoint == nil || consistencyCheckpoint.Digest != wantDigest {
+		return fmt.Errorf("第 %d 章当前草稿尚未通过 check_consistency（或检查后正文又被修改）；请回读 drafts/%02d.draft.md 并重新检查后再 commit_chapter: %w", chapter, chapter, errs.ErrToolPrecondition)
+	}
+	return nil
+}
+
+func requireDraftPlanTitleMatch(st *store.Store, chapter int, content string) error {
+	plan, err := st.Drafts.LoadChapterPlan(chapter)
+	if err != nil {
+		return fmt.Errorf("读取第 %d 章计划用于标题校验: %w", chapter, err)
+	}
+	if plan == nil || strings.TrimSpace(plan.Title) == "" {
+		return nil
+	}
+	heading := firstChapterHeading(content)
+	if heading == "" || !chapterTitleEquivalent(heading, plan.Title) {
+		return fmt.Errorf("第 %d 章正文标题与计划标题不一致：正文首行=%q，plan.title=%q；请修正正文标题并重新 check_consistency: %w", chapter, heading, plan.Title, errs.ErrToolPrecondition)
+	}
+	return nil
+}
+
+func (t *CommitChapterTool) saveAIGCReviewFiles(chapter int, body string, report aigc.Report, violations []rules.Violation) error {
 	dir := filepath.Join(t.store.Dir(), "reviews")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	payload := reviewreport.MechanicalGatePayload{
 		Chapter:        chapter,
+		BodySHA256:     reviewreport.BodySHA256(body),
 		AIGCReport:     report,
 		RuleViolations: violations,
 		GeneratedAt:    time.Now().Format(time.RFC3339),
@@ -1312,6 +1367,7 @@ func validateCommitCharacterStage(s *store.Store, chapter int, records []domain.
 		return fmt.Errorf("第 %d 章提交缺少 character_stage_records：必须沉淀主角和关键配角的场景、行动、位置、交通/见面限制和状态变化: %w", chapter, errs.ErrToolPrecondition)
 	}
 	protagonist := inferCommitProtagonist(s)
+	simulationRequired := chapterWorldSimulationRequired(s)
 	hasSideCharacter := false
 	var missing []string
 	for i, r := range records {
@@ -1328,15 +1384,14 @@ func validateCommitCharacterStage(s *store.Store, chapter int, records []domain.
 		require(strings.TrimSpace(r.CurrentAction) != "", "current_action")
 		require(strings.TrimSpace(r.Pressure) != "", "pressure")
 		require(strings.TrimSpace(r.Decision) != "", "decision")
+		if simulationRequired {
+			require(strings.TrimSpace(r.DecisionReason) != "", "decision_reason")
+			require(len(r.ButterflyEffects) > 0, "butterfly_effects")
+		}
 		require(strings.TrimSpace(r.KnowledgeBoundary) != "", "knowledge_boundary")
 		require(strings.TrimSpace(r.TimelineConsistency) != "", "timeline_consistency")
 		if name != "" && (protagonist == "" || name != protagonist) {
 			hasSideCharacter = true
-			require(strings.TrimSpace(r.Status) != "", "status")
-			require(hasMovementConstraint(r), "transport/travel_time/meeting_constraint")
-			require(strings.TrimSpace(r.PersonalityDelta) != "", "personality_delta")
-			require(strings.TrimSpace(r.DeathState) != "", "death_state")
-			require(strings.TrimSpace(r.ProtagonistNotice) != "", "protagonist_notice")
 		}
 	}
 	if !hasSideCharacter {
