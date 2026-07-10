@@ -38,6 +38,8 @@ import (
 //   - abstract_system_reassurance：系统用无对象、无后果的客服式空话假装陪伴
 //   - opaque_procedure_jargon：对白把流程缩写/验收黑话直接丢给大众读者
 //   - dialogue_action_lead_repetition：连续对白段都以人物动作报幕再开口
+//   - trend_language_sound_effect_misuse：把“呱，”吐槽起手式写成叫声/拟声动作
+//   - system_procedure_narration：系统用后台核验术语代替可读、有人味的短回应
 //   - bureaucratic_register_overuse：制度/纪要/表单词连续驱动场景，人物口语和私人压力不足
 //   - structured_note_triplet / card_tos_block / empty_parallel_chant：
 //     便签三条、黑卡 ToS 块、空对仗童谣等结构感过强的 AI 签名
@@ -63,6 +65,7 @@ func Lint(text string) []Violation {
 	vs = appendEndingAphorismQuestion(vs, text)
 	vs = appendPunctuationCadence(vs, text)
 	vs = appendSystemMessageSignals(vs, text)
+	vs = appendTrendAndSystemVoiceSignals(vs, text)
 	vs = appendHumanFeelStructureSignals(vs, text)
 	vs = appendCausalIntegritySignals(vs, text)
 	vs = appendCadenceSignals(vs, text)
@@ -207,6 +210,8 @@ var systemMessageRe = regexp.MustCompile(`【([^】]{2,240})】`)
 var abstractSystemReassuranceRe = regexp.MustCompile(`(?:钱没跑|陪你(?:换条路|找(?:条)?路)|规矩不撤|先喘(?:半)?口气|(?:这回)?算你[^。！？!?]{0,8}挣来的)`)
 var dialogueActionLeadRe = regexp.MustCompile(`^(?:[^“「\n]{0,46})(?:夹着|端着|拿着|护住|划出|刚说了句|说了句|看见|抬起|抬眼|抬头|低头|推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]`)
 var opaqueProcedureSingletonRe = regexp.MustCompile(`(?:补上再测|补测|用途不符|真实改善消费|合规核验)`)
+var trendLanguageSoundEffectMisuseRe = regexp.MustCompile(`(?:呱了(?:一)?声|(?:怪叫|喊|叫|发出|短促地|轻轻地|低低地)[^。！？!?\n]{0,20}呱[，,])`)
+var systemProcedureNarrationRe = regexp.MustCompile(`(?:系统(?:判定|显示|提示)[：:]?[^。！？!?\n]{0,48}(?:本地新增交付|进入核验|核验通过|额度解锁)|阶段核验通过|(?:夜市)?小额改善额度解锁[：:]?\s*\d*)`)
 var opaqueProcedureJargonTerms = []string{
 	"采购凭证", "用途说明", "测试记录", "临时固定", "补测", "核验", "验收记录", "用途不符", "真实改善消费",
 }
@@ -423,6 +428,28 @@ func appendOpaqueProcedureJargon(vs []Violation, text string) []Violation {
 			Target:   truncateRunes(message, 100),
 			Limit:    "普通读者当场能看懂风险、后果和下一步；流程黑话不得成串",
 			Actual:   count,
+			Severity: SeverityWarning,
+		})
+	}
+	return vs
+}
+
+func appendTrendAndSystemVoiceSignals(vs []Violation, text string) []Violation {
+	if match := trendLanguageSoundEffectMisuseRe.FindString(text); strings.TrimSpace(match) != "" {
+		vs = append(vs, Violation{
+			Rule:     "trend_language_sound_effect_misuse",
+			Target:   truncateRunes(strings.TrimSpace(match), 100),
+			Limit:    "“呱，”只能由角色直接开口并接完整吐槽，前面不得写叫声或拟声动作",
+			Actual:   1,
+			Severity: SeverityWarning,
+		})
+	}
+	if match := systemProcedureNarrationRe.FindString(text); strings.TrimSpace(match) != "" {
+		vs = append(vs, Violation{
+			Rule:     "system_procedure_narration",
+			Target:   truncateRunes(strings.TrimSpace(match), 100),
+			Limit:    "系统短答必须让普通读者当场看懂，并体现陪伴声口；不得播报后台核验状态",
+			Actual:   1,
 			Severity: SeverityWarning,
 		})
 	}

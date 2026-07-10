@@ -1,10 +1,12 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -316,6 +318,171 @@ func TestValidateRewriteChapterTitleUsesOutlineTitle(t *testing.T) {
 	}
 	if err := validateRewriteChapterTitle(1, "失业饭桌", "林澈推门进屋。\n\n正文。"); err == nil {
 		t.Fatal("rewrite without an explicit matching heading should be blocked")
+	}
+}
+
+func TestResolveRewriteOutlineEntryFallsBackToChapterPlan(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "失业饭桌",
+		Goal:    "林澈在饭桌受挫后验证县城消费系统。",
+		Hook:    "手机弹出系统绑定提示",
+		Contract: domain.ChapterContract{
+			SceneAnchors: []string{"林家饭桌", "河畔夜市入口"},
+		},
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatalf("SaveChapterPlan: %v", err)
+	}
+
+	got := resolveRewriteOutlineEntry(st, nil, 1)
+	if got == nil {
+		t.Fatal("expected chapter-plan fallback, got nil")
+	}
+	if got.Title != plan.Title || got.CoreEvent != plan.Goal || got.Hook != plan.Hook {
+		t.Fatalf("unexpected fallback: %+v", got)
+	}
+	if len(got.Scenes) != 2 || got.Scenes[1] != "河畔夜市入口" {
+		t.Fatalf("scene anchors were not preserved: %+v", got.Scenes)
+	}
+}
+
+func TestRewriteSystemPromptDoesNotImposeForeignAuthorProfile(t *testing.T) {
+	if strings.Contains(rewriteSystemPrompt, "默认叙述者背后") || strings.Contains(rewriteSystemPrompt, "她懂工具") {
+		t.Fatalf("rewrite prompt still imposes a foreign author profile: %s", rewriteSystemPrompt)
+	}
+	for _, want := range []string{"当前项目明确给出的角色职业", "不得套用程序员"} {
+		if !strings.Contains(rewriteSystemPrompt, want) {
+			t.Fatalf("rewrite prompt missing %q", want)
+		}
+	}
+}
+
+func TestRewritePromptsKeepFirstChapterRulesDuringCompression(t *testing.T) {
+	wants := []string{
+		"正式任务卡",
+		"目标、时限、奖励",
+		"既定数字",
+		"眼前一个问题",
+		"客服腔",
+		"后台流程腔",
+		"关键首笔交付",
+		"真实阻力或调整",
+		"测试结果",
+		"人物反应",
+		"施工教程",
+		"连续三句",
+		"时限、权限、责任",
+		"插话、漏答或反问",
+		"完整吐槽",
+		"席间反应",
+		"不要求第二句续梗",
+		"生硬",
+	}
+	for name, prompt := range map[string]string{
+		"rewrite":     rewriteSystemPrompt,
+		"compression": compressionRewriteSystemPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range wants {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt missing %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestRewriteRetryInstructionPreservesFirstChapterRules(t *testing.T) {
+	instruction := rewriteLengthInstruction(rewritePatchBounds{
+		Original: 3600,
+		Min:      2800,
+		Max:      3400,
+		Source:   "test",
+	}, "上一版超出写回上限")
+	for _, want := range []string{
+		"初稿和压缩重试",
+		"正式任务卡保留既定目标/时限/奖励和数字",
+		"人格对白每次只答眼前一个问题",
+		"关键首笔交付保留真实阻力或调整、测试结果、人物反应",
+		"监管/谈判三项口径以插话、漏答或反问打断",
+		"完整吐槽和席间反应",
+		"不要求第二句续梗",
+		"生硬",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Errorf("retry instruction missing %q:\n%s", want, instruction)
+		}
+	}
+}
+
+func TestRolePromptsKeepFirstChapterRewriteRulesAligned(t *testing.T) {
+	for _, rel := range []string{
+		"assets/prompts/drafter.md",
+		"assets/prompts/writer.md",
+		"assets/prompts/editor.md",
+	} {
+		t.Run(filepath.Base(rel), func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(rel)))
+			if err != nil {
+				t.Fatalf("read %s: %v", rel, err)
+			}
+			prompt := string(body)
+			for _, want := range []string{
+				"正式任务卡",
+				"目标、时限、奖励",
+				"既定数字",
+				"眼前一个问题",
+				"首笔交付",
+				"测试结果",
+				"人物反应",
+				"施工教程",
+				"连续三句",
+				"时限、权限、责任",
+				"插话、漏答或反问",
+				"席间反应",
+				"不要求第二句续梗",
+				"生硬时",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("%s missing %q", rel, want)
+				}
+			}
+			if filepath.Base(rel) == "editor.md" && !strings.Contains(prompt, "不得要求隐藏数字、拆散任务或让主角自行推断") {
+				t.Error("editor prompt must not ask rewrites to hide established task numbers or make the protagonist infer them")
+			}
+			if filepath.Base(rel) == "drafter.md" || filepath.Base(rel) == "writer.md" {
+				for _, forbidden := range []string{"默认叙述者背后是 30 岁左右、有文学素养的程序员", "她可以懂 AI 工具"} {
+					if strings.Contains(prompt, forbidden) {
+						t.Errorf("%s still imposes foreign author profile %q", rel, forbidden)
+					}
+				}
+				for _, want := range []string{"只采用当前项目明确给出的作者声口", "不得默认程序员或女性画像"} {
+					if !strings.Contains(prompt, want) {
+						t.Errorf("%s missing project-only author profile rule %q", rel, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRewritePreflightBlocksTrendAndSystemVoiceRegressions(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	text := `第一章 失业饭桌
+
+赵航怪叫一声：“呱，照这算法，门卫也算世界五百强元老。”
+
+系统判定：本地新增交付，可进入核验。阶段核验通过。`
+	err := validateRewritePreflight(st, 1, text)
+	if err == nil {
+		t.Fatal("expected trend/system voice preflight failure")
+	}
+	for _, want := range []string{"trend_language_sound_effect_misuse", "system_procedure_narration"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("preflight error missing %q: %v", want, err)
+		}
 	}
 }
 

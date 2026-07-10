@@ -100,6 +100,13 @@ DIALOGUE_ACTION_LEAD_RE = re.compile(
     r"推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]"
 )
 OPAQUE_PROCEDURE_SINGLETON_RE = re.compile(r"(?:补上再测|补测|用途不符|真实改善消费|合规核验)")
+TREND_LANGUAGE_SOUND_EFFECT_MISUSE_RE = re.compile(
+    r"(?:呱了(?:一)?声|(?:怪叫|喊|叫|发出|短促地|轻轻地|低低地)[^。！？!?\n]{0,20}呱[，,])"
+)
+SYSTEM_PROCEDURE_NARRATION_RE = re.compile(
+    r"(?:系统(?:判定|显示|提示)[：:]?[^。！？!?\n]{0,48}(?:本地新增交付|进入核验|核验通过|额度解锁)|"
+    r"阶段核验通过|(?:夜市)?小额改善额度解锁[：:]?\s*\d*)"
+)
 OPAQUE_PROCEDURE_TERMS = [
     "采购凭证", "用途说明", "测试记录", "临时固定", "补测", "核验", "验收记录", "用途不符", "真实改善消费",
 ]
@@ -796,6 +803,34 @@ def cadence_issues(raw: str) -> list[dict]:
             }
         )
         break
+
+    match = TREND_LANGUAGE_SOUND_EFFECT_MISUSE_RE.search(raw)
+    if match:
+        issues.append(
+            {
+                "rule": "trend_language_sound_effect_misuse",
+                "severity": "warning",
+                "line": line_number(raw, match.start()),
+                "limit": "“呱，”只能由角色直接开口并接完整吐槽",
+                "actual": 1,
+                "target": match.group(0)[:100],
+                "evidence": "热梗起手式不是叫声或拟声动作；删除怪叫/叫了一声/发出一声等前置",
+            }
+        )
+
+    match = SYSTEM_PROCEDURE_NARRATION_RE.search(raw)
+    if match:
+        issues.append(
+            {
+                "rule": "system_procedure_narration",
+                "severity": "warning",
+                "line": line_number(raw, match.start()),
+                "limit": "系统回答眼前问题，不播报后台核验状态",
+                "actual": 1,
+                "target": match.group(0)[:100],
+                "evidence": "把系统判定/阶段核验/进入核验改成普通读者能懂、带陪伴声口的短回应",
+            }
+        )
 
     isolated = [para for para in paras if len(split_sentences(para)) == 1]
     if len(isolated) > 4:

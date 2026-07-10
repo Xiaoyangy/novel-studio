@@ -594,6 +594,28 @@ func TestLint_DialogueActionLeadRepetition(t *testing.T) {
 	}
 }
 
+func TestLint_TrendLanguageSoundEffectMisuse(t *testing.T) {
+	bad := `赵航怪叫一声：“呱，照这算法，门卫也算世界五百强元老。”`
+	if v := findRule(Lint(bad), "trend_language_sound_effect_misuse"); v == nil {
+		t.Fatalf("expected trend_language_sound_effect_misuse, got %+v", Lint(bad))
+	}
+	clean := `赵航先笑了：“呱，照这算法，门卫也算世界五百强元老。”`
+	if v := findRule(Lint(clean), "trend_language_sound_effect_misuse"); v != nil {
+		t.Fatalf("direct spoken trend phrase should pass: %+v", v)
+	}
+}
+
+func TestLint_SystemProcedureNarration(t *testing.T) {
+	bad := `系统判定：本地新增交付，可进入核验。阶段核验通过。夜市小额改善额度解锁：50000元。`
+	if v := findRule(Lint(bad), "system_procedure_narration"); v == nil {
+		t.Fatalf("expected system_procedure_narration, got %+v", Lint(bad))
+	}
+	clean := `屏幕上只多了一句：这单算。第一碗卖出去了，五万元给你。`
+	if v := findRule(Lint(clean), "system_procedure_narration"); v != nil {
+		t.Fatalf("plain companion reply should pass: %+v", v)
+	}
+}
+
 func TestLint_PunctuationCadenceAllowsRhymeSemicolons(t *testing.T) {
 	text := `# 第一章
 

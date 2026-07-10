@@ -46,6 +46,35 @@ func TestTTRLowFloorRelaxesForLongChapters(t *testing.T) {
 	}
 }
 
+func TestOrderedMarkersIgnoreOrdinaryNarrativeUses(t *testing.T) {
+	body := "第一碗豆腐脑刚端出去，他收到了第一笔转账。最后一条回复没发出去，想了想又把最后那句删掉。"
+	if got := len(orderedMarkerRe.FindAllString(body, -1)); got != 0 {
+		t.Fatalf("ordinary ordinal or temporal wording counted as outline markers: %d", got)
+	}
+}
+
+func TestOrderedMarkersKeepExplicitOutlineSequence(t *testing.T) {
+	body := "首先，把材料列出来。其次，逐项解释。最后，给出结论。"
+	if got := len(orderedMarkerRe.FindAllString(body, -1)); got != 3 {
+		t.Fatalf("explicit outline markers = %d, want 3", got)
+	}
+}
+
+func TestZhuqueWholeTextSegmentPreservesParagraphLayout(t *testing.T) {
+	body := "第一段有现场动作。\n\n第二段有不同长度的对白：“先等等。”\n\n第三段继续推进。"
+	visible := make([]rune, 0, len(body))
+	for _, r := range body {
+		if !strings.ContainsRune(" \t\r\n", r) {
+			visible = append(visible, r)
+		}
+	}
+	bounds := [][2]int{{0, len(visible)}}
+	got := zhuqueSegmentChunk(body, visible, bounds, 0)
+	if got != body {
+		t.Fatalf("whole-text segment lost paragraph layout:\n%q", got)
+	}
+}
+
 func TestNarrativeHumanAnchorAllowsFinalCapForStrongScenes(t *testing.T) {
 	stats := Stats{
 		Hanzi:               1500,

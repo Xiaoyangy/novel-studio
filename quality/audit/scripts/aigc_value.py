@@ -640,7 +640,9 @@ def score_perplexity_proxy(chars: list[str], total_cliche: float, per_k: dict[st
 
 
 def score_structure_fingerprint(body: str, paras: list[str], per_k: dict[str, float], fragment_stats: dict | None = None) -> dict:
-    ordered_marker_re = re.compile(r"(?:首先|其次|再次|最后|总之|综上|换句话说|第一[，、点:]|第二[，、点:]|第三[，、点:])")
+    ordered_marker_re = re.compile(
+        r"(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])"
+    )
     transition_markers = ["然而", "与此同时", "随后", "紧接着", "片刻后", "很快", "没过多久", "于是", "因此"]
     summary_markers = ["这让他意识到", "这让她意识到", "终于明白", "不仅仅是", "更是", "这意味着"]
     marker_count = len(ordered_marker_re.findall(body))
@@ -1652,7 +1654,7 @@ def zhuque_segment_proxy(raw: str) -> dict:
     max_score = 0
     max_index = 0
     for index, (start, end) in enumerate(bounds, 1):
-        chunk = visible[start:end]
+        chunk = body if len(bounds) == 1 and start == 0 and end == len(visible) else visible[start:end]
         if not chunk:
             continue
         report = analyze_text(chunk, include_segments=False)

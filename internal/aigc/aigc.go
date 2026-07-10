@@ -154,7 +154,7 @@ var cliches = map[string][]string{
 var (
 	sentenceSplitRe     = regexp.MustCompile(`[。！？!?；;\n]+`)
 	paragraphSplitRe    = regexp.MustCompile(`\n\s*\n+`)
-	orderedMarkerRe     = regexp.MustCompile(`(?:首先|其次|再次|最后|总之|综上|换句话说|第一[，、点:]|第二[，、点:]|第三[，、点:])`)
+	orderedMarkerRe     = regexp.MustCompile(`(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])`)
 	nonCJKRe            = regexp.MustCompile(`[^一-龥]`)
 	soundNoiseRe        = regexp.MustCompile(`(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}`)
 	cjkRunRe            = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
@@ -627,7 +627,7 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 		if end <= start {
 			continue
 		}
-		chunk := string(visible[start:end])
+		chunk := zhuqueSegmentChunk(body, visible, bounds, index)
 		report := analyze(chunk, false)
 		proportion := ratio(end-start, len(visible))
 		score, evidence := segmentAIGCProxy(report, end-start, proportion)
@@ -674,6 +674,20 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 		proxy.RiskFloorPercent = round2(riskRatio * 0.70)
 	}
 	return proxy
+}
+
+func zhuqueSegmentChunk(body string, visible []rune, bounds [][2]int, index int) string {
+	if len(bounds) == 1 && bounds[0][0] == 0 && bounds[0][1] == len(visible) {
+		return body
+	}
+	if index < 0 || index >= len(bounds) {
+		return ""
+	}
+	start, end := bounds[index][0], bounds[index][1]
+	if start < 0 || end <= start || end > len(visible) {
+		return ""
+	}
+	return string(visible[start:end])
 }
 
 func rawDetectorScore(item Dimension) float64 {

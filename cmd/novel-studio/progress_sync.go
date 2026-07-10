@@ -54,15 +54,22 @@ func syncProgressChapterWordCount(st *store.Store, chapter, wordCount int) (bool
 	if progress.ChapterWordCounts == nil {
 		progress.ChapterWordCounts = make(map[int]int)
 	}
-	if progress.ChapterWordCounts[chapter] == wordCount {
+	wordCountChanged := progress.ChapterWordCounts[chapter] != wordCount
+	staleInProgress := progress.InProgressChapter == chapter && progress.CurrentChapter > chapter
+	if !wordCountChanged && !staleInProgress {
 		return false, nil
 	}
-	progress.ChapterWordCounts[chapter] = wordCount
-	total := 0
-	for _, count := range progress.ChapterWordCounts {
-		total += count
+	if wordCountChanged {
+		progress.ChapterWordCounts[chapter] = wordCount
+		total := 0
+		for _, count := range progress.ChapterWordCounts {
+			total += count
+		}
+		progress.TotalWordCount = total
 	}
-	progress.TotalWordCount = total
+	if staleInProgress {
+		progress.InProgressChapter = 0
+	}
 	if err := st.Progress.Save(progress); err != nil {
 		return false, err
 	}

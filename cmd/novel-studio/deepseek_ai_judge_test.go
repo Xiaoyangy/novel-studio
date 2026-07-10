@@ -88,6 +88,28 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 	}
 }
 
+func TestDeepSeekAIJudgePromptDoesNotImposeForeignAuthorProfile(t *testing.T) {
+	for _, forbidden := range []string{"30 岁左右", "有文学素养的程序员", "目标作者画像"} {
+		if strings.Contains(deepseekAIJudgeSystemPrompt, forbidden) {
+			t.Fatalf("DeepSeek judge prompt still imposes %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"不预设作者的年龄、性别、职业",
+		"不能移植其他项目身份",
+		"明确数字任务",
+		"不能仅凭其存在判为 AI",
+		"不是语言模型证据",
+		"禁止把它们单独列入 reasons",
+		"类型爽文允许清晰因果",
+		"不得用“模块化”覆盖这些人工特征",
+	} {
+		if !strings.Contains(deepseekAIJudgeSystemPrompt, want) {
+			t.Fatalf("DeepSeek judge prompt missing %q", want)
+		}
+	}
+}
+
 func TestDeepSeekAIJudgeCacheHitSkipsModelCall(t *testing.T) {
 	dir := t.TempDir()
 	body := "第一章\n\n林澈把账本合上。"

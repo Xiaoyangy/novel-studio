@@ -54,3 +54,44 @@ func TestSyncCompletedChapterWordCountsUsesFinalChapterText(t *testing.T) {
 		t.Fatalf("second sync updated=%d, want 0", updated)
 	}
 }
+
+func TestSyncCompletedChapterWordCountsClearsCompletedInProgressPointer(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("测试长篇", 3); err != nil {
+		t.Fatal(err)
+	}
+	finalText := "第一章\n\n这一章已经交付。"
+	if err := st.Drafts.SaveFinalChapter(1, finalText); err != nil {
+		t.Fatalf("SaveFinalChapter: %v", err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, domain.WordCount(finalText), "crisis", "growth"); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatalf("Load progress: %v", err)
+	}
+	progress.InProgressChapter = 1
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatalf("seed stale progress: %v", err)
+	}
+
+	updated, err := syncCompletedChapterWordCounts(st)
+	if err != nil {
+		t.Fatalf("syncCompletedChapterWordCounts: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated=%d, want 1 for stale pointer repair", updated)
+	}
+	progress, err = st.Progress.Load()
+	if err != nil {
+		t.Fatalf("Load repaired progress: %v", err)
+	}
+	if progress.InProgressChapter != 0 || progress.CurrentChapter != 2 {
+		t.Fatalf("stale in-progress pointer not repaired: %+v", progress)
+	}
+}
