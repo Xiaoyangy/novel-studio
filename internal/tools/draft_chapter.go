@@ -74,10 +74,12 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if err := EnsureChapterExpanded(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
+	isRewrite := false
 	if t.store.Progress.IsChapterCompleted(a.Chapter) {
 		// 打磨/重写路径：章节虽已完成，但仍在 pending_rewrites 中，允许覆盖草稿
 		progress, _ := t.store.Progress.Load()
 		inRewriteQueue := progress != nil && slices.Contains(progress.PendingRewrites, a.Chapter)
+		isRewrite = inRewriteQueue
 		if !inRewriteQueue {
 			return json.Marshal(map[string]any{
 				"chapter":   a.Chapter,
@@ -85,6 +87,15 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 				"completed": true,
 				"reason":    fmt.Sprintf("第 %d 章已提交完成，不能覆盖", a.Chapter),
 			})
+		}
+	}
+	// 真实流水线中计划存在时，写正文前重新执行完整门禁。这样旧 plan 即使文件仍在，
+	// 只要缺少当前项目要求的首屏抓力、喜剧节拍、热梗落点或长篇开局设计，也不能旁路写作。
+	if plan, err := t.store.Drafts.LoadChapterPlan(a.Chapter); err != nil {
+		return nil, fmt.Errorf("load chapter plan: %w: %w", errs.ErrStoreRead, err)
+	} else if plan != nil {
+		if err := validateChapterPrewriteSimulation(t.store, *plan, isRewrite); err != nil {
+			return nil, err
 		}
 	}
 	if latest := t.store.Checkpoints.Latest(domain.ChapterScope(a.Chapter)); latest != nil && latest.Step == "draft" {
@@ -125,15 +136,18 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		if err != nil {
 			return nil, err
 		}
+		wordContract := inspectChapterWordContract(t.store, full)
 		return json.Marshal(map[string]any{
 			"written":            true,
 			"chapter":            a.Chapter,
 			"mode":               "append",
 			"word_count":         utf8.RuneCountInString(full),
+			"word_contract":      wordContract,
+			"hard_gate_passed":   wordContract.Passed,
 			"ai_voice_score":     analysis.Metrics.AIVoiceScore,
 			"figurative_density": analysis.Metrics.FigurativeDensity,
 			"dialogue_ratio":     analysis.Metrics.DialogueRatio,
-			"next_step":          "草稿已成功保存。不要再次调用 draft_chapter 重写同一章；立即 read_chapter(source=draft) 回读草稿，再调用 check_consistency。若无硬伤，必须调用 commit_chapter 提交终稿。",
+			"next_step":          draftWordContractNextStep(wordContract),
 		})
 	default: // write
 		if err := validateProjectContaminationFinal(t.store, "draft_chapter", a.Content); err != nil {
@@ -152,15 +166,18 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		if err != nil {
 			return nil, err
 		}
+		wordContract := inspectChapterWordContract(t.store, a.Content)
 		return json.Marshal(map[string]any{
 			"written":            true,
 			"chapter":            a.Chapter,
 			"mode":               "write",
 			"word_count":         utf8.RuneCountInString(a.Content),
+			"word_contract":      wordContract,
+			"hard_gate_passed":   wordContract.Passed,
 			"ai_voice_score":     analysis.Metrics.AIVoiceScore,
 			"figurative_density": analysis.Metrics.FigurativeDensity,
 			"dialogue_ratio":     analysis.Metrics.DialogueRatio,
-			"next_step":          "草稿已成功保存。不要再次调用 draft_chapter 重写同一章；立即 read_chapter(source=draft) 回读草稿，再调用 check_consistency。若无硬伤，必须调用 commit_chapter 提交终稿。",
+			"next_step":          draftWordContractNextStep(wordContract),
 		})
 	}
 }

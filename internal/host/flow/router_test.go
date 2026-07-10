@@ -80,6 +80,24 @@ func TestRoute_PendingRewritesFirst(t *testing.T) {
 	}
 }
 
+func TestRoute_StagedPlanRepairBeatsGenericRewritePlanning(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{1}
+	steer := "Pipeline staged-plan repair：只补 trend_language_plan 与 system_companion_voice"
+	got := Route(State{
+		Progress:                 p,
+		NextActionPlanReady:      false,
+		NextActionPlanPartial:    true,
+		NextActionPlanRepairTask: steer,
+		NextActionTitle:          "失业饭桌",
+		NextActionCoreEvent:      "饭桌受辱",
+		NextActionHook:           "系统绑定",
+	})
+	if got == nil || got.Agent != "writer" || got.Task != steer {
+		t.Fatalf("staged repair task must beat generic rewrite prompt, got %+v", got)
+	}
+}
+
 func TestRoute_PendingPolishingVerb(t *testing.T) {
 	p := writingProgress([]int{1}, domain.FlowPolishing)
 	p.PendingRewrites = []int{2}

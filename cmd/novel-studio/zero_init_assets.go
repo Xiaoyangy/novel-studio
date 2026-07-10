@@ -1964,6 +1964,7 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 			AntiAIPlan:          zeroAntiAIPlan(project),
 			ExternalRefs:        zeroExternalReferencePlan(project),
 			TrendLanguage:       zeroTrendLanguagePlan(project),
+			EntertainmentPlan:   zeroReaderEntertainmentPlan(project),
 			GroundingDetails:    zeroGroundingDetails(project),
 			OffscreenStage:      zeroOffscreenStage(project, dynamics.Characters),
 			LongformOpening:     zeroLongformOpeningDesign(project, first),
@@ -2212,6 +2213,27 @@ func zeroTrendLanguagePlan(project zeroInitProject) []domain.TrendLanguagePlan {
 		UsageBudget:      "第一章默认0-1处，最多2处半截反应；禁止梗串",
 		ForbiddenUsage:   "主角关键判断、恐怖规则条款、章末钩子、作者旁白和金句里不用热梗",
 	}}
+}
+
+func zeroReaderEntertainmentPlan(project zeroInitProject) domain.ReaderEntertainmentPlan {
+	if zeroIsSecondAlgorithmProject(project) {
+		return domain.ReaderEntertainmentPlan{
+			OpeningBeat:          "前200字让许闻溪在具体工作现场遭遇一句轻慢、一次权限卡点或一个结果被夺走，立刻逼出她的临场选择。",
+			HumorBeats:           []string{"同事把规范话说得过分顺口，现实小动作当场拆台", "许闻溪用克制的短句反问，对方误以为她在配合，随后被结果反噬"},
+			ImmediatePayoffs:     []string{"主角保住一个可见结果或证据", "轻视她的人不得不改变一句话、一个动作或一次资源分配"},
+			ProcedureCompression: "会议、审批、培训和工具流程只保留会改变责任、证据或关系的节点，其余一句带过。",
+			CompanionVoiceBeat:   "由同事、朋友或男主用有立场的半句反应承载陪伴，不替许闻溪给答案。",
+			ForbiddenComedy:      []string{"拿真实困境当笑料", "网络梗串", "配角集体降智", "用金句代替结果"},
+		}
+	}
+	return domain.ReaderEntertainmentPlan{
+		OpeningBeat:          "前200字让主角在具体现场遭遇尴尬、冲突、误会或规则反噬，并当场做出不完美但主动的回应。",
+		HumorBeats:           []string{"配角的误解或嘴欠反应被现场结果反打", "系统、搭档或朋友用短促接话制造第二层反应，而不是讲规则"},
+		ImmediatePayoffs:     []string{"本章中段前出现一次读者能看见的小胜或能力验证", "章末前让钱、结果、面子、关系或权限至少再改变一次"},
+		ProcedureCompression: "交易、登记、核验、交通和安装等流程只保留发生拒绝、反转、笑点、代价或关系变化的节点。",
+		CompanionVoiceBeat:   "系统、搭档或朋友至少有一次带个人声口的短回应，能接话、吐槽、提醒或撑腰，但不替主角做决定。",
+		ForbiddenComedy:      []string{"梗串", "旁白硬贴热词", "配角集体降智", "在章末用热梗代替追读后果"},
+	}
 }
 
 func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan {

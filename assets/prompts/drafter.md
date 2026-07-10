@@ -10,7 +10,7 @@
 
 严格按顺序执行，所有产物通过工具落盘。
 
-1. 调用一次 `novel_context(chapter=N)`。必须确认 `chapter_world_simulation.status=ready`、`chapter_plan.causal_simulation.world_simulation_id` 与之相同，并读懂 `protagonist_projection`、`required_beats`、`reader_retention_plan`、`voice_logic`、`dialogue_scene_blueprints`、`environment_state`、`anti_ai_execution_plan` 和章末契约。
+1. 调用一次 `novel_context(chapter=N)`。必须确认 `chapter_world_simulation.status=ready`、`chapter_plan.causal_simulation.world_simulation_id` 与之相同，并读懂 `protagonist_projection`、`required_beats`、`reader_retention_plan`、`reader_entertainment_plan`、`trend_language_plan`、`longform_opening`、`voice_logic`、`dialogue_scene_blueprints`、`environment_state`、`anti_ai_execution_plan` 和章末契约。
 2. 严守渲染边界：
    - `character_decisions` 是后台全角色事实，用于保持连续性和提交台账，不是全知正文素材。
    - 正文只允许渲染 `protagonist_projection.observable_effects`、主角现场感知和经合法传播路径抵达的信息。
@@ -44,6 +44,10 @@
 - **不越计划范围（铁律）**：计划是本章正文的唯一范围依据。正文只能落实计划里已定的事：必须覆盖全部 `required_beats`，**绝不触犯任何 `forbidden_moves`（硬禁止，不是"尽量避免"）**，不得引入计划未规划的重大情节、新角色、新场景、新势力或新设定。若渲染中发现故事"需要"计划之外的东西才成立，说明计划有缺口——在 `feedback` 里指出并停止，退回推演阶段补计划，**不要在正文里自行发挥补上**。细节层面的具体措辞、动作、感官、留白由你填充，但不得改变或扩张计划设定的事件与范围。
 - **计划即事实**：`causal_simulation.initial_state`/`voice_logic`/`dialogue_scene_blueprints` 里每个角色的目标、知识边界、声口、潜台词就是他们在正文里的行为约束。角色不说自己不知道的信息，不为推进剧情突然转性、解释世界观或救场。
 - **留存筛选优先**：正文显性内容先看 `reader_retention_plan.surface_beats`，每个 surface beat 必须变成页面上的动作、对白、物件变化、证据或选择后果；`latent_context` 不许被旁白讲成设定说明，`reveal_budget` 不许提前揭底，`cut_or_compress` 不许还原成清单段落。计划里没有进入 surface 的字段不是不用，而是藏在角色选择、沉默、误判和物件回扣里。
+- **吸引力合同必须逐项兑现**：`reader_entertainment_plan.opening_beat` 要在前200字内落成具体尴尬、冲突、误会或反转；`humor_beats` 至少兑现两个不同机制的笑点，必须有铺垫和人物反应，不能都靠热梗；`immediate_payoffs` 要让钱、结果、面子、关系或权限在本章页面可见地改变。第一章还必须兑现 `longform_opening.opening_hook`，不能把系统、首个爽点或女主记忆点全压到章末。
+- **流程只留戏，不留说明书**：严格执行 `reader_entertainment_plan.procedure_compression`。询价、开票、安装、登记、核验等连续流程，除非其中发生拒绝、误判、反转、笑点、关系位移或代价变化，否则一句带过；不得连续两段只证明主角“按流程做对了”。
+- **系统/同伴要活着说话**：兑现 `companion_voice_beat`。若用户已把系统定义为会交流解闷，它必须短促吐槽、接话、提醒或替主角撑腰并始终支持主角，不能只下任务、报数字、弹菜单；任何 anti_ai 计划都无权把它改成“不接话/不吐槽”的冷机器。若由朋友或伴侣承载，也必须有个人声口和立场变化。
+- **热梗是人物动作的一部分**：用户明确要求热梗时，至少自然使用一条 `trend_language_plan.item` 的具体短句，严格由 `character_carrier` 承载并服从 `usage_budget`。热梗前后必须有误会、社死、吐槽对象或关系反应；旁白、主角关键判断、硬煽情和章末钩子禁用。单章通常1-2处，绝不串梗。
 - **物件承载信息**：兑现 `scene_anchors` 与 `causal_simulation.environment_state`——每章至少 2 个现场物件/痕迹承担新信息、关系位移或规则代价，不做装饰名词。
 - **小说分段**：按 `fiction_paragraphing` 执行。换说话人通常换段；换行动主体、焦点、时间地点、证据落点也换段。动作 beat 跟所属台词同段；同一段里不要让三个人轮流说话，除非是群体噪声。150-220 字段落必须有慢速观察/复杂反应理由，220 字以上默认视为文字墙候选；同时不要为了规避大段切成连续孤句。
 - **声口区分**：按 `voice_logic` 写出人物各自的句长、标点、话术习惯；不同角色说话不能同一个腔。对白带信息差、隐瞒、误判或临场交易，不替作者解释设定。

@@ -104,6 +104,62 @@ func writeCleanMechanicalGate(t *testing.T, s *store.Store, chapter int) {
 	}
 }
 
+func TestCommitChapterRejectsWordContractBeforeFinalWrite(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{
+		ChapterWords: &rules.WordRange{Min: 10, Max: 20},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("长", 25)
+	if err := s.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter":                 1,
+		"summary":                 "超字数候选不能覆盖终稿。",
+		"characters":              []string{"主角", "配角"},
+		"key_events":              []string{"候选生成"},
+		"character_stage_records": testCharacterStageRecords("主角", "配角"),
+	})
+	if _, err := NewCommitChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "字数硬门禁未通过") {
+		t.Fatalf("expected pre-commit word gate, got %v", err)
+	}
+	if final, _ := s.Drafts.LoadChapterText(1); final != "" {
+		t.Fatalf("invalid draft must not replace final: %q", final)
+	}
+	progress, _ := s.Progress.Load()
+	if len(progress.CompletedChapters) != 0 {
+		t.Fatalf("invalid draft must not advance progress: %+v", progress.CompletedChapters)
+	}
+}
+
+func TestMergeRewriteCharacterStageInheritsUnchangedCast(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	existing := testCharacterStageRecords("林澈", "沈知遥", "贺骁")
+	if err := s.SaveCharacterStageRecords(1, existing); err != nil {
+		t.Fatal(err)
+	}
+	submitted := []domain.CharacterStageRecord{existing[0]}
+	submitted[0].Decision = "压缩正文后仍按原计划承担付款责任"
+	merged := mergeRewriteCharacterStage(s, 1, submitted)
+	if len(merged) != 3 {
+		t.Fatalf("partial rewrite metadata should inherit omitted cast: %+v", merged)
+	}
+	if merged[0].Decision != submitted[0].Decision || merged[1].Character != "沈知遥" || merged[2].Character != "贺骁" {
+		t.Fatalf("rewrite stage merge lost or failed to update records: %+v", merged)
+	}
+}
+
 func TestCommitChapterSchemaDescribesFeedbackAsObject(t *testing.T) {
 	tool := NewCommitChapterTool(store.NewStore(t.TempDir()))
 	schema := tool.Schema()
@@ -157,6 +213,20 @@ func TestRequireCurrentDraftConsistencyRejectsMissingAndStaleCheck(t *testing.T)
 	}
 	if err := requireCurrentDraftConsistency(s, 1, second); err == nil || !strings.Contains(err.Error(), "check_consistency") {
 		t.Fatalf("stale consistency check should block commit, got %v", err)
+	}
+	if _, err := NewCheckConsistencyTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatalf("check edited draft: %v", err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, second); err != nil {
+		t.Fatalf("edit followed by current consistency check should pass: %v", err)
+	}
+
+	const third = "# 第一章 测试\n\n第三版正文。"
+	if err := s.Drafts.SaveDraft(1, third); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, third); err == nil {
+		t.Fatal("unchecked edit after consistency check must still be blocked")
 	}
 }
 

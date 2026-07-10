@@ -64,6 +64,7 @@ type ChapterCausalSimulation struct {
 	AntiAIPlan          AntiAIExecutionPlan          `json:"anti_ai_execution_plan,omitempty"`      // AI 味风险的写前阻断计划
 	ExternalRefs        []ExternalReferencePlan      `json:"external_reference_plan,omitempty"`     // 网络/RAG/外部资料如何转化为正文细节
 	TrendLanguage       []TrendLanguagePlan          `json:"trend_language_plan,omitempty"`         // 热梗/流行语如何受控进入人物声口或生活纹理
+	EntertainmentPlan   ReaderEntertainmentPlan      `json:"reader_entertainment_plan,omitempty"`   // 首屏抓力、喜剧节拍、即时兑现和流程压缩
 	GroundingDetails    []GroundingDetailPlan        `json:"grounding_details,omitempty"`           // 由外部资料转化出的生活/制度/物件锚点
 	OffscreenStage      []CharacterStageRecord       `json:"offscreen_character_stage,omitempty"`   // 本章所有关键角色在正文内外的时间线行动
 	LongformOpening     LongformOpeningDesign        `json:"longform_opening,omitempty"`            // 百万字长篇第一章开局设计
@@ -136,6 +137,17 @@ type TrendLanguagePlan struct {
 	SceneFunction    string `json:"scene_function,omitempty"`
 	UsageBudget      string `json:"usage_budget,omitempty"`
 	ForbiddenUsage   string `json:"forbidden_usage,omitempty"`
+}
+
+// ReaderEntertainmentPlan 把“抓人、好笑、有爽点”从笼统风格词变成可验收的页面计划。
+// 它不替代因果推演，只约束既定事件以什么节奏和人物反应进入主视角正文。
+type ReaderEntertainmentPlan struct {
+	OpeningBeat          string   `json:"opening_beat,omitempty"`
+	HumorBeats           []string `json:"humor_beats,omitempty"`
+	ImmediatePayoffs     []string `json:"immediate_payoffs,omitempty"`
+	ProcedureCompression string   `json:"procedure_compression,omitempty"`
+	CompanionVoiceBeat   string   `json:"companion_voice_beat,omitempty"`
+	ForbiddenComedy      []string `json:"forbidden_comedy,omitempty"`
 }
 
 type GroundingDetailPlan struct {

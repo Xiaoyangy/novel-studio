@@ -268,6 +268,15 @@ func projectMemoryRAGChunks(st *store.Store, chapter int) ([]domain.RAGChunk, er
 			MaxRunes:   2400,
 		},
 		{
+			RelPath:    "meta/web_reference_brief.md",
+			SourceKind: "craft",
+			Facet:      "style",
+			Context:    "项目联网写法与热梗简报 | web_reference_brief",
+			Summary:    "带检索日期和来源的当前市场写法、开篇抓力、喜剧节拍、流程压缩、系统声口与热梗角色载体约束。",
+			Keywords:   []string{"联网简报", "开篇抓力", "首屏冲突", "喜剧节拍", "即时兑现", "流程压缩", "系统声口", "热梗", "trend_language"},
+			MaxRunes:   2600,
+		},
+		{
 			RelPath:    "meta/world_background_plan.md",
 			SourceKind: "world",
 			Facet:      "zero_init",

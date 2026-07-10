@@ -73,7 +73,11 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 		score    domain.SamplingCandidate
 	}
 	candidates := make([]candidate, 0, candidateCount)
-	for i := 1; i <= candidateCount; i++ {
+	sampleCount := candidateCount
+	if isRewriteSamplingRequest(messages) {
+		sampleCount = 1
+	}
+	for i := 1; i <= sampleCount; i++ {
 		resp, err := m.Base.Generate(ctx, messages, tools, opts...)
 		if err != nil {
 			if i == 1 {
@@ -120,6 +124,23 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 	resp := cloneResponse(best.response)
 	attachSamplingRecord(&resp.Message, best.call.ID, record)
 	return resp, nil
+}
+
+func isRewriteSamplingRequest(messages []agentcore.Message) bool {
+	start := max(0, len(messages)-12)
+	for i := len(messages) - 1; i >= start; i-- {
+		text := messages[i].TextContent()
+		if containsAny(text,
+			"待返工章节的新推演计划",
+			"待返工章节",
+			"重写第 ",
+			"重写第1", "重写第2", "重写第3", "重写第4", "重写第5",
+			`"flow":"rewriting"`, `"flow": "rewriting"`,
+		) {
+			return true
+		}
+	}
+	return false
 }
 
 type draftArgs struct {

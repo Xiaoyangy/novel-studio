@@ -16,6 +16,28 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if err != nil || plan == nil {
 		return false
 	}
+	var preferenceText string
+	if snapshot, loadErr := store.UserRules.Load(); loadErr == nil && snapshot != nil {
+		preferenceText = snapshot.Structured.Genre + "\n" + snapshot.Preferences
+	}
+	requireLongform := false
+	if chapter == 1 {
+		if progress, loadErr := store.Progress.Load(); loadErr == nil && progress != nil && progress.TotalChapters >= 50 {
+			requireLongform = true
+		}
+		if strings.Contains(preferenceText, "长篇") || strings.Contains(preferenceText, "万字") {
+			requireLongform = true
+		}
+	}
+	if !domain.ChapterAttractionPlanReady(
+		*plan,
+		domain.TrendLanguageRequested(preferenceText),
+		domain.ReaderEntertainmentRequested(preferenceText),
+		requireLongform,
+		domain.SystemCompanionVoiceRequested(preferenceText),
+	) {
+		return false
+	}
 	if !isRewrite {
 		return true
 	}
@@ -50,9 +72,11 @@ func LoadState(store *storepkg.Store) State {
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
+		loadNextActionPlanStage(store, next, &s)
 		loadNextActionOutline(store, next, &s)
 	}
 
@@ -78,6 +102,18 @@ func LoadState(store *storepkg.Store) State {
 	}
 
 	return s
+}
+
+func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {
+	if store == nil || state == nil || chapter <= 0 {
+		return
+	}
+	if partial, err := store.Drafts.LoadChapterPlanPartial(chapter); err == nil && partial != nil {
+		state.NextActionPlanPartial = true
+	}
+	if meta, err := store.RunMeta.Load(); err == nil && meta != nil && strings.HasPrefix(strings.TrimSpace(meta.PendingSteer), "Pipeline staged-plan repair") {
+		state.NextActionPlanRepairTask = strings.TrimSpace(meta.PendingSteer)
+	}
 }
 
 func loadNextActionOutline(store *storepkg.Store, chapter int, state *State) {

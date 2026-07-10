@@ -76,6 +76,23 @@ func TestMethodologyViolationsPacing(t *testing.T) {
 	}
 }
 
+func TestMethodologyPacingDefersWordRangeToUserRules(t *testing.T) {
+	tool := newLintTestTool(t)
+	contract, _ := domain.PacingPreset("qidian_dushi")
+	if err := tool.store.Methodology.SavePacingContract(contract); err != nil {
+		t.Fatal(err)
+	}
+	if err := tool.store.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{
+		ChapterWords: &rules.WordRange{Min: 2100, Max: 3000},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := tool.methodologyViolations(1, 2500, "crisis", methodologyCommitExtras{})
+	if countRule(got, "pacing_contract") != 0 {
+		t.Fatalf("genre preset must not contradict explicit user word range: %v", got)
+	}
+}
+
 func TestMethodologyViolationsPOV(t *testing.T) {
 	tool := newLintTestTool(t)
 	// 写入契约：scope 限林昭/沈青

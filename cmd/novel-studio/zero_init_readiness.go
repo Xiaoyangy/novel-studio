@@ -147,6 +147,9 @@ func zeroValidateChapterPlan(plan domain.ChapterPlan) []string {
 			issues = append(issues, fmt.Sprintf("causal_simulation.trend_language_plan[%d] 未补足", i))
 		}
 	}
+	if !domain.CompleteReaderEntertainmentPlan(sim.EntertainmentPlan) {
+		issues = append(issues, "causal_simulation.reader_entertainment_plan 未补足")
+	}
 	if len(sim.GroundingDetails) == 0 {
 		issues = append(issues, "causal_simulation.grounding_details 不能为空")
 	}
@@ -395,7 +398,7 @@ func zeroValidateChapterPlan(plan domain.ChapterPlan) []string {
 	if len(sim.EnvironmentState) == 0 {
 		issues = append(issues, "causal_simulation.environment_state 不能为空")
 	}
-	if sim.LongformOpening.SerialEngine == "" || len(sim.LongformOpening.ReaderRewardLoop) == 0 {
+	if !domain.CompleteLongformOpeningDesign(sim.LongformOpening) {
 		issues = append(issues, "causal_simulation.longform_opening 未补足")
 	}
 	return issues

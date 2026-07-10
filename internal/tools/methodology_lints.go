@@ -53,6 +53,12 @@ func (t *CommitChapterTool) methodologyViolations(chapter, wordCount int, hookTy
 
 	// --- 节奏契约（Task 002）：体裁硬数字确定性 lint ---
 	if contract, err := t.store.Methodology.LoadPacingContract(); err == nil && contract != nil {
+		// 明确的 user_rules.chapter_words 是本书唯一字数事实源。体裁预设仍负责
+		// 钩子和冲突节奏，但不能再用另一套字数带制造互相矛盾的双重门禁。
+		if snapshot, loadErr := t.store.UserRules.Load(); loadErr == nil && snapshot != nil && snapshot.Structured.ChapterWords != nil {
+			contract.ChapterWordMin = 0
+			contract.ChapterWordMax = 0
+		}
 		hookHistory := t.hookHistoryWithCurrent(chapter, hookType)
 		for _, issue := range contract.LintPacing(chapter, wordCount, hookType, hookHistory) {
 			warn("pacing_contract", issue, wordCount)

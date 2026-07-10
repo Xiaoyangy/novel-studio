@@ -79,7 +79,7 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 		ObservableEffects: []string{"亲戚追问把失业事实推到桌面"},
 		HiddenPressures:   []string{"沈知遥的工作安排尚未传到林澈"},
 		AvailableOptions:  []string{"继续隐瞒", "承认失业"},
-		ChosenDecision:    "在饭桌承认失业",
+		ChosenDecision:    "错误的重复选择",
 		DecisionReason:    "继续隐瞒会让家人按错误信息安排明天",
 		PlanConstraints:   []string{"不能提前知道沈知遥的离屏行动"},
 		CausalChain:       []string{"亲戚追问", "父母护短", "物证压缩退路", "林澈承认失业"},
@@ -108,6 +108,26 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 	sim, err := st.LoadChapterWorldSimulation(1)
 	if err != nil || sim == nil || len(sim.CharacterDecisions) != 2 {
 		t.Fatalf("saved simulation mismatch: sim=%+v err=%v", sim, err)
+	}
+	if sim.ProtagonistProjection.ChosenDecision != "在饭桌承认失业" {
+		t.Fatalf("projection should be normalized to protagonist decision: %+v", sim.ProtagonistProjection)
+	}
+}
+
+func TestSimulateChapterWorldRejectsEmptyAndOversizedBatches(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	tool := NewSimulateChapterWorldTool(st)
+	empty, _ := json.Marshal(map[string]any{"chapter": 1})
+	if _, err := tool.Execute(context.Background(), empty); err == nil || !strings.Contains(err.Error(), "空提交无效") {
+		t.Fatalf("empty simulation patch must fail, got %v", err)
+	}
+	decisions := make([]domain.CharacterWorldDecision, 0, 6)
+	for _, name := range []string{"甲", "乙", "丙", "丁", "戊", "己"} {
+		decisions = append(decisions, simulatedDecision(name, "继续自己的行动", false))
+	}
+	oversized, _ := json.Marshal(map[string]any{"chapter": 1, "character_decisions": decisions})
+	if _, err := tool.Execute(context.Background(), oversized); err == nil || !strings.Contains(err.Error(), "最多提交5名") {
+		t.Fatalf("oversized simulation batch must fail, got %v", err)
 	}
 }
 

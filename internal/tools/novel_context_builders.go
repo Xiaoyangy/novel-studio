@@ -491,6 +491,7 @@ func hasChapterCausalSimulation(sim domain.ChapterCausalSimulation) bool {
 		hasAntiAIExecutionPlan(sim.AntiAIPlan) ||
 		len(sim.ExternalRefs) > 0 ||
 		len(sim.TrendLanguage) > 0 ||
+		domain.CompleteReaderEntertainmentPlan(sim.EntertainmentPlan) ||
 		len(sim.GroundingDetails) > 0 ||
 		len(sim.OffscreenStage) > 0 ||
 		hasLongformOpeningDesign(sim.LongformOpening) ||

@@ -44,6 +44,23 @@ func TestSamplerPreservesUltraThinking(t *testing.T) {
 	}
 }
 
+func TestSamplerUsesSingleCandidateForRewrite(t *testing.T) {
+	base := &fakeModel{responses: []*agentcore.LLMResponse{
+		draftResponse("rewrite", 1, "返工后的正文。"),
+	}}
+	model := New(base)
+	_, err := model.Generate(context.Background(), []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("重写第 1 章，按 rewrite brief 局部压缩。")}},
+		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock("next_step: 请调用 draft_chapter 写章节草稿正文")}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if base.calls != 1 {
+		t.Fatalf("rewrite sampling calls = %d, want 1", base.calls)
+	}
+}
+
 func (m *fakeModel) GenerateStream(context.Context, []agentcore.Message, []agentcore.ToolSpec, ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
 	panic("not used")
 }

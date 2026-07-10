@@ -68,7 +68,7 @@ func TestPlanStructureRejectsGenericIdentityAnchors(t *testing.T) {
 	}
 }
 
-func TestPlanStructureRejectsGenericMaleProjectAndTitleDrift(t *testing.T) {
+func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	st := newPhaseTestStore(t)
 	if err := st.Characters.Save([]domain.Character{
 		{Name: "林澈", Role: "主角", Tier: "core"},
@@ -82,8 +82,15 @@ func TestPlanStructureRejectsGenericMaleProjectAndTitleDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1)); err == nil || !strings.Contains(err.Error(), "身份锚点") {
-		t.Fatalf("expected male project identity/title rejection, got %v", err)
+	if _, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1)); err != nil {
+		t.Fatalf("outline anchors should normalize a generic structure: %v", err)
+	}
+	anchored, err := st.Drafts.LoadChapterPlanPartial(1)
+	if err != nil || anchored == nil {
+		t.Fatalf("LoadChapterPlanPartial: partial=%v err=%v", anchored, err)
+	}
+	if got := anchored["structure"].(map[string]any)["title"]; got != "失业饭桌" {
+		t.Fatalf("outline title should be injected before validation, got %#v", got)
 	}
 
 	args, _ := json.Marshal(map[string]any{
@@ -115,6 +122,9 @@ func TestPlanStructureRejectsGenericMaleProjectAndTitleDrift(t *testing.T) {
 	}
 	if got := structure["hook"]; got != "手机弹出县城花钱系统绑定提示" {
 		t.Fatalf("outline hook must pin chapter boundary, got %#v", got)
+	}
+	if got := structure["title"]; got != "失业饭桌" {
+		t.Fatalf("outline title must pin chapter name, got %#v", got)
 	}
 }
 
@@ -286,6 +296,32 @@ func TestPlanDetailsMergesCharacterArraysByName(t *testing.T) {
 	raw, _ := json.Marshal(states)
 	if !strings.Contains(string(raw), "许闻溪") || !strings.Contains(string(raw), "梁渡") {
 		t.Fatalf("merged states lost a character: %s", raw)
+	}
+}
+
+func TestPlanDetailsAppendsSourceAndReviewArrays(t *testing.T) {
+	merged := map[string]any{
+		"context_sources": []any{"world_foundation"},
+		"review_refinement": map[string]any{
+			"trigger_sources":      []any{"reviews/01.md"},
+			"preserve_constraints": []any{"保留付款事实"},
+		},
+	}
+	mergeCausalSimulationPatch(merged, map[string]any{
+		"context_sources": []any{"rewrite_source:sha256:test", "world_foundation"},
+		"review_refinement": map[string]any{
+			"trigger_sources":      []any{"rewrite_brief"},
+			"preserve_constraints": []any{"保留章末钩子"},
+		},
+	})
+	raw, _ := json.Marshal(merged)
+	for _, want := range []string{"world_foundation", "rewrite_source:sha256:test", "reviews/01.md", "rewrite_brief", "保留付款事实", "保留章末钩子"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("merged patch lost %q: %s", want, raw)
+		}
+	}
+	if strings.Count(string(raw), "world_foundation") != 1 {
+		t.Fatalf("source arrays should deduplicate: %s", raw)
 	}
 }
 

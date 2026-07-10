@@ -73,6 +73,22 @@ func TestBuildProsePromptCompactsOversizedContext(t *testing.T) {
 	}
 }
 
+func TestBuildProsePromptPinsChapterWordContract(t *testing.T) {
+	msgs := []agentcore.Message{
+		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"user_rules":{"structured":{"chapter_words":{"min":2100,"max":3000}}}}`)}},
+	}
+	prompt := buildProsePrompt(msgs)
+	for _, want := range []string{"本章字数硬合同", "2100-3000", "工具按完整输出", "覆盖终稿前被拒绝"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prose prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	contract := inferProseWordContract(msgs)
+	if contract.Min != 2100 || contract.Max != 3000 || !contract.accepts(2500) || contract.accepts(3900) {
+		t.Fatalf("unexpected inferred contract: %+v", contract)
+	}
+}
+
 func TestParseCodexResponseToolCall(t *testing.T) {
 	// arguments_json 是 JSON 字符串（严格结构化输出无法用自由 object）。
 	raw := `{"action":"tool_call","tool_name":"plan_chapter","arguments_json":"{\"chapter\":1,\"title\":\"开局\"}","text":null}`

@@ -32,7 +32,7 @@ func (t *SimulateChapterWorldTool) Label() string                          { ret
 func (t *SimulateChapterWorldTool) ReadOnly(_ json.RawMessage) bool        { return false }
 func (t *SimulateChapterWorldTool) ConcurrencySafe(_ json.RawMessage) bool { return false }
 func (t *SimulateChapterWorldTool) Description() string {
-	return "在章节 plan 之前推进单一世界中的全部实名角色。每个角色都必须按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。可分批提交 character_decisions，最后 finalize=true；完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。"
+	return "在章节 plan 之前推进单一世界中的全部实名角色。每个角色都必须按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。必须分批提交 character_decisions，每批最多5名角色，最后 finalize=true；完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。空补丁会被拒绝。"
 }
 
 func (t *SimulateChapterWorldTool) Schema() map[string]any {
@@ -80,7 +80,7 @@ func (t *SimulateChapterWorldTool) Schema() map[string]any {
 	return schema.Object(
 		schema.Property("chapter", schema.Int("章节号；缺省用当前章")),
 		schema.Property("time_window", schema.String("本章覆盖的现实故事时间窗口；复杂项目按真实耗时跨章推进")),
-		schema.Property("character_decisions", schema.Array("本批角色决定；同名角色后批覆盖前批", decision)),
+		schema.Property("character_decisions", schema.Array("本批角色决定；同名角色后批覆盖前批；每批最多5名，剩余角色下次补", decision)),
 		schema.Property("protagonist_projection", projection),
 		schema.Property("rewrite_fact_coverage", schema.Array("仅返工章需要：逐条证明保留事实已进入本轮世界模拟", rewriteCoverage)),
 		schema.Property("sources", schema.Array("本次推演依据的 tick、角色档案、台账、大纲和规则", schema.String(""))),
@@ -107,6 +107,9 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter 缺失且无法推断当前章: %w", errs.ErrToolArgs)
 	}
+	if len(a.CharacterDecisions) > 5 {
+		return nil, fmt.Errorf("simulate_chapter_world 单批最多提交5名角色，当前=%d；请按 gaps 分成多批，避免大 JSON 在模型末端丢成空参数: %w", len(a.CharacterDecisions), errs.ErrToolArgs)
+	}
 	if skipped, _, err := ensureChapterPlannable(t.store, a.Chapter); err != nil || skipped != nil {
 		return skipped, err
 	}
@@ -117,6 +120,12 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	}
 	if partial == nil {
 		partial = &domain.ChapterWorldSimulation{Version: 1, Chapter: a.Chapter}
+	}
+	if strings.TrimSpace(a.TimeWindow) == "" && len(a.CharacterDecisions) == 0 &&
+		strings.TrimSpace(a.ProtagonistProjection.Protagonist) == "" && len(a.RewriteFactCoverage) == 0 &&
+		len(a.Sources) == 0 && !a.Finalize {
+		return nil, fmt.Errorf("simulate_chapter_world 空提交无效：必须补1-5名 character_decisions、rewrite_fact_coverage、protagonist_projection 或 finalize。当前缺口：%s: %w",
+			strings.Join(chapterWorldSimulationGaps(t.store, *partial), "；"), errs.ErrToolArgs)
 	}
 	rewriteSource, _, _, rewriteErr := loadChapterRewriteSource(t.store, a.Chapter)
 	if rewriteErr != nil {
@@ -135,6 +144,7 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if strings.TrimSpace(a.ProtagonistProjection.Protagonist) != "" {
 		partial.ProtagonistProjection = a.ProtagonistProjection
 	}
+	normalizeProtagonistProjection(t.store, partial)
 	for _, source := range a.Sources {
 		partial.Sources = appendUniqueString(partial.Sources, source)
 	}
@@ -156,7 +166,7 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 			"chapter":            a.Chapter,
 			"characters_present": characterDecisionNames(partial.CharacterDecisions),
 			"gaps":               gaps,
-			"next_step":          "继续分批调用 simulate_chapter_world；补齐所有角色后提交 protagonist_projection 并传 finalize=true。不要开始 plan_structure。",
+			"next_step":          "继续分批调用 simulate_chapter_world，每批只补 gaps 中最多5名角色；补齐后单独提交 protagonist_projection 并传 finalize=true。禁止空提交，不要开始 plan_structure。",
 		})
 	}
 	if len(gaps) > 0 {
@@ -179,6 +189,30 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 		"protagonist_projection": partial.ProtagonistProjection,
 		"next_step":              "基于 protagonist_projection 调用 plan_structure，再用 plan_details 写入 world_simulation_id 和 protagonist_decision；正文只渲染主角可见信息。",
 	})
+}
+
+func normalizeProtagonistProjection(st *store.Store, simulation *domain.ChapterWorldSimulation) {
+	if st == nil || simulation == nil {
+		return
+	}
+	protagonist := strings.TrimSpace(inferCommitProtagonist(st))
+	if protagonist == "" {
+		return
+	}
+	projection := &simulation.ProtagonistProjection
+	if strings.TrimSpace(projection.Protagonist) == "" {
+		projection.Protagonist = protagonist
+	}
+	if strings.TrimSpace(projection.Protagonist) != protagonist {
+		return
+	}
+	for _, decision := range simulation.CharacterDecisions {
+		if strings.TrimSpace(decision.Character) != protagonist || strings.TrimSpace(decision.Decision) == "" {
+			continue
+		}
+		projection.ChosenDecision = strings.TrimSpace(decision.Decision)
+		return
+	}
 }
 
 func mergeCharacterWorldDecisions(existing, incoming []domain.CharacterWorldDecision) []domain.CharacterWorldDecision {

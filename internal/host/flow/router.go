@@ -51,6 +51,10 @@ type State struct {
 	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
 	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
 	NextActionPlanReady bool
+	// 已有 staged plan partial 时，Router 必须优先派最小补丁修复，不能退化成
+	// 普通“从头重做计划”提示，否则 Planner 会重复已完成批次。
+	NextActionPlanPartial    bool
+	NextActionPlanRepairTask string
 
 	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
 	// 避免大上下文裁剪把当前章标题/核心事件挤掉。
@@ -102,6 +106,18 @@ func Route(s State) *Instruction {
 			verb = "打磨"
 		}
 		if !s.NextActionPlanReady {
+			if s.NextActionPlanPartial {
+				task := s.NextActionPlanRepairTask
+				if task == "" {
+					task = fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 plan.partial。只调用 novel_context(chapter=%d) 一次，然后严格按 chapter_plan_stage.gap_summary 用 plan_details 提交最小缺口补丁；禁止重跑 simulate_chapter_world、plan_structure，禁止重发已完成字段，最后 finalize=true", ch, ch)
+				}
+				return &Instruction{
+					Agent:   "writer",
+					Task:    task,
+					Reason:  fmt.Sprintf("第 %d 章 staged plan 只需最小补丁修复", ch),
+					Chapter: ch,
+				}
+			}
 			task := fmt.Sprintf(
 				"返工目标锁定第 %d 章：按本章 rewrite_brief 重做写前推演计划（%s前）。该章已在 completed_chapters、进度游标指向下一章都属于正常返工状态；严禁规划第 %d 章或任何未来章节。read_chapter(第%d章) 是读取待返工原文，不是把它当上一章续写；所有 planning 工具必须提交 chapter=%d",
 				ch, verb, ch+1, ch, ch,
@@ -206,6 +222,13 @@ func Route(s State) *Instruction {
 	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
+		if s.NextActionPlanPartial {
+			task := s.NextActionPlanRepairTask
+			if task == "" {
+				task = fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 plan.partial。只调用 novel_context(chapter=%d) 一次，然后严格按 chapter_plan_stage.gap_summary 用 plan_details 提交最小缺口补丁；禁止重跑 simulate_chapter_world、plan_structure，禁止重发已完成字段，最后 finalize=true", next, next)
+			}
+			return &Instruction{Agent: "writer", Task: task, Reason: "下一章 staged plan 只需最小补丁修复", Chapter: next}
+		}
 		task := fmt.Sprintf("为第 %d 章做写前推演，落盘完整章节计划", next)
 		if s.NextActionTitle != "" {
 			task += fmt.Sprintf("；计划标题必须原样使用《%s》", s.NextActionTitle)

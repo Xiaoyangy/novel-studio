@@ -220,11 +220,12 @@ const CurrentRAGIndexSchemaVersion = 2
 
 // RAGIndexState 记录本地/RAG 后端索引状态。Embedding 与 Qdrant 写入并发由 Config 控制。
 type RAGIndexState struct {
-	SchemaVersion int            `json:"schema_version,omitempty"`
-	Config        RAGIndexConfig `json:"config"`
-	Chunks        []RAGChunk     `json:"chunks,omitempty"`
-	ChunkHashes   []string       `json:"chunk_hashes,omitempty"`
-	UpdatedAt     string         `json:"updated_at,omitempty"`
+	SchemaVersion   int            `json:"schema_version,omitempty"`
+	Config          RAGIndexConfig `json:"config"`
+	Chunks          []RAGChunk     `json:"chunks,omitempty"`
+	ChunkHashes     []string       `json:"chunk_hashes,omitempty"`
+	SanitizedDigest string         `json:"sanitized_digest,omitempty"`
+	UpdatedAt       string         `json:"updated_at,omitempty"`
 }
 
 type RAGPendingUpserts struct {

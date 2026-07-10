@@ -61,6 +61,14 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 	result["content"] = content
 	result["word_count"] = wordCount
+	wordContract := inspectChapterWordContract(t.store, content)
+	result["chapter_words_contract"] = wordContract
+	var hardGateViolations []string
+	if wordContract.Configured && !wordContract.Passed {
+		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+			"chapter_words: actual=%d, required=%d-%d；必须先用 edit_chapter 调整草稿，当前不可 commit_chapter",
+			wordContract.Actual, wordContract.Min, wordContract.Max))
+	}
 
 	// 对照数据：保留全局性的一致性检查数据，避免重复加载 novel_context 已有的窗口数据
 	if rules, _ := t.store.World.LoadWorldRules(); len(rules) > 0 {
@@ -114,10 +122,21 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		if len(flags) > 0 {
 			result["plan_scope_flags"] = flags
 		}
+		attractionEvidence := inspectChapterAttractionEvidence(*plan, content)
+		result["reader_attraction_check"] = attractionEvidence
+		result["reader_attraction_check_usage"] = "逐项核对 opening_beat、humor_beat_targets、immediate_payoffs 是否已在页面形成事件与人物反应；trend_language_plan 要由指定角色自然说出，不能只出现相似词"
+		if attractionRequirementsForChapter(t.store, a.Chapter).Trend && !attractionEvidence.TrendPassed {
+			hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+				"trend_language_plan: 正文未原样兑现任何已规划短梗（候选：%s）；须按 character_carrier 放进有上下文的人物对白/系统交流/群聊反应",
+				strings.Join(attractionEvidence.TrendItems, "、")))
+		}
 	}
 	if warnings, _ := t.store.Drafts.LoadChapterPlanConsistencyWarnings(a.Chapter); len(warnings) > 0 {
 		result["plan_consistency_warnings"] = warnings
 		result["plan_consistency_warnings_usage"] = "计划阶段遗留的一致性疑点：正文必须已妥善处理（如新角色已交代来历、别名统一）；未处理的要修正"
+	}
+	if len(hardGateViolations) > 0 {
+		result["hard_gate_violations"] = hardGateViolations
 	}
 
 	if _, err := t.store.Checkpoints.AppendArtifact(

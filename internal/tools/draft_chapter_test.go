@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -134,6 +135,37 @@ func TestDraftChapterRejectsConsecutiveDraftWithoutConsistencyCheck(t *testing.T
 	}
 	if _, err := tool.Execute(context.Background(), second); err == nil || !strings.Contains(err.Error(), "禁止连续 draft_chapter") {
 		t.Fatalf("expected consecutive draft rejection, got %v", err)
+	}
+}
+
+func TestDraftChapterPersistsButFlagsWordContractFailure(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{
+		ChapterWords: &rules.WordRange{Min: 10, Max: 20},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("长", 25)
+	args, _ := json.Marshal(map[string]any{"chapter": 1, "content": content, "mode": "write"})
+	raw, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["hard_gate_passed"] != false || !strings.Contains(result["next_step"].(string), "edit_chapter") {
+		t.Fatalf("expected hard gate guidance, got %s", raw)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != content {
+		t.Fatalf("out-of-range draft should remain editable, got %q", draft)
 	}
 }
 

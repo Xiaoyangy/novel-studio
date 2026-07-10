@@ -199,6 +199,7 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
 		return nil, err
 	}
+	normalizeChapterAttractionPlan(s, &plan)
 	if err := validateChapterPrewriteSimulation(s, plan, isRewritePlan); err != nil {
 		return nil, err
 	}
@@ -720,6 +721,26 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	require(hasReaderRewardPlan(sim.ReaderRewardPlan), "causal_simulation.reader_reward_plan")
 	require(hasReaderRetentionPlan(sim.ReaderRetentionPlan), "causal_simulation.reader_retention_plan")
 	require(hasEndingConsequenceContract(sim.EndingContract), "causal_simulation.ending_consequence_contract")
+	attraction := attractionRequirementsForChapter(s, plan.Chapter)
+	if attraction.Trend {
+		require(domain.CompleteTrendLanguagePlan(sim.TrendLanguage), "causal_simulation.trend_language_plan")
+		require(domain.HasActiveTrendLanguagePlan(sim.TrendLanguage), "causal_simulation.trend_language_plan(active_item)")
+		if !trendLanguagePlanGroundedInChapterBrief(s, plan.Chapter, sim.TrendLanguage) {
+			allowed := chapterTrendLanguageBriefItems(s, plan.Chapter)
+			require(false, fmt.Sprintf("causal_simulation.trend_language_plan(project_brief_grounding: item只允许原样使用=%s; source_context必须写meta/web_reference_brief.md)", strings.Join(allowed, " | ")))
+		}
+	}
+	if attraction.Entertainment {
+		require(domain.CompleteReaderEntertainmentPlan(sim.EntertainmentPlan), "causal_simulation.reader_entertainment_plan")
+	}
+	if attraction.Longform {
+		require(domain.CompleteLongformOpeningDesign(sim.LongformOpening), "causal_simulation.longform_opening")
+	}
+	if attraction.SystemCompanion {
+		if problems := domain.SystemCompanionPlanProblems(sim); len(problems) > 0 {
+			require(false, "causal_simulation.reader_entertainment_plan(system_companion_voice: 必须写系统接话/吐槽/解闷且始终支持主角；同时从anti_ai_execution_plan和forbidden_comedy删除反向句；当前问题="+strings.Join(problems, " | ")+")")
+		}
+	}
 	// 轻松大众题材不把资料/装备/视觉/读者奖励矩阵设为硬卡点；这些字段存在时仍校验来源，
 	// 缺失交给 Editor/AI 味审核和正文阶段处理，避免第一章计划被方法论表格拖死。
 	for i, vd := range sim.VisualDesign {
@@ -1208,6 +1229,37 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("dialogue_function_plan", schema.String("对白功能分配")).Required(),
 		schema.Property("review_checks", schema.Array("提交前检查项", schema.String(""))).Required(),
 	)
+	trendLanguage := schema.Object(
+		schema.Property("item", schema.String("本章会原样落进人物对白/系统交流/群聊反应的一条具体短梗；若项目 web_reference_brief 有本章热梗落点，只能从该小节选择，不得擅自换梗")).Required(),
+		schema.Property("source_context", schema.String("必须明确写 meta/web_reference_brief.md 或项目联网简报的具体条目；无简报时才可写当轮 web_research 来源")).Required(),
+		schema.Property("character_carrier", schema.String("明确到角色或媒介；不得写旁白")).Required(),
+		schema.Property("scene_function", schema.String("误会、社死、关系反应或轻喜剧反噬中的具体功能")).Required(),
+		schema.Property("usage_budget", schema.String("本章次数预算，通常1-2处且禁止梗串")).Required(),
+		schema.Property("forbidden_usage", schema.String("明确旁白、关键判断、硬煽情和章末禁用")).Required(),
+	)
+	entertainmentPlan := schema.Object(
+		schema.Property("opening_beat", schema.String("前200字内的具体尴尬、冲突、误会或反转；写清谁做什么以及现场反应")).Required(),
+		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧节拍，每个写清铺垫、承载角色和反应后果；不能都靠热梗", schema.String(""))).Required(),
+		schema.Property("immediate_payoffs", schema.Array("至少2个本章页面可见的即时兑现：到账、打脸、关系偏转、结果反噬或新权限", schema.String(""))).Required(),
+		schema.Property("procedure_compression", schema.String("列明哪些流程一笔带过，以及保留的冲突/笑点/关系变化；不得把经营写成教程")).Required(),
+		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友如何用有性格的短回应陪主角推进；用户定义系统会交流解闷时，必须明确系统如何接话/吐槽并始终支持主角，禁止反向写成不接话")).Required(),
+		schema.Property("forbidden_comedy", schema.Array("本章喜剧禁区：降智、梗串、旁白热词、拿严肃情绪硬抖包袱等", schema.String(""))).Required(),
+	)
+	longRangePromise := schema.Object(
+		schema.Property("promise", schema.String("长线承诺")).Required(),
+		schema.Property("first_chapter_seed", schema.String("第一章可见种子")).Required(),
+		schema.Property("payoff_horizon", schema.String("兑现区间")).Required(),
+	)
+	longformOpening := schema.Object(
+		schema.Property("target_reader", schema.String("核心读者与消费期待")).Required(),
+		schema.Property("opening_hook", schema.String("第一章最短追读理由")).Required(),
+		schema.Property("serial_engine", schema.String("支撑长篇连载的升级发动机")).Required(),
+		schema.Property("reader_reward_loop", schema.Array("反复兑现的奖励类型", schema.String(""))).Required(),
+		schema.Property("long_range_promises", schema.Array("长线承诺与回收周期", longRangePromise)).Required(),
+		schema.Property("reveal_budget", schema.Array("第一章克制不解释的内容", schema.String(""))).Required(),
+		schema.Property("first_chapter_proof", schema.Array("第一章证明连载可持续的页面证据", schema.String(""))).Required(),
+		schema.Property("retention_risks", schema.Array("第一章流失风险与规避动作", schema.String(""))).Required(),
+	)
 	rewardPlan := schema.Object(
 		schema.Property("chapter_window", schema.String("兑现窗口")),
 		schema.Property("first_chapter_small_win", schema.String("本章可见小胜")).Required(),
@@ -1264,6 +1316,9 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("dialogue_scene_blueprints", schema.Array("关键对白场景", dialogueBlueprint)),
 		schema.Property("emotional_logic", schema.Array("至少覆盖主角的情绪到行动", emotionalLogic)),
 		schema.Property("anti_ai_execution_plan", antiAI),
+		schema.Property("trend_language_plan", schema.Array("显式要求热梗的项目必须给出至少一条具体短梗及角色落点", trendLanguage)),
+		schema.Property("reader_entertainment_plan", entertainmentPlan),
+		schema.Property("longform_opening", longformOpening),
 		schema.Property("reader_reward_plan", rewardPlan),
 		schema.Property("reader_retention_plan", retentionPlan),
 		schema.Property("ending_consequence_contract", endingContract),
@@ -1515,6 +1570,14 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("scene_function", schema.String("它在场景中的功能：误判、嘈杂、时代纹理、关系摩擦、诱导确认、反讽等")).Required(),
 		schema.Property("usage_budget", schema.String("使用预算，例如0次、最多1句半截、最多2处群体反应；禁止梗串")).Required(),
 		schema.Property("forbidden_usage", schema.String("禁止用法：主角金句、旁白解释、章末钩子、规则条款、过时梗硬贴等")).Required(),
+	)
+	readerEntertainmentPlan := schema.Object(
+		schema.Property("opening_beat", schema.String("前200字内的具体尴尬、冲突、误会或反转；写清谁做什么以及现场反应")).Required(),
+		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧节拍，每个写清铺垫、承载角色和反应后果；不能都靠热梗", schema.String(""))).Required(),
+		schema.Property("immediate_payoffs", schema.Array("至少2个本章页面可见的即时兑现：到账、打脸、关系偏转、结果反噬或新权限", schema.String(""))).Required(),
+		schema.Property("procedure_compression", schema.String("哪些流程压缩，以及保留的冲突、笑点或关系变化")).Required(),
+		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友的性格化短回应；无此类角色时写替代反应")).Required(),
+		schema.Property("forbidden_comedy", schema.Array("喜剧禁区：降智、梗串、旁白热词、硬抖包袱等", schema.String(""))).Required(),
 	)
 	groundingDetail := schema.Object(
 		schema.Property("detail", schema.String("从外部资料或当代生活观察提炼出的具体细节")).Required(),
@@ -1834,6 +1897,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		req(schema.Property("anti_ai_execution_plan", antiAIExecutionPlan)),
 		req(schema.Property("external_reference_plan", schema.Array("外部资料、网络检索、项目 web_reference_brief 和 RAG 召回如何进入正文；不用网络资料也要说明不用原因", externalReferencePlan))),
 		req(schema.Property("trend_language_plan", schema.Array("热梗/流行语的受控使用计划；不用时写 item=none 并说明禁用原因", trendLanguagePlan))),
+		req(schema.Property("reader_entertainment_plan", readerEntertainmentPlan)),
 		req(schema.Property("grounding_details", schema.Array("由外部资料转化出的具体生活/制度/物件锚点", groundingDetail))),
 		req(schema.Property("offscreen_character_stage", schema.Array("本章所有关键角色在正文内外的同时间线行动、误判和决策；主角、关键配角、短期会回归人物都要覆盖", characterStageRecord))),
 		schema.Property("longform_opening", longformOpening),

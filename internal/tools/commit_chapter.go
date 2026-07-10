@@ -210,20 +210,9 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 		// 打磨/重写路径：章节虽已完成，但仍在 pending_rewrites 中，允许覆盖并 drain 队列
 		progress, _ := t.store.Progress.Load()
 		if progress != nil && slices.Contains(progress.PendingRewrites, a.Chapter) {
-			characterStage := a.CharacterStage
-			if len(characterStage) == 0 {
-				if existingStage, err := t.store.LoadCharacterStageRecords(a.Chapter); err == nil && len(existingStage) > 0 {
-					characterStage = existingStage
-				}
-			}
-			if len(characterStage) > 0 || len(requiredDossierCharacterNames(t.store, a.Chapter)) > 0 {
-				if err := validateCommitCharacterStage(t.store, a.Chapter, characterStage); err != nil {
-					return nil, err
-				}
-			}
 			return t.executeRewriteCommit(ctx, a.Chapter, a.Summary, a.Characters, a.KeyEvents,
 				a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
-				characterStage, a.ResourceUpdates, a.ResourceProposals,
+				a.CharacterStage, a.ResourceUpdates, a.ResourceProposals,
 				a.HookType, a.DominantStrand, a.OpeningDevice, a.EndingDevice, progress)
 		}
 		return t.buildSkipResult(a.Chapter, progress)
@@ -274,6 +263,12 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 		return nil, err
 	}
 	if err := requireDraftPlanTitleMatch(t.store, a.Chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireChapterWordContract(t.store, a.Chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireChapterAttractionContent(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
 
@@ -870,6 +865,18 @@ func (t *CommitChapterTool) executeRewriteCommit(
 		return nil, fmt.Errorf("第 %d 章 drafts 与 chapters 内容完全相同，未检测到%s改动。请先调 draft_chapter(mode=write, chapter=%d) 写入%s后的新正文，再 commit_chapter: %w",
 			chapter, mode, chapter, mode, errs.ErrToolPrecondition)
 	}
+	if err := requireChapterWordContract(t.store, chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireChapterAttractionContent(t.store, chapter, content); err != nil {
+		return nil, err
+	}
+	characterStage = mergeRewriteCharacterStage(t.store, chapter, characterStage)
+	if len(characterStage) > 0 || len(requiredDossierCharacterNames(t.store, chapter)) > 0 {
+		if err := validateCommitCharacterStage(t.store, chapter, characterStage); err != nil {
+			return nil, err
+		}
+	}
 
 	// 3. 覆盖终稿
 	if err := t.store.Drafts.SaveFinalChapter(chapter, content); err != nil {
@@ -1048,6 +1055,37 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	})
 }
 
+func mergeRewriteCharacterStage(st *store.Store, chapter int, submitted []domain.CharacterStageRecord) []domain.CharacterStageRecord {
+	existing, err := st.LoadCharacterStageRecords(chapter)
+	if err != nil || len(existing) == 0 {
+		return submitted
+	}
+	if len(submitted) == 0 {
+		return existing
+	}
+	out := append([]domain.CharacterStageRecord(nil), existing...)
+	index := make(map[string]int, len(out))
+	for i := range out {
+		if name := strings.TrimSpace(out[i].Character); name != "" {
+			index[name] = i
+		}
+	}
+	for _, record := range submitted {
+		name := strings.TrimSpace(record.Character)
+		if name == "" {
+			continue
+		}
+		record.Character = name
+		if i, ok := index[name]; ok {
+			out[i] = record
+			continue
+		}
+		index[name] = len(out)
+		out = append(out, record)
+	}
+	return out
+}
+
 func (t *CommitChapterTool) chapterCommitCheckpointCount(chapter int) int {
 	scope := domain.ChapterScope(chapter)
 	count := 0
@@ -1157,14 +1195,17 @@ func requireCurrentDraftConsistency(st *store.Store, chapter int, content string
 		return nil
 	}
 	wantDigest := "sha256:" + reviewreport.BodySHA256(content)
+	consistencyCheckpoint := st.Checkpoints.LatestByStep(scope, "consistency_check")
+	// edit_chapter 会有意修改 draft checkpoint 之后的字节。只要随后确实对当前
+	// 精确字节重新执行过 check_consistency，它就应成为新的提交凭证；过去先比较
+	// draft digest，导致 edit -> check -> commit 永远无法通过并循环重发提交参数。
+	if consistencyCheckpoint != nil && consistencyCheckpoint.Digest == wantDigest {
+		return nil
+	}
 	if draftCheckpoint.Digest != wantDigest {
 		return fmt.Errorf("第 %d 章草稿在 draft checkpoint 后发生变化；请重新调用 draft_chapter 或 check_consistency 后再提交: %w", chapter, errs.ErrToolPrecondition)
 	}
-	consistencyCheckpoint := st.Checkpoints.LatestByStep(scope, "consistency_check")
-	if consistencyCheckpoint == nil || consistencyCheckpoint.Digest != wantDigest {
-		return fmt.Errorf("第 %d 章当前草稿尚未通过 check_consistency（或检查后正文又被修改）；请回读 drafts/%02d.draft.md 并重新检查后再 commit_chapter: %w", chapter, chapter, errs.ErrToolPrecondition)
-	}
-	return nil
+	return fmt.Errorf("第 %d 章当前草稿尚未通过 check_consistency（或检查后正文又被修改）；请回读 drafts/%02d.draft.md 并重新检查后再 commit_chapter: %w", chapter, chapter, errs.ErrToolPrecondition)
 }
 
 func requireDraftPlanTitleMatch(st *store.Store, chapter int, content string) error {

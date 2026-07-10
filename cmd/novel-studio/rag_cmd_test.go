@@ -432,6 +432,54 @@ func TestPipelineRAGLocalArtifactsReusableAcrossBackendChange(t *testing.T) {
 	}
 }
 
+func TestPipelineRAGIncrementalPlanEmbedsOnlyMissingHashes(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config: domain.RAGIndexConfig{
+			EmbeddingProvider: "local", EmbeddingModel: "qwen", VectorDimension: 3,
+			VectorStore: "qdrant", Collection: "novel_test",
+		},
+		Chunks: []domain.RAGChunk{
+			{ID: "fact-a", Hash: "hash-a", SourcePath: "a.json", SourceKind: "chapter_summary_facts", Text: "A"},
+			{ID: "fact-b", Hash: "hash-b", SourcePath: "b.json", SourceKind: "chapter_review_facts", Text: "B"},
+			{ID: "craft", Hash: "hash-craft", SourcePath: "craft.md", SourceKind: "craft_technique", Text: "手法"},
+		},
+	}
+	vectors := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact-a", Hash: "hash-a", Vector: []float32{1, 2, 3}}},
+	}
+	missing, expected, ok, reason := pipelineRAGIncrementalPlan(
+		state, vectors, bootstrap.RAGEmbeddingConfig{Provider: "local", Model: "qwen"},
+	)
+	if !ok || expected != 2 || len(missing) != 1 || missing[0].Hash != "hash-b" {
+		t.Fatalf("expected one missing fact hash: ok=%v expected=%d missing=%+v reason=%s", ok, expected, missing, reason)
+	}
+	update := domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact-b", Hash: "hash-b", Vector: []float32{3, 2, 1}}},
+	}
+	merged := mergePipelineRAGVectorPoints(vectors, update, state.Chunks)
+	if len(merged.Points) != 2 || merged.Points[0].ID != "fact-a" || merged.Points[1].ID != "fact-b" {
+		t.Fatalf("incremental merge should preserve valid points and add missing point: %+v", merged.Points)
+	}
+}
+
+func TestPipelineRAGIncrementalPlanRejectsInvalidExistingVector(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config:        domain.RAGIndexConfig{EmbeddingProvider: "local", EmbeddingModel: "qwen", VectorDimension: 2},
+		Chunks:        []domain.RAGChunk{{ID: "fact", Hash: "hash", SourceKind: "chapter_summary_facts", Text: "事实"}},
+	}
+	vectors := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "hash", Vector: []float32{1}}},
+	}
+	if _, _, ok, reason := pipelineRAGIncrementalPlan(state, vectors, bootstrap.RAGEmbeddingConfig{Provider: "local", Model: "qwen"}); ok || !strings.Contains(reason, "维度") {
+		t.Fatalf("invalid existing vectors must force full rebuild: ok=%v reason=%s", ok, reason)
+	}
+}
+
 func TestMigrateRAGIndexSchemaRehashesSemanticContent(t *testing.T) {
 	state := &domain.RAGIndexState{
 		Chunks: []domain.RAGChunk{{

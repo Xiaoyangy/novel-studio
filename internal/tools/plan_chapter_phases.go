@@ -182,6 +182,9 @@ func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[s
 	if err != nil || entry == nil {
 		return
 	}
+	if title := strings.TrimSpace(entry.Title); title != "" {
+		structure["title"] = title
+	}
 	required := stringSliceFromAny(structure["required_beats"])
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		// 大纲核心事件决定本章“要完成什么”。允许 Planner 自由设计冲突、场景和
@@ -298,6 +301,7 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		)
 	}
 	mergeCausalSimulationPatch(merged, a.CausalSimulation)
+	applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation)
 	normalizations := normalizePartialVisibleCharacterScope(t.store, a.Chapter, merged)
 	partial["causal_simulation"] = merged
 	if len(normalizations) > 0 {
@@ -370,11 +374,89 @@ func normalizePartialVisibleCharacterScope(s *store.Store, chapter int, merged m
 
 func mergeCausalSimulationPatch(dst, patch map[string]any) {
 	for key, value := range patch {
+		if key == "context_sources" {
+			if mergedStrings, ok := mergeUniqueStringArrays(dst[key], value); ok {
+				dst[key] = mergedStrings
+				continue
+			}
+		}
+		if key == "review_refinement" {
+			if mergedMap, ok := mergeReviewRefinementPatch(dst[key], value); ok {
+				dst[key] = mergedMap
+				continue
+			}
+		}
 		if mergedArray, ok := mergeArrayObjectsByCharacter(dst[key], value); ok {
 			dst[key] = mergedArray
 			continue
 		}
 		dst[key] = value
+	}
+}
+
+func mergeReviewRefinementPatch(existing, incoming any) (map[string]any, bool) {
+	incomingMap, ok := incoming.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	merged := map[string]any{}
+	if existingMap, ok := existing.(map[string]any); ok {
+		maps.Copy(merged, existingMap)
+	}
+	for key, value := range incomingMap {
+		if key == "trigger_sources" || key == "preserve_constraints" {
+			if stringsMerged, ok := mergeUniqueStringArrays(merged[key], value); ok {
+				merged[key] = stringsMerged
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged, true
+}
+
+func mergeUniqueStringArrays(existing, incoming any) ([]any, bool) {
+	incomingStrings := stringSliceFromAny(incoming)
+	if incomingStrings == nil {
+		return nil, false
+	}
+	merged := stringSliceFromAny(existing)
+	for _, value := range incomingStrings {
+		merged = appendUniqueString(merged, value)
+	}
+	out := make([]any, 0, len(merged))
+	for _, value := range merged {
+		out = append(out, value)
+	}
+	return out, true
+}
+
+func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation) {
+	if st == nil || chapter <= 0 || merged == nil {
+		return
+	}
+	contextSources := stringSliceFromAny(merged["context_sources"])
+	if simulation != nil {
+		merged["world_simulation_id"] = simulation.SimulationID
+		merged["protagonist_decision"] = simulation.ProtagonistProjection.ChosenDecision
+		contextSources = appendUniqueString(contextSources, "chapter_world_simulation:"+simulation.SimulationID)
+	}
+	if source, _, _, err := loadChapterRewriteSource(st, chapter); err == nil && source != nil {
+		contextSources = appendUniqueString(contextSources, rewriteSourceToken(source))
+		contextSources = appendUniqueString(contextSources, rewriteBriefToken(source))
+		refinement, _ := merged["review_refinement"].(map[string]any)
+		if refinement == nil {
+			refinement = map[string]any{}
+		}
+		preserve := stringSliceFromAny(refinement["preserve_constraints"])
+		for _, fact := range source.PreserveFacts {
+			preserve = appendUniqueString(preserve, fact)
+		}
+		refinement["preserve_constraints"] = preserve
+		merged["review_refinement"] = refinement
+	}
+	if len(contextSources) > 0 {
+		merged["context_sources"] = contextSources
 	}
 }
 
@@ -490,8 +572,9 @@ func planDetailsRecommendedBatches() []string {
 	return []string{
 		"batch1_scope_and_state: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state（只需覆盖主角）",
 		"batch2_scene_causality: environment_state + causal_beats + decision_points + outcome_shift",
-		"batch3_prose_control: voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan",
-		"batch4_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；返工章同时补 review_refinement",
+		"batch3a_voice_and_dialogue: voice_logic + dialogue_scene_blueprints + emotional_logic",
+		"batch3b_style_and_entertainment: anti_ai_execution_plan + reader_entertainment_plan；显式要求热梗时同时补 trend_language_plan",
+		"batch4_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；第一章长篇项目同时补 longform_opening；返工章同时补 review_refinement",
 	}
 }
 
@@ -523,6 +606,22 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 	} {
 		if _, ok := merged[field]; !ok {
 			gaps = append(gaps, "missing "+field)
+		}
+	}
+	attraction := attractionRequirementsForChapter(s, chapter)
+	if attraction.Trend {
+		if _, ok := merged["trend_language_plan"]; !ok {
+			gaps = append(gaps, "missing trend_language_plan")
+		}
+	}
+	if attraction.Entertainment {
+		if _, ok := merged["reader_entertainment_plan"]; !ok {
+			gaps = append(gaps, "missing reader_entertainment_plan")
+		}
+	}
+	if attraction.Longform {
+		if _, ok := merged["longform_opening"]; !ok {
+			gaps = append(gaps, "missing longform_opening")
 		}
 	}
 	if rewrite, _ := partial["rewrite"].(bool); rewrite {

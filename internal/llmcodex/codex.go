@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -152,6 +154,7 @@ var proseToolContentField = map[string]string{
 // regenerateProseArgs 若本轮是正文类工具调用，用自由文本（无 schema）重新生成正文，
 // 替换 arguments 里的正文字段，规避结构化输出对正文统计自然度的损伤。
 func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentcore.Message, msg *agentcore.Message, reasoning string) {
+	wordContract := inferProseWordContract(messages)
 	for _, block := range msg.Content {
 		if block.Type != agentcore.ContentToolCall || block.ToolCall == nil {
 			continue
@@ -174,7 +177,22 @@ func (m *CodexModel) regenerateProseArgs(ctx context.Context, messages []agentco
 				"module", "codex", "tool", block.ToolCall.Name, "err", err, "elapsed_ms", time.Since(start).Milliseconds())
 			continue // 自由文本失败则保留结构化正文，不阻塞
 		}
-		if p := strings.TrimSpace(stripCodeFence(prose)); p != "" {
+		p := strings.TrimSpace(stripCodeFence(prose))
+		if p != "" && wordContract.configured() && !wordContract.accepts(utf8.RuneCountInString(p)) {
+			firstCount := utf8.RuneCountInString(p)
+			repairStart := time.Now()
+			repaired, repairErr := m.runCodex(ctx, buildProseRepairPrompt(messages, firstCount, wordContract), nil, reasoning)
+			candidate := strings.TrimSpace(stripCodeFence(repaired))
+			if repairErr == nil && candidate != "" && wordContract.distance(utf8.RuneCountInString(candidate)) < wordContract.distance(firstCount) {
+				p = candidate
+			}
+			slog.Info("正文触发一次有界字数纠偏",
+				"module", "codex", "tool", block.ToolCall.Name,
+				"before_runes", firstCount, "after_runes", utf8.RuneCountInString(p),
+				"min", wordContract.Min, "max", wordContract.Max,
+				"repair_err", repairErr, "elapsed_ms", time.Since(repairStart).Milliseconds())
+		}
+		if p != "" {
 			args[field] = p
 			if newArgs, e := json.Marshal(args); e == nil {
 				block.ToolCall.Args = newArgs
@@ -199,8 +217,91 @@ func buildProsePrompt(messages []agentcore.Message) string {
 	}
 	suffix := "## 现在渲染正文\n严格依据上面的写前推演计划、检索到的手法，以及 system 消息里列出的**全部写作与审核规则**（字数区间、禁用词/疲劳词、AI 味红线、章节契约范围），把本章写成完整正文并逐条自检达标。**只输出正文本身**，不要输出 JSON、不要解释、不要复述计划。\n" +
 		"【格式】正常小说排版，不是 Markdown：首行是纯文本章节标题（如「第一章 欠费单」，不要加 # 或任何符号）；正文段落之间空一行；全程禁止使用 # * - > 反引号 星号 等任何 Markdown 标记。\n" +
+		"【抓力与娱乐硬要求】严格兑现 reader_entertainment_plan：前200字落成 opening_beat 的冲突/尴尬/误会/反转；至少两个不同机制的 humor_beats，必须有铺垫和人物反应，不能只写俏皮句；至少两个 immediate_payoffs 在页面上改变钱、结果、面子、关系或权限。询价、付款、开票、安装、登记、核验等流程，若没有拒绝、反转、笑点、代价或关系位移就一句带过，禁止连续两段写正确流程。若本章有系统，按 companion_voice_beat 让它短促接话、吐槽或撑腰并始终支持主角，禁止纯菜单机器人。用户明确要求热梗时，至少原样自然使用一条 trend_language_plan.item，只由指定角色/系统/群聊承载，前后必须有误会、社死、吐槽对象或关系反应；旁白、关键判断、煽情和章末禁用，单章通常1-2处且禁止梗串。第一章不得把系统、首个可见爽点和核心人物记忆点全压到章末。\n" +
 		"【反 AI 味硬要求】句长长短交替（不要整章中短句同一节奏）；用字多样、不整章复述同一个具象名词（换称/代指/部件名）；段首不重复（不要连续多段以同一主语起句）；单句成段全章≤4 且绝不连续；对白要断续、有隐瞒、被追问才挤出下一条信息（禁止一口气罗列清单/姓名+房号+背景）；抽象判断之后必落到动作、物件、感官或对白后果；配角对白要有主动误解/打断/拒绝/讨价的冲突。"
+	if contract := inferProseWordContract(messages); contract.configured() {
+		suffix += contract.prompt()
+	}
 	return assembleBudgetedPrompt("", dialog.String(), suffix)
+}
+
+type proseWordContract struct {
+	Min int
+	Max int
+}
+
+var (
+	chapterWordsObjectPattern = regexp.MustCompile(`(?s)"chapter_words"\s*:\s*\{([^{}]{0,512})\}`)
+	chapterWordsMinPattern    = regexp.MustCompile(`"min"\s*:\s*([0-9]{1,7})`)
+	chapterWordsMaxPattern    = regexp.MustCompile(`"max"\s*:\s*([0-9]{1,7})`)
+	chapterWordsRangePattern  = regexp.MustCompile(`(?i)(?:chapter_words|章节字数)[^0-9]{0,160}([0-9]{2,7})\s*[-—~至到]\s*([0-9]{2,7})`)
+)
+
+func inferProseWordContract(messages []agentcore.Message) proseWordContract {
+	var result proseWordContract
+	for _, message := range messages {
+		text := message.TextContent()
+		for _, match := range chapterWordsObjectPattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			minMatch := chapterWordsMinPattern.FindStringSubmatch(match[1])
+			maxMatch := chapterWordsMaxPattern.FindStringSubmatch(match[1])
+			if len(minMatch) < 2 || len(maxMatch) < 2 {
+				continue
+			}
+			minWords, _ := strconv.Atoi(minMatch[1])
+			maxWords, _ := strconv.Atoi(maxMatch[1])
+			if minWords > 0 && maxWords >= minWords {
+				result = proseWordContract{Min: minWords, Max: maxWords}
+			}
+		}
+		if result.configured() {
+			continue
+		}
+		if match := chapterWordsRangePattern.FindStringSubmatch(text); len(match) >= 3 {
+			minWords, _ := strconv.Atoi(match[1])
+			maxWords, _ := strconv.Atoi(match[2])
+			if minWords > 0 && maxWords >= minWords {
+				result = proseWordContract{Min: minWords, Max: maxWords}
+			}
+		}
+	}
+	return result
+}
+
+func (c proseWordContract) configured() bool {
+	return c.Min > 0 && c.Max >= c.Min
+}
+
+func (c proseWordContract) accepts(count int) bool {
+	return !c.configured() || (count >= c.Min && count <= c.Max)
+}
+
+func (c proseWordContract) distance(count int) int {
+	if count < c.Min {
+		return c.Min - count
+	}
+	if count > c.Max {
+		return count - c.Max
+	}
+	return 0
+}
+
+func (c proseWordContract) prompt() string {
+	span := c.Max - c.Min
+	targetMin := c.Min + span/3
+	targetMax := c.Max - span/5
+	if targetMax < targetMin {
+		targetMin, targetMax = c.Min, c.Max
+	}
+	return fmt.Sprintf("\n【本章字数硬合同】工具按完整输出（含标题）统计，必须在 %d-%d 字内；建议主动写到 %d-%d 字留出误差。超出或不足都会在覆盖终稿前被拒绝。输出前自行压缩重复解释、流程复述和同义环境描写，但不得删除 required_beats、保留事实、因果转折或章末钩子。", c.Min, c.Max, targetMin, targetMax)
+}
+
+func buildProseRepairPrompt(messages []agentcore.Message, previousCount int, contract proseWordContract) string {
+	base := buildProsePrompt(messages)
+	repair := fmt.Sprintf("\n\n【上一候选已被字数门禁拒绝】上一版按工具统计为 %d 字，不得原样输出，也不要解释。重新从同一计划渲染一次，严格落入 %d-%d 字，优先靠近区间中段；这是唯一一次自动纠偏。", previousCount, contract.Min, contract.Max)
+	return compactCodexText(base, codexPromptRuneBudget-utf8.RuneCountInString(repair)) + repair
 }
 
 // estimateUsage 给出 token 用量的估算——codex exec 不回报 token 数，不填会触发
