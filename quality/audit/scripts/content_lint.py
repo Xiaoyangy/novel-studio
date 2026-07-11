@@ -95,6 +95,12 @@ SYSTEM_MESSAGE_RE = re.compile(r"【([^】]{2,240})】")
 ABSTRACT_SYSTEM_REASSURANCE_RE = re.compile(
     r"(?:钱没跑|陪你(?:换条路|找(?:条)?路)|规矩不撤|先喘(?:半)?口气|(?:这回)?算你[^。！？!?]{0,8}挣来的)"
 )
+UI_TRIAL_ACTION_RE = re.compile(
+    r"(?:试着?还[^。！？!?；;\n]{0,12}(?:信用卡|欠款|账)|点(?:击|开|了)?[^。！？!?；;\n]{0,10}(?:提现|转账|确认|按钮)|"
+    r"按下[^。！？!?；;\n]{0,10}(?:按钮|确认|提现)|确认键|改(?:了|掉)?[^。！？!?；;\n]{0,10}(?:备注|用途)|"
+    r"删(?:掉|了)[^。！？!?；;\n]{0,8}(?:备注|输入|内容)?|重新输入)"
+)
+UI_TRIAL_CONTEXT_RE = re.compile(r"(?:手机|页面|按钮|屏幕|系统|备注|提现|转账|信用卡|确认键)")
 DIALOGUE_ACTION_LEAD_RE = re.compile(
     r"^(?:[^“「\n]{0,46})(?:夹着|端着|拿着|护住|划出|刚说了句|说了句|看见|抬起|抬眼|抬头|低头|"
     r"推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]"
@@ -780,6 +786,25 @@ def cadence_issues(raw: str) -> list[dict]:
                 "actual": 1,
                 "target": message[:100],
                 "evidence": "系统陪伴感不能靠客服式空话；让它回答主角刚问的具体问题，或给一个能马上执行的选择",
+            }
+        )
+        break
+
+    for para in paras:
+        if not UI_TRIAL_CONTEXT_RE.search(para):
+            continue
+        trial_actions = list(UI_TRIAL_ACTION_RE.finditer(para))
+        if len(trial_actions) < 3:
+            continue
+        issues.append(
+            {
+                "rule": "ui_trial_checklist",
+                "severity": "warning",
+                "line": line_number(raw, raw.find(para)),
+                "limit": "同一规则只保留一次会改变人物判断的界面试错",
+                "actual": len(trial_actions),
+                "target": para[:110],
+                "evidence": "点击、失败、改备注和删除若只证明同一边界，不得按 plan 逐项渲染；保留一次决定性的失败，其余合并或删除",
             }
         )
         break

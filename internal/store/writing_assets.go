@@ -183,12 +183,15 @@ func (s *WritingAssetStore) ApplyReviewFeedback(r domain.ReviewEntry, finalVerdi
 			lib.Version = 1
 		}
 		// 当前 reviews/<chapter>.json 是该章最新事实；同源旧反馈必须先撤下，
-		// 否则复审纠正后的建议仍会长期污染 writing_engine 与 RAG。
+		// 否则复审纠正后的建议仍会长期污染 writing_engine 与 RAG。早期版本
+		// 使用 reviews/NN.md，并可能留下空壳反馈；一并迁移清理。
+		legacySource := strings.TrimSuffix(source, ".json") + ".md"
 		lib.Feedback = slices.DeleteFunc(lib.Feedback, func(entry domain.WritingFeedback) bool {
-			return entry.Source == source
+			empty := strings.TrimSpace(entry.Signal) == "" && strings.TrimSpace(entry.Suggestion) == "" && strings.TrimSpace(entry.Rule) == ""
+			return empty || entry.Source == source || entry.Source == legacySource
 		})
 		lib.Features = slices.DeleteFunc(lib.Features, func(feature domain.WritingFeature) bool {
-			return feature.Source == source
+			return feature.Source == source || feature.Source == legacySource
 		})
 		for _, entry := range feedback {
 			var added bool

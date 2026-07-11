@@ -20,6 +20,10 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 				"赵航必须用“呱，”打断饭桌说教",
 			},
 			ForbiddenMoves: []string{"公开系统"},
+			ContinuityChecks: []string{
+				"沈知遥到场时首单已经发生。",
+				"章末具体锚点必须是票据、测试记录和九点要求。",
+			},
 		},
 		CausalSimulation: domain.ChapterCausalSimulation{
 			ReaderRetentionPlan: domain.ReaderRetentionPlan{
@@ -36,6 +40,12 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 				SceneID: "dinner", DialogueMode: "group_council", ScenePressure: "失业羞耻", DialogueObjective: "替主角解围",
 				TurnProgression: []domain.DialogueTurnDesign{{Speaker: "赵航", SurfaceLineFunction: "反问", ActionBeat: "抬眼夹菜", NextPressure: "亲戚失语"}},
 			}},
+			EndingContract: domain.EndingConsequenceContract{
+				ConcreteAnchor:  "票据和测试记录",
+				Consequence:     "林澈接下明早九点的责任",
+				NextChapterPull: "下一家摊主主动求助",
+				WhyNotUI:        "不要用系统数字收尾",
+			},
 		},
 	}
 	working := map[string]any{
@@ -68,6 +78,17 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 1 {
 		t.Fatalf("mandatory/optional = %#v / %#v", packet.MandatoryBeats, packet.OptionalStyleBeats)
 	}
+	for _, policy := range []string{packet.PlanTranslationPolicy, packet.ReaderRegisterPolicy, packet.InterfaceCompression} {
+		if strings.TrimSpace(policy) == "" {
+			t.Fatalf("render translation policy missing: %#v", packet)
+		}
+	}
+	if len(packet.ContinuityChecks) != 1 || !strings.Contains(packet.ContinuityChecks[0], "首单已经发生") {
+		t.Fatalf("render packet leaked presentation-only continuity checks: %#v", packet.ContinuityChecks)
+	}
+	if packet.EndingContract.ConcreteAnchor != "" || packet.EndingContract.WhyNotUI != "" || packet.EndingAnchorCandidate != "票据和测试记录" {
+		t.Fatalf("ending anchor should be a candidate, not a hard contract: %#v / %q", packet.EndingContract, packet.EndingAnchorCandidate)
+	}
 	raw, err := json.Marshal(packet)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +113,54 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	leanPlan := result["chapter_plan"].(map[string]any)
 	if _, exists := leanPlan["causal_simulation"]; exists {
 		t.Fatal("lean chapter plan must not embed causal_simulation")
+	}
+}
+
+func TestRenderRequiredOutcomesCollapsesProcessRecipesAndOutlineDuplicates(t *testing.T) {
+	plan := domain.ChapterPlan{
+		Goal: "完整兑现本章大纲核心事件：林澈返乡饭桌被亲戚阴阳失业",
+		Hook: "手机弹出县城花钱系统绑定提示",
+		Contract: domain.ChapterContract{RequiredBeats: []string{
+			"手机向林澈显示县城花钱系统绑定成功，额度一百万元，限定用于青山县内新增、真实、合规、可核验的消费；林澈用旧债等两至三个短动作验证边界，旧债测试被明确拒绝，并保留一次真实迟疑。",
+			"系统给出河畔夜市不低于三千元真实改善消费的首笔任务；林澈亲自到场复核入口照明、价目辨识和安全用电缺口。",
+			"系统依据真实改善与成交完成阶段核验，解锁五万元夜市小额改善额度，并追加二十四小时内取得十家摊主同意、完成至少五十笔真实交易的目标。",
+			"必须完整兑现大纲核心事件：林澈返乡饭桌被亲戚阴阳失业",
+			"必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末：手机弹出县城花钱系统绑定提示",
+			"系统绑定，额度一百万元，只限青山县真实合规消费。",
+			"首笔任务为河畔夜市不低于3000元真实改善消费。",
+			"系统解锁5万元夜市小额改善额度，追加24小时十家摊主、至少五十笔交易目标。",
+		}},
+	}
+
+	got := RenderRequiredOutcomes(plan)
+	if len(got) != 3 {
+		t.Fatalf("required outcomes should collapse to 3 result beats, got %d: %#v", len(got), got)
+	}
+	joined := strings.Join(got, "\n")
+	for _, unwanted := range []string{"两至三个短动作", "必须完整兑现", "若现有章节契约"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("process/meta instruction leaked into prose outcomes: %s", joined)
+		}
+	}
+	for _, want := range []string{"系统绑定", "首笔任务", "系统解锁"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("result beat %q missing: %s", want, joined)
+		}
+	}
+}
+
+func TestRenderRequiredOutcomesKeepsEventWhenTrendLiteralIsEmbedded(t *testing.T) {
+	plan := domain.ChapterPlan{
+		Contract: domain.ChapterContract{RequiredBeats: []string{
+			"饭桌上亲戚挤兑林澈；赵航以‘呱，’起头吐槽，林澈最终离席。",
+		}},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			TrendLanguage: []domain.TrendLanguagePlan{{Item: "呱，……"}},
+		},
+	}
+	got := RenderRequiredOutcomes(plan)
+	if len(got) != 1 || !strings.Contains(got[0], "林澈最终离席") {
+		t.Fatalf("event outcome was incorrectly demoted with its optional wording: %#v", got)
 	}
 }
 

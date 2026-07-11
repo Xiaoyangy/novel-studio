@@ -176,6 +176,32 @@ func TestWritingAssetsReviewFeedbackReplacesSameSource(t *testing.T) {
 	}
 }
 
+func TestWritingAssetsReviewFeedbackRemovesLegacyMarkdownAndEmptyShells(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.WritingAssets.Save(domain.WritingAssetLibrary{
+		Version: 2,
+		Feedback: []domain.WritingFeedback{
+			{ID: "legacy", Signal: "旧的错误意见", Source: "reviews/01.md"},
+			{ID: "empty", Source: "user_constraints"},
+			{ID: "keep", Signal: "保留有效用户规则", Source: "user_constraints"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.WritingAssets.ApplyReviewFeedback(domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", Verdict: "accept",
+	}, "accept", ""); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := s.WritingAssets.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lib.Feedback) != 1 || lib.Feedback[0].Signal != "保留有效用户规则" {
+		t.Fatalf("legacy/empty feedback was not cleaned: %#v", lib.Feedback)
+	}
+}
+
 func TestWritingAssetsCompileForScopeHonorsBindings(t *testing.T) {
 	lib := domain.WritingAssetLibrary{
 		Version: 1,

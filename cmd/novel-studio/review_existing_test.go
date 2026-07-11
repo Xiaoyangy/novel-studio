@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
 )
 
@@ -41,6 +43,120 @@ func (m *reviewCacheModel) GenerateStream(context.Context, []agentcore.Message, 
 func (m *reviewCacheModel) SupportsTools() bool { return false }
 
 func (m *reviewCacheModel) callCount() int { return int(m.calls.Load()) }
+
+func TestBuildEditorChapterReviewContextUsesResultLevelContract(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "失业饭桌",
+		Contract: domain.ChapterContract{RequiredBeats: []string{
+			"系统显示一百万元额度；林澈用旧债等两至三个短动作验证边界。",
+			"系统绑定一百万元额度。",
+		}},
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	context := buildEditorChapterReviewContext(st, 1)
+	if strings.Contains(context, "两至三个短动作") {
+		t.Fatalf("Editor context leaked process recipe: %s", context)
+	}
+	for _, want := range []string{"系统绑定一百万元额度", "结果级要求", "逐项照抄 plan"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("Editor context missing %q: %s", want, context)
+		}
+	}
+}
+
+func TestSanitizeEditorReviewRemovesMissingPayloadAndAbsentOptionalTrendClaims(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		CausalSimulation: domain.ChapterCausalSimulation{
+			TrendLanguage: []domain.TrendLanguagePlan{{Item: "呱，……", CharacterCarrier: "赵航"}},
+		},
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章 失业饭桌\n\n赵航替林澈挡了一句，饭桌安静下来。"
+	analysis := domain.AIVoiceAnalysis{
+		Chapter:    1,
+		BodySHA256: reviewreport.BodySHA256(body),
+		Label:      "✅ 可通过",
+		Summary:    "规则引擎未发现硬性 AI 腔红旗。",
+		Metrics: domain.ChapterAIVoiceMetrics{
+			Chapter: 1, ParagraphCount: 2, SentenceCount: 2,
+			FigurativeDensity: 0.02, DialogueRatio: 0.31, ProtagonistWaver: true,
+		},
+	}
+	dimensions := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
+	for _, name := range reviewDimensionNames {
+		score, comment := 90, "通过"
+		verdict := "pass"
+		if name == "ai_voice_detection" {
+			score = 70
+			verdict = "warning"
+			comment = "未读取red flag JSON，需补检。"
+		}
+		dimensions = append(dimensions, domain.DimensionScore{Dimension: name, Score: score, Verdict: verdict, Comment: comment})
+	}
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "met", Verdict: "polish", Summary: "AI腔检测流程缺失，需补检。",
+		Dimensions: dimensions,
+		Issues: []domain.ConsistencyIssue{
+			{Type: "aesthetic", Severity: "warning", Description: "未读取red flag JSON，需补检。"},
+			{Type: "aesthetic", Severity: "warning", Description: "赵航热梗未完全落地：呱，功能仅完成50%。"},
+		},
+	}
+
+	removed := sanitizeEditorReviewForProject(st, 1, body, analysis, &entry)
+	if len(removed) != 2 || len(entry.Issues) != 0 {
+		t.Fatalf("sanitized issues = %#v removed=%#v", entry.Issues, removed)
+	}
+	if entry.Verdict != "accept" || strings.Contains(entry.Summary, "需补检") {
+		t.Fatalf("sanitized review did not recover accept: %+v", entry)
+	}
+	for _, dimension := range entry.Dimensions {
+		if dimension.Dimension == "ai_voice_detection" && (dimension.Score < 90 || dimension.Verdict != "pass") {
+			t.Fatalf("AI voice dimension not repaired from deterministic payload: %+v", dimension)
+		}
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewUsesIndependentSameHashGates(t *testing.T) {
+	body := "第一章 失业饭桌\n\n林澈把事情办成了。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "met", Verdict: "polish",
+		Issues: []domain.ConsistencyIssue{{Type: "aesthetic", Severity: "warning", Description: "可再打磨"}},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "aesthetic", Score: 60, Verdict: "warning", Comment: "主观建议"},
+			{Dimension: "consistency", Score: 90, Verdict: "pass"},
+		},
+	}
+	mechanical := &reviewreport.MechanicalGatePayload{Chapter: 1, BodySHA256: hash}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 1, BodySHA256: hash, Label: "✅ 可通过", Summary: "规则引擎未发现硬性 AI 腔红旗。",
+		Metrics: domain.ChapterAIVoiceMetrics{Chapter: 1, ParagraphCount: 2, SentenceCount: 2},
+	}
+	judge := &deepseekAIJudgeArtifact{Chapter: 1, BodySHA256: hash, Verdict: "human_like", Blocking: false}
+
+	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("same-hash independent passing gates should reconcile warning-only Editor drift")
+	}
+	if entry.Verdict != "accept" || len(entry.Issues) != 0 || entry.Dimensions[0].Score < 80 {
+		t.Fatalf("reconciled entry = %+v", entry)
+	}
+
+	blocked := entry
+	blocked.Verdict = "polish"
+	blockedJudge := *judge
+	blockedJudge.Blocking = true
+	if reconcileWarningOnlyEditorReview(&blocked, hash, mechanical, analysis, &blockedJudge) {
+		t.Fatal("blocking independent judge must never be overridden")
+	}
+}
 
 func TestEditorReviewCacheHitSkipsModelCallAndUsesDedicatedArtifact(t *testing.T) {
 	dir := t.TempDir()

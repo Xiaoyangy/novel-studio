@@ -36,6 +36,7 @@ import (
 //   - stiff_trade_dialogue：讲价/互怼对白被写成口号或条款
 //   - system_message_overpacked：系统单条消息同时承担过多规则、安慰和任务功能
 //   - abstract_system_reassurance：系统用无对象、无后果的客服式空话假装陪伴
+//   - ui_trial_checklist：把同一规则的点击、失败、改备注、删除等试错逐项渲染
 //   - opaque_procedure_jargon：对白把流程缩写/验收黑话直接丢给大众读者
 //   - dialogue_action_lead_repetition：连续对白段都以人物动作报幕再开口
 //   - trend_language_sound_effect_misuse：把“呱，”吐槽起手式写成叫声/拟声动作
@@ -65,6 +66,7 @@ func Lint(text string) []Violation {
 	vs = appendEndingAphorismQuestion(vs, text)
 	vs = appendPunctuationCadence(vs, text)
 	vs = appendSystemMessageSignals(vs, text)
+	vs = appendUITrialChecklist(vs, text)
 	vs = appendTrendAndSystemVoiceSignals(vs, text)
 	vs = appendHumanFeelStructureSignals(vs, text)
 	vs = appendCausalIntegritySignals(vs, text)
@@ -208,6 +210,8 @@ var formNoticeLeadRe = regexp.MustCompile(`(?:纸面写着|纸上写着|白纸[^
 var stiffTradeDialogueRe = regexp.MustCompile(`[“「][^”」]{0,50}(?:活到明早|活到明天|撑到明早|撑到明天)[^”」]{0,50}(?:按进价|不讲兄弟价|别讲兄弟价)[^”」]{0,50}[”」]`)
 var systemMessageRe = regexp.MustCompile(`【([^】]{2,240})】`)
 var abstractSystemReassuranceRe = regexp.MustCompile(`(?:钱没跑|陪你(?:换条路|找(?:条)?路)|规矩不撤|先喘(?:半)?口气|(?:这回)?算你[^。！？!?]{0,8}挣来的)`)
+var uiTrialActionRe = regexp.MustCompile(`(?:试着?还[^。！？!?；;\n]{0,12}(?:信用卡|欠款|账)|点(?:击|开|了)?[^。！？!?；;\n]{0,10}(?:提现|转账|确认|按钮)|按下[^。！？!?；;\n]{0,10}(?:按钮|确认|提现)|确认键|改(?:了|掉)?[^。！？!?；;\n]{0,10}(?:备注|用途)|删(?:掉|了)[^。！？!?；;\n]{0,8}(?:备注|输入|内容)?|重新输入)`)
+var uiTrialContextRe = regexp.MustCompile(`(?:手机|页面|按钮|屏幕|系统|备注|提现|转账|信用卡|确认键)`)
 var dialogueActionLeadRe = regexp.MustCompile(`^(?:[^“「\n]{0,46})(?:夹着|端着|拿着|护住|划出|刚说了句|说了句|看见|抬起|抬眼|抬头|低头|推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]`)
 var opaqueProcedureSingletonRe = regexp.MustCompile(`(?:补上再测|补测|用途不符|真实改善消费|合规核验)`)
 var trendLanguageSoundEffectMisuseRe = regexp.MustCompile(`(?:呱了(?:一)?声|(?:怪叫|喊|叫|发出|短促地|轻轻地|低低地)[^。！？!?\n]{0,20}呱[，,])`)
@@ -398,6 +402,26 @@ func appendSystemMessageSignals(vs []Violation, text string) []Violation {
 		break
 	}
 	vs = appendOpaqueProcedureJargon(vs, text)
+	return vs
+}
+
+func appendUITrialChecklist(vs []Violation, text string) []Violation {
+	for _, paragraph := range narrativeParagraphs(text) {
+		if !uiTrialContextRe.MatchString(paragraph) {
+			continue
+		}
+		matches := uiTrialActionRe.FindAllString(paragraph, -1)
+		if len(matches) < 3 {
+			continue
+		}
+		return append(vs, Violation{
+			Rule:     "ui_trial_checklist",
+			Target:   truncateRunes(strings.TrimSpace(paragraph), 110),
+			Limit:    "同一规则只保留一次会改变人物判断的界面试错",
+			Actual:   len(matches),
+			Severity: SeverityWarning,
+		})
+	}
 	return vs
 }
 

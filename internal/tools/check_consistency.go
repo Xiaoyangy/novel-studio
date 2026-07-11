@@ -123,12 +123,12 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 
 	// 计划范围核对：计划是正文的唯一范围依据，正文不得超出。加载本章计划 + finalize 阶段
-	// 遗留的一致性疑点，供 drafter 逐条核对——必须覆盖 required_beats、不得触犯
-	// forbidden_moves、不得引入计划外的情节/角色/场景。
+	// 遗留的一致性疑点，供 drafter 核对。required_beats 在这里投影为结果级
+	// outcomes，避免把上游验证动作、举例和句序重新塞回正文。
 	if plan, _ := t.store.Drafts.LoadChapterPlan(a.Chapter); plan != nil {
 		scope, flags := chapterPlanScopeCheck(*plan, content)
 		result["chapter_plan_scope"] = scope
-		result["chapter_plan_scope_usage"] = "范围契约：核对正文是否 (1) 落实全部 required_beats (2) 未触犯任何 forbidden_moves (3) 未引入计划外的重大情节/新角色/新场景。越界的必须在返回问题里列出并修正正文回到计划内"
+		result["chapter_plan_scope_usage"] = "范围契约：required_outcomes 只核结果是否在页面成立，不核计划中的动作顺序、验证次数或原句；正文还须未触犯 forbidden_moves、未引入计划外重大情节/新角色/新场景。禁止为了对账把省略的过程补写成清单。"
 		if len(flags) > 0 {
 			result["plan_scope_flags"] = flags
 		}
@@ -158,6 +158,7 @@ func proseRenderingViolations(content string) []qualityrules.Violation {
 	wanted := map[string]struct{}{
 		"abstract_system_reassurance":     {},
 		"opaque_procedure_jargon":         {},
+		"ui_trial_checklist":              {},
 		"dialogue_action_lead_repetition": {},
 		"templated_dialogue_chain":        {},
 		"bureaucratic_register_overuse":   {},
@@ -178,13 +179,14 @@ func proseRenderingViolations(content string) []qualityrules.Violation {
 // 关键短语），需 LLM 复核。范围契约的语义级判断（是否引入计划外情节）交给 drafter。
 func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]any, []string) {
 	scope := map[string]any{
-		"chapter":         plan.Chapter,
-		"title":           plan.Title,
-		"goal":            plan.Goal,
-		"conflict":        plan.Conflict,
-		"hook":            plan.Hook,
-		"required_beats":  plan.Contract.RequiredBeats,
-		"forbidden_moves": plan.Contract.ForbiddenMoves,
+		"chapter":           plan.Chapter,
+		"title":             plan.Title,
+		"goal":              plan.Goal,
+		"conflict":          plan.Conflict,
+		"hook":              plan.Hook,
+		"required_outcomes": RenderRequiredOutcomes(plan),
+		"forbidden_moves":   plan.Contract.ForbiddenMoves,
+		"render_policy":     "结果必须成立；上游举例、点击路径、动作拍、句序和台词原句不是正文清单，可合并、替换或删除。",
 	}
 	if len(plan.Contract.PayoffPoints) > 0 {
 		scope["payoff_points"] = plan.Contract.PayoffPoints

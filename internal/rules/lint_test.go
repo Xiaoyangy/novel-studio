@@ -571,6 +571,17 @@ func TestLint_OpaqueProcedureJargon(t *testing.T) {
 	}
 }
 
+func TestLint_UITrialChecklist(t *testing.T) {
+	bad := `林澈试着还信用卡，确认键刚亮，页面就退了回去。他又点了提现，按钮按下去没反应，最后把用途备注改成“今日周转”，看了两秒又删掉。`
+	if v := findRule(Lint(bad), "ui_trial_checklist"); v == nil {
+		t.Fatalf("expected ui_trial_checklist, got %+v", Lint(bad))
+	}
+	clean := `他先问信用卡能不能还，屏幕回得很快：【旧账不行。那是你绑定前花的钱。】“提现呢？”【也不行。你能拿它买东西、请人干活，不能取成现金。】`
+	if v := findRule(Lint(clean), "ui_trial_checklist"); v != nil {
+		t.Fatalf("plain result-level explanation should pass: %+v", v)
+	}
+}
+
 func TestLint_DialogueActionLeadRepetition(t *testing.T) {
 	bad := `二姨夫夹着鱼：“回来也别闲着。”
 

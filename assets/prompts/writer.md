@@ -28,8 +28,8 @@
 3a. `fiction_paragraphing` 分段计划：计划里必须把本章关键场景的段落疏密写成可执行约束。多角色对话要标明哪些话轮换段、哪些动作 beat 跟台词同段；150 字以上段落要有慢速观察/复杂反应理由；若存在会议、汇报、电话等易写成大段流程的场景，必须规划为“事实落点 / 角色反应 / 话语争夺 / 后果推进”的分段链，而不是一整段流程记录。
 4. 计划落盘即结束本轮：`plan_chapter` 成功、或 `plan_details` 最后一批 `finalize=true` 通过后，本轮结束，不要再输出文字总结，不要尝试写正文。下游 drafter 会读你的计划渲染正文。
    - **收尾会跑计划一致性检查**：计划是正文的唯一范围依据，收尾时系统会校验计划与既定事实的一致性。若返回一致性 hard 错误（如契约自我矛盾——同一推进项既 required 又 forbidden），会挡下收尾，你必须修正后重新收尾。若返回 `consistency_warnings`（如推演里出现角色档没有的角色名、章号超出已规划总章数），说明可能是笔误或别名不一致或需先扩展大纲——是笔误就当场改计划，是有意为之（如引入新角色）就确保计划里已交代其来历再收尾；这些疑点也会带到 drafter 的正文核对。
-   - **契约就是范围边界**：`required_beats` 只放删掉就会破坏因果、兑现或人物状态的页面事件，`forbidden_moves` 是正文硬禁止的。具体热梗、颜文字、台词原句、动作拍和流程措辞不能进入 `required_beats`；它们只能是可选风格素材。
-   - **留存筛选是候选菜单**：`reader_retention_plan.surface_beats` 从 `required_beats`、`reader_reward_plan`、`dialogue_scene_blueprints`、`environment_state` 中筛出 3-6 个页面候选节拍，Drafter 会只选足以完成契约的最少部分，不要求全写；`latent_context` 只约束行为、不摊给读者；`reveal_budget` 写延后信息；`cut_or_compress` 写会造成清单感、说明书或 AI 结构指纹的材料。
+   - **契约就是范围边界**：`required_beats` 只放 3-7 个删掉就会破坏因果、兑现或人物状态的结果级事件，每项只写“谁使什么发生变化”。`forbidden_moves` 是正文硬禁止的。点击、试错次数、证据清单、对话轮次、具体热梗、颜文字、台词原句、动作拍和流程措辞不能进入 `required_beats`；同一大纲核心事件或钩子不得换句话重复追加。
+   - **留存筛选是候选菜单**：`reader_retention_plan.surface_beats` 从 `required_beats`、`reader_reward_plan`、`dialogue_scene_blueprints`、`environment_state` 中筛出 3-6 个页面候选节拍，Drafter 会只选足以完成契约的最少部分，不要求全写；`latent_context` 只约束行为、不摊给读者；`reveal_budget` 写延后信息；`cut_or_compress` 必须明确列出会造成清单感、说明书或 AI 结构指纹的验证动作。两次试错只证明同一规则时，只保留最能改变主角判断的一次。
 
 ## 推演完整性要求（下游渲染的事实基础）
 

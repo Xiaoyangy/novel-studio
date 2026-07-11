@@ -3,6 +3,8 @@ package tools
 import (
 	"encoding/json"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -25,7 +27,7 @@ type draftRenderPacket struct {
 	ContinuityChecks       []string                         `json:"continuity_checks,omitempty"`
 	PayoffPoints           []string                         `json:"payoff_points,omitempty"`
 	SceneAnchors           []string                         `json:"scene_anchors,omitempty"`
-	CandidateBeats         []draftCandidateBeat              `json:"candidate_beats,omitempty"`
+	CandidateBeats         []draftCandidateBeat             `json:"candidate_beats,omitempty"`
 	RevealBudget           []string                         `json:"reveal_budget,omitempty"`
 	CutOrCompress          []string                         `json:"cut_or_compress,omitempty"`
 	PageTurnQuestions      []string                         `json:"page_turn_questions,omitempty"`
@@ -40,11 +42,15 @@ type draftRenderPacket struct {
 	GroundingDetails       []domain.GroundingDetailPlan     `json:"grounding_details,omitempty"`
 	EnvironmentSignals     []draftEnvironmentSignal         `json:"environment_signals,omitempty"`
 	EndingContract         domain.EndingConsequenceContract `json:"ending_consequence_contract,omitempty"`
+	EndingAnchorCandidate  string                           `json:"ending_anchor_candidate,omitempty"`
 	SelectionPolicy        string                           `json:"selection_policy"`
 	SceneBridgePolicy      string                           `json:"scene_bridge_policy"`
 	DialogueTopologyPolicy string                           `json:"dialogue_topology_policy"`
 	SystemVoicePolicy      string                           `json:"system_voice_policy"`
 	JargonPolicy           string                           `json:"jargon_policy"`
+	PlanTranslationPolicy  string                           `json:"plan_translation_policy"`
+	ReaderRegisterPolicy   string                           `json:"reader_register_policy"`
+	InterfaceCompression   string                           `json:"interface_compression_policy"`
 }
 
 type draftProtagonistProjection struct {
@@ -185,7 +191,8 @@ func chapterPlanFromContext(result map[string]any, working map[string]any) *doma
 
 func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 	sim := plan.CausalSimulation
-	mandatoryBeats, optionalStyleBeats := splitOptionalStyleBeats(plan.Contract.RequiredBeats, sim.TrendLanguage)
+	mandatoryBeats := RenderRequiredOutcomes(plan)
+	_, optionalStyleBeats := splitOptionalStyleBeats(plan.Contract.RequiredBeats, sim.TrendLanguage)
 	candidateBeats := make([]draftCandidateBeat, 0, len(sim.ReaderRetentionPlan.SurfaceBeats))
 	for _, beat := range sim.ReaderRetentionPlan.SurfaceBeats {
 		if optionalStyleText(beat.MustShow+" "+beat.ProofOnPage, sim.TrendLanguage) {
@@ -279,7 +286,7 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		MandatoryBeats:         mandatoryBeats,
 		OptionalStyleBeats:     compactStrings(optionalStyleBeats),
 		ForbiddenMoves:         plan.Contract.ForbiddenMoves,
-		ContinuityChecks:       plan.Contract.ContinuityChecks,
+		ContinuityChecks:       RenderContinuityChecks(plan),
 		PayoffPoints:           plan.Contract.PayoffPoints,
 		SceneAnchors:           plan.Contract.SceneAnchors,
 		CandidateBeats:         candidateBeats,
@@ -296,13 +303,155 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		DialogueScenes:         dialogueScenes,
 		GroundingDetails:       sim.GroundingDetails,
 		EnvironmentSignals:     environment,
-		EndingContract:         sim.EndingContract,
-		SelectionPolicy:        "mandatory_beats 全部落地；candidate_beats 是素材菜单，不是清单。只选能共同完成本章目标的最少节拍，通常 2-4 个；其余直接省略，不得用旁白补交。optional_style_beats 里的热梗、颜文字和指定说法只在声口与语境自然时选用，零使用也允许。一个场景可合并兑现多个 mandatory beat。",
+		EndingContract:         RenderEndingContract(plan),
+		EndingAnchorCandidate:  sim.EndingContract.ConcreteAnchor,
+		SelectionPolicy:        "mandatory_beats 是本章必须成立的结果，不是动作顺序或句子清单。每个结果只选一个最有戏、最容易看懂的页面证据；同一场景可合并多个结果。candidate_beats 通常只选 2-4 个，其余直接省略，不得用旁白、对白或流程段补交。optional_style_beats 里的热梗、颜文字和指定说法零使用也允许。",
 		SceneBridgePolicy:      "每次换场前先让上一场的余波变成主角当下的需要或选择，再进入下一地点；页面至少看得见‘为什么现在去’和‘去了先碰到什么阻力’。仅写锁屏、下楼、到达某地不算因果桥。",
 		DialogueTopologyPolicy: "动作拍不是对白轮次的必填项。先用少量具体信息定住人物和空间，进入交锋后允许连续裸对白、打断、漏答、答非所问与无人接话；动作只在改变权力、遮掩信息、打断话头或影响现场结果时出现。",
-		SystemVoicePolicy:      "系统先回答主角此刻真正问的事，一次只给一条具体规则或一个可执行提示。陪伴感来自接住具体情绪、吐槽具体处境和共同做选择；禁用‘钱没跑’‘陪你换条路’‘规矩不撤’‘先喘半口气’等没有对象和后果的客服式安慰。",
+		SystemVoicePolicy:      "系统先回答主角此刻真正问的事，一次只给一条具体规则或一个可执行提示。首次任务必须让普通读者马上知道：主角能做什么、不能做什么、现在去哪里完成什么；数字、地点、时限和完成条件用日常话说清，不让读者替系统推理。陪伴感来自接住具体情绪、吐槽具体处境和共同做选择；禁用‘钱没跑’‘陪你换条路’‘规矩不撤’‘先喘半口气’等没有对象和后果的客服式安慰。",
 		JargonPolicy:           "面向无行业经验的普通读者。专业角色可以知道术语，但台词和叙述必须让读者当场看懂会坏在哪里、谁会吃亏、下一步要做什么；‘补测、核验、用途说明、临时固定’等词若不能由可见后果自然解释，就改成日常说法或删除。",
+		PlanTranslationPolicy:  "先把每场计划翻成三个读者问题：此刻最想看什么、最容易看不懂什么、这一场结束后什么发生了变化。再按人物欲望、阻力和结果重组场景。计划中的动作拍、举例、验证路径和句序都可删除、合并、替换或调序；只保留结果事实、因果边界、人物选择和不可改的金额地点。ending_anchor_candidate 只是候选镜头；章末只要兑现 consequence 与 next_chapter_pull，可换成更强的现场人物、动作或结果。禁止按 plan 原句顺序逐句渲染。",
+		ReaderRegisterPolicy:   "默认写给没有行业经验的大众类型文读者。优先使用能在饭桌、摊位、街边自然说出口的常用词和短解释；县城普通居民不替作者说工整对仗、验收术语或设计感强的俏皮话。每个新规则只允许一个必要概念，并立刻用人物能得到或失去什么讲明白。",
+		InterfaceCompression:   "点击、按钮变灰、改备注、删输入等界面操作本身不是戏。若两次以上试错只证明同一条边界，只保留最能改变人物判断的一次，其余用一句结果带过或直接删除；禁止把 plan 中的验证动作排成‘点击—失败—再点击—再失败’清单。",
 	}
+}
+
+// RenderRequiredOutcomes projects the full chapter contract into the smallest
+// result-level contract needed by prose. The source plan remains untouched and
+// keeps every simulation fact; only the Drafter-facing view removes duplicate
+// outline anchors and prefers concise outcome statements over process recipes.
+func RenderRequiredOutcomes(plan domain.ChapterPlan) []string {
+	beats, _ := splitOptionalStyleBeats(plan.Contract.RequiredBeats, plan.CausalSimulation.TrendLanguage)
+	out := make([]string, 0, len(beats))
+	for _, raw := range beats {
+		beat := unwrapRenderOutcome(raw)
+		if beat == "" {
+			continue
+		}
+		merged := false
+		for i, existing := range out {
+			if !renderOutcomesEquivalent(existing, beat) {
+				continue
+			}
+			if preferRenderOutcome(beat, existing) {
+				out[i] = beat
+			}
+			merged = true
+			break
+		}
+		if !merged {
+			out = append(out, beat)
+		}
+	}
+	return compactStrings(out)
+}
+
+// RenderContinuityChecks keeps factual continuity in the prose packet while
+// removing presentation instructions that belong to style or review policy.
+func RenderContinuityChecks(plan domain.ChapterPlan) []string {
+	out := make([]string, 0, len(plan.Contract.ContinuityChecks))
+	for _, check := range plan.Contract.ContinuityChecks {
+		if optionalStyleText(check, plan.CausalSimulation.TrendLanguage) || renderOnlyContinuityCheck(check) {
+			continue
+		}
+		out = append(out, check)
+	}
+	return compactStrings(out)
+}
+
+func renderOnlyContinuityCheck(text string) bool {
+	for _, marker := range []string{
+		"章末具体锚点", "短消息分开发送", "颜文字", "拟声", "吐槽的起头",
+		"每次只承担拒绝", "不能连续用界面", "必须位于报价确认后", "台词原句",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// RenderEndingContract preserves the consequence and forward pull but moves a
+// prescribed final prop/shot out of the hard contract. Exact framing belongs
+// in EndingAnchorCandidate so the Drafter can replace it with a stronger beat.
+func RenderEndingContract(plan domain.ChapterPlan) domain.EndingConsequenceContract {
+	contract := plan.CausalSimulation.EndingContract
+	contract.ConcreteAnchor = ""
+	contract.WhyNotUI = ""
+	return contract
+}
+
+func unwrapRenderOutcome(text string) string {
+	text = strings.TrimSpace(text)
+	for _, prefix := range []string{
+		"必须完整兑现大纲核心事件：",
+		"必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末：",
+	} {
+		if strings.HasPrefix(text, prefix) {
+			// goal / hook already carry these outline anchors in render_packet.
+			return ""
+		}
+	}
+	return text
+}
+
+func renderOutcomesEquivalent(a, b string) bool {
+	a = normalizeRenderOutcome(a)
+	b = normalizeRenderOutcome(b)
+	if a == "" || b == "" {
+		return false
+	}
+	shorter, longer := a, b
+	if utf8.RuneCountInString(shorter) > utf8.RuneCountInString(longer) {
+		shorter, longer = longer, shorter
+	}
+	if utf8.RuneCountInString(shorter) >= 8 && strings.Contains(longer, shorter) {
+		return true
+	}
+	aPairs := renderOutcomeBigrams(a)
+	bPairs := renderOutcomeBigrams(b)
+	if len(aPairs) < 6 || len(bPairs) < 6 {
+		return false
+	}
+	intersection := 0
+	for pair := range aPairs {
+		if _, ok := bPairs[pair]; ok {
+			intersection++
+		}
+	}
+	denominator := min(len(aPairs), len(bPairs))
+	return intersection >= 6 && float64(intersection)/float64(denominator) >= 0.52
+}
+
+func normalizeRenderOutcome(text string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(text) {
+		if unicode.Is(unicode.Han, r) || unicode.IsDigit(r) || unicode.IsLetter(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func renderOutcomeBigrams(text string) map[string]struct{} {
+	runes := []rune(text)
+	out := make(map[string]struct{}, max(0, len(runes)-1))
+	for i := 0; i+1 < len(runes); i++ {
+		out[string(runes[i:i+2])] = struct{}{}
+	}
+	return out
+}
+
+func preferRenderOutcome(candidate, current string) bool {
+	candidateLen := utf8.RuneCountInString(candidate)
+	currentLen := utf8.RuneCountInString(current)
+	if candidateLen < 8 {
+		return false
+	}
+	if currentLen < 8 {
+		return true
+	}
+	return candidateLen < currentLen
 }
 
 func splitOptionalStyleBeats(beats []string, trends []domain.TrendLanguagePlan) ([]string, []string) {
@@ -319,7 +468,15 @@ func splitOptionalStyleBeats(beats []string, trends []domain.TrendLanguagePlan) 
 }
 
 func optionalStyleText(text string, trends []domain.TrendLanguagePlan) bool {
-	for _, marker := range []string{"热梗", "颜文字", "台词原句", "原样使用", "必须说成", "句式槽位", "那还说啥了，给你了呗"} {
+	trimmed := strings.TrimSpace(text)
+	// A style literal embedded in a compound event must not demote the event's
+	// real outcome (for example, "赵航用梗打断；林澈离席"). Only pure style
+	// requirements belong in optional_style_beats.
+	compound := strings.TrimRight(trimmed, "。！？!?；;")
+	if strings.ContainsAny(compound, "；;。") {
+		return false
+	}
+	for _, marker := range []string{"热梗", "颜文字", "台词原句", "原样使用", "必须说成", "句式槽位"} {
 		if strings.Contains(text, marker) {
 			return true
 		}
@@ -335,11 +492,21 @@ func optionalStyleText(text string, trends []domain.TrendLanguagePlan) bool {
 			trendTokens = append(trendTokens, "呱")
 		}
 	}
-	if strings.Contains(text, "^_^") {
+	if strings.Contains(text, "^_^") && utf8.RuneCountInString(trimmed) <= 60 {
 		return true
 	}
 	for _, token := range trendTokens {
-		if token != "" && strings.Contains(text, token) {
+		if token != "" && strings.Contains(text, token) && utf8.RuneCountInString(trimmed) <= 60 &&
+			containsRenderStyleMarker(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRenderStyleMarker(text string) bool {
+	for _, marker := range []string{"必须", "原句", "原样", "起头", "说出", "使用"} {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}

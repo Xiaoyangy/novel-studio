@@ -108,15 +108,6 @@ func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	if err != nil || partial == nil {
 		t.Fatalf("LoadChapterPlanPartial: partial=%v err=%v", partial, err)
 	}
-	raw, _ := json.Marshal(partial)
-	for _, want := range []string{
-		"手机弹出县城花钱系统绑定提示",
-		"必须完整兑现大纲核心事件：林澈返乡饭桌受挤兑",
-	} {
-		if !strings.Contains(string(raw), want) {
-			t.Fatalf("outline anchor %q missing from partial: %s", want, raw)
-		}
-	}
 	structure := partial["structure"].(map[string]any)
 	if got := structure["goal"]; got != "完整兑现本章大纲核心事件：林澈返乡饭桌受挤兑" {
 		t.Fatalf("outline goal must pin chapter scope, got %#v", got)
@@ -126,6 +117,9 @@ func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	}
 	if got := structure["title"]; got != "失业饭桌" {
 		t.Fatalf("outline title must pin chapter name, got %#v", got)
+	}
+	if required := stringSliceFromAny(structure["required_beats"]); len(required) != 0 {
+		t.Fatalf("outline goal/hook must not be duplicated into prose checklist: %#v", required)
 	}
 }
 

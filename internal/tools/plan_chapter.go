@@ -48,7 +48,7 @@ func (t *PlanChapterTool) Schema() map[string]any {
 		schema.Property("hook", schema.String("章末钩子")),
 		schema.Property("emotion_arc", schema.String("情绪曲线")),
 		schema.Property("notes", schema.String("自由备忘；写明本章承接的历史数据、大纲、动态台账、资源/人物连续性、写法资产或 RAG 召回依据")),
-		schema.Property("required_beats", schema.Array("本章必须完成的推进项", schema.String(""))),
+		schema.Property("required_beats", schema.Array("本章必须成立的 3-7 个结果级推进项；每项只写谁使什么发生变化，不写点击、验证次数、动作拍、台词原句或流程步骤", schema.String(""))),
 		schema.Property("forbidden_moves", schema.Array("本章明确不能发生的推进", schema.String(""))),
 		schema.Property("continuity_checks", schema.Array("本章需特别核对的连续性点", schema.String(""))),
 		schema.Property("evaluation_focus", schema.Array("Editor 重点检查项", schema.String(""))),
@@ -284,11 +284,14 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
 	if err != nil || entry == nil {
 		return
 	}
-	if hook := strings.TrimSpace(entry.Hook); hook != "" {
-		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, "必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末："+hook)
+	if title := strings.TrimSpace(entry.Title); title != "" {
+		plan.Title = title
 	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
-		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, "必须完整兑现大纲核心事件："+event)
+		plan.Goal = "完整兑现本章大纲核心事件：" + event
+	}
+	if hook := strings.TrimSpace(entry.Hook); hook != "" {
+		plan.Hook = hook
 	}
 }
 
