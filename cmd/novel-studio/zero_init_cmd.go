@@ -23,6 +23,7 @@ type zeroInitFlags struct {
 	Check                bool
 	RebuildRAG           bool
 	ResetSimulationState bool
+	RefreshOpeningPlan   bool
 	GenerationID         string
 	MaxChunk             int
 	MaxFiles             int
@@ -137,7 +138,7 @@ func hasZeroInitFlag(argv []string) bool {
 func parseZeroInitFlags(argv []string) (zeroInitFlags, []string, error) {
 	fs := flag.NewFlagSet("zero-init", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "用法: novel-studio --zero-init [--dir <output/novel>] [--check] [--overwrite] [--rebuild-rag=false]\n\n")
+		fmt.Fprintf(os.Stderr, "用法: novel-studio --zero-init [--dir <output/novel>] [--check] [--overwrite] [--refresh-opening-plan] [--rebuild-rag=false]\n\n")
 		fmt.Fprintf(os.Stderr, "为一本还未开写正文的新书生成零章写前梳理资产：本书世界、初始人物动态、资源/关系/伏笔台账、捧场角色策略、第一章推演草案和 RAG 白名单索引。正文仍必须通过 --pipeline 产出。\n\n选项：\n")
 		fs.PrintDefaults()
 	}
@@ -150,6 +151,7 @@ func parseZeroInitFlags(argv []string) (zeroInitFlags, []string, error) {
 	fs.BoolVar(&f.Check, "check", false, "只检查零章资产是否齐全，不生成文件")
 	fs.BoolVar(&f.RebuildRAG, "rebuild-rag", f.RebuildRAG, "生成/更新零章白名单 RAG 索引；只索引当前项目设定和零章资产")
 	fs.BoolVar(&f.ResetSimulationState, "reset-simulation-state", false, "将活动 progress 切换为新的推演线；不删除旧章节文件，旧数据只保留为背景种子")
+	fs.BoolVar(&f.RefreshOpeningPlan, "refresh-opening-plan", false, "只按最新 Architect 大纲重建第一章 zero-init 计划；保留活动资源、关系、伏笔与章节进度")
 	fs.StringVar(&f.GenerationID, "generation-id", "", "指定本轮推演 generation_id；为空时按生成时间自动创建")
 	fs.IntVar(&f.MaxChunk, "max-chunk-runes", f.MaxChunk, "单个 RAG chunk 的最大字符数")
 	fs.IntVar(&f.MaxFiles, "max-files", f.MaxFiles, "最多索引文件数")
@@ -184,6 +186,9 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	if flags.MaxFiles <= 0 {
 		return fmt.Errorf("--max-files 必须大于 0")
 	}
+	if flags.RefreshOpeningPlan && (flags.Overwrite || flags.ResetSimulationState) {
+		return fmt.Errorf("--refresh-opening-plan 不能与 --overwrite/--reset-simulation-state 同时使用")
+	}
 	dir, err := resolveZeroInitDir(opts, flags.Dir)
 	if err != nil {
 		return err
@@ -210,8 +215,14 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	} else if existingPolicy, perr := st.LoadSimulationRestartPolicy(); perr == nil && existingPolicy != nil && strings.TrimSpace(existingPolicy.GenerationID) != "" {
 		project.GenerationID = strings.TrimSpace(existingPolicy.GenerationID)
 	}
-	if err := writeZeroInitArtifacts(dir, &project, flags.Overwrite); err != nil {
-		return err
+	if flags.RefreshOpeningPlan {
+		if err := writeZeroInitOpeningPlanArtifacts(dir, project); err != nil {
+			return err
+		}
+	} else {
+		if err := writeZeroInitArtifacts(dir, &project, flags.Overwrite); err != nil {
+			return err
+		}
 	}
 	if flags.ResetSimulationState {
 		if err := applyZeroInitSimulationRestartState(dir, &project); err != nil {
@@ -227,7 +238,7 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 		}
 	}
 	readiness := assessZeroInitReadiness(dir, ragStats)
-	if err := writeZeroInitReadiness(dir, readiness, flags.Overwrite); err != nil {
+	if err := writeZeroInitReadiness(dir, readiness, flags.Overwrite || flags.RefreshOpeningPlan); err != nil {
 		return err
 	}
 	if !readiness.Ready {
@@ -239,6 +250,62 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	}
 	fmt.Fprintf(os.Stdout, "%s\n", filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"))
 	return nil
+}
+
+func writeZeroInitOpeningPlanArtifacts(dir string, project zeroInitProject) error {
+	dynamics := zeroInitDynamics(project)
+	crowdPolicy := zeroInitCrowdPolicy(project)
+	storycraft := zeroInitStorycraftPlan(project, dynamics)
+	worldBackground := zeroInitWorldBackgroundPlan(project)
+	plan := zeroInitChapterPlan(project, dynamics, crowdPolicy, storycraft, worldBackground)
+	// Opening refresh is allowed after chapter files exist, so refresh only assets
+	// derived from Architect foundation. Active chapter ledgers, progress and world
+	// simulation state stay untouched.
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "initial_character_dynamics.json"), dynamics, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "initial_character_dynamics.md"), renderZeroDynamics(dynamics), true); err != nil {
+		return err
+	}
+	relationship := zeroInitRelationshipState(project, dynamics.Characters)
+	if err := writeZeroJSON(filepath.Join(dir, "relationship_state.initial.json"), relationship, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "relationship_state.initial.md"), renderZeroGenericDoc("零章初始关系契约", relationship), true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "initial_review_lessons.md"), renderZeroReviewLessons(), true); err != nil {
+		return err
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "crowd_role_policy.json"), crowdPolicy, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "crowd_role_policy.md"), renderZeroGenericDoc("捧场类角色策略", crowdPolicy), true); err != nil {
+		return err
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "prewrite_storycraft_plan.json"), storycraft, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "prewrite_storycraft_plan.md"), renderZeroStorycraftPlan(storycraft), true); err != nil {
+		return err
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "world_background_plan.json"), worldBackground, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "world_background_plan.md"), renderZeroWorldBackgroundPlan(worldBackground), true); err != nil {
+		return err
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "drafts", "01.zero_init.plan.json"), plan, true); err != nil {
+		return err
+	}
+	if err := writeZeroText(filepath.Join(dir, "meta", "ch01_zero_init_plan.md"), renderZeroChapterPlan(plan), true); err != nil {
+		return err
+	}
+	manifest := zeroInitManifest(project)
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "zero_chapter_context_manifest.json"), manifest, true); err != nil {
+		return err
+	}
+	return writeZeroText(filepath.Join(dir, "meta", "zero_chapter_context_manifest.md"), renderZeroGenericDoc("零章上下文清单", manifest), true)
 }
 
 func resolveZeroInitDir(opts cliOptions, explicit string) (string, error) {

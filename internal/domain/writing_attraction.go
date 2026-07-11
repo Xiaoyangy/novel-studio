@@ -61,6 +61,10 @@ func SystemCompanionVoiceRequested(text string) bool {
 			return true
 		}
 	}
+	if strings.Contains(text, "系统") && (strings.Contains(text, "会聊天") ||
+		strings.Contains(text, "吐槽搭子") || strings.Contains(text, "情绪支持")) {
+		return true
+	}
 	return false
 }
 

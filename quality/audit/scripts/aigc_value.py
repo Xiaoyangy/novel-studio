@@ -1600,12 +1600,21 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
             and human_anchor.get("strength") == "strong"
             and not blockers
         )
-        multi_signal_support = (
-            current_curve >= 60
-            or zhuque_composite >= 38
-            or (burstiness >= 35 and (structure >= 45 or cross_paragraph >= 30))
-            or (structure >= 65 and concrete < 18 and dialogue_ratio < 0.35)
-            or (not strong_anchor and raw_curve >= 90)
+        raw_curve_consensus = (
+            raw_probability_curve >= 90
+            and raw_weak >= 75
+            and raw_entropy >= 60
+        )
+        independent_support = sum(
+            (
+                current_curve >= 60,
+                zhuque_composite >= 50,
+                burstiness >= 35 and (structure >= 45 or cross_paragraph >= 30),
+                structure >= 65 and concrete < 18 and dialogue_ratio < 0.35,
+            )
+        )
+        multi_signal_support = independent_support >= 2 or (
+            not strong_anchor and (independent_support >= 1 or raw_curve >= 90)
         )
         if raw_curve >= 80 and multi_signal_support:
             external_like_score = min(86.0, max(76.0, 62.0 + raw_curve * 0.20))
@@ -1615,9 +1624,14 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
                     f"整章单段疑似朱雀形态：曲线原始高值 {raw_curve:.2f}%，且存在当前曲线/结构节奏复合支撑"
                 )
         elif raw_curve >= 80:
-            evidence.append(
-                f"整章单段原始曲线高值 {raw_curve:.2f}%，但当前曲线、人味锚点和结构节奏未形成复合高风险"
-            )
+            if raw_curve_consensus:
+                evidence.append(
+                    "整章单段三条原始曲线同时过平，但当前曲线、人味锚点和结构节奏未形成独立复合高风险"
+                )
+            else:
+                evidence.append(
+                    f"整章单段原始曲线高值 {raw_curve:.2f}%，但当前曲线、人味锚点和结构节奏未形成复合高风险"
+                )
     blockers = human_anchor.get("blockers", [])
     length_only_blocker = blockers and all(str(item).startswith("文本长度不足") for item in blockers)
     segment_anchor_eligible = human_anchor.get("eligible") or (
@@ -1658,12 +1672,13 @@ def zhuque_segment_proxy(raw: str) -> dict:
         if not chunk:
             continue
         report = analyze_text(chunk, include_segments=False)
-        proportion = len(chunk) / max(len(visible), 1)
-        score, evidence = segment_aigc_proxy(report, len(chunk), proportion)
+        segment_chars = end - start
+        proportion = segment_chars / max(len(visible), 1)
+        score, evidence = segment_aigc_proxy(report, segment_chars, proportion)
         if score >= 99:
-            ai_chars += len(chunk)
+            ai_chars += segment_chars
         elif score >= 50:
-            suspected_chars += len(chunk)
+            suspected_chars += segment_chars
         if score > max_score:
             max_score = score
             max_index = index
@@ -1672,7 +1687,7 @@ def zhuque_segment_proxy(raw: str) -> dict:
                 "index": index,
                 "start": start,
                 "end": end,
-                "char_count": len(chunk),
+                "char_count": segment_chars,
                 "proportion": round(proportion, 4),
                 "aigc_percent": score,
                 "category": "AI特征" if score >= 99 else ("疑似AI" if score >= 50 else "人工特征"),

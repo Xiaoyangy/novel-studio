@@ -47,6 +47,24 @@ func zeroIsSecondAlgorithmProject(project zeroInitProject) bool {
 		strings.Contains(text, "桥点职业转型")
 }
 
+func zeroIsCountySpendProject(project zeroInitProject) bool {
+	text := strings.Join([]string{
+		project.Name,
+		project.Premise,
+		project.FirstChapter.Title,
+		project.FirstChapter.CoreEvent,
+		project.FirstChapter.Hook,
+	}, "\n")
+	return strings.Contains(text, "青山县") &&
+		(strings.Contains(text, "县城") || strings.Contains(text, "夜市")) &&
+		(strings.Contains(text, "系统") || strings.Contains(text, "一百万"))
+}
+
+func zeroIsPrimaryProtagonist(project zeroInitProject, c domain.Character) bool {
+	primary := zeroProtagonist(project.Characters)
+	return strings.TrimSpace(primary.Name) != "" && strings.TrimSpace(primary.Name) == strings.TrimSpace(c.Name)
+}
+
 func zeroInitDynamics(project zeroInitProject) zeroInitCharacterDynamicsDoc {
 	chars := zeroInitialCharacters(project)
 	var states []domain.CharacterSimulationState
@@ -135,7 +153,7 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 	}
 	return domain.CharacterSimulationState{
 		Character:          c.Name,
-		CurrentGoal:        fmt.Sprintf("以“%s”的身份在第一章拿到一个可验证的下一步目标。", role),
+		CurrentGoal:        zeroCurrentGoal(project, c, role),
 		Pressure:           fmt.Sprintf("第一章核心事件“%s”会检验其性格、资源和关系边界。", zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title)),
 		Resources:          []string{"角色卡既有经验", "第一章可见事实", "可复核的关系/资源台账"},
 		RelationshipForces: relationshipForces,
@@ -198,6 +216,30 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 	}
 }
 
+func zeroCurrentGoal(project zeroInitProject, c domain.Character, role string) string {
+	name := zeroFirstNonEmpty(c.Name, role, "该角色")
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "顶住返乡饭桌上的难堪，确认异常资金不会连累家人，并在当晚完成一笔真能帮到人的县内消费。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "守住夜市安全和商户利益，同时判断林澈这笔来路异常、用途却真实的钱到底能不能经得起查。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "先把汽修店的活交稳，再决定要不要借车、出力，帮刚返乡的林澈把第一件事办成。"
+		case zeroCharacterNameIs(c, "周曼"):
+			return "别让亲戚把儿子逼得下不来台，也要看清林澈是真有下一步，还是只在饭桌上硬撑。"
+		case zeroCharacterNameIs(c, "林建国"):
+			return "护住儿子的体面又不替他吹牛，等林澈拿一件做成的事回来再表态。"
+		case zeroCharacterNameIs(c, "马玉芬"):
+			return "不替陌生人的热心买单，先确认灯线安全、坏了有人管，再看摊上能不能真多几单生意。"
+		}
+	}
+	if mention := project.FirstMentions[strings.TrimSpace(c.Name)]; mention > 1 {
+		return fmt.Sprintf("%s在第%d章前沿自己的生活线行动，首次入场时以%s的现实目标影响主线，不提前挤进开篇。", name, mention, role)
+	}
+	return fmt.Sprintf("%s要以%s的立场，在第一章核心事件里做出一个可验证、会留下后果的选择。", name, role)
+}
+
 func zeroSecondFearSource(second bool) string {
 	if second {
 		return "害怕失去目标、岗位入口、专业价值或关系边界。"
@@ -223,12 +265,12 @@ func zeroInitVoiceLogic(project zeroInitProject, c domain.Character) domain.Char
 	return domain.CharacterVoiceLogic{
 		Character:          c.Name,
 		PersonalitySource:  zeroFirstNonEmpty(strings.Join(c.Traits, "、"), c.Description, c.Role),
-		SpeechPrinciple:    zeroSpeechPrinciple(c),
+		SpeechPrinciple:    zeroSpeechPrinciple(project, c),
 		SceneObjective:     zeroSceneObjective(project, c),
-		HiddenSubtext:      zeroHiddenSubtext(c),
+		HiddenSubtext:      zeroHiddenSubtext(project, c),
 		KnowledgeBoundary:  "只说自己能从角色卡、现场证据和已授权关系里推出来的话。",
-		RelationshipStance: zeroRelationshipStance(c),
-		DictionAndRhythm:   zeroDictionAndRhythm(c),
+		RelationshipStance: zeroRelationshipStance(project, c),
+		DictionAndRhythm:   zeroDictionAndRhythm(project, c),
 		SentenceLength:     "平稳时中短句核验事实；受惊、撒谎、被逼问时允许断句、改口和半句停住。",
 		PunctuationStyle:   "问号只用于真实核验或失控反应；避免连续反问、整齐顿号清单和每句都句号斩断。",
 		LineBreakStyle:     "只有选择前犹豫、物件反馈、关系冷场或情绪压不住时单独断行。",
@@ -245,38 +287,80 @@ func zeroInitVoiceLogic(project zeroInitProject, c domain.Character) domain.Char
 
 func zeroSceneObjective(project zeroInitProject, c domain.Character) string {
 	event := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title, "第一章事件")
-	switch {
-	case zeroIsProtagonist(c):
-		return "先把发布会现场撑住，再确认自己的经验为什么被系统当成可合并资产；章末必须拒绝一个无异议承诺。"
-	case zeroCharacterNameIs(c, "梁渡"):
-		return "从外部旁观者位置判断这套提效叙事的真实代价；不救场，只留下一个让许闻溪无法继续圆场的问题。"
-	case zeroCharacterNameIs(c, "夏岚"):
-		return "把发布会事故压回可控范围，同时判断许闻溪还能不能继续承担组织需要她承担的脏活。"
-	case zeroCharacterNameIs(c, "傅行简"):
-		return "维护AI提效项目的漂亮叙事，把岗位合并说成流程升级，并迫使许闻溪配合现场说法。"
-	case zeroCharacterNameIs(c, "程棠"):
-		return "确认自己是不是被合并名单推出去的人，并从许闻溪那里等一个不敷衍的态度。"
-	case zeroCharacterNameIs(c, "乔安"):
-		return "在流程允许范围内保护自己，同时给许闻溪留下一点能被追溯的真实风险。"
-	case zeroCharacterNameIs(c, "邱梅"):
-		return "用生活化的担心牵住许闻溪，让她看见上一代女性被低价消耗后的旧路。"
-	case zeroCharacterNameIs(c, "陆敏"):
-		return "用门店现场的真实损耗反驳办公室提效话术，逼许闻溪承认被替代的是具体经验。"
-	case zeroCharacterNameIs(c, "韩璐"):
-		return "把客服一线被AI压缩后的疲惫带进台面，让工单背后的人不再只是成本项。"
-	case zeroCharacterNameIs(c, "陈思予"):
-		return "远端观察许闻溪的方法是否能变成可交付服务，并提前计算桥点能承受的合作边界。"
-	case zeroCharacterNameIs(c, "周临", "陈砚青"):
-		return "稳住高层对外叙事，评估许闻溪的反应会不会影响组织推行岗位压缩。"
-	default:
-		return fmt.Sprintf("在“%s”中用自己的职业目标、关系压力或资源缺口推动一次可见位移。", event)
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "饭桌上先接住亲戚的难听话，离桌后认真核验一百万的风险；当晚必须把第一笔钱花成摊主和顾客都看得见的改善。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "到夜市先看走线和商户风险，挡掉不合规的做法；再判断林澈是在撒钱作秀，还是确实能把钱花到实处。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "接到林澈借皮卡的电话时先问清拉什么、谁出油钱，嘴上损两句，行动上给出明早能落地的答复。"
+		case zeroCharacterNameIs(c, "周曼"):
+			return "在接风饭上给儿子留台阶，不和亲戚正面吵翻；从林澈离桌后的反应判断他是不是又把难受憋回去了。"
+		case zeroCharacterNameIs(c, "林建国"):
+			return "用最少的话截住亲戚继续比较，既不替林澈编前程，也不让儿子在自家饭桌上被当成笑话。"
+		case zeroCharacterNameIs(c, "马玉芬"):
+			return "先问坏了找谁、会不会耽误做生意，再亲眼看顾客是否因灯和价牌停下来；没有实际好处就不点头。"
+		case zeroCharacterNameIs(c, "梁广财"):
+			return "借熟人关心探林澈的失业和去向，话说出口后还想保住自己只是好心的体面。"
+		}
 	}
+	if mention := project.FirstMentions[strings.TrimSpace(c.Name)]; mention > 1 {
+		return fmt.Sprintf("第%d章前保持自己的离屏生活线；首次入场时让%s的目标、资源或顾虑真实改变现场，不提前抢进第一章。", mention, zeroFirstNonEmpty(c.Name, c.Role, "该角色"))
+	}
+	if zeroIsSecondAlgorithmProject(project) {
+		switch {
+		case zeroIsPrimaryProtagonist(project, c):
+			return "先把发布会现场撑住，再确认自己的经验为什么被系统当成可合并资产；章末必须拒绝一个无异议承诺。"
+		case zeroCharacterNameIs(c, "梁渡"):
+			return "从外部旁观者位置判断这套提效叙事的真实代价；不救场，只留下一个让许闻溪无法继续圆场的问题。"
+		case zeroCharacterNameIs(c, "夏岚"):
+			return "把发布会事故压回可控范围，同时判断许闻溪还能不能继续承担组织需要她承担的脏活。"
+		case zeroCharacterNameIs(c, "傅行简"):
+			return "维护AI提效项目的漂亮叙事，把岗位合并说成流程升级，并迫使许闻溪配合现场说法。"
+		case zeroCharacterNameIs(c, "程棠"):
+			return "确认自己是不是被合并名单推出去的人，并从许闻溪那里等一个不敷衍的态度。"
+		case zeroCharacterNameIs(c, "乔安"):
+			return "在流程允许范围内保护自己，同时给许闻溪留下一点能被追溯的真实风险。"
+		case zeroCharacterNameIs(c, "邱梅"):
+			return "用生活化的担心牵住许闻溪，让她看见上一代女性被低价消耗后的旧路。"
+		case zeroCharacterNameIs(c, "陆敏"):
+			return "用门店现场的真实损耗反驳办公室提效话术，逼许闻溪承认被替代的是具体经验。"
+		case zeroCharacterNameIs(c, "韩璐"):
+			return "把客服一线被AI压缩后的疲惫带进台面，让工单背后的人不再只是成本项。"
+		case zeroCharacterNameIs(c, "陈思予"):
+			return "远端观察许闻溪的方法是否能变成可交付服务，并提前计算桥点能承受的合作边界。"
+		case zeroCharacterNameIs(c, "周临", "陈砚青"):
+			return "稳住高层对外叙事，评估许闻溪的反应会不会影响组织推行岗位压缩。"
+		}
+	}
+	return fmt.Sprintf("%s在“%s”中只按自己的已知信息行动，用一次选择、拒绝或交换留下可追踪后果。", zeroFirstNonEmpty(c.Name, c.Role, "该角色"), event)
 }
 
-func zeroSpeechPrinciple(c domain.Character) string {
+func zeroSpeechPrinciple(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role + " " + strings.Join(c.Traits, " ")
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "嘴上先把场面接住，真到要扛事时少说两句、直接动手；吐槽像当下反应，不拿金句替决定。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "对外先说边界和后果，转向林澈时语气软半格；不用官样长句，也不靠冷脸人设替代判断。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "熟人话和短句多，损友式补刀之后马上问具体活；笑归笑，答应的事给准时间。"
+		case zeroCharacterNameIs(c, "许牧"):
+			return "先拆需求和漏洞，再用一句低温吐槽收尾；技术词只说到现场的人听得懂。"
+		case zeroCharacterNameIs(c, "叶南栀"):
+			return "先接住场面和镜头，再用调侃戳破闺蜜嘴硬；说流量时必须落到谁在看、为什么转。"
+		case strings.Contains(c.Role, "父亲"):
+			return "不擅长软话，通常先挑毛病再默默补位；真护儿子时只说半句，不做长篇父爱独白。"
+		case strings.Contains(c.Role, "母亲"):
+			return "从菜、钱和街坊小事说起，担心重时反而把话说轻；唠叨里要有具体生活账。"
+		case strings.Contains(c.Role, "商户") || strings.Contains(c.Role, "合作社"):
+			return fmt.Sprintf("%s先问价格、责任和能不能真卖出去；县城口语直来直去，不替作者讲经营方法论。", zeroFirstNonEmpty(c.Name, c.Role))
+		}
+	}
 	switch {
-	case zeroIsProtagonist(c):
+	case zeroIsSecondAlgorithmProject(project) && zeroIsPrimaryProtagonist(project, c):
 		return "先接住现场，再在过不去的确认上停下来；不讲大道理，用短句和动作暴露她从圆场到拒绝的变化。"
 	case zeroCharacterNameIs(c, "梁渡") || strings.Contains(c.Role, "男主"):
 		return "先问真实代价，再给判断；话短、准、有边界，不替许闻溪决定出路。"
@@ -299,14 +383,30 @@ func zeroSpeechPrinciple(c domain.Character) string {
 	case zeroCharacterNameIs(c, "陈砚青", "周临") || strings.Contains(roleText, "高层"):
 		return "先看盘子和风险，再决定是否给资源；话里少情绪，多边界和可交换条件。"
 	default:
-		return fmt.Sprintf("%s的对白先服务本章处境和已知信息，再体现其职业、关系和风险偏好。", zeroFirstNonEmpty(c.Name, "角色"))
+		return fmt.Sprintf("%s说话先服从%s的处境和已知信息，再让“%s”的性格从用词与反应速度里露出来。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前身份"), zeroFirstNonEmpty(strings.Join(c.Traits, "、"), "既有性格"))
 	}
 }
 
-func zeroHiddenSubtext(c domain.Character) string {
+func zeroHiddenSubtext(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "他怕父母因自己失业被人看低，也怕来得太容易的钱最后让家里替他收拾残局。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "她对林澈的异常来路已经起疑，却更在意他会不会拿普通商户试错；关心要藏在追问和补位里。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "他担心林澈失业后憋出事，嘴上越损，越说明这趟忙他已经打算帮到底。"
+		case zeroCharacterNameIs(c, "周曼"):
+			return "她怕儿子在外面受了委屈不肯说，也怕自己护得太急反而让亲戚更看笑话。"
+		case zeroCharacterNameIs(c, "林建国"):
+			return "他既恼儿子失业，也不允许外人在自家桌上踩儿子；支持会先落在行动上。"
+		case zeroCharacterNameIs(c, "马玉芬"):
+			return "她不是不想生意变好，只怕好处还没见着，坏灯、赔钱和投诉先落到自己头上。"
+		}
+	}
 	switch {
-	case zeroIsProtagonist(c):
+	case zeroIsSecondAlgorithmProject(project) && zeroIsPrimaryProtagonist(project, c):
 		return "她怕一拒绝就失去位置，也怕不拒绝就继续把自己变成好用的人。"
 	case zeroCharacterNameIs(c, "梁渡") || strings.Contains(c.Role, "男主"):
 		return "他怕自己又把别人当案例，所以宁愿话不好听，也不轻易许诺。"
@@ -327,14 +427,28 @@ func zeroHiddenSubtext(c domain.Character) string {
 	case zeroCharacterNameIs(c, "陈思予"):
 		return "她真心想把混乱的人接住，但也怕桥点的现金流撑不起太多善意。"
 	default:
-		return "想保护自己的边界、筹码或弱点，但不能越过角色已知信息。"
+		return fmt.Sprintf("%s想保住自己作为%s的筹码，也不愿暴露“%s”背后的软处；潜台词不能越过已知信息。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前角色"), zeroFirstNonEmpty(firstString(c.Traits), "既有性格"))
 	}
 }
 
-func zeroRelationshipStance(c domain.Character) string {
+func zeroRelationshipStance(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "对家人先报喜不报忧，对朋友肯开口但不白占便宜；面对沈知遥既服她的专业，也会用嘴贫缓解被看穿的紧张。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "对外强势守规则，对林澈会主动靠近和护短，但每一次柔软都建立在他没有拿别人冒险的前提上。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "兄弟之间可以互损，钱、车和时间却算清楚；帮忙来自多年交情，不替林澈解释秘密。"
+		case zeroCharacterNameIs(c, "叶南栀"):
+			return "先护沈知遥，再观察林澈值不值得助攻；调侃可以推近关系，不能替两人做决定。"
+		case strings.Contains(c.Role, "父亲") || strings.Contains(c.Role, "母亲"):
+			return fmt.Sprintf("%s与林澈有多年家庭历史，担心会绕着面子和生活细节表达，不能像刚认识的功能角色。", zeroFirstNonEmpty(c.Name, c.Role))
+		}
+	}
 	switch {
-	case zeroIsProtagonist(c):
+	case zeroIsSecondAlgorithmProject(project) && zeroIsPrimaryProtagonist(project, c):
 		return "先习惯性负责，再逐步划边界；帮助别人时必须付出可见代价。"
 	case zeroCharacterNameIs(c, "夏岚"):
 		return "一边欣赏许闻溪，一边把她当组织缓冲垫；每次人情都夹着管理者的回收条件。"
@@ -357,14 +471,34 @@ func zeroRelationshipStance(c domain.Character) string {
 	case strings.Contains(roleText, "母亲"):
 		return "亲情已有历史，但表达常绕着体面、担心和不想添麻烦。"
 	default:
-		return "试探多于交心；帮助、拒绝或讽刺都要有交易、情感或风险依据。"
+		return fmt.Sprintf("%s以%s的现实利益和既有情分决定靠近或拒绝；每次态度变化都要有眼前证据。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前身份"))
 	}
 }
 
-func zeroDictionAndRhythm(c domain.Character) string {
+func zeroDictionAndRhythm(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role + " " + strings.Join(c.Traits, " ")
+	if zeroIsCountySpendProject(project) {
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			return "口语短句，能顺手接梗；真正震住时会停一下、重问一遍，确认后才恢复嘴贫。"
+		case zeroCharacterNameIs(c, "沈知遥"):
+			return "对工作对象句子短而明确，对林澈会放慢半拍，偶尔用一句看似平静的话把人逼得心虚。"
+		case zeroCharacterNameIs(c, "贺骁"):
+			return "语速快，熟人称呼和现场词多；先笑两声再办事，急起来直接报地点、时间和要带的东西。"
+		case zeroCharacterNameIs(c, "许牧"):
+			return "话少、信息密，常先指出哪里不对；吐槽落在成本、步骤和返工上，不说玄乎比喻。"
+		case zeroCharacterNameIs(c, "叶南栀"):
+			return "语气明快，会抛接网络梗，但转到舆情风险时立刻说人话和具体后果。"
+		case strings.Contains(c.Role, "父亲"):
+			return "短句、停顿多，常省掉主语；重话说到一半收住，随后用拿工具、挪车或添东西补上。"
+		case strings.Contains(c.Role, "母亲"):
+			return "家常口语，句子会被夹菜、收碗和算账打断；同一担心可能换个生活问题再问一遍。"
+		case strings.Contains(c.Role, "商户") || strings.Contains(c.Role, "合作社"):
+			return "县城口语直、具体，常把价钱、天气、位置和谁负责挂在一句里；不使用项目汇报腔。"
+		}
+	}
 	switch {
-	case zeroIsProtagonist(c):
+	case zeroIsSecondAlgorithmProject(project) && zeroIsPrimaryProtagonist(project, c):
 		return "平时稳、会接话；压力越大句子越短，关键处允许停顿和改口。"
 	case zeroCharacterNameIs(c, "傅行简"):
 		return "职业词和流程词偏多，语速平稳；被戳破时用更中性的说法缓冲。"
@@ -383,7 +517,7 @@ func zeroDictionAndRhythm(c domain.Character) string {
 	case zeroCharacterNameIs(c, "陈思予"):
 		return "语气更圆，能接人情绪；谈钱和排期时句子会变快、变具体。"
 	default:
-		return "句长和停顿随压力变化；避免连续漂亮短句、金句反问和同质化冷静判断。"
+		return fmt.Sprintf("%s以%s常用的生活或职业词开口，句长随“%s”的性格和压力变化；不复制其他角色的冷静短句。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前身份"), zeroFirstNonEmpty(strings.Join(c.Traits, "、"), "既有性格"))
 	}
 }
 
@@ -1112,7 +1246,7 @@ func zeroEmotionalLogic(project zeroInitProject, states []domain.CharacterSimula
 	for _, c := range project.Characters {
 		state := stateByName[c.Name]
 		pressure := zeroFirstNonEmpty(state.Pressure, project.FirstChapter.CoreEvent, "正文开始前的世界/关系压力")
-		emotion := zeroCharacterEmotionProfile(c)
+		emotion := zeroCharacterEmotionProfile(project, c)
 		out = append(out, domain.CharacterEmotionalLogic{
 			Character:               c.Name,
 			PhysiologicalState:      emotion.PhysiologicalState,
@@ -1188,7 +1322,7 @@ type zeroEmotionProfile struct {
 	Evidence           []string
 }
 
-func zeroCharacterEmotionProfile(c domain.Character) zeroEmotionProfile {
+func zeroCharacterEmotionProfile(project zeroInitProject, c domain.Character) zeroEmotionProfile {
 	name := zeroFirstNonEmpty(c.Name, "角色")
 	roleText := c.Role + " " + strings.Join(c.Traits, " ")
 	base := zeroEmotionProfile{
@@ -1211,8 +1345,66 @@ func zeroCharacterEmotionProfile(c domain.Character) zeroEmotionProfile {
 		EventRole:          "本章事件通过该角色的误判、克制或临界选择完成，而不是只被外部事件推着走。",
 		Evidence:           []string{"动作停顿", "语速变化", "视线/手部反应", "一次不完全理性的选择"},
 	}
+	if zeroIsCountySpendProject(project) {
+		base.PhysiologicalState = "县城日常节奏里的普通能量基线；压力从夹菜、看手机、收钱、搬东西、语速和站位变化里露出来。"
+		base.ImmediateState = "受接风饭、夜市收摊时间和熟人目光牵制；情绪可以被打断、压回去或换成一句家常话。"
+		switch {
+		case zeroCharacterNameIs(c, "林澈"):
+			base.Primary = "难堪"
+			base.Composite = "林澈被亲戚戳中后的窝火、失业羞耻和不肯让父母担心的硬撑"
+			base.GoalAppraisal = "先把饭桌上的追问当成一顿饭能忍过去的小事，系统到账后才意识到自己真有机会把局面扳回来。"
+			base.BoundaryThreat = "失业后的尊严、父母在亲戚面前的体面，以及异常资金会不会反噬家人。"
+			base.Regulation = "先笑着顶一句，离桌后反复核验；确认能试时马上去做一笔小而真实的消费。"
+			base.Defense = "林澈用嘴贫挡住难堪，真正担心的风险只在独处核验和行动速度里露出来。"
+			base.Action = "林澈把被比较的窝火转成当晚去夜市试钱，并完成第一次真实改善。"
+			base.EventRole = "他的行动让开篇从失业受气切到系统兑现和县城经营的第一步。"
+			base.Evidence = []string{"筷子停一下又继续夹菜", "离桌后重看到账数字", "先问能不能撤回", "确认后立刻联系商户"}
+		case zeroCharacterNameIs(c, "沈知遥"):
+			base.Primary = "警惕"
+			base.Composite = "沈知遥对安全风险的紧绷、对林澈异常资金的怀疑和不愿当众让他难堪的克制"
+			base.GoalAppraisal = "先把现场当成需要立即纠正的夜市隐患，再从林澈肯不肯听劝判断这人值不值得继续合作。"
+			base.BoundaryThreat = "商户安全、公开规则和她不愿承认的私人关心同时被一次冒进试探。"
+			base.Regulation = "对施工问题直接叫停，确认能改后再放低声音问钱和责任；关心藏在补充条件里。"
+			base.Defense = "沈知遥用专业和强势保护现场，也借检查掩住自己对林澈格外多看了两眼。"
+			base.Action = "沈知遥纠正走线后没有赶走林澈，而是约定次日再看试点。"
+			base.EventRole = "她把无脑撒钱的可能性压住，同时为男女主同场经营建立第一条可信合作线。"
+			base.Evidence = []string{"先看线再看人", "当众说清责任", "转向林澈时语气放缓", "给出次日时间"}
+		case zeroCharacterNameIs(c, "贺骁"):
+			base.Primary = "担心"
+			base.Composite = "贺骁看兄弟笑话的轻松、怕林澈真撑不住的担心和被叫上后立刻来劲的义气"
+			base.Defense = "贺骁用损友笑话遮住关心，先问活和油钱，免得一句安慰把林澈说得更难受。"
+			base.Action = "贺骁接下明早借皮卡的活，把兄弟情落成一个具体时间和动作。"
+			base.EventRole = "他让主角的下一步不只靠系统，也有县城熟人关系和现实执行力承接。"
+		case zeroCharacterNameIs(c, "周曼"):
+			base.Primary = "心疼"
+			base.Composite = "周曼怕儿子受委屈的焦急、对亲戚眼光的敏感和不敢追问太重的克制"
+			base.Defense = "周曼用夹菜、转话题和收拾碗筷护住儿子，不把心疼讲成一段大道理。"
+			base.Action = "周曼在亲戚追问时不断给林澈留台阶，也记住他离桌后那点反常。"
+			base.EventRole = "她把返乡失业的压力落到一家人的体面和真实担心上。"
+		case zeroCharacterNameIs(c, "林建国"):
+			base.Primary = "窝火"
+			base.Composite = "林建国对儿子失业的焦虑、被亲戚越界后的火气和不会说软话的护短"
+			base.Defense = "林建国用一句硬话截住饭桌，再把没说出口的支持留给之后的实际帮忙。"
+			base.Action = "林建国不替儿子吹嘘，只阻止亲戚继续拿他比较，让林澈自己去做下一步。"
+			base.EventRole = "他的半句保护把家庭压力写实，也给后续父子和解留下空间。"
+		case zeroCharacterNameIs(c, "马玉芬"):
+			base.Primary = "戒备"
+			base.Composite = "马玉芬想多卖几单的期待、怕出事故赔钱的戒备和对外来热心的不信任"
+			base.Defense = "马玉芬先问坏了找谁、会不会挡生意，用生意人的具体问题挡住空口好意。"
+			base.Action = "马玉芬在确认安全和售后后允许试用，并用真实顾客反应决定是否继续。"
+			base.EventRole = "她让系统消费必须接受普通商户的现实判断，首个爽点因此有可信落点。"
+		default:
+			base.Composite = fmt.Sprintf("%s作为%s面对县城熟人社会时的谨慎、私心和不愿失去现有位置的压力", name, zeroFirstNonEmpty(c.Role, "当事人"))
+			base.Defense = fmt.Sprintf("%s先按%s的习惯处理眼前事，把真实情绪藏进条件、称呼和是否出手。", name, zeroFirstNonEmpty(c.Role, "自己的身份"))
+			base.Action = fmt.Sprintf("%s把情绪转成一次符合自身利益的靠近、观望或拒绝，不为主角无理由让路。", name)
+		}
+		return base
+	}
+	if !zeroIsSecondAlgorithmProject(project) {
+		return base
+	}
 	switch {
-	case zeroIsProtagonist(c):
+	case zeroIsPrimaryProtagonist(project, c):
 		base.Primary = "委屈"
 		base.Composite = "被复制后的羞窘、责任感和压住怒气"
 		base.GoalAppraisal = "她先把发布会失控评估为自己必须圆过去的现场事故，随后意识到这是价值被替代的公开羞辱。"

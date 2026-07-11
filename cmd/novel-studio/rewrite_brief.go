@@ -314,6 +314,8 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 		return "物件回应必须不等距：至少一次重话后没有任何外部响应，一次响应延后到下一动作之后；不要句句重话后显字/亮屏/震动。"
 	case "system_message_overpacked":
 		return "系统单条消息不要同时拒绝、安慰、解释、发任务和发奖励；拆成一次一事的人话回应与必要数据行。"
+	case "system_message_inline":
+		return "每条【系统消息】独立成段；人物问句、读屏动作和下一条系统消息都另起段。不要把换行变成连续 UI 清单，一问一答后尽快回到现场人物和后果。"
 	case "abstract_system_reassurance":
 		return "删掉“钱没跑、陪你换条路、规矩不撤”等客服式空话；系统只回答主角刚问的具体问题，或给一个能马上执行的选择。"
 	case "opaque_procedure_jargon":

@@ -465,6 +465,55 @@ func TestPipelineRAGIncrementalPlanEmbedsOnlyMissingHashes(t *testing.T) {
 	}
 }
 
+func TestPipelineRAGIncrementalPlanReplacesChangedHashWithoutFullRebuild(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config: domain.RAGIndexConfig{
+			EmbeddingProvider: "local", EmbeddingModel: "qwen", VectorDimension: 3,
+		},
+		Chunks: []domain.RAGChunk{{ID: "fact", Hash: "new-hash", SourcePath: "chapter.json", SourceKind: "chapter_summary_facts", Text: "新事实"}},
+	}
+	vectors := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "old-hash", Vector: []float32{1, 2, 3}}},
+	}
+	missing, expected, ok, reason := pipelineRAGIncrementalPlan(
+		state, vectors, bootstrap.RAGEmbeddingConfig{Provider: "local", Model: "qwen"},
+	)
+	if !ok || expected != 1 || len(missing) != 1 || missing[0].Hash != "new-hash" || !strings.Contains(reason, "stale=1") {
+		t.Fatalf("changed hash should use incremental replacement: ok=%v expected=%d missing=%+v reason=%s", ok, expected, missing, reason)
+	}
+	update := domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{{ID: "fact", Hash: "new-hash", Vector: []float32{3, 2, 1}}},
+	}
+	merged := mergePipelineRAGVectorPoints(vectors, update, state.Chunks)
+	if len(merged.Points) != 1 || merged.Points[0].Hash != "new-hash" {
+		t.Fatalf("changed hash should replace stale point: %+v", merged.Points)
+	}
+}
+
+func TestPipelineRAGIncrementalPlanCanPruneStaleWithoutEmbedding(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config:        domain.RAGIndexConfig{EmbeddingProvider: "local", EmbeddingModel: "qwen", VectorDimension: 2},
+		Chunks:        []domain.RAGChunk{{ID: "keep", Hash: "keep-hash", SourceKind: "chapter_summary_facts", Text: "保留"}},
+	}
+	vectors := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{
+			{ID: "keep", Hash: "keep-hash", Vector: []float32{1, 2}},
+			{ID: "stale", Hash: "stale-hash", Vector: []float32{2, 1}},
+		},
+	}
+	missing, expected, ok, reason := pipelineRAGIncrementalPlan(
+		state, vectors, bootstrap.RAGEmbeddingConfig{Provider: "local", Model: "qwen"},
+	)
+	if !ok || expected != 1 || len(missing) != 0 || !strings.Contains(reason, "stale=1") {
+		t.Fatalf("stale-only plan should prune without embedding: ok=%v expected=%d missing=%+v reason=%s", ok, expected, missing, reason)
+	}
+}
+
 func TestPipelineRAGIncrementalPlanRejectsInvalidExistingVector(t *testing.T) {
 	state := &domain.RAGIndexState{
 		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,

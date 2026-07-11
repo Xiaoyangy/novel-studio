@@ -46,6 +46,29 @@ func TestLoadReferencesIncludesFictionParagraphing(t *testing.T) {
 	if !strings.Contains(bundle.References.FictionParagraphing, "文字墙候选") {
 		t.Fatalf("expected fiction paragraphing reference to include long paragraph handling")
 	}
+	if !strings.Contains(bundle.References.FictionParagraphing, "一条消息独立一个自然段") {
+		t.Fatalf("expected fiction paragraphing reference to isolate system messages")
+	}
+}
+
+func TestLoadPromptsIncludeGoldenThreeAndWholeTextAIGCContracts(t *testing.T) {
+	bundle := Load("default")
+	for name, prompt := range map[string]string{
+		"writer":  bundle.Prompts.Writer,
+		"drafter": bundle.Prompts.Drafter,
+		"planner": bundle.Prompts.Planner,
+		"editor":  bundle.Prompts.Editor,
+	} {
+		if !strings.Contains(prompt, "黄金三章") {
+			t.Fatalf("%s prompt missing golden-three contract", name)
+		}
+		if name != "planner" && !strings.Contains(prompt, "系统消息") {
+			t.Fatalf("%s prompt missing system-message layout contract", name)
+		}
+	}
+	if !strings.Contains(bundle.Prompts.Writer, "三条原始曲线") {
+		t.Fatalf("writer prompt missing whole-text raw-curve contract")
+	}
 }
 
 func TestLoadReferencesIncludesWritingTechniquesDigest(t *testing.T) {

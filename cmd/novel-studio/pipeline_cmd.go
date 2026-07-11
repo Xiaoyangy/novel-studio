@@ -42,12 +42,15 @@ type pipelineFlags struct {
 	Start            int
 	End              int
 	WriteTo          int
+	StopAfterCommit  int
 	Budget           time.Duration
 	Role             string
 	MaxRewriteRounds int
 	PolishWarnings   bool
 	RewriteBriefOnly bool
 	NewNovel         bool
+	RefreshArchitect bool
+	RefreshZeroInit  bool
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -72,6 +75,8 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.BoolVar(&f.PolishWarnings, "polish-warnings", false, "rewrite 阶段无红旗但存在黄旗时，也按质量优先原则择优打磨")
 	fs.BoolVar(&f.RewriteBriefOnly, "brief-only", false, "rewrite 阶段只刷新 rewrite brief，不调用 Writer、不改正文")
 	fs.BoolVar(&f.NewNovel, "new-novel", false, "新建小说：先跑头脑风暴（web/RAG 调研 + 落盘 brainstorm.md），再据此初始化并写作")
+	fs.BoolVar(&f.RefreshArchitect, "refresh-architect", false, "已有 foundation 仍强制 Architect 按本次 prompt 重规划开篇/大纲；只在 architect 阶段生效")
+	fs.BoolVar(&f.RefreshZeroInit, "refresh-zero-init", false, "已有正文时安全刷新 zero-init 开篇计划和 RAG，不覆盖活动资源/关系台账")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
 	}
@@ -376,7 +381,7 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 	case "review":
 		return reviewExistingPipeline(opts, stageArgs["review"])
 	case "rewrite":
-		return rewriteExistingPipeline(opts, stageArgs["rewrite"])
+		return pipelineCausalRewrite(opts, flags, state, stageArgs["review"], stageArgs["rewrite"])
 	case "deliver":
 		cfg, _, err := loadCfgBundle(opts)
 		if err != nil {

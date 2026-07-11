@@ -1148,6 +1148,21 @@ func mergeRewriteCharacterStage(st *store.Store, chapter int, submitted []domain
 	if err != nil || len(existing) == 0 {
 		return submitted
 	}
+	allowed := rewriteStageSimulationCharacters(st, chapter)
+	filterAllowed := func(records []domain.CharacterStageRecord) []domain.CharacterStageRecord {
+		if len(allowed) == 0 {
+			return records
+		}
+		out := records[:0]
+		for _, record := range records {
+			if allowed[strings.TrimSpace(record.Character)] {
+				out = append(out, record)
+			}
+		}
+		return out
+	}
+	existing = filterAllowed(existing)
+	submitted = filterAllowed(submitted)
 	if len(submitted) == 0 {
 		return existing
 	}
@@ -1165,11 +1180,65 @@ func mergeRewriteCharacterStage(st *store.Store, chapter int, submitted []domain
 		}
 		record.Character = name
 		if i, ok := index[name]; ok {
-			out[i] = record
+			out[i] = mergeRewriteCharacterStageRecord(out[i], record)
 			continue
 		}
 		index[name] = len(out)
 		out = append(out, record)
+	}
+	return out
+}
+
+func rewriteStageSimulationCharacters(st *store.Store, chapter int) map[string]bool {
+	simulation, err := st.LoadChapterWorldSimulation(chapter)
+	if err != nil || simulation == nil || len(simulation.CharacterDecisions) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(simulation.CharacterDecisions))
+	for _, decision := range simulation.CharacterDecisions {
+		if name := strings.TrimSpace(decision.Character); name != "" {
+			allowed[name] = true
+		}
+	}
+	return allowed
+}
+
+func mergeRewriteCharacterStageRecord(existing, submitted domain.CharacterStageRecord) domain.CharacterStageRecord {
+	out := existing
+	if submitted.Chapter > 0 {
+		out.Chapter = submitted.Chapter
+	}
+	assign := func(dst *string, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			*dst = value
+		}
+	}
+	assign(&out.Character, submitted.Character)
+	assign(&out.Time, submitted.Time)
+	assign(&out.Location, submitted.Location)
+	assign(&out.Status, submitted.Status)
+	assign(&out.Environment, submitted.Environment)
+	assign(&out.CurrentAction, submitted.CurrentAction)
+	assign(&out.Pressure, submitted.Pressure)
+	assign(&out.Decision, submitted.Decision)
+	assign(&out.DecisionReason, submitted.DecisionReason)
+	assign(&out.MistakeOrMisbelief, submitted.MistakeOrMisbelief)
+	assign(&out.KnowledgeBoundary, submitted.KnowledgeBoundary)
+	assign(&out.Evidence, submitted.Evidence)
+	assign(&out.Transport, submitted.Transport)
+	assign(&out.TravelTime, submitted.TravelTime)
+	assign(&out.MeetingConstraint, submitted.MeetingConstraint)
+	assign(&out.PersonalityDelta, submitted.PersonalityDelta)
+	assign(&out.DeathState, submitted.DeathState)
+	assign(&out.ProtagonistNotice, submitted.ProtagonistNotice)
+	assign(&out.TimelineConsistency, submitted.TimelineConsistency)
+	assign(&out.NextPotential, submitted.NextPotential)
+	out.VisibleInChapter = out.VisibleInChapter || submitted.VisibleInChapter
+	if len(submitted.ButterflyEffects) > 0 {
+		out.ButterflyEffects = append([]string(nil), submitted.ButterflyEffects...)
+	}
+	if len(submitted.Tags) > 0 {
+		out.Tags = append([]string(nil), submitted.Tags...)
 	}
 	return out
 }

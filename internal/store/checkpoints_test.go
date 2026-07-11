@@ -134,6 +134,27 @@ func TestCheckpointStore_RestoreFromDisk(t *testing.T) {
 	}
 }
 
+func TestCheckpointStore_ConcurrentInstancesRefreshBeforeAppend(t *testing.T) {
+	dir := t.TempDir()
+	first := NewCheckpointStore(newIO(dir))
+	stale := NewCheckpointStore(newIO(dir))
+
+	cp1, err := first.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp2, err := stale.Append(domain.ChapterScope(1), "draft", "d", "sha256:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp1.Seq != 1 || cp2.Seq != 2 {
+		t.Fatalf("cross-store sequence must remain monotonic, got %d then %d", cp1.Seq, cp2.Seq)
+	}
+	if got := len(readCheckpointsFile(filepath.Join(dir, checkpointsFile))); got != 2 {
+		t.Fatalf("journal entries = %d, want 2", got)
+	}
+}
+
 func TestCheckpointStore_AllReturnsCopy(t *testing.T) {
 	cs, _ := newTestCheckpointStore(t)
 	cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")

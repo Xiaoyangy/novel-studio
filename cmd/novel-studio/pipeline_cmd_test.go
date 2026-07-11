@@ -849,6 +849,28 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 	}
 }
 
+func TestParsePipelineFlagsSupportsOpeningRefresh(t *testing.T) {
+	flags, extra, err := parsePipelineFlags([]string{"--refresh-architect", "--refresh-zero-init", "--stages", "architect,zero-init"})
+	if err != nil {
+		t.Fatalf("parsePipelineFlags: %v", err)
+	}
+	if len(extra) != 0 || !flags.RefreshArchitect || !flags.RefreshZeroInit {
+		t.Fatalf("unexpected refresh flags: flags=%+v extra=%v", flags, extra)
+	}
+}
+
+func TestPipelineArchitectRefreshPromptLocksGoldenThreeAndStageBoundary(t *testing.T) {
+	prompt, err := pipelineArchitectRefreshPrompt(t.TempDir(), "整章朱雀分数过高，重做黄金三章")
+	if err != nil {
+		t.Fatalf("pipelineArchitectRefreshPrompt: %v", err)
+	}
+	for _, want := range []string{"architect_long", "番茄免费阅读留存闭环", "每条【系统消息】独立成段", "严禁 plan_chapter", "整章朱雀分数过高"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("refresh prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
@@ -1027,6 +1049,51 @@ func TestSettlePipelineDeliveryRejectsUnifiedBlockingGate(t *testing.T) {
 	err := settlePipelineDelivery(dir, pipelineFlags{Start: 1, End: 1})
 	if err == nil || (!strings.Contains(err.Error(), "统一审核裁决") && !strings.Contains(err.Error(), "blocking unified review")) {
 		t.Fatalf("blocking unified gate should reject delivery, got %v", err)
+	}
+}
+
+func TestPipelineCausalRewritePendingKeepsChapterOrder(t *testing.T) {
+	progress := &domain.Progress{PendingRewrites: []int{3, 1, 2, 2}}
+	pending, err := pipelineCausalRewritePending(progress, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(pending, []int{1, 2}) {
+		t.Fatalf("unexpected pending range: %v", pending)
+	}
+	if _, err := pipelineCausalRewritePending(progress, 2, 3); err == nil || !strings.Contains(err.Error(), "不能从 --from=2 跳过") {
+		t.Fatalf("causal rewrite must not skip an earlier pending chapter, got %v", err)
+	}
+}
+
+func TestPipelineCausalRewriteResumesAtReviewAfterCommit(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章 旧正文")
+	mustWriteCurrentReviewArtifactsWithVerdict(t, dir, 1, "rewrite")
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "review", "reviews/01.json"); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章 新正文")
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "commit", "chapters/01.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !pipelineCausalRewriteAwaitingReview(st, []int{1}) {
+		t.Fatal("newer commit should resume directly at review")
+	}
+	// Simulate reviewExistingPipeline writing through another Store instance.
+	// The original checkpoint cache stays stale, but current review artifacts
+	// must stop recovery from reviewing the same body forever.
+	mustWriteCurrentReviewArtifactsWithVerdict(t, dir, 1, "rewrite")
+	other := store.NewStore(dir)
+	if _, err := other.Checkpoints.AppendArtifact(domain.ChapterScope(1), "review", "reviews/01.json"); err != nil {
+		t.Fatal(err)
+	}
+	if pipelineCausalRewriteAwaitingReview(st, []int{1}) {
+		t.Fatal("current review artifacts should require normal pending-rewrite routing")
 	}
 }
 

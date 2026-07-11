@@ -612,13 +612,15 @@ func pipelineRAGIncrementalPlan(
 		return nil, 0, false, "事实层 chunk 为空"
 	}
 	present := make(map[string]struct{}, len(vectorStore.Points))
+	staleCount := 0
 	for _, point := range vectorStore.Points {
 		hash := strings.TrimSpace(point.Hash)
 		if hash == "" {
 			hash = strings.TrimSpace(point.Chunk.Hash)
 		}
 		if _, ok := desired[hash]; !ok {
-			return nil, len(desired), false, "本地向量仍含过期 chunk hash"
+			staleCount++
+			continue
 		}
 		if _, duplicate := present[hash]; duplicate {
 			return nil, len(desired), false, "本地向量含重复 chunk hash"
@@ -637,11 +639,11 @@ func pipelineRAGIncrementalPlan(
 			missing = append(missing, chunk)
 		}
 	}
-	if len(missing) == 0 {
+	if len(missing) == 0 && staleCount == 0 {
 		return nil, len(desired), false, "没有缺失 hash，需按其他不一致原因处理"
 	}
 	sort.SliceStable(missing, func(i, j int) bool { return missing[i].ID < missing[j].ID })
-	return missing, len(desired), true, "旧向量均有效，仅缺失 chunk hash"
+	return missing, len(desired), true, fmt.Sprintf("复用有效向量，补齐 missing=%d，剔除 stale=%d", len(missing), staleCount)
 }
 
 func reconcilePipelineRAGIncrementally(
@@ -655,16 +657,6 @@ func reconcilePipelineRAGIncrementally(
 	expected int,
 	qdrantEnabled bool,
 ) (int, error) {
-	if len(missing) == 0 {
-		return 0, nil
-	}
-	embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg)
-	if err != nil {
-		return 0, err
-	}
-	if !enabled {
-		return 0, fmt.Errorf("RAG embedding 未启用")
-	}
 	buildConcurrency := embCfg.BuildConcurrency
 	if buildConcurrency <= 0 {
 		buildConcurrency = 2
@@ -683,12 +675,24 @@ func reconcilePipelineRAGIncrementally(
 	if indexCfg.VectorBatchSize <= 0 {
 		indexCfg.VectorBatchSize = 32
 	}
-	memory := rag.NewMemoryVectorWriter()
-	result, err := rag.BuildIndex(ctx, missing, nil, indexCfg, embedder, memory)
-	if err != nil {
-		return 0, err
+	result := rag.IndexResult{State: domain.RAGIndexState{Config: indexCfg}}
+	update := domain.RAGVectorStore{Config: indexCfg}
+	if len(missing) > 0 {
+		embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg)
+		if err != nil {
+			return 0, err
+		}
+		if !enabled {
+			return 0, fmt.Errorf("RAG embedding 未启用")
+		}
+		memory := rag.NewMemoryVectorWriter()
+		built, buildErr := rag.BuildIndex(ctx, missing, nil, indexCfg, embedder, memory)
+		if buildErr != nil {
+			return 0, buildErr
+		}
+		result = built
+		update = memory.VectorStore(result.State.Config)
 	}
-	update := memory.VectorStore(result.State.Config)
 	merged := mergePipelineRAGVectorPoints(existing, update, state.Chunks)
 	if len(merged.Points) != expected {
 		return 0, fmt.Errorf("增量合并后本地向量点数不一致: got=%d want=%d", len(merged.Points), expected)

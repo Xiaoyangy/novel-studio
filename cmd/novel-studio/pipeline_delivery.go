@@ -26,6 +26,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/entry/headless"
 	"github.com/chenhongyang/novel-studio/internal/rag"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
@@ -689,7 +690,6 @@ func nonEmptyFile(path string) bool {
 }
 
 func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
-	_ = flags
 	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
@@ -702,6 +702,9 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		return err
 	}
 	if tools.FoundationCoreComplete(cfg.OutputDir) {
+		if flags.RefreshArchitect {
+			return pipelineRefreshArchitectOpening(opts, cfg, bundle, state.Prompt)
+		}
 		fmt.Fprintln(os.Stderr, "[pipeline:architect] foundation 已齐，检查 Architect readiness")
 		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
 			return nil
@@ -734,6 +737,48 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		return fmt.Errorf("architect 阶段运行 %d 次后 foundation 仍未齐：missing=%s", maxArchitectRuns, strings.Join(tools.FoundationCoreMissing(cfg.OutputDir), ", "))
 	}
 	return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+}
+
+func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string) error {
+	refreshPrompt, err := pipelineArchitectRefreshPrompt(cfg.OutputDir, prompt)
+	if err != nil {
+		return err
+	}
+	before, err := pipelineOpeningFoundationDigest(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
+	const maxRefreshRuns = 3
+	for run := 1; run <= maxRefreshRuns; run++ {
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次刷新开篇 foundation\n", run, maxRefreshRuns)
+		if err := headless.Run(cfg, bundle, headless.Options{
+			Prompt:                    refreshPrompt,
+			PreserveUserRules:         true,
+			StopAfterFoundationChange: true,
+		}); err != nil {
+			return err
+		}
+		after, err := pipelineOpeningFoundationDigest(cfg.OutputDir)
+		if err != nil {
+			return err
+		}
+		if after != before {
+			return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+		}
+	}
+	return fmt.Errorf("Architect 刷新 %d 次后开篇大纲指纹仍未变化", maxRefreshRuns)
+}
+
+func pipelineOpeningFoundationDigest(outputDir string) (string, error) {
+	h := sha256.New()
+	for _, rel := range []string{"outline.json", "layered_outline.json"} {
+		raw, err := os.ReadFile(filepath.Join(outputDir, rel))
+		if err != nil {
+			return "", fmt.Errorf("读取 Architect 开篇产物 %s 失败: %w", rel, err)
+		}
+		_, _ = h.Write(raw)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string, cause error) error {
@@ -961,6 +1006,26 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	return b.String(), nil
 }
 
+func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
+	_ = outputDir
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", fmt.Errorf("--refresh-architect 需要 --prompt/--prompt-file 说明本次重规划目标")
+	}
+	var b strings.Builder
+	b.WriteString("[Pipeline Architect 开篇刷新阶段]\n")
+	b.WriteString("这是已有长篇项目的开篇重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation，再通过 save_foundation 同步更新 layered_outline 与 outline。\n")
+	b.WriteString("只重做前三章的结果级结构和必要标题，保留书名、总题材、人物关系、系统保密规则、长期卷弧和已经确认的世界设定；不得借机重写整本书。\n")
+	b.WriteString("前三章必须形成番茄免费阅读留存闭环：第一章首屏冲突、能力出现且本章首次兑现；第二章承接新债、男女主同场行动、限制升级并有小胜；第三章完成首个目标结算、出现普通人可见结果和外界态度变化，再打开更大项目。禁止三章连续解释规则、列检查表或准备开工。\n")
+	b.WriteString("系统提示在结构设计中按一问一答安排，每条【系统消息】独立成段；系统是支持男主的吐槽搭子，不是任务播报器。前三章整体轻松欢快，笑点来自人物误判、熟人社会和结果反差，经营信息只保留普通读者看得懂的现场后果。\n")
+	b.WriteString("第一章既有关键事实可压缩重排但不得丢失：失业返乡压力、系统绑定、第一笔真实县内支出、普通顾客受益、沈知遥当晚出现。第二章不要把买车失败写成核心流程，只能作为极短边界笑点。第三章必须兑现夜市第一轮目标，并允许按既有法典落地个人奖励或下一档项目额度。\n")
+	b.WriteString("保存后立即停止；严禁 plan_chapter、draft_chapter、commit_chapter，严禁派 writer/drafter/editor。\n\n")
+	b.WriteString("[本次用户与市场校准要求]\n")
+	b.WriteString(prompt)
+	b.WriteString("\n")
+	return b.String(), nil
+}
+
 func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
 	_ = prompt
 	readinessPath := filepath.Join(outputDir, "meta", "architect_readiness.md")
@@ -1002,7 +1067,6 @@ func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (strin
 }
 
 func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
-	_ = flags
 	_ = state
 	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
@@ -1010,6 +1074,13 @@ func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.Pipeli
 	}
 	st := store.NewStore(cfg.OutputDir)
 	if !tools.ChapterOnePendingFirstWrite(st) {
+		if flags.RefreshZeroInit {
+			fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 已有正文，安全刷新开篇 zero-init 计划")
+			if err := zeroInitPipeline(opts, []string{"--dir", cfg.OutputDir, "--refresh-opening-plan"}); err != nil {
+				return fmt.Errorf("zero-init 开篇计划刷新失败: %w", err)
+			}
+			return nil
+		}
 		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 第 1 章已完成，跳过 zero-init")
 		return nil
 	}
@@ -1179,6 +1250,210 @@ func pipelineRequirePrewritingReady(outputDir string) error {
 	return nil
 }
 
+// pipelineCausalRewrite keeps rewrites on the same route as first-pass prose:
+// plan_chapter -> causal world/character simulation -> drafter -> commit. The
+// standalone rewrite-existing command remains available for explicit brief-only
+// or diagnostic use, but pipeline prose never bypasses the chapter plan.
+func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineState, reviewArgs, legacyRewriteArgs []string) error {
+	if flags.RewriteBriefOnly {
+		return rewriteExistingPipeline(opts, legacyRewriteArgs)
+	}
+	cfg, _, err := loadCfgBundle(opts)
+	if err != nil {
+		return err
+	}
+	maxRounds := flags.MaxRewriteRounds
+	if maxRounds <= 0 {
+		maxRounds = 3
+	}
+	st := store.NewStore(cfg.OutputDir)
+	if flags.PolishWarnings {
+		queued, queueErr := pipelineQueueAcceptedWarningPolish(st, flags.Start, flags.End)
+		if queueErr != nil {
+			return queueErr
+		}
+		if len(queued) > 0 {
+			fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 已将 accept 章节的可执行黄旗送入正文打磨队列（复用既有推演）：%v\n", queued)
+		}
+	}
+	for round := 1; round <= maxRounds; round++ {
+		progress, err := st.Progress.Load()
+		if err != nil {
+			return err
+		}
+		pending, err := pipelineCausalRewritePending(progress, flags.Start, flags.End)
+		if err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			if round == 1 {
+				fmt.Fprintln(os.Stderr, "[pipeline:rewrite] 当前范围没有 pending_rewrites，跳过正文改写")
+			}
+			return nil
+		}
+		if pipelineCausalRewriteAwaitingReview(st, pending) {
+			fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 检测到因果正文已 commit、复审尚未刷新，直接复审：%v\n", pending)
+			for _, chapter := range pending {
+				rel := filepath.ToSlash(filepath.Join("chapters", fmt.Sprintf("%02d.md", chapter)))
+				if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chapter), "causal-rewrite", rel); err != nil {
+					return fmt.Errorf("记录第 %d 章因果重写 checkpoint: %w", chapter, err)
+				}
+			}
+			if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
+				return fmt.Errorf("因果重写恢复复审失败: %w", err)
+			}
+			continue
+		}
+
+		target := pending[len(pending)-1]
+		writeFlags := flags
+		writeFlags.WriteTo = target
+		writeFlags.StopAfterCommit = target
+		fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 第 %d/%d 轮按单世界因果链处理返工（渲染问题复用既有 plan，事实问题重推演）：%v\n", round, maxRounds, pending)
+		if err := pipelineWrite(opts, writeFlags, state); err != nil {
+			return fmt.Errorf("因果重写第 %d 轮失败: %w", round, err)
+		}
+		for _, chapter := range pending {
+			rel := filepath.ToSlash(filepath.Join("chapters", fmt.Sprintf("%02d.md", chapter)))
+			if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chapter), "causal-rewrite", rel); err != nil {
+				return fmt.Errorf("记录第 %d 章因果重写 checkpoint: %w", chapter, err)
+			}
+		}
+		if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
+			return fmt.Errorf("因果重写第 %d 轮复审失败: %w", round, err)
+		}
+	}
+
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return err
+	}
+	pending, pendingErr := pipelineCausalRewritePending(progress, flags.Start, flags.End)
+	if pendingErr != nil {
+		return pendingErr
+	}
+	if len(pending) > 0 {
+		return fmt.Errorf("达到最大因果重写轮数 %d 后仍有 pending_rewrites=%v", maxRounds, pending)
+	}
+	return nil
+}
+
+func pipelineQueueAcceptedWarningPolish(st *store.Store, start, end int) ([]int, error) {
+	if st == nil {
+		return nil, nil
+	}
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		return nil, err
+	}
+	if len(progress.PendingRewrites) > 0 {
+		for _, chapter := range append([]int(nil), progress.PendingRewrites...) {
+			if pipelineWarningPolishAlreadyResolved(st, chapter) {
+				if err := st.Progress.CompleteRewrite(chapter); err != nil {
+					return nil, err
+				}
+			}
+		}
+		progress, err = st.Progress.Load()
+		if err != nil || progress == nil || len(progress.PendingRewrites) > 0 {
+			return nil, err
+		}
+	}
+	chapters := filterChaptersForPipelineRange(progress.CompletedChapters, pipelineFlags{Start: start, End: end})
+	selected := make([]int, 0, len(chapters))
+	for _, chapter := range chapters {
+		if pipelineWarningPolishAlreadyResolved(st, chapter) {
+			continue
+		}
+		if err := currentChapterReviewError(st.Dir(), chapter); err != nil {
+			return nil, fmt.Errorf("第 %d 章黄旗打磨要求当前审核：%w", chapter, err)
+		}
+		body, err := os.ReadFile(filepath.Join(st.Dir(), "chapters", fmt.Sprintf("%02d.md", chapter)))
+		if err != nil {
+			return nil, err
+		}
+		reviewBody, _ := os.ReadFile(filepath.Join(st.Dir(), "reviews", fmt.Sprintf("%02d.md", chapter)))
+		plan := buildRevisionPlan(st.Dir(), chapter, string(body), string(reviewBody))
+		if plan.HasRed || !plan.HasYellow {
+			continue
+		}
+		if err := writeRevisionBrief(st.Dir(), plan); err != nil {
+			return nil, fmt.Errorf("刷新第 %d 章黄旗 rewrite brief: %w", chapter, err)
+		}
+		selected = append(selected, chapter)
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	sort.Ints(selected)
+	if err := st.Progress.SetPendingRewritesAndFlow(selected, "已接受章节存在可执行正文黄旗，择优局部打磨", domain.FlowPolishing); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
+func pipelineWarningPolishAlreadyResolved(st *store.Store, chapter int) bool {
+	if st == nil || chapter <= 0 || currentChapterReviewError(st.Dir(), chapter) != nil {
+		return false
+	}
+	body, err := os.ReadFile(filepath.Join(st.Dir(), "chapters", fmt.Sprintf("%02d.md", chapter)))
+	if err != nil {
+		return false
+	}
+	cp := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "causal-rewrite")
+	return cp != nil && cp.Digest == "sha256:"+reviewreport.BodySHA256(string(body))
+}
+
+func pipelineCausalRewriteAwaitingReview(st *store.Store, chapters []int) bool {
+	if st == nil || len(chapters) == 0 {
+		return false
+	}
+	for _, chapter := range chapters {
+		commit := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "commit")
+		if commit == nil {
+			return false
+		}
+		body, err := os.ReadFile(filepath.Join(st.Dir(), "chapters", fmt.Sprintf("%02d.md", chapter)))
+		if err != nil || commit.Digest != "sha256:"+reviewreport.BodySHA256(string(body)) {
+			return false
+		}
+		// reviewExistingPipeline uses its own Store, so this Store's checkpoint
+		// cache does not observe the appended review checkpoint. Bind recovery to
+		// the durable review artifacts and current chapter bytes instead.
+		if currentChapterReviewError(st.Dir(), chapter) == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func pipelineCausalRewritePending(progress *domain.Progress, start, end int) ([]int, error) {
+	if progress == nil || len(progress.PendingRewrites) == 0 {
+		return nil, nil
+	}
+	pending := append([]int(nil), progress.PendingRewrites...)
+	sort.Ints(pending)
+	if start > 0 && pending[0] < start {
+		return nil, fmt.Errorf("第 %d 章仍在待返工队列；因果写作必须按章序处理，不能从 --from=%d 跳过", pending[0], start)
+	}
+	seen := map[int]bool{}
+	selected := make([]int, 0, len(pending))
+	for _, chapter := range pending {
+		if chapter <= 0 || seen[chapter] {
+			continue
+		}
+		if start > 0 && chapter < start {
+			continue
+		}
+		if end > 0 && chapter > end {
+			continue
+		}
+		selected = append(selected, chapter)
+		seen[chapter] = true
+	}
+	return selected, nil
+}
+
 // pipelineWrite 跑创作阶段：已完结则跳过；已有进度则恢复；全新项目用创作指令起新书。
 //
 // 工程卡点与自愈（用户不变量）：
@@ -1238,8 +1513,17 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 				return nil
 			}
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterChapter: flags.WriteTo, SkipQueueReplay: true}); err != nil {
+		commitSeqBefore := latestPipelineChapterCommitSeq(cfg.OutputDir, flags.StopAfterCommit)
+		if err := headless.Run(cfg, bundle, headless.Options{
+			Prompt:                 prompt,
+			StopAfterChapter:       flags.WriteTo,
+			StopAfterRewriteCommit: flags.StopAfterCommit,
+			SkipQueueReplay:        true,
+		}); err != nil {
 			return err
+		}
+		if flags.StopAfterCommit > 0 && latestPipelineChapterCommitSeq(cfg.OutputDir, flags.StopAfterCommit) > commitSeqBefore {
+			return nil
 		}
 		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
@@ -1250,6 +1534,17 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+func latestPipelineChapterCommitSeq(outputDir string, chapter int) int64 {
+	if chapter <= 0 {
+		return 0
+	}
+	cp := store.NewStore(outputDir).Checkpoints.LatestByStep(domain.ChapterScope(chapter), "commit")
+	if cp == nil {
+		return 0
+	}
+	return cp.Seq
 }
 
 func pipelineHasWritingProgress(prog *domain.Progress) bool {

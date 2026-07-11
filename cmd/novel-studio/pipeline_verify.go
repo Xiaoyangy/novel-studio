@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
@@ -346,6 +347,11 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 			continue
 		}
 		body, _ := os.ReadFile(chapterPath)
+		if cp := latestRewriteResolutionCheckpoint(store.NewStore(outputDir), ch); cp != nil &&
+			cp.Digest == "sha256:"+reviewreport.BodySHA256(string(body)) {
+			evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:%s#%d", ch, cp.Step, cp.Seq))
+			continue
+		}
 		plan := buildRevisionPlan(outputDir, ch, string(body), "")
 		if !plan.HasRed && !(flags.PolishWarnings && plan.HasYellow) {
 			if cp := latestRewriteResolutionCheckpoint(store.NewStore(outputDir), ch); cp != nil {
@@ -373,7 +379,7 @@ func verifyPipelineRewriteStage(outputDir string, flags pipelineFlags, evidence 
 
 func latestRewriteResolutionCheckpoint(st *store.Store, chapter int) *domain.Checkpoint {
 	scope := domain.ChapterScope(chapter)
-	for _, step := range []string{"rewrite-existing", "rewrite-not-needed", "rewrite-brief-only"} {
+	for _, step := range []string{"causal-rewrite", "rewrite-existing", "rewrite-not-needed", "rewrite-brief-only"} {
 		if cp := st.Checkpoints.LatestByStep(scope, step); cp != nil {
 			return cp
 		}

@@ -1,9 +1,12 @@
 package headless
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/assets"
@@ -20,8 +23,11 @@ import (
 type Options struct {
 	Prompt                    string
 	StopAfterChapter          int
+	StopAfterRewriteCommit    int
 	StopAfterFoundation       bool
+	StopAfterFoundationChange bool
 	StopAfterInitialWorldTick bool
+	PreserveUserRules         bool
 	SkipQueueReplay           bool
 	Stdin                     io.Reader
 	Stdout                    io.Writer
@@ -50,6 +56,11 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		return err
 	}
 	eng.AskUser().SetHandler(newTerminalAskUser(stdin, stderr).handle)
+	foundationDigest := ""
+	if opts.StopAfterFoundationChange {
+		foundationDigest = foundationRevisionDigest(eng.Dir())
+	}
+	rewriteCommitSeq := latestChapterCommitSeq(eng.Dir(), opts.StopAfterRewriteCommit)
 	cleanup := logger.SetupFile(eng.Dir(), "headless.log", false)
 	defer cleanup()
 	defer eng.Close()
@@ -69,9 +80,12 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return err
 		}
 		fmt.Fprintf(stderr, "headless 启动: %s\n", eng.Dir())
-		// 启动侧确定性生成本书用户规则快照（用原始 prompt 归一化），须在 StartPrepared 前。
-		if err := eng.PrepareUserRules(plan.RawPrompt); err != nil {
-			return err
+		// 新书启动时生成用户规则快照；pipeline 内部的 Architect 刷新提示只是阶段指令，
+		// 不能覆盖已经沉淀的长期用户规则。
+		if !opts.PreserveUserRules {
+			if err := eng.PrepareUserRules(plan.RawPrompt); err != nil {
+				return err
+			}
 		}
 		if err := eng.StartPrepared(plan.StartPrompt); err != nil {
 			return err
@@ -96,13 +110,13 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return fmt.Errorf("headless 模式需要 --prompt，或输出目录 %q 下已有可恢复会话", eng.Dir())
 		}
 		fmt.Fprintf(stderr, "headless 恢复: %s (%s)\n", eng.Dir(), label)
-		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterFoundation, opts.StopAfterInitialWorldTick)
+		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterFoundation, opts.StopAfterInitialWorldTick)
+	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
 }
 
-func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter int, stopAfterFoundation bool, stopAfterInitialWorldTick bool) error {
+func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool) error {
 	stopRequested := false
 	for {
 		select {
@@ -116,9 +130,19 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 				fmt.Fprintf(stderr, "[headless] 已完成到第 %d 章，按 --write-to 暂停写作\n", stopAfterChapter)
 				eng.Abort()
 			}
+			if !stopRequested && shouldStopAfterChapterCommit(eng.Dir(), stopAfterRewriteCommit, initialRewriteCommitSeq) {
+				stopRequested = true
+				fmt.Fprintf(stderr, "[headless] 第 %d 章返工正文已 commit，交还 pipeline 复审\n", stopAfterRewriteCommit)
+				eng.Abort()
+			}
 			if !stopRequested && stopAfterFoundation && shouldStopAfterFoundationReady(eng.Dir()) {
 				stopRequested = true
 				fmt.Fprintln(stderr, "[headless] Architect foundation 已齐，按 pipeline 阶段暂停")
+				eng.Abort()
+			}
+			if !stopRequested && stopAfterFoundationChange && shouldStopAfterFoundationChanged(eng.Dir(), initialFoundationDigest) {
+				stopRequested = true
+				fmt.Fprintln(stderr, "[headless] Architect foundation 已更新，按 pipeline 刷新阶段暂停")
 				eng.Abort()
 			}
 			if !stopRequested && stopAfterInitialWorldTick && shouldStopAfterInitialWorldTickReady(eng.Dir()) {
@@ -157,6 +181,41 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 
 func shouldStopAfterFoundationReady(dir string) bool {
 	return tools.FoundationCoreComplete(dir)
+}
+
+func latestChapterCommitSeq(dir string, chapter int) int64 {
+	if chapter <= 0 {
+		return 0
+	}
+	cp := store.NewStore(dir).Checkpoints.LatestByStep(domain.ChapterScope(chapter), "commit")
+	if cp == nil {
+		return 0
+	}
+	return cp.Seq
+}
+
+func shouldStopAfterChapterCommit(dir string, chapter int, initialSeq int64) bool {
+	return chapter > 0 && latestChapterCommitSeq(dir, chapter) > initialSeq
+}
+
+func shouldStopAfterFoundationChanged(dir, initialDigest string) bool {
+	if initialDigest == "" || !tools.FoundationCoreComplete(dir) {
+		return false
+	}
+	current := foundationRevisionDigest(dir)
+	return current != "" && current != initialDigest
+}
+
+func foundationRevisionDigest(dir string) string {
+	h := sha256.New()
+	for _, rel := range []string{"outline.json", "layered_outline.json"} {
+		raw, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			return ""
+		}
+		_, _ = h.Write(raw)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func shouldStopAfterInitialWorldTickReady(dir string) bool {

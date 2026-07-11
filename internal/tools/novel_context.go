@@ -199,11 +199,11 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		budget := 188 * 1024
 		switch a.Profile {
 		case "planning":
-			budget = 128 * 1024
+			budget = 64 * 1024
 		case "world_simulation":
-			budget = 160 * 1024
+			budget = 96 * 1024
 		case "draft":
-			budget = 144 * 1024
+			budget = 64 * 1024
 		}
 		trimByBudget(result, budget)
 		if a.Profile != "" && a.Profile != "full" {

@@ -451,6 +451,32 @@ func TestLint_IsolatedSentenceIgnoresPlainTitleAndPureDialogue(t *testing.T) {
 	}
 }
 
+func TestLint_IsolatedSentenceIgnoresStandaloneSystemMessages(t *testing.T) {
+	text := `第一章 一百万到账了
+
+【县城花钱系统已绑定。】
+
+【可用额度：1000000元。】
+
+【这笔钱只能花在青山县。】
+
+【不能转给自己，也不能拿去还旧账。】
+
+【花得真，才算数。】
+
+【先去找个真需要的人。】
+
+林澈把手机扣在掌心，沿着河堤往夜市走。风从桥洞里穿过来，吹得路边价目纸哗啦作响。`
+
+	vs := Lint(text)
+	if v := findRule(vs, "isolated_sentence_overuse"); v != nil {
+		t.Fatalf("standalone system messages should not count as ordinary isolated narration: %+v", v)
+	}
+	if v := findRule(vs, "system_message_inline"); v != nil {
+		t.Fatalf("standalone system messages should satisfy the layout contract: %+v", v)
+	}
+}
+
 func TestLint_TemplatedDialogueChain(t *testing.T) {
 	text := `# 第一章
 
@@ -544,6 +570,32 @@ func TestLintSystemMessageOverpacked(t *testing.T) {
 	clean := "【这笔不算。旧账是昨天欠的。】\n\n【先别乱刷，我帮你挑第一笔。】"
 	if v := findRule(Lint(clean), "system_message_overpacked"); v != nil {
 		t.Fatalf("short layered system messages should pass: %+v", v)
+	}
+	bootCard := `【青山县专项经营额度已绑定：1000000元。仅限青山县内新发生的真实经营支出，不能提现、转给本人或偿还旧债；首次验证地点为河畔夜市，完成一笔能当场验货的小额实物采购。】`
+	if v := findRule(Lint(bootCard), "system_message_overpacked"); v == nil {
+		t.Fatalf("long boot card should be split into standalone system messages: %+v", Lint(bootCard))
+	}
+}
+
+func TestLintSystemMessageMustUseStandaloneParagraph(t *testing.T) {
+	bad := `林澈问：“信用卡能还吗？”【不能。旧账是昨天欠的。】
+
+手机又亮了：【先去夜市。】【别乱买。】
+
+【系统消息】不是，哥们，拉两趟货就想买车？`
+	if v := findRule(Lint(bad), "system_message_inline"); v == nil {
+		t.Fatalf("expected system_message_inline, got %+v", Lint(bad))
+	}
+
+	clean := `林澈问：“信用卡能还吗？”
+
+【不能。旧账是昨天欠的。】
+
+他把手机翻过来，又问：“那第一笔呢？”
+
+【先去夜市。】`
+	if v := findRule(Lint(clean), "system_message_inline"); v != nil {
+		t.Fatalf("standalone system messages should pass: %+v", v)
 	}
 }
 

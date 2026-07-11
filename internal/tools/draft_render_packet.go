@@ -141,9 +141,47 @@ type draftEnvironmentSignal struct {
 }
 
 func applyChapterContextProfile(result map[string]any, profile string) {
-	if profile != "draft" {
-		return
+	switch profile {
+	case "world_simulation":
+		applyWorldSimulationContextProfile(result)
+	case "planning":
+		applyPlanningContextProfile(result)
+	case "draft":
+		applyDraftContextProfile(result)
 	}
+}
+
+func applyWorldSimulationContextProfile(result map[string]any) {
+	// The simulator needs every character's current state and the shared world,
+	// but not prose craft, prior render packets or project-level progress reports.
+	for _, key := range []string{
+		"outline", "progression_snapshot", "project_progress", "evolution_report",
+		"chapter_world_deltas", "side_character_journeys", "future_outline_window",
+		"recent_summaries", "previous_tail", "references", "writing_engine",
+		"style_rules", "style_stats", "voice_samples", "rag_recall", "retrieval_trace",
+		"chapter_plan", "chapter_contract", "causal_simulation", "next_plan",
+	} {
+		deleteContextKey(result, key)
+	}
+	result["world_simulation_context_policy"] = "保留全部实名角色的当前状态、知识边界、关系、资源和本章大纲；写法资料、正文渲染历史与重复项目报告已隐藏。"
+}
+
+func applyPlanningContextProfile(result map[string]any) {
+	// Once the world simulation is finalized, the POV planner consumes its
+	// protagonist projection. Full off-screen decisions stay durable on disk and
+	// must not be copied into the POV plan or paid for again in every planning turn.
+	for _, key := range []string{
+		"outline", "progression_snapshot", "project_progress", "evolution_report",
+		"chapter_world_deltas", "character_stage_records", "side_character_journeys",
+		"premise", "world_rules", "recent_summaries",
+	} {
+		deleteContextKey(result, key)
+	}
+	sanitizePlanningWorldSimulation(result)
+	result["planning_context_policy"] = "全角色决定已落盘；本阶段只依据 protagonist_projection、当前章/未来窗口、角色声口与审核约束生成主视角 plan。"
+}
+
+func applyDraftContextProfile(result map[string]any) {
 	working, _ := result["working_memory"].(map[string]any)
 	plan := chapterPlanFromContext(result, working)
 	if plan != nil {
@@ -184,6 +222,32 @@ func applyChapterContextProfile(result map[string]any, profile string) {
 		}
 	}
 	sanitizeDraftWorldSimulation(result)
+	for _, key := range []string{
+		"outline", "progression_snapshot", "project_progress", "evolution_report",
+		"chapter_world_deltas", "character_stage_records", "side_character_journeys",
+		"premise", "world_rules", "characters", "character_dossiers",
+		"future_outline_window", "next_chapter_outline",
+	} {
+		deleteContextKey(result, key)
+	}
+}
+
+func sanitizePlanningWorldSimulation(result map[string]any) {
+	sim, ok := result["chapter_world_simulation"].(map[string]any)
+	if !ok || sim["status"] != "ready" {
+		return
+	}
+	lean := map[string]any{}
+	for _, key := range []string{
+		"status", "simulation_id", "base_tick_id", "time_window", "character_count",
+		"protagonist_projection", "rewrite_source", "rewrite_fact_coverage",
+	} {
+		if value, exists := sim[key]; exists {
+			lean[key] = value
+		}
+	}
+	lean["planning_policy"] = "完整 character_decisions 已在 meta/chapter_simulations 落盘；POV plan 只能投影 protagonist_projection，不得重写隐藏角色决定。"
+	result["chapter_world_simulation"] = lean
 }
 
 func chapterPlanFromContext(result map[string]any, working map[string]any) *domain.ChapterPlan {

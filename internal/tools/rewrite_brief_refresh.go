@@ -32,6 +32,12 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		return "", loadErr
 	} else if meta != nil {
 		pendingSteer = strings.TrimSpace(meta.PendingSteer)
+		if isInternalPipelineRepairSteer(pendingSteer) {
+			pendingSteer = ""
+			if clearErr := s.RunMeta.ClearPendingSteer(); clearErr != nil {
+				return "", clearErr
+			}
+		}
 	}
 
 	var b strings.Builder
@@ -77,7 +83,7 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 	b.WriteString("\n## 验收条件\n\n")
 	b.WriteString("- 逐条满足用户本轮要求、合同漏项和 error/critical issue；warning 只在不损伤正文时修正。\n")
 	b.WriteString("- 保留事实的事件顺序、金额、地点、角色、结果和章末后果不得漂移。\n")
-	b.WriteString("- 必须重新完成世界模拟、POV plan、正文渲染、机械检查与 Editor 审核；不得复用旧 plan 冒充新返工。\n")
+	b.WriteString("- 纯措辞、对白、分段、标点和 AI 味问题复用已通过的世界模拟与 POV plan，只重渲染正文；事实、合同、角色决策或因果问题才重跑推演。改后必须重新完成机械检查与 Editor 审核。\n")
 
 	path := fmt.Sprintf("reviews/%02d_rewrite_brief.md", review.Chapter)
 	if err := s.Drafts.SaveRewriteBrief(review.Chapter, b.String()); err != nil {
@@ -91,6 +97,12 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		}
 	}
 	return path, nil
+}
+
+func isInternalPipelineRepairSteer(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, "Pipeline staged-plan repair") ||
+		strings.HasPrefix(text, "Pipeline world-simulation repair")
 }
 
 func writeRewriteBriefItems(b *strings.Builder, items []string) {

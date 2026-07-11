@@ -23,6 +23,7 @@ var blockingMechanicalRules = map[string]bool{
 	"dialogue_semicolon_formality":       true,
 	"templated_dialogue_chain":           true,
 	"abstract_system_reassurance":        true,
+	"system_message_inline":              true,
 	"opaque_procedure_jargon":            true,
 	"dialogue_action_lead_repetition":    true,
 	"trend_language_sound_effect_misuse": true,

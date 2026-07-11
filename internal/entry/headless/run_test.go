@@ -1,6 +1,8 @@
 package headless
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -76,6 +78,63 @@ func TestShouldStopAfterInitialWorldTickRequiresSubstantiveEvents(t *testing.T) 
 	}
 	if !shouldStopAfterInitialWorldTickReady(dir) {
 		t.Fatal("substantive world events should stop the stage")
+	}
+}
+
+func TestShouldStopAfterFoundationChangedRequiresDigestChange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"premise.md", "characters.json", "world_rules.json", "book_world.json", "world_codex.json", filepath.Join("meta", "compass.json")} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"ready":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"outline.json", "layered_outline.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"version":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initial := foundationRevisionDigest(dir)
+	if initial == "" {
+		t.Fatal("expected initial foundation digest")
+	}
+	if shouldStopAfterFoundationChanged(dir, initial) {
+		t.Fatal("unchanged foundation should not stop")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outline.json"), []byte(`{"version":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterFoundationChanged(dir, initial) {
+		t.Fatal("changed foundation should stop")
+	}
+}
+
+func TestShouldStopAfterChapterCommitRequiresNewCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "第一版正文"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "commit", "chapters/01.md"); err != nil {
+		t.Fatal(err)
+	}
+	initial := latestChapterCommitSeq(dir, 1)
+	if shouldStopAfterChapterCommit(dir, 1, initial) {
+		t.Fatal("existing commit must not stop a resumed rewrite")
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "第二版正文"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "commit", "chapters/01.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterChapterCommit(dir, 1, initial) {
+		t.Fatal("new commit checkpoint should return control to pipeline review")
 	}
 }
 

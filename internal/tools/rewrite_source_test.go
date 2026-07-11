@@ -55,6 +55,13 @@ func TestRewriteSourceExtractsPreserveFactsAndBodyHash(t *testing.T) {
 	}
 }
 
+func TestRewriteBriefPreserveFactsIgnoresEmptyPlaceholder(t *testing.T) {
+	brief := "# brief\n\n## 保留事实\n\n- 无额外条目。\n\n## 必须修正\n\n- 调整分号。\n"
+	if facts := rewriteBriefPreserveFacts(brief); len(facts) != 0 {
+		t.Fatalf("empty placeholder must not become a preserve fact: %v", facts)
+	}
+}
+
 func TestRewriteVisibleCharactersComeFromCommittedBody(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

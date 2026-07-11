@@ -2,12 +2,14 @@ package flow
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -31,6 +33,66 @@ func TestChapterPlanReadyForDraftRejectsStaleAttractionPlan(t *testing.T) {
 	}
 	if chapterPlanReadyForDraft(s, 1, false) {
 		t.Fatal("stale plan without attraction contract must route back to planner")
+	}
+}
+
+func TestRenderOnlyReviewReusesCurrentCausalPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章正文。\n\n【额度和限制与任务全挤在这里。】"
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "第一章"}); err != nil {
+		t.Fatal(err)
+	}
+	bodyHash := reviewreport.BodySHA256(body)
+	review := domain.ReviewEntry{
+		Chapter: 1, BodySHA256: bodyHash, Scope: "chapter", ContractStatus: "met", Verdict: "rewrite",
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Verdict: "pass"},
+			{Dimension: "character", Verdict: "pass"},
+			{Dimension: "pacing", Verdict: "pass"},
+			{Dimension: "continuity", Verdict: "pass"},
+			{Dimension: "foreshadow", Verdict: "pass"},
+			{Dimension: "hook", Verdict: "pass"},
+		},
+	}
+	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	writeGate := func(rule string) {
+		t.Helper()
+		payload := reviewreport.MechanicalGatePayload{
+			Chapter: 1, BodySHA256: bodyHash,
+			RuleViolations: []rules.Violation{{Rule: rule, Severity: rules.SeverityError}},
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(s.Dir(), "reviews", "01_ai_gate.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeGate("system_message_overpacked")
+	if !renderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
+		t.Fatal("render-only system dialogue fix should reuse the current causal plan")
+	}
+	writeGate("semicolon_overuse")
+	if !renderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
+		t.Fatal("render-only punctuation fix should reuse the current causal plan")
+	}
+	writeGate("pending_resource_as_fact")
+	if renderOnlyReviewAllowsPlanReuse(s, 1) || chapterPlanReadyForDraft(s, 1, true) {
+		t.Fatal("resource/fact failures must return to causal replanning")
 	}
 }
 

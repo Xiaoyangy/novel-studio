@@ -17,6 +17,12 @@ func TestProjectStyleRequests(t *testing.T) {
 	}
 }
 
+func TestSystemCompanionVoiceRequestedFromWorldRule(t *testing.T) {
+	if !SystemCompanionVoiceRequested("系统是主角的稳定吐槽搭子和情绪支持者，会聊天，也会提醒风险。") {
+		t.Fatal("world-rule companion wording should enable the system voice contract")
+	}
+}
+
 func TestSystemCompanionFeedbackContradiction(t *testing.T) {
 	for _, text := range []string{
 		"系统口吻偏暖，建议强化系统冷硬感。",

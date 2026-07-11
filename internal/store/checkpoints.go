@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 )
 
 const checkpointsFile = "meta/checkpoints.jsonl"
+
+// Stores created by Host, pipeline review and delivery can coexist in one
+// process. Their IO mutexes are instance-local, so checkpoint appends need one
+// process-wide critical section before refreshing the append-only journal.
+var checkpointProcessMu sync.Mutex
 
 // CheckpointStore 管理 step 级 checkpoint 的追加与查询。
 // 磁盘格式：meta/checkpoints.jsonl，只追加；查询走内存镜像。
@@ -51,8 +57,22 @@ func (cs *CheckpointStore) loadFromDisk() {
 // Append 追加一条 checkpoint。
 // 幂等：相同 Scope + Step + Digest 已存在则跳过写入，直接返回已有记录。
 func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
+	checkpointProcessMu.Lock()
+	defer checkpointProcessMu.Unlock()
 	cs.io.mu.Lock()
 	defer cs.io.mu.Unlock()
+
+	// Another Store may have appended since this instance was created. Refresh
+	// before idempotence and sequence allocation so stale caches cannot emit
+	// duplicate sequence numbers or duplicate artifacts.
+	cs.cache = readCheckpointsFile(cs.io.path(checkpointsFile))
+	var maxSeq int64
+	for _, cp := range cs.cache {
+		if cp.Seq > maxSeq {
+			maxSeq = cp.Seq
+		}
+	}
+	cs.seqGen.Store(maxSeq)
 
 	if digest != "" {
 		for i := len(cs.cache) - 1; i >= 0; i-- {
@@ -153,6 +173,8 @@ func (cs *CheckpointStore) All() []domain.Checkpoint {
 // Reset 清空 checkpoint 文件与 cache。仅在新建小说时使用。
 // 先删文件再清内存：删除失败时保留 cache 与 seqGen，避免内存与磁盘状态错位。
 func (cs *CheckpointStore) Reset() error {
+	checkpointProcessMu.Lock()
+	defer checkpointProcessMu.Unlock()
 	cs.io.mu.Lock()
 	defer cs.io.mu.Unlock()
 	if err := cs.io.RemoveFileUnlocked(checkpointsFile); err != nil {

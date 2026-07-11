@@ -118,8 +118,11 @@ func TestHumanAnchorDoesNotRewardDialogueAndActionStuffing(t *testing.T) {
 	sentences := []float64{8, 24, 11, 19, 7, 28, 13, 17}
 	natural := humanAnchorStats("桌边有人争执，窗外雨声压住半句话。", base, sentences, map[string]float64{}, map[string]any{})
 	staged := humanAnchorStats("“问。”他抬眼。“答。”她停手。", stuffed, sentences, map[string]float64{}, map[string]any{})
-	if floatFromAny(staged["score"]) >= floatFromAny(natural["score"]) {
-		t.Fatalf("stuffed score %.2f should stay below natural %.2f", floatFromAny(staged["score"]), floatFromAny(natural["score"]))
+	if !boolFromAny(natural["eligible"]) {
+		t.Fatalf("natural scene should remain anchor eligible: %+v", natural)
+	}
+	if boolFromAny(staged["eligible"]) || boolFromAny(staged["final_cap_allowed"]) {
+		t.Fatalf("unsupported dialogue/action stuffing must not earn a human cap: %+v", staged)
 	}
 	if stringFromAny(staged["anchor_type"]) != "narrative_scene" {
 		t.Fatalf("novel prose must not switch to technical anchor: %+v", staged)
@@ -164,5 +167,83 @@ func TestEffectiveGatePercentUsesWholeTextSegmentRiskOverHumanAnchorCap(t *testi
 	}
 	if got := EffectiveGatePercent(report); got != 82 {
 		t.Fatalf("whole-text single segment risk should override human anchor cap, got %.2f", got)
+	}
+}
+
+func TestWholeTextRawCurveConsensusNeedsIndependentSupport(t *testing.T) {
+	report := Report{
+		Stats: Stats{
+			DialogueRatio:       0.33,
+			ConcreteDensityPerK: 17,
+			ActionDensityPerK:   25,
+			HumanAnchor: map[string]any{
+				"eligible":    true,
+				"strength":    "strong",
+				"anchor_type": "narrative_scene",
+				"blockers":    []string{},
+				"segment_cap": 88.0,
+			},
+		},
+		Dimensions: map[string]Dimension{
+			"burstiness":                  {Score: 0},
+			"structure_fingerprint":       {Score: 0},
+			"cross_paragraph_consistency": {Score: 0},
+			"perplexity_proxy": {Stats: map[string]any{
+				"ttr":                0.25,
+				"normalized_entropy": 0.90,
+			}},
+		},
+		LatestDetectorProxy: DetectorProxy{Components: map[string]Dimension{
+			"probability_curvature_proxy":  {Score: 33.32, Stats: map[string]any{"human_anchor_adjusted_from": 98.0}},
+			"weak_lm_uniformity":           {Score: 27.88, Stats: map[string]any{"human_anchor_adjusted_from": 82.0}},
+			"local_entropy_uniformity":     {Score: 23.12, Stats: map[string]any{"human_anchor_adjusted_from": 68.0}},
+			"layout_humanizer_fingerprint": {Score: 0},
+		}},
+	}
+
+	score, evidence := segmentAIGCProxy(report, 2935, 1)
+	if score >= 50 {
+		t.Fatalf("raw three-curve consensus alone should not override a strong human baseline, got %.2f (%v)", score, evidence)
+	}
+	if !strings.Contains(strings.Join(evidence, "\n"), "未形成独立复合高风险") {
+		t.Fatalf("expected unsupported raw-curve evidence, got %v", evidence)
+	}
+}
+
+func TestWholeTextStrongAnchorCanBeOverriddenByTwoIndependentSignals(t *testing.T) {
+	report := Report{
+		Stats: Stats{
+			DialogueRatio:       0.20,
+			ConcreteDensityPerK: 12,
+			ActionDensityPerK:   18,
+			HumanAnchor: map[string]any{
+				"eligible":    true,
+				"strength":    "strong",
+				"anchor_type": "narrative_scene",
+				"blockers":    []string{},
+				"segment_cap": 88.0,
+			},
+		},
+		ZhuqueCompositePercent: 60,
+		Dimensions: map[string]Dimension{
+			"burstiness":                  {Score: 0},
+			"structure_fingerprint":       {Score: 0},
+			"cross_paragraph_consistency": {Score: 0},
+			"perplexity_proxy": {Stats: map[string]any{
+				"ttr":                0.25,
+				"normalized_entropy": 0.90,
+			}},
+		},
+		LatestDetectorProxy: DetectorProxy{Components: map[string]Dimension{
+			"probability_curvature_proxy":  {Score: 70, Stats: map[string]any{"human_anchor_adjusted_from": 98.0}},
+			"weak_lm_uniformity":           {Score: 32, Stats: map[string]any{"human_anchor_adjusted_from": 82.0}},
+			"local_entropy_uniformity":     {Score: 24, Stats: map[string]any{"human_anchor_adjusted_from": 68.0}},
+			"layout_humanizer_fingerprint": {Score: 0},
+		}},
+	}
+
+	score, evidence := segmentAIGCProxy(report, 2800, 1)
+	if score < 80 {
+		t.Fatalf("two independent high-risk signals should override the anchor, got %.2f (%v)", score, evidence)
 	}
 }

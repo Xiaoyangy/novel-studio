@@ -52,6 +52,11 @@ type State struct {
 	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
 	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
 	NextActionPlanReady bool
+	// 单世界全角色推演先于 POV plan。需要且未完成时，Host 派受限的
+	// world_simulator；完成后才派 writer 规划主视角。
+	NextActionWorldSimulationRequired bool
+	NextActionWorldSimulationReady    bool
+	NextActionWorldSimulationGaps     []string
 	// 已有 staged plan partial 时，Router 必须优先派最小补丁修复，不能退化成
 	// 普通“从头重做计划”提示，否则 Planner 会重复已完成批次。
 	NextActionPlanPartial    bool
@@ -110,6 +115,10 @@ func Route(s State) *Instruction {
 			verb = "打磨"
 		}
 		if !s.NextActionPlanReady {
+			if s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady {
+				task := worldSimulationTask(ch, s.NextActionWorldSimulationGaps)
+				return &Instruction{Agent: "world_simulator", Task: task, Reason: fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", ch), Chapter: ch}
+			}
 			if s.NextActionPlanPartial {
 				task := s.NextActionPlanRepairTask
 				if task == "" {
@@ -155,7 +164,7 @@ func Route(s State) *Instruction {
 		if s.NextActionDraftReady {
 			return &Instruction{
 				Agent:   "draft_finalizer",
-				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，只对明确硬伤使用 edit_chapter；随后 check_consistency 并 commit_chapter。禁止重新整章生成", ch),
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，逐条核对 rewrite_brief 的“必须修正”和机械门禁；明确的局部硬伤与 warning 都用 edit_chapter 修正，必要时连续编辑多处，禁止只修第一项就提交。随后 check_consistency 并 commit_chapter；禁止重新整章生成", ch),
 				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
 				Chapter: ch,
 			}
@@ -244,6 +253,10 @@ func Route(s State) *Instruction {
 	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
+		if s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady {
+			task := worldSimulationTask(next, s.NextActionWorldSimulationGaps)
+			return &Instruction{Agent: "world_simulator", Task: task, Reason: fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", next), Chapter: next}
+		}
 		if s.NextActionPlanPartial {
 			task := s.NextActionPlanRepairTask
 			if task == "" {
@@ -282,6 +295,18 @@ func Route(s State) *Instruction {
 		Reason:  "下一章计划已就绪，渲染正文",
 		Chapter: next,
 	}
+}
+
+func worldSimulationTask(chapter int, gaps []string) string {
+	task := fmt.Sprintf("为第 %d 章完成单世界全角色推演：只调用一次 novel_context(chapter=%d, profile=world_simulation)，再按 gaps 分批调用 simulate_chapter_world；覆盖每个实名角色的选项、决定、理由、行动与蝴蝶效应，最后提交 protagonist_projection 并 finalize=true。禁止调用 planning 或正文工具", chapter, chapter)
+	if len(gaps) > 0 {
+		limit := len(gaps)
+		if limit > 8 {
+			limit = 8
+		}
+		task += "。当前缺口：" + strings.Join(gaps[:limit], "；")
+	}
+	return task
 }
 
 // FormatMessage 把 Instruction 格式化为发给 Coordinator 的用户消息。

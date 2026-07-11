@@ -69,6 +69,23 @@ func TestPlanStructureRejectsGenericIdentityAnchors(t *testing.T) {
 	}
 }
 
+func TestCharacterIdentityGuardAllowsSystemVoiceOnly(t *testing.T) {
+	names := map[string]struct{}{"林澈": {}, "系统": {}}
+	voicePlan := map[string]any{"causal_simulation": map[string]any{
+		"voice_logic": []any{map[string]any{"character": "县城花钱系统"}},
+	}}
+	if issues := characterFieldIdentityIssues(voicePlan, names, "林澈", false); len(issues) != 0 {
+		t.Fatalf("system companion voice should not require a social character dossier: %v", issues)
+	}
+
+	emotionalPlan := map[string]any{"causal_simulation": map[string]any{
+		"emotional_logic": []any{map[string]any{"character": "县城花钱系统"}},
+	}}
+	if issues := characterFieldIdentityIssues(emotionalPlan, names, "林澈", false); len(issues) == 0 {
+		t.Fatal("system must remain outside social character and emotional simulation fields")
+	}
+}
+
 func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	st := newPhaseTestStore(t)
 	if err := st.Characters.Save([]domain.Character{
@@ -120,6 +137,26 @@ func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	}
 	if required := stringSliceFromAny(structure["required_beats"]); len(required) != 0 {
 		t.Fatalf("outline goal/hook must not be duplicated into prose checklist: %#v", required)
+	}
+}
+
+func TestFinalPlanGoalFollowsWorldSimulationDecision(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1, Title: "旧大纲标题", CoreEvent: "当晚扩到十家", Hook: "打开下一步",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+		WorldSimulationID:   "ch001-test",
+		ProtagonistDecision: "不临时扩摊，先守住五家真实交付",
+	}}
+	applyOutlineAnchorsToPlan(st, &plan)
+	if want := "落实本轮世界模拟后的主角选择：不临时扩摊，先守住五家真实交付"; plan.Goal != want {
+		t.Fatalf("goal = %q, want %q", plan.Goal, want)
+	}
+	if plan.Title != "旧大纲标题" || plan.Hook != "打开下一步" {
+		t.Fatalf("title and hook should remain outline anchors: %+v", plan)
 	}
 }
 

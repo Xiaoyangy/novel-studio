@@ -298,6 +298,24 @@ func TestRoute_NormalContinue(t *testing.T) {
 	}
 }
 
+func TestRoute_WorldSimulationPrecedesPOVPlanner(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowWriting)
+	p.TotalChapters = 20
+	got := Route(State{
+		Progress:                          p,
+		NextActionPlanReady:               false,
+		NextActionWorldSimulationRequired: true,
+		NextActionWorldSimulationReady:    false,
+		NextActionWorldSimulationGaps:     []string{"missing character decision: 沈知遥"},
+	})
+	if got == nil || got.Agent != "world_simulator" || got.Chapter != 2 {
+		t.Fatalf("world simulation must precede POV planning, got %+v", got)
+	}
+	if !strings.Contains(got.Task, "profile=world_simulation") || !strings.Contains(got.Task, "沈知遥") {
+		t.Fatalf("world simulator task lost profile or gaps: %q", got.Task)
+	}
+}
+
 func TestRoute_ShortCompleteNeedsFinalGlobalReview(t *testing.T) {
 	p := &domain.Progress{
 		Phase:             domain.PhaseWriting,

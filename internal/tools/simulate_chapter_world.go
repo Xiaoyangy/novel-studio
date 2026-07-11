@@ -416,6 +416,28 @@ func chapterWorldSimulationRequired(s *store.Store) bool {
 	return err == nil && len(cast.Assignments) > 0
 }
 
+// ChapterWorldSimulationStatus exposes the pre-plan boundary to the Host
+// router without leaking simulation implementation details into flow logic.
+func ChapterWorldSimulationStatus(s *store.Store, chapter int) (required, ready bool, gaps []string) {
+	if s == nil || chapter <= 0 || !chapterWorldSimulationRequired(s) {
+		return false, true, nil
+	}
+	if partial, err := s.LoadChapterWorldSimulationPartial(chapter); err != nil {
+		return true, false, []string{err.Error()}
+	} else if partial != nil {
+		return true, false, chapterWorldSimulationGaps(s, *partial)
+	}
+	sim, err := s.LoadChapterWorldSimulation(chapter)
+	if err != nil {
+		return true, false, []string{err.Error()}
+	}
+	if sim == nil {
+		return true, false, []string{"missing chapter world simulation"}
+	}
+	gaps = chapterWorldSimulationGaps(s, *sim)
+	return true, len(gaps) == 0, gaps
+}
+
 func ensureChapterWorldSimulationReadyForPlanning(s *store.Store, chapter int) (*domain.ChapterWorldSimulation, error) {
 	if !chapterWorldSimulationRequired(s) {
 		return nil, nil

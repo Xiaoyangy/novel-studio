@@ -208,3 +208,65 @@ func TestNonDraftProfileKeepsPlanningContext(t *testing.T) {
 		t.Fatal("planning profile lost causal_simulation")
 	}
 }
+
+func TestPlanningProfileUsesProjectionWithoutFullCharacterDecisions(t *testing.T) {
+	result := map[string]any{
+		"outline": []string{"full outline"},
+		"working_memory": map[string]any{
+			"current_chapter_outline": "keep",
+			"progression_snapshot":    "drop",
+			"character_stage_records": "keep",
+		},
+		"chapter_world_simulation": map[string]any{
+			"status":                 "ready",
+			"simulation_id":          "sim-2",
+			"character_decisions":    []domain.CharacterWorldDecision{{Character: "沈知遥"}},
+			"protagonist_projection": domain.ProtagonistDecisionProjection{Protagonist: "林澈", ChosenDecision: "继续试点"},
+		},
+	}
+	applyChapterContextProfile(result, "planning")
+	if _, exists := result["outline"]; exists {
+		t.Fatal("planning profile should use current/future outline window, not the full outline")
+	}
+	world := result["chapter_world_simulation"].(map[string]any)
+	if _, exists := world["character_decisions"]; exists {
+		t.Fatal("planning profile leaked full off-screen character decisions")
+	}
+	if _, exists := world["protagonist_projection"]; !exists {
+		t.Fatal("planning profile lost protagonist projection")
+	}
+	working := result["working_memory"].(map[string]any)
+	if _, exists := working["progression_snapshot"]; exists {
+		t.Fatal("planning profile kept duplicate project progression")
+	}
+	if _, exists := working["character_stage_records"]; exists {
+		t.Fatal("planning profile should trust the finalized protagonist projection instead of repeating all character stages")
+	}
+}
+
+func TestWorldSimulationProfileKeepsCharacterStateAndDropsWritingMaterial(t *testing.T) {
+	result := map[string]any{
+		"outline":    "drop",
+		"references": "drop",
+		"working_memory": map[string]any{
+			"current_chapter_outline": "keep",
+			"character_stage_records": "keep",
+			"chapter_world_deltas":    "drop",
+			"side_character_journeys": "drop",
+		},
+		"episodic_memory": map[string]any{"characters": "keep"},
+	}
+	applyChapterContextProfile(result, "world_simulation")
+	for _, key := range []string{"outline", "references"} {
+		if _, exists := result[key]; exists {
+			t.Fatalf("world simulation profile kept %s", key)
+		}
+	}
+	working := result["working_memory"].(map[string]any)
+	if working["current_chapter_outline"] != "keep" || working["character_stage_records"] != "keep" {
+		t.Fatal("world simulation profile lost current chapter or character state")
+	}
+	if _, exists := working["chapter_world_deltas"]; exists {
+		t.Fatal("world simulation profile kept duplicate chapter deltas")
+	}
+}

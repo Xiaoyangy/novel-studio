@@ -513,14 +513,19 @@ func rewriteExistingRAGChunks(chapter int, brief, rewritten string) []domain.RAG
 	})}
 }
 
-// lookupOutlineEntry 从分层大纲里找本章的 outline entry，给 Writer 提供情绪标签。
+// lookupOutlineEntry 从分层大纲里按全局顺序找本章。分层文件中的
+// OutlineEntry.Chapter 可为零，读取时必须像 Store.GetChapterFromLayered 一样编号。
 func lookupOutlineEntry(volumes []domain.VolumeOutline, chapter int) *domain.OutlineEntry {
+	current := 1
 	for _, v := range volumes {
 		for _, a := range v.Arcs {
 			for i := range a.Chapters {
-				if a.Chapters[i].Chapter == chapter {
-					return &a.Chapters[i]
+				if current == chapter {
+					entry := a.Chapters[i]
+					entry.Chapter = current
+					return &entry
 				}
+				current++
 			}
 		}
 	}
@@ -1254,7 +1259,7 @@ func normalizeRewriteParagraphingForGate(text string) (string, bool) {
 			if !rewriteShouldMergeIsolatedParagraph(i, paragraphs[i]) {
 				continue
 			}
-			if i > 0 && !rewriteIsPlainChapterTitle(paragraphs[i-1]) && rewriteParagraphRuneCount(paragraphs[i-1])+rewriteParagraphRuneCount(paragraphs[i]) <= 280 {
+			if i > 0 && !rewriteIsPlainChapterTitle(paragraphs[i-1]) && !rewriteContainsSystemMessage(paragraphs[i-1]) && rewriteParagraphRuneCount(paragraphs[i-1])+rewriteParagraphRuneCount(paragraphs[i]) <= 280 {
 				paragraphs[i-1] = joinRewriteParagraphs(paragraphs[i-1], paragraphs[i])
 				paragraphs = append(paragraphs[:i], paragraphs[i+1:]...)
 				changed = true
@@ -1262,7 +1267,7 @@ func normalizeRewriteParagraphingForGate(text string) (string, bool) {
 				i--
 				continue
 			}
-			if i+1 < len(paragraphs) && rewriteParagraphRuneCount(paragraphs[i])+rewriteParagraphRuneCount(paragraphs[i+1]) <= 280 {
+			if i+1 < len(paragraphs) && !rewriteContainsSystemMessage(paragraphs[i+1]) && rewriteParagraphRuneCount(paragraphs[i])+rewriteParagraphRuneCount(paragraphs[i+1]) <= 280 {
 				paragraphs[i+1] = joinRewriteParagraphs(paragraphs[i], paragraphs[i+1])
 				paragraphs = append(paragraphs[:i], paragraphs[i+1:]...)
 				changed = true
@@ -1313,10 +1318,14 @@ func rewriteIsolatedParagraphCount(paragraphs []string) int {
 
 func rewriteShouldMergeIsolatedParagraph(index int, paragraph string) bool {
 	p := strings.TrimSpace(paragraph)
-	if p == "" || (index == 0 && rewriteIsPlainChapterTitle(p)) || rewriteIsDialogueOnlyParagraph(p) {
+	if p == "" || (index == 0 && rewriteIsPlainChapterTitle(p)) || rewriteIsDialogueOnlyParagraph(p) || rewriteContainsSystemMessage(p) {
 		return false
 	}
 	return rewriteParagraphSentenceCount(p) == 1
+}
+
+func rewriteContainsSystemMessage(paragraph string) bool {
+	return strings.Contains(paragraph, "【") || strings.Contains(paragraph, "】")
 }
 
 func rewriteParagraphSentenceCount(paragraph string) int {

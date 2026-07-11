@@ -1523,6 +1523,8 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "讲价/互怼对白不能像合同条款或广告口号；改成有停顿、有关系、有算盘的普通人口语。")
 		case "system_message_overpacked":
 			focus = append(focus, "系统单条消息塞了过多功能；把拒绝、安慰、解释、任务和奖励拆开，一条消息只做一件事。")
+		case "system_message_inline":
+			focus = append(focus, "系统完整内容必须放在一对【】内并独占一段；把“【系统消息】不是……”改成“【不是……】”，人物问句、旁白和下一条消息都另起段。")
 		case "bureaucratic_register_overuse":
 			focus = append(focus, "制度/纪要/表单词过密时，不要继续补规范说明；把信息拆进人物口语、担责压力、误读、拒写、私人消息打断和具体动作。专业词可以保留在表格/屏幕里，人物说话要短、怕事、有口头反应。")
 		case "structured_note_triplet":

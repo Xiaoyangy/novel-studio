@@ -146,17 +146,30 @@ func TestMergeRewriteCharacterStageInheritsUnchangedCast(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := testCharacterStageRecords("林澈", "沈知遥", "贺骁")
+	existing[0].DecisionReason = "依据原世界模拟作出选择"
+	existing[0].ButterflyEffects = []string{"原决定继续影响下一章"}
 	if err := s.SaveCharacterStageRecords(1, existing); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{Chapter: 1, CharacterDecisions: []domain.CharacterWorldDecision{
+		{Character: "林澈"}, {Character: "沈知遥"}, {Character: "贺骁"},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	submitted := []domain.CharacterStageRecord{existing[0]}
 	submitted[0].Decision = "压缩正文后仍按原计划承担付款责任"
+	submitted[0].DecisionReason = ""
+	submitted[0].ButterflyEffects = nil
+	submitted = append(submitted, domain.CharacterStageRecord{Character: "赵启明之外的唐越", Decision: "污染身份"})
 	merged := mergeRewriteCharacterStage(s, 1, submitted)
 	if len(merged) != 3 {
 		t.Fatalf("partial rewrite metadata should inherit omitted cast: %+v", merged)
 	}
 	if merged[0].Decision != submitted[0].Decision || merged[1].Character != "沈知遥" || merged[2].Character != "贺骁" {
 		t.Fatalf("rewrite stage merge lost or failed to update records: %+v", merged)
+	}
+	if merged[0].DecisionReason != existing[0].DecisionReason || len(merged[0].ButterflyEffects) != 1 {
+		t.Fatalf("partial rewrite metadata must preserve omitted causal fields: %+v", merged[0])
 	}
 }
 

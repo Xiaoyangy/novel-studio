@@ -35,6 +35,7 @@ import (
 //     分号滥用、纸面条款一行分号链、对白书面腔
 //   - stiff_trade_dialogue：讲价/互怼对白被写成口号或条款
 //   - system_message_overpacked：系统单条消息同时承担过多规则、安慰和任务功能
+//   - system_message_inline：系统消息与人物台词/旁白或另一条系统消息挤在同一段
 //   - abstract_system_reassurance：系统用无对象、无后果的客服式空话假装陪伴
 //   - ui_trial_checklist：把同一规则的点击、失败、改备注、删除等试错逐项渲染
 //   - opaque_procedure_jargon：对白把流程缩写/验收黑话直接丢给大众读者
@@ -383,6 +384,23 @@ func appendPunctuationCadence(vs []Violation, text string) []Violation {
 }
 
 func appendSystemMessageSignals(vs []Violation, text string) []Violation {
+	for _, paragraph := range narrativeParagraphs(text) {
+		matches := systemMessageRe.FindAllString(paragraph, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		if len(matches) == 1 && strings.TrimSpace(paragraph) == strings.TrimSpace(matches[0]) {
+			continue
+		}
+		vs = append(vs, Violation{
+			Rule:     "system_message_inline",
+			Target:   truncateRunes(strings.TrimSpace(paragraph), 110),
+			Limit:    "系统完整内容放在一对【】内并独占一段，禁止【系统消息】标签后续接正文",
+			Actual:   len(matches),
+			Severity: SeverityError,
+		})
+		break
+	}
 	for _, match := range systemMessageRe.FindAllStringSubmatch(text, -1) {
 		if len(match) < 2 {
 			continue
@@ -390,15 +408,18 @@ func appendSystemMessageSignals(vs []Violation, text string) []Violation {
 		message := strings.TrimSpace(match[1])
 		punctuation := strings.Count(message, "。") + strings.Count(message, "！") +
 			strings.Count(message, "？") + strings.Count(message, "!") + strings.Count(message, "?")
-		if punctuation < 4 || !containsAnyPhrase(message, []string{"系统", "额度", "任务", "核验", "用途", "消费", "奖励", "限时"}) {
+		clauseBreaks := punctuation + strings.Count(message, "，") + strings.Count(message, "；")
+		messageLen := len([]rune(message))
+		if (punctuation < 4 && clauseBreaks < 5 && messageLen < 70) ||
+			!containsAnyPhrase(message, []string{"系统", "额度", "任务", "核验", "用途", "消费", "奖励", "限时"}) {
 			continue
 		}
 		vs = append(vs, Violation{
 			Rule:     "system_message_overpacked",
 			Target:   truncateRunes(message, 100),
 			Limit:    "系统单条消息只承担拒绝、安慰、解释、任务或奖励中的一项",
-			Actual:   punctuation,
-			Severity: SeverityWarning,
+			Actual:   clauseBreaks,
+			Severity: SeverityError,
 		})
 		break
 	}
@@ -1317,7 +1338,13 @@ func ignoreIsolatedSentenceParagraph(index int, paragraph string) bool {
 	if index == 0 && isPlainChapterTitle(p) {
 		return true
 	}
-	return isDialogueOnlyParagraph(p)
+	return isDialogueOnlyParagraph(p) || isStandaloneSystemMessageParagraph(p)
+}
+
+func isStandaloneSystemMessageParagraph(paragraph string) bool {
+	p := strings.TrimSpace(paragraph)
+	match := systemMessageRe.FindStringIndex(p)
+	return match != nil && match[0] == 0 && match[1] == len(p) && len(systemMessageRe.FindAllStringIndex(p, -1)) == 1
 }
 
 func isPlainChapterTitle(p string) bool {

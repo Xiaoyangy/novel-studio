@@ -51,6 +51,7 @@ func TestBlockingMechanicalWarningsAndHighRiskDimensions(t *testing.T) {
 func TestRendererReadabilityViolationsAlwaysBlockUnifiedGate(t *testing.T) {
 	for _, rule := range []string{
 		"abstract_system_reassurance",
+		"system_message_inline",
 		"opaque_procedure_jargon",
 		"dialogue_action_lead_repetition",
 	} {

@@ -290,6 +290,10 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		plan.Goal = "完整兑现本章大纲核心事件：" + event
 	}
+	if decision := strings.TrimSpace(plan.CausalSimulation.ProtagonistDecision); decision != "" &&
+		strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != "" {
+		plan.Goal = "落实本轮世界模拟后的主角选择：" + decision
+	}
 	if hook := strings.TrimSpace(entry.Hook); hook != "" {
 		plan.Hook = hook
 	}
@@ -433,7 +437,16 @@ func planSystemEntityAllowed(s *store.Store) bool {
 		return false
 	}
 	source := snapshot.Structured.Genre + "\n" + snapshot.Preferences
-	return domain.SystemCompanionVoiceRequested(source)
+	if domain.SystemCompanionVoiceRequested(source) {
+		return true
+	}
+	for _, rel := range []string{"world_rules.json", filepath.Join("meta", "world_foundation.json")} {
+		raw, readErr := os.ReadFile(filepath.Join(s.Dir(), rel))
+		if readErr == nil && domain.SystemCompanionVoiceRequested(string(raw)) {
+			return true
+		}
+	}
+	return false
 }
 
 func visibleCharacterOutlineScopeIssues(s *store.Store, chapter int, payload any) []string {
@@ -612,6 +625,9 @@ func characterFieldIdentityIssues(v any, names map[string]struct{}, protagonist 
 					switch {
 					case isGenericCharacterPlaceholder(name):
 						issues = append(issues, fmt.Sprintf("%s.character=%q 是模板占位，必须改为 characters.json 里的角色实名", path, name))
+					case isAllowedNonCastPlanEntity(path, name, names):
+						// A companion system needs a voice card, but is not a social
+						// actor and must stay out of the all-character world simulation.
 					case len(names) > 0:
 						if _, ok := names[name]; !ok {
 							issues = append(issues, fmt.Sprintf("%s.character=%q 不在角色册中，计划阶段不能用泛称或临时身份代替实名", path, name))
@@ -646,6 +662,11 @@ func characterFieldIdentityIssues(v any, names map[string]struct{}, protagonist 
 	}
 	walk("plan", v)
 	return compactStrings(issues)
+}
+
+func isAllowedNonCastPlanEntity(path, name string, names map[string]struct{}) bool {
+	_, companionRequested := names["系统"]
+	return companionRequested && strings.Contains(path, ".voice_logic[") && strings.Contains(name, "系统")
 }
 
 func isGenericCharacterPlaceholder(name string) bool {

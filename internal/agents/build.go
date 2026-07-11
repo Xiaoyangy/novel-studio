@@ -269,11 +269,8 @@ func BuildCoordinator(
 		craftRecall,
 		// 联网研究：推演时按本章需要动态补题材现实支架、生活/职业/平台细节、描写素材。
 		webResearch,
-		// 单世界先运行：所有实名角色自主决策与蝴蝶效应完成后，才允许生成 POV plan。
-		tools.NewSimulateChapterWorldTool(store),
-		tools.NewPlanChapterTool(store),
-		// 两阶段规划：plan_structure 先落核心骨架，plan_details 分批补 causal_simulation；
-		// 与单发 plan_chapter 同一校验口径，长章/大 plan 用它降低单次输出压力。
+		// Host 已先派 world_simulator。POV planner 只保留 staged plan 工具，
+		// 避免重复携带 simulate_chapter_world 与单发 plan_chapter 的大 schema。
 		tools.NewPlanStructureTool(store),
 		tools.NewPlanDetailsTool(store),
 	}

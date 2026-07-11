@@ -75,9 +75,22 @@ func rewriteBriefPreserveFacts(markdown string) []string {
 		if line == "" {
 			continue
 		}
+		if rewriteBriefEmptyItem(line) {
+			continue
+		}
 		facts = appendUniqueString(facts, line)
 	}
 	return facts
+}
+
+func rewriteBriefEmptyItem(line string) bool {
+	line = strings.TrimSpace(strings.TrimRight(line, "。.!！"))
+	switch line {
+	case "无", "暂无", "无额外条目", "无额外事实", "没有额外条目", "none", "None", "N/A":
+		return true
+	default:
+		return false
+	}
 }
 
 var rewriteLiteralPatterns = []*regexp.Regexp{

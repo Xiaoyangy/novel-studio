@@ -321,6 +321,23 @@ func TestValidateRewriteChapterTitleUsesOutlineTitle(t *testing.T) {
 	}
 }
 
+func TestLookupOutlineEntryAssignsGlobalChapterNumbers(t *testing.T) {
+	volumes := []domain.VolumeOutline{{
+		Index: 1,
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Chapters: []domain.OutlineEntry{
+				{Title: "刚被催着找工作，一百万到账了"},
+				{Title: "皮卡一到，五个摊主点头了"},
+			},
+		}},
+	}}
+	entry := lookupOutlineEntry(volumes, 2)
+	if entry == nil || entry.Chapter != 2 || entry.Title != "皮卡一到，五个摊主点头了" {
+		t.Fatalf("layered entries with zero stored chapter must resolve by global order: %+v", entry)
+	}
+}
+
 func TestResolveRewriteOutlineEntryFallsBackToChapterPlan(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	plan := domain.ChapterPlan{
@@ -554,6 +571,41 @@ func TestNormalizeRewriteParagraphingForGateMergesNarrativeIsolatedParagraphs(t 
 	for _, v := range rules.Lint(normalized) {
 		if v.Rule == "isolated_sentence_overuse" {
 			t.Fatalf("normalized text should pass isolated_sentence_overuse gate: %+v\n%s", v, normalized)
+		}
+	}
+}
+
+func TestNormalizeRewriteParagraphingPreservesStandaloneSystemMessages(t *testing.T) {
+	text := `第一章 一百万到账了
+
+林澈把手机翻过来。
+
+屏幕亮得有些扎眼。
+
+【县城花钱系统已绑定。】
+
+他盯着那行字看了两遍。
+
+【可用额度：1000000元。】
+
+河风从桥洞里钻出来。
+
+夜市那边有人喊着收摊。
+
+林澈终于把手机攥紧。`
+
+	normalized, changed := normalizeRewriteParagraphingForGate(text)
+	if !changed {
+		t.Fatal("expected ordinary isolated narration to be merged")
+	}
+	for _, message := range []string{"【县城花钱系统已绑定。】", "【可用额度：1000000元。】"} {
+		if !strings.Contains(normalized, "\n\n"+message+"\n\n") {
+			t.Fatalf("system message must remain a standalone paragraph: %s\n%s", message, normalized)
+		}
+	}
+	for _, v := range rules.Lint(normalized) {
+		if v.Rule == "system_message_inline" {
+			t.Fatalf("paragraph normalization reintroduced inline system text: %+v\n%s", v, normalized)
 		}
 	}
 }

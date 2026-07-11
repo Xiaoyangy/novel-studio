@@ -9,7 +9,10 @@ import (
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	storepkg "github.com/chenhongyang/novel-studio/internal/store"
+	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 // chapterPlanReadyForDraft 判断某章的写前计划是否已就绪、可直接交 drafter 渲染。
@@ -50,6 +53,9 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if !isRewrite {
 		return true
 	}
+	if renderOnlyReviewAllowsPlanReuse(store, chapter) {
+		return true
+	}
 	body, err := store.Drafts.LoadChapterText(chapter)
 	if err != nil || strings.TrimSpace(body) == "" {
 		return false
@@ -65,6 +71,79 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	briefToken := fmt.Sprintf("rewrite_brief:%s#sha256=%x", briefPath, briefSum)
 	return slices.Contains(plan.CausalSimulation.ContextSources, bodyToken) &&
 		slices.Contains(plan.CausalSimulation.ContextSources, briefToken)
+}
+
+var planPreservingRenderRules = map[string]bool{
+	"aigc_ratio":                    true,
+	"abstract_system_reassurance":   true,
+	"dialogue_semicolon_formality":  true,
+	"dramatic_negation_overuse":     true,
+	"isolated_sentence_overuse":     true,
+	"micro_action_overuse":          true,
+	"not_but_overuse":               true,
+	"object_response_overuse":       true,
+	"object_response_rhythm_flat":   true,
+	"paragraph_start_repetition":    true,
+	"semicolon_overuse":             true,
+	"state_clause_pile":             true,
+	"stiff_trade_dialogue":          true,
+	"system_message_inline":         true,
+	"system_message_overpacked":     true,
+	"templated_dialogue_chain":      true,
+	"too_many_isolated_short_lines": true,
+}
+
+// renderOnlyReviewAllowsPlanReuse identifies rewrites that change expression,
+// paragraphing or dialogue presentation without changing the simulated world or
+// protagonist decision. Such chapters may go straight to the plan-bound draft
+// finalizer; factual, contract or character failures still require replanning.
+func renderOnlyReviewAllowsPlanReuse(st *storepkg.Store, chapter int) bool {
+	if st == nil || chapter <= 0 {
+		return false
+	}
+	body, err := st.Drafts.LoadChapterText(chapter)
+	if err != nil || strings.TrimSpace(body) == "" {
+		return false
+	}
+	bodyHash := reviewreport.BodySHA256(body)
+	review, err := st.World.LoadReview(chapter)
+	if err != nil || review == nil || review.BodySHA256 != bodyHash || review.ContractStatus != "met" || len(review.ContractMisses) > 0 {
+		return false
+	}
+	for _, dimension := range review.Dimensions {
+		switch dimension.Dimension {
+		case "consistency", "character", "pacing", "continuity", "foreshadow", "hook":
+			if dimension.Verdict != "pass" {
+				return false
+			}
+		}
+	}
+	for _, issue := range review.Issues {
+		if issue.Type != "aesthetic" && issue.Type != "ai_voice_detection" {
+			return false
+		}
+	}
+
+	gate, _, err := reviewreport.LoadMechanicalGate(st.Dir(), chapter)
+	if err != nil || gate == nil || gate.BodySHA256 != bodyHash || len(gate.RuleViolations) == 0 {
+		return false
+	}
+	blocking := review.Verdict == "rewrite" || review.Verdict == "polish"
+	if !blocking {
+		if progress, loadErr := st.Progress.Load(); loadErr == nil && progress != nil &&
+			progress.Flow == domain.FlowPolishing && slices.Contains(progress.PendingRewrites, chapter) {
+			blocking = true
+		}
+	}
+	for _, violation := range gate.RuleViolations {
+		if !planPreservingRenderRules[violation.Rule] {
+			return false
+		}
+		if violation.Severity == rules.SeverityError {
+			blocking = true
+		}
+	}
+	return blocking
 }
 
 // LoadState 从 Store 读取 Route 所需的全部事实。
@@ -90,11 +169,13 @@ func LoadState(store *storepkg.Store) State {
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, target)
 		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, target)
 		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
+		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, next)
 		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, next)
 		loadNextActionPlanStage(store, next, &s)
 		loadNextActionOutline(store, next, &s)

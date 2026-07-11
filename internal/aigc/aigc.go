@@ -758,11 +758,21 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 		strongAnchor := boolFromAny(anchor["eligible"]) &&
 			stringFromAny(anchor["strength"]) == "strong" &&
 			len(blockers) == 0
-		multiSignalSupport := currentCurve >= 60 ||
-			report.ZhuqueCompositePercent >= 38 ||
-			(burstiness >= 35 && (structure >= 45 || crossParagraph >= 30)) ||
-			(structure >= 65 && concrete < 18 && report.Stats.DialogueRatio < 0.35) ||
-			(!strongAnchor && rawCurve >= 90)
+		rawCurveConsensus := rawProbabilityCurve >= 90 && rawWeak >= 75 && rawEntropy >= 60
+		independentSupport := 0
+		if currentCurve >= 60 {
+			independentSupport++
+		}
+		if report.ZhuqueCompositePercent >= 50 {
+			independentSupport++
+		}
+		if burstiness >= 35 && (structure >= 45 || crossParagraph >= 30) {
+			independentSupport++
+		}
+		if structure >= 65 && concrete < 18 && report.Stats.DialogueRatio < 0.35 {
+			independentSupport++
+		}
+		multiSignalSupport := independentSupport >= 2 || (!strongAnchor && (independentSupport >= 1 || rawCurve >= 90))
 		if rawCurve >= 80 && multiSignalSupport {
 			externalLikeScore := math.Min(86, math.Max(76, 62+rawCurve*0.20))
 			if externalLikeScore > score {
@@ -770,7 +780,11 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 				evidence = append(evidence, "整章单段疑似朱雀形态：曲线原始高值偏高且存在当前曲线/结构节奏复合支撑")
 			}
 		} else if rawCurve >= 80 {
-			evidence = append(evidence, "整章单段原始曲线偏高，但当前曲线、人味锚点和结构节奏未形成复合高风险")
+			if rawCurveConsensus {
+				evidence = append(evidence, "整章单段三条原始曲线同时过平，但当前曲线、人味锚点和结构节奏未形成独立复合高风险")
+			} else {
+				evidence = append(evidence, "整章单段原始曲线偏高，但当前曲线、人味锚点和结构节奏未形成复合高风险")
+			}
 		}
 	}
 	lengthOnlyBlocker := len(blockers) > 0
@@ -1176,9 +1190,8 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	// abstract. That shortcut rewarded jargon density, long explanatory sentences,
 	// and dialogue removal inside fiction. Keep the helper for offline diagnostics,
 	// but calibrate delivery only as narrative prose here.
-	cappedActionDensity := math.Min(stats.ActionDensityPerK, 8)
 	groundingDensity := round2(stats.ConcreteDensityPerK + stats.SensoryDensityPerK)
-	sceneDensity := round2(groundingDensity + cappedActionDensity)
+	sceneDensity := round2(groundingDensity + stats.ActionDensityPerK)
 	short12 := round3(ratio(countWhere(sentLens, func(v float64) bool { return v <= 12 }), len(sentLens)))
 	quoteDensity := density(countAll(body, []string{"“", "”", "「", "」", "『", "』"}), stats.Hanzi)
 	punctKinds := punctuationKindCount(body)
@@ -1207,6 +1220,9 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 		stats.BracketLineRatio >= 0.08 {
 		blockers = append(blockers, "短段与条款块同时密集，疑似人味化后处理")
 	}
+	if stats.DialogueRatio >= 0.50 && quoteDensity < 8 {
+		blockers = append(blockers, "高对白统计缺少足量引号轮次承载，疑似短促问答堆砌")
+	}
 
 	score := 0
 	credits := []map[string]any{}
@@ -1234,10 +1250,10 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	} else if short12 >= 0.06 && short12 <= 0.58 {
 		add(6, "short_sentence_present", "存在短句断气")
 	}
-	if stats.DialogueRatio >= 0.08 && stats.DialogueRatio <= 0.38 {
-		add(8, "dialogue_voice_balanced", "对话存在且未挤占叙述")
-	} else if stats.DialogueRatio > 0 && stats.DialogueRatio <= 0.50 {
-		add(4, "dialogue_voice_present", "存在人物声口")
+	if stats.DialogueRatio >= 0.25 || quoteDensity >= 45 {
+		add(14, "dialogue_voice_high", "对白声口或引号轮次充足")
+	} else if stats.DialogueRatio >= 0.12 || quoteDensity >= 18 {
+		add(10, "dialogue_voice_present", "存在稳定人物声口")
 	}
 	if sceneDensity >= 28 {
 		add(20, "scene_density_high", "物件/动作/感官密度高")
@@ -1246,10 +1262,10 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	} else if sceneDensity >= 14 {
 		add(9, "scene_density_present", "存在场景锚点")
 	}
-	if stats.ActionDensityPerK >= 3 && stats.ActionDensityPerK <= 12 && stats.SensoryDensityPerK >= 3 {
-		add(6, "action_sensory_balance", "适量动作与感官共同承载场景")
-	} else if stats.ActionDensityPerK >= 2 && stats.ActionDensityPerK <= 14 {
-		add(3, "action_present", "动作密度处于叙事区间")
+	if stats.ActionDensityPerK >= 10 && stats.SensoryDensityPerK >= 5 {
+		add(12, "action_sensory_chain", "动作与感官共同承载场景")
+	} else if stats.ActionDensityPerK >= 8 {
+		add(6, "action_chain", "动作链承担了场景推进")
 	}
 	if stats.AbstractDensityPerK <= 4.5 && sceneDensity >= 18 {
 		add(8, "abstract_under_scene", "抽象词低于场景锚点")
@@ -1313,10 +1329,6 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	finalCapAllowed := eligible &&
 		strength == "strong" &&
 		score >= 90 &&
-		groundingDensity >= 10 &&
-		stats.DialogueRatio <= 0.45 &&
-		stats.ClicheTotalPerK <= 4 &&
-		stats.AbstractDensityPerK <= 4.5 &&
 		stats.Repeated12Extra == 0
 	return map[string]any{
 		"score":             round2(float64(score)),

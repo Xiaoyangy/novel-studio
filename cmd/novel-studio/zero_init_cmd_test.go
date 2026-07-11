@@ -130,6 +130,96 @@ func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
 	}
 }
 
+func TestZeroInitRefreshOpeningPlanPreservesActiveLedgers(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	if err := zeroInitPipeline(cliOptions{}, []string{"--dir", dir, "--rebuild-rag=false"}); err != nil {
+		t.Fatalf("initial zeroInitPipeline: %v", err)
+	}
+	sentinel := []byte(`{"active":"keep-current-chapter-state"}`)
+	sentinelPaths := []string{
+		filepath.Join(dir, "meta", "resource_ledger.json"),
+		filepath.Join(dir, "relationship_state.json"),
+		filepath.Join(dir, "foreshadow_ledger.json"),
+	}
+	for _, path := range sentinelPaths {
+		if err := os.WriteFile(path, sentinel, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "meta", "initial_review_lessons.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta", "initial_character_dynamics.json"), []byte(`{"stale":"发布会现场"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outline, err := store.NewStore(dir).Outline.LoadOutline()
+	if err != nil || len(outline) == 0 {
+		t.Fatalf("load outline: %v %+v", err, outline)
+	}
+	outline[0].Title = "刷新后的开篇标题"
+	if err := store.NewStore(dir).Outline.SaveOutline(outline); err != nil {
+		t.Fatal(err)
+	}
+	if err := zeroInitPipeline(cliOptions{}, []string{"--dir", dir, "--refresh-opening-plan", "--rebuild-rag=false"}); err != nil {
+		t.Fatalf("refresh zeroInitPipeline: %v", err)
+	}
+
+	planRaw, err := os.ReadFile(filepath.Join(dir, "drafts", "01.zero_init.plan.json"))
+	if err != nil || !strings.Contains(string(planRaw), "刷新后的开篇标题") {
+		t.Fatalf("opening plan was not refreshed: err=%v body=%s", err, planRaw)
+	}
+	for _, path := range sentinelPaths {
+		gotSentinel, readErr := os.ReadFile(path)
+		if readErr != nil || string(gotSentinel) != string(sentinel) {
+			t.Fatalf("active ledger changed at %s: err=%v got=%s", path, readErr, gotSentinel)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "meta", "initial_review_lessons.md")); err != nil {
+		t.Fatalf("refresh should restore review lessons: %v", err)
+	}
+	dynamicsRaw, err := os.ReadFile(filepath.Join(dir, "meta", "initial_character_dynamics.json"))
+	if err != nil || strings.Contains(string(dynamicsRaw), "发布会现场") {
+		t.Fatalf("refresh should replace stale opening dynamics: err=%v body=%s", err, dynamicsRaw)
+	}
+}
+
+func TestZeroInitCountySpendVoicesSeparateLeadsAndFriends(t *testing.T) {
+	project := zeroInitProject{
+		Name:    "只许把钱花在青山县",
+		Premise: "林澈失业返乡，绑定只能在青山县花钱的县城系统，从河畔夜市开始经营。",
+		FirstChapter: domain.OutlineEntry{
+			Chapter:   1,
+			Title:     "刚被催着找工作，一百万到账了",
+			CoreEvent: "林澈在接风饭后核验系统，当晚为夜市完成首笔真实改善消费。",
+		},
+		Characters: []domain.Character{
+			{Name: "林澈", Role: "主角", Tier: "core", Traits: []string{"嘴贫", "有担当"}},
+			{Name: "沈知遥", Role: "女主", Tier: "core", Traits: []string{"强势", "护短"}},
+			{Name: "贺骁", Role: "主角团配角", Tier: "core", Traits: []string{"嘴碎", "仗义"}},
+		},
+		FirstCast: map[string]bool{"林澈": true, "沈知遥": true, "贺骁": true},
+	}
+	dynamics := zeroInitDynamics(project)
+	voices := map[string]domain.CharacterVoiceLogic{}
+	for _, voice := range dynamics.VoiceLogic {
+		voices[voice.Character] = voice
+	}
+	if voices["林澈"].SpeechPrinciple == voices["沈知遥"].SpeechPrinciple ||
+		voices["沈知遥"].DictionAndRhythm == voices["贺骁"].DictionAndRhythm {
+		t.Fatalf("county cast voices must be distinct: %+v", voices)
+	}
+	raw, err := json.Marshal(dynamics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"发布会", "讲稿", "许闻溪", "可合并资产"} {
+		if strings.Contains(string(raw), stale) {
+			t.Fatalf("county zero-init contains stale workplace residue %q: %s", stale, raw)
+		}
+	}
+}
+
 func TestZeroInitOverwriteRepairsWorldTickFromExistingEvents(t *testing.T) {
 	dir := seedZeroInitProject(t)
 	st := store.NewStore(dir)

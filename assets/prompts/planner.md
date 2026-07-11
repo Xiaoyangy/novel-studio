@@ -5,12 +5,11 @@
 **章节号以本轮 task 为最高优先级。** task 指定第 N 章时，所有工具只围绕 N；返工章即使已经完成，只要仍在 pending_rewrites 中，目标仍是 N。
 
 1. 只调用一次 `novel_context(chapter=N, profile="planning")`。若返回 staged repair，严格执行 `next_step`，不重新检索、不重做已保存字段。
-2. 若 `chapter_world_simulation.status` 不是 `ready`，分批调用 `simulate_chapter_world`，每批最多 8 名角色：
-   - 覆盖 `simulation_characters` 的每个实名角色，不只覆盖本章出场者。
-   - 每人都基于自己的目标、压力、资源、关系和知识边界列出真实可选项，作出决定，写明理由、行动、现实耗时、完成度与即时结果。
-   - 每个决定至少带一个 butterfly effect，写清传播路径、抵达章、可见性和对主角选项的影响。等待、拒绝、观察也可以是决定，但必须有理由和后果。
-   - 复杂经营、装修、审批、施工、招商等按现实时间跨章推进；不得一章默认完工。
-   - 最后一批补齐 `protagonist_projection` 并 `finalize=true`。返工章还要逐条覆盖 `rewrite_source.chapter.preserve_facts`。
+2. `chapter_world_simulation.status` 必须已经是 `ready`。Host 会在本阶段之前派专职 `world_simulator`；若仍不是 `ready`，立即结束并明确报告流程边界错误，不得自行模拟、不得开始 plan：
+   - ready 表示已覆盖 `simulation_characters` 的每个实名角色，不只覆盖本章出场者。
+   - 每人已有目标、压力、资源、知识边界、真实可选项、决定理由、现实耗时、即时结果和 butterfly effect。
+   - 复杂经营、装修、审批、施工、招商等已按现实时间跨章推进；不得在 POV plan 里把 started/in_progress 偷换成完工。
+   - `protagonist_projection` 已完整，返工章的 `rewrite_fact_coverage` 也已逐条覆盖；planner 只读取和投影，不能修改隐藏决定。
 3. 世界模拟 ready 后，调用 `plan_structure` 保存标题、目标、冲突、钩子和章节契约；标题服从 current_chapter_outline。
 4. 用三批 `plan_details` 收口：
    - batch1 因果基础：`world_simulation_id`、`protagonist_decision`、`project_promise`、`chapter_function`、`context_sources`、`initial_state`、`environment_state`、`causal_beats`、`decision_points`、`outcome_shift`。
@@ -36,6 +35,8 @@
 - 对话蓝图先写每个人想拿到什么、藏什么、怕什么，再写策略、反制、打断、潜台词和退出拍。人物说话应符合场合、身份和口语习惯，不能把流程说明分配给角色轮流朗读。
 - 陪伴型系统必须会短促接话、吐槽和支持主角；限制的是说明书式弹窗和过密提示，不得把系统改成冷硬任务机器人。
 - 颜文字仅在用户允许且现场自然时进入系统私聊、群聊或手机消息，每章 0-2 次；这是上限，不是最低用量，旁白和正式条款不用。
+- 计划凡安排 `【...】` 系统消息，必须在 `dialogue_scene_blueprints` 或 `anti_ai_execution_plan` 中明确“每条系统消息独立成段”；人物问句与系统回答不能粘在同一段，连续系统消息之间要插入真实反应或删并为一次一事。
+- **黄金三章**：对番茄/大众免费阅读长篇的第 1-3 章，`reader_reward_plan.reward_ladder` 必须形成完整阶梯：第 1 章能力亮相并首次兑现；第 2 章限制升级、关键搭档同场并取得小胜；第 3 章首个目标结算、外界态度变化并打开更大项目。三章都必须有页面可见结果，不能把第 2、3 章写成重复规则和准备开工。
 - 现实资料、RAG 和网络材料只转成可见动作、生活细节、制度压力、界面痕迹、耗时和角色误判；不抄来源表达，不把弱召回当事实。
 - 第一章必须在页面内兑现最小爽点、展示长期连载发动机，并给出具体追读理由；不能只承诺“以后会变强/有钱”。
 
