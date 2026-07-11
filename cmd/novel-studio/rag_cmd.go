@@ -78,7 +78,9 @@ func ragReadyPipeline(opts cliOptions, args []string) error {
 		fs.PrintDefaults()
 	}
 	var dir string
+	var probeChapter int
 	fs.StringVar(&dir, "dir", "", "小说输出目录；为空时使用配置中的 output_dir")
+	fs.IntVar(&probeChapter, "probe-chapter", 0, "就绪后用 novel_context 探测指定章节的 RAG 召回；不重建 embedding")
 	if hasHelpToken(args) {
 		fs.Usage()
 		return nil
@@ -89,7 +91,7 @@ func ragReadyPipeline(opts cliOptions, args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("--rag-ready 不接受额外参数：%v", fs.Args())
 	}
-	cfg, _, err := loadCfgBundle(opts)
+	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil && strings.TrimSpace(dir) == "" {
 		return err
 	}
@@ -158,6 +160,33 @@ func ragReadyPipeline(opts cliOptions, args []string) error {
 				return countErr
 			}
 			report["qdrant_points"] = count
+		}
+	}
+	if probeChapter > 0 {
+		if cfg.Style == "" {
+			cfg.Style = "default"
+		}
+		if bundle.References.RAGWritingGuidelines == "" {
+			bundle = assets.Load(cfg.Style)
+		}
+		embedder, _, embedErr := bootstrap.NewRAGEmbedderWithOverride(cfg, bootstrap.RAGEmbeddingConfig{})
+		if embedErr != nil {
+			return embedErr
+		}
+		var searcher rag.VectorSearcher
+		if qdrantClient, enabled, clientErr := bootstrap.NewRAGQdrantClient(cfg, false); clientErr == nil && enabled {
+			searcher = qdrantClient
+		} else if clientErr != nil {
+			return clientErr
+		}
+		count, probeErr := probeRAGRecall(cfg.OutputDir, cfg.Style, bundle.References, probeChapter, embedder, searcher)
+		if probeErr != nil {
+			return probeErr
+		}
+		report["probe_chapter"] = probeChapter
+		report["rag_recall"] = count
+		if count == 0 {
+			return fmt.Errorf("probe chapter %d 未召回 RAG；就绪检查通过但当前章节查询未命中", probeChapter)
 		}
 	}
 	encoder := json.NewEncoder(os.Stdout)
@@ -1882,19 +1911,11 @@ func probeRAGRecall(outputDir, style string, refs toolspkg.References, chapter i
 	if searcher != nil {
 		tool.WithRAGVectorSearcher(searcher)
 	}
-	raw, err := tool.Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{"chapter":%d}`, chapter)))
+	items, _, err := tool.ProbeRAGRecall(context.Background(), chapter)
 	if err != nil {
 		return 0, err
 	}
-	var payload struct {
-		Selected struct {
-			RAG []domain.RecallItem `json:"rag_recall"`
-		} `json:"selected_memory"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return 0, err
-	}
-	return len(payload.Selected.RAG), nil
+	return len(items), nil
 }
 
 // appendConfiguredSharedLibraries 把配置的共享库（写作手法库 + 对标素材库 + 显式校准库）

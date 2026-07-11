@@ -220,6 +220,29 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	return marshalOrderedContext(result)
 }
 
+// ProbeRAGRecall runs the chapter retrieval path without building and trimming
+// the full novel_context envelope. A full context may legitimately trim
+// selected_memory.rag_recall to stay within its byte budget; probes must report
+// the pre-trim retrieval result instead of turning that budget decision into a
+// false zero-recall failure.
+func (t *ContextTool) ProbeRAGRecall(ctx context.Context, chapter int) ([]domain.RecallItem, *domain.RetrievalTrace, error) {
+	if chapter <= 0 {
+		return nil, nil, fmt.Errorf("RAG probe chapter 必须大于 0")
+	}
+	seed := newChapterContextEnvelope()
+	state := t.prepareChapterContext(chapter, &seed, func(string, error) {})
+	if state.currentEntry == nil && state.chapterPlan == nil {
+		return nil, nil, fmt.Errorf("RAG probe chapter %d 缺少大纲或章节计划", chapter)
+	}
+	items, trace, cacheHit := t.selectRAGRecall(ctx, state)
+	if trace != nil && !cacheHit {
+		if err := t.store.RAG.AppendTrace(*trace); err != nil {
+			return nil, nil, err
+		}
+	}
+	return items, trace, nil
+}
+
 func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, chapter int, warn func(string, error)) {
 	if !chapterWorldSimulationRequired(t.store) {
 		return

@@ -109,6 +109,8 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 
 - **情感打动力**：是否有让读者心跳加速、喉头发紧或嘴角上扬的段落？如果整章情感平淡，指出最该加强的 1-2 个位置和建议手法（如延迟揭示、感官特写、节奏突变）。
 
+- **标题与总体基调**：核对章节标题是否兑现本书 user_rules 的题材温度和追读承诺。轻松搞笑/爽文的标题应抓反差、即时爽点、关系糖、尴尬笑点或结果悬念；“第一张清单”“某某的表”“雨夜验收”这类流程/文档标签若没有人物反应或反差结果，归 consistency issue。正文允许短暂低谷，但整章若连续由流程、训话、压抑和失败主导，结尾又没有同伴感、小胜或下一步期待，归 aesthetic / pacing，不得以“现实感”为由放行。
+
 - **全书级固化（style_stats）**：`episodic_memory.style_stats`（如有）是代码对全部已写章节的确定性统计：句式模式类计数（patterns，含章均 per_chapter）、近期高频短语（top_phrases）、跨章逐字重复句（repeated_sentences）、章末形态（ending.short_ratio 为短句收尾章占比）、开篇时间词率（opening_time_rate）、标题格式混用（title_formats）。审阅窗口内每处都"正常"的句式，全书章均几十次就是病——当某模式章均次数明显异常、章末短句占比逼近 1、同一长句跨多章复现、标题格式混用时，必须在 aesthetic（标题问题归 consistency）出 issue 并直接引用统计数字。统计只给事实，是否成病由你按题材与文风裁定。
 - **写法资产（writing_engine）**：`reference_pack.writing_engine` 是当前启用的写法特征池编译结果。审稿时检查正文是否执行 active_rules、是否违背 taboos、是否只机械套用 samples 形成模板感。发现问题归 aesthetic；不要要求照抄样本。
 - **生产链路诊断（production_playbook）**：`reference_pack.references.production_playbook` 用来区分问题层级。表达偏移、AI 腔、样本机械套用归 aesthetic；章节任务未完成归 contract / pacing / continuity；本书世界、资源账本、角色状态被写错归 consistency / continuity；RAG 或拆书资料污染正文时指出来源越权。可用正文加局部 warning 不应直接升级为全书重规划，除非后续任务单或事实资产已经失效。

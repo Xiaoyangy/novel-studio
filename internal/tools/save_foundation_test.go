@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -147,6 +148,42 @@ func TestSaveFoundationOutlineClearsLayeredStateWhenDowngrading(t *testing.T) {
 	}
 	if meta.PlanningTier != domain.PlanningTierMid {
 		t.Fatalf("expected planning tier %q, got %q", domain.PlanningTierMid, meta.PlanningTier)
+	}
+}
+
+func TestSaveFoundationRejectsCompactProcessTitlesForExplicitLightheartedProject(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.UserRules.Save(&rules.Snapshot{
+		Version:     rules.SnapshotVersion,
+		Status:      rules.StatusReady,
+		Preferences: "整本保持轻松欢快；卷名、弧名和章节标题必须有吸引力，不能像工作日志。",
+	}); err != nil {
+		t.Fatalf("Save user rules: %v", err)
+	}
+
+	tool := NewSaveFoundationTool(s)
+	bad, _ := json.Marshal(map[string]any{
+		"type": "outline",
+		"content": []map[string]any{{
+			"chapter": 1, "title": "第一张清单", "core_event": "系统筛掉无效消费", "hook": "女主到场",
+		}},
+	})
+	if _, err := tool.Execute(context.Background(), bad); err == nil {
+		t.Fatal("expected compact process title to be rejected")
+	}
+
+	good, _ := json.Marshal(map[string]any{
+		"type": "outline",
+		"content": []map[string]any{{
+			"chapter": 1, "title": "系统不要排面，只要实用", "core_event": "系统筛掉无效消费", "hook": "女主到场",
+		}},
+	})
+	if _, err := tool.Execute(context.Background(), good); err != nil {
+		t.Fatalf("expected contrast-driven title to pass: %v", err)
 	}
 }
 

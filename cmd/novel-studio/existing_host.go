@@ -29,7 +29,7 @@ func loadCfgBundle(opts cliOptions) (bootstrap.Config, assets.Bundle, error) {
 	// host.New 内部也会 FillDefaults（幂等），这里先填一遍让 cfg.OutputDir 等默认值
 	// 对直接读 cfg 的调用方（如 --pipeline 解析 statePath）可见。
 	// --dir 指定项目根时以它为基准解析相对 OutputDir，不再要求 cwd 必须是项目目录。
-	if err := normalizeOutputDirForInvocation(&cfg, opts.Dir); err != nil {
+	if err := normalizeOutputAndRAGForInvocation(&cfg, opts.Dir, hasConfiguredRAGQdrantCollection(opts)); err != nil {
 		return bootstrap.Config{}, assets.Bundle{}, err
 	}
 	rules.EnsureHomeRulesDir()
@@ -38,6 +38,18 @@ func loadCfgBundle(opts cliOptions) (bootstrap.Config, assets.Bundle, error) {
 	bundle, provenance := assets.LoadWithOverrides(cfg.Style, assets.DefaultPromptOverrideDirs()...)
 	assets.WritePromptManifest(cfg.OutputDir, provenance)
 	return cfg, bundle, nil
+}
+
+// normalizeOutputAndRAGForInvocation keeps the runtime Qdrant collection tied
+// to the final normalized output directory. FillDefaults may derive a
+// collection before --dir is applied; leaving that value in place makes
+// build-rag write one collection while pipeline/rag-ready query another.
+func normalizeOutputAndRAGForInvocation(cfg *bootstrap.Config, baseDir string, collectionConfigured bool) error {
+	if err := normalizeOutputDirForInvocation(cfg, baseDir); err != nil {
+		return err
+	}
+	refreshAutoRAGCollectionForOutputDir(cfg, cfg.OutputDir, collectionConfigured)
+	return nil
 }
 
 // normalizeOutputDirForInvocation turns cfg.OutputDir into an absolute path based

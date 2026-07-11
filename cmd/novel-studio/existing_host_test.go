@@ -6,7 +6,40 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
+	"github.com/chenhongyang/novel-studio/internal/rag"
 )
+
+func TestNormalizeOutputAndRAGRekeysCollectionAfterDirOverride(t *testing.T) {
+	runRoot := t.TempDir()
+	cfg := bootstrap.Config{}
+	cfg.FillDefaults()
+	stale := cfg.RAG.Qdrant.Collection
+
+	if err := normalizeOutputAndRAGForInvocation(&cfg, runRoot, false); err != nil {
+		t.Fatal(err)
+	}
+
+	wantDir := filepath.Join(runRoot, "output", "novel")
+	wantCollection := rag.CollectionName("novel_studio", wantDir)
+	if cfg.OutputDir != wantDir || cfg.RAG.Qdrant.Collection != wantCollection {
+		t.Fatalf("OutputDir=%q Collection=%q, want %q %q (stale=%q)",
+			cfg.OutputDir, cfg.RAG.Qdrant.Collection, wantDir, wantCollection, stale)
+	}
+}
+
+func TestNormalizeOutputAndRAGPreservesExplicitCollection(t *testing.T) {
+	runRoot := t.TempDir()
+	cfg := bootstrap.Config{}
+	cfg.FillDefaults()
+	cfg.RAG.Qdrant.Collection = "shared_manual_collection"
+
+	if err := normalizeOutputAndRAGForInvocation(&cfg, runRoot, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RAG.Qdrant.Collection != "shared_manual_collection" {
+		t.Fatalf("explicit collection changed to %q", cfg.RAG.Qdrant.Collection)
+	}
+}
 
 func TestNormalizeOutputDirFromRunRoot(t *testing.T) {
 	runRoot := t.TempDir()

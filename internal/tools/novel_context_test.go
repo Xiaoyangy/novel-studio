@@ -1331,6 +1331,16 @@ func TestContextToolRAGRecallUsesProjectChunksAndIgnoresReferenceLibraries(t *te
 	}
 
 	tool := NewContextTool(s, References{}, "default")
+	probeItems, probeTrace, err := tool.ProbeRAGRecall(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ProbeRAGRecall: %v", err)
+	}
+	if len(probeItems) == 0 || probeItems[0].Key != "chunk:night-rent-craft" {
+		t.Fatalf("expected pre-trim RAG probe result, got %+v", probeItems)
+	}
+	if probeTrace == nil || len(probeTrace.Matches) == 0 {
+		t.Fatalf("expected probe trace, got %+v", probeTrace)
+	}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)

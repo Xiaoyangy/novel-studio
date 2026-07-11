@@ -126,6 +126,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("outline", &entries); err != nil {
 			return nil, err
 		}
+		if err := validateLightheartedOutlineTitles(t.store, entries); err != nil {
+			return nil, err
+		}
 		if err := t.store.Outline.SaveOutline(entries); err != nil {
 			return nil, fmt.Errorf("save outline: %w: %w", errs.ErrStoreWrite, err)
 		}
@@ -141,6 +144,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	case "layered_outline":
 		var volumes []domain.VolumeOutline
 		if err := decode("layered_outline", &volumes); err != nil {
+			return nil, err
+		}
+		if err := validateLightheartedLayeredTitles(t.store, volumes); err != nil {
 			return nil, err
 		}
 		if err := t.store.Outline.SaveLayeredOutline(volumes); err != nil {
@@ -227,6 +233,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("expand_arc chapters", &chapters); err != nil {
 			return nil, err
 		}
+		if err := validateLightheartedOutlineTitles(t.store, chapters); err != nil {
+			return nil, err
+		}
 		if err := t.store.ExpandArc(a.Volume, a.Arc, chapters); err != nil {
 			return nil, fmt.Errorf("expand arc: %w: %w", errs.ErrStoreWrite, err)
 		}
@@ -240,6 +249,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		}
 		var vol domain.VolumeOutline
 		if err := decode("append_volume", &vol); err != nil {
+			return nil, err
+		}
+		if err := validateLightheartedLayeredTitles(t.store, []domain.VolumeOutline{vol}); err != nil {
 			return nil, err
 		}
 		if err := t.store.AppendVolume(vol); err != nil {

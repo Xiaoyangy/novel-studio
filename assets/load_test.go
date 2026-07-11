@@ -105,3 +105,25 @@ func TestWritingPromptsRemainProjectNeutral(t *testing.T) {
 		}
 	}
 }
+
+func TestLightheartedTitleAndToneContractIsLoaded(t *testing.T) {
+	bundle := Load("default")
+	for name, prompt := range map[string]string{
+		"architect": bundle.Prompts.ArchitectLong,
+		"writer":    bundle.Prompts.Writer,
+		"editor":    bundle.Prompts.Editor,
+	} {
+		if !strings.Contains(prompt, "轻松") {
+			t.Fatalf("%s prompt must carry the lighthearted tone contract", name)
+		}
+	}
+	if !strings.Contains(bundle.Prompts.ArchitectLong, "流程标签") {
+		t.Fatal("architect prompt must reject report-like chapter titles")
+	}
+	if !strings.Contains(bundle.Prompts.Writer, "全章余味合同") {
+		t.Fatal("writer prompt must preserve the lighthearted whole-chapter aftertaste")
+	}
+	if !strings.Contains(bundle.Prompts.Editor, "标题与总体基调") {
+		t.Fatal("editor prompt must review title appeal and overall tone together")
+	}
+}
