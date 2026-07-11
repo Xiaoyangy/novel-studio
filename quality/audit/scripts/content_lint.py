@@ -116,6 +116,17 @@ SYSTEM_PROCEDURE_NARRATION_RE = re.compile(
 OPAQUE_PROCEDURE_TERMS = [
     "采购凭证", "用途说明", "测试记录", "临时固定", "补测", "核验", "验收记录", "用途不符", "真实改善消费",
 ]
+DESIGNED_ROLE_QUIP_MARKERS = [
+    "照牌", "审我", "采访", "开会", "汇报", "上课", "判案", "拍广告", "演戏", "查户口", "写报告", "走流程",
+]
+PROCEDURE_STAGE_GROUPS = [
+    ["答应", "同意", "做不了主", "只动", "别动", "授权"],
+    ["报价", "总价", "多少钱", "五金店", "材料单", "四千二百八"],
+    ["安装", "送装", "接线", "线槽", "卡扣", "工具箱", "上梯"],
+    ["测试", "试过", "漏保", "保护开关", "测试键"],
+    ["开票", "电子票", "票据", "付款码", "收款码", "支付", "付款记录"],
+    ["检查", "核验", "放行", "收摊", "明早九点", "文旅中心"],
+]
 TEMPLATED_DIALOGUE_NAME_CALL_IN_TEXT_RE = re.compile(r"[“\"「][\u4e00-\u9fff]{2,4}[。！？!?]?[”\"」][^。！？!?；;\n]{0,12}叫[他她]")
 TEMPLATED_DIALOGUE_MICRO_BEAT_RE = re.compile(
     r"(?:叫[他她]|停住|停下|抬眼|抬头|看了[^。！？!?；;\n]{0,8}一眼|"
@@ -825,6 +836,44 @@ def cadence_issues(raw: str) -> list[dict]:
                 "actual": term_count,
                 "target": message[:100],
                 "evidence": "流程缩写和验收黑话不得成串进入对白；改写成哪里会坏、谁会吃亏、现在要怎么办",
+            }
+        )
+        break
+
+    for message in messages:
+        has_contrast = "，还是" in message or ",还是" in message or "，不是" in message
+        if not has_contrast or not any(marker in message for marker in DESIGNED_ROLE_QUIP_MARKERS):
+            continue
+        target_index = raw.find(message)
+        issues.append(
+            {
+                "rule": "designed_role_quip",
+                "severity": "warning",
+                "line": line_number(raw, target_index if target_index >= 0 else 0),
+                "limit": "普通人物先说眼前麻烦，不替作者临时造工整比喻",
+                "actual": 1,
+                "target": message[:100],
+                "evidence": "角色没有稳定机智声口时，删掉角色比喻和整齐反问，改成当场会脱口而出的具体抱怨",
+            }
+        )
+        break
+
+    window_size = 12
+    for start in range(len(paras)):
+        window = " ".join(paras[start : start + window_size])
+        stage_count = sum(1 for group in PROCEDURE_STAGE_GROUPS if any(term in window for term in group))
+        if stage_count < len(PROCEDURE_STAGE_GROUPS):
+            continue
+        target_index = raw.find(paras[start])
+        issues.append(
+            {
+                "rule": "procedure_stage_pile",
+                "severity": "warning",
+                "line": line_number(raw, target_index if target_index >= 0 else 0),
+                "limit": "单场只保留一次关键交涉、一个结果和真正改变人物的后果",
+                "actual": stage_count,
+                "target": window[:120],
+                "evidence": "授权、报价、安装、测试、付款和检查在同一场密集交齐，说明正文仍按 plan 补流程；压缩后台步骤，把篇幅还给人物选择和兑现",
             }
         )
         break

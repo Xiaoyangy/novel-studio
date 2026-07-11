@@ -19,7 +19,7 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 				"主角确认额度真实并完成第一笔改善消费",
 				"赵航必须用“呱，”打断饭桌说教",
 			},
-			ForbiddenMoves: []string{"公开系统"},
+			ForbiddenMoves: []string{"公开系统", "普通对白不得使用指定设计腔措辞"},
 			ContinuityChecks: []string{
 				"沈知遥到场时首单已经发生。",
 				"章末具体锚点必须是票据、测试记录和九点要求。",
@@ -78,7 +78,16 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 1 {
 		t.Fatalf("mandatory/optional = %#v / %#v", packet.MandatoryBeats, packet.OptionalStyleBeats)
 	}
-	for _, policy := range []string{packet.PlanTranslationPolicy, packet.ReaderRegisterPolicy, packet.InterfaceCompression} {
+	if len(packet.ForbiddenMoves) != 2 {
+		t.Fatalf("hard project prohibitions must survive render projection: %#v", packet.ForbiddenMoves)
+	}
+	for _, policy := range []string{
+		packet.PlanTranslationPolicy,
+		packet.ReaderRegisterPolicy,
+		packet.InterfaceCompression,
+		packet.ScenePurposePolicy,
+		packet.SpokenLanguagePolicy,
+	} {
 		if strings.TrimSpace(policy) == "" {
 			t.Fatalf("render translation policy missing: %#v", packet)
 		}
@@ -94,7 +103,10 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 		t.Fatal(err)
 	}
 	serialized := string(raw)
-	for _, forbidden := range []string{"turn_progression", "action_beat", "proof_on_page", "latent_context", "hidden_pressures", "每句先夹菜"} {
+	for _, forbidden := range []string{
+		"turn_progression", "action_beat", "proof_on_page", "latent_context", "hidden_pressures", "每句先夹菜",
+		"scene_objective", "sentence_rhythm_policy", "review_checks",
+	} {
 		if strings.Contains(serialized, forbidden) {
 			t.Fatalf("draft render packet leaked %q: %s", forbidden, serialized)
 		}
@@ -113,6 +125,27 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	leanPlan := result["chapter_plan"].(map[string]any)
 	if _, exists := leanPlan["causal_simulation"]; exists {
 		t.Fatal("lean chapter plan must not embed causal_simulation")
+	}
+}
+
+func TestDraftRenderPacketKeepsRelationshipScenesAndDropsProcessScenes(t *testing.T) {
+	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
+		DialogueBlueprints: []domain.DialogueSceneBlueprint{
+			{SceneID: "dinner", DialogueMode: "public_confrontation", RelationshipFrame: "亲友争夺体面"},
+			{SceneID: "system", DialogueMode: "mediated_exchange", RelationshipFrame: "用户与系统"},
+			{SceneID: "phone", DialogueMode: "mediated_exchange", RelationshipFrame: "朋友隔着电话互相试探"},
+			{SceneID: "supplier", DialogueMode: "logistics_under_stress", RelationshipFrame: "付款方与供货方"},
+			{SceneID: "review", DialogueMode: "status_report", RelationshipFrame: "旧识在职责与关心之间"},
+			{SceneID: "settlement", DialogueMode: "mediated_exchange", RelationshipFrame: "系统结算"},
+		},
+	}}
+
+	packet := newDraftRenderPacket(plan)
+	if len(packet.DialogueScenes) != 3 {
+		t.Fatalf("dialogue scenes should contain only relationship-bearing scenes: %#v", packet.DialogueScenes)
+	}
+	if packet.DialogueScenes[0].SceneID != "dinner" || packet.DialogueScenes[1].SceneID != "phone" || packet.DialogueScenes[2].SceneID != "review" {
+		t.Fatalf("unexpected dialogue scene projection: %#v", packet.DialogueScenes)
 	}
 }
 

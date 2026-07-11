@@ -571,6 +571,63 @@ func TestLint_OpaqueProcedureJargon(t *testing.T) {
 	}
 }
 
+func TestLint_DesignedRoleQuip(t *testing.T) {
+	bad := `新灯一亮，马玉芬挡住眼：“你是照牌，还是审我？”`
+	if v := findRule(Lint(bad), "designed_role_quip"); v == nil {
+		t.Fatalf("expected designed_role_quip, got %+v", Lint(bad))
+	}
+	clean := `新灯一亮，马玉芬眯起眼：“往外挪点，晃眼。”`
+	if v := findRule(Lint(clean), "designed_role_quip"); v != nil {
+		t.Fatalf("plain complaint should pass: %+v", v)
+	}
+}
+
+func TestLint_ProcedureStagePile(t *testing.T) {
+	bad := `马玉芬说：“我只答应动摊前，旁边我做不了主。”
+
+老丁从五金店赶来，报了总价：“四千二百八。”
+
+材料单摊在桌上。
+
+他打开工具箱开始安装。
+
+林澈扶着老丁上梯。
+
+线槽和卡扣逐个压好。
+
+老丁按下测试键。
+
+“漏保试过了。”
+
+电子票发到手机上。
+
+林澈调出付款码，留下付款记录。
+
+沈知遥低头检查线路。
+
+“只放行到收摊，明早九点来文旅中心核验。”`
+	if v := findRule(Lint(bad), "procedure_stage_pile"); v == nil {
+		t.Fatalf("expected procedure_stage_pile, got %+v", Lint(bad))
+	}
+
+	clean := `“只能动我摊前，别人的地方我管不着。”
+
+老丁看完旧线，报了四千二百八。林澈让他照能长期用的弄。
+
+半个多小时后，新灯照亮了坡口。马玉芬眯起眼：“往外挪点，晃眼。”
+
+老丁调整好灯，电子票也发了过来。收款声响起，林澈再看自己的银行卡，余额一分没少。
+
+第一位顾客回来买了一碗豆腐脑。
+
+系统给出五万元和二十四小时的新任务。
+
+沈知遥到场后看了眼线路：“今晚先用，收摊就关。明早九点来找我。”`
+	if v := findRule(Lint(clean), "procedure_stage_pile"); v != nil {
+		t.Fatalf("compressed scene should pass: %+v", v)
+	}
+}
+
 func TestLint_UITrialChecklist(t *testing.T) {
 	bad := `林澈试着还信用卡，确认键刚亮，页面就退了回去。他又点了提现，按钮按下去没反应，最后把用途备注改成“今日周转”，看了两秒又删掉。`
 	if v := findRule(Lint(bad), "ui_trial_checklist"); v == nil {

@@ -32,10 +32,10 @@ type draftRenderPacket struct {
 	CutOrCompress          []string                         `json:"cut_or_compress,omitempty"`
 	PageTurnQuestions      []string                         `json:"page_turn_questions,omitempty"`
 	ProtagonistProjection  draftProtagonistProjection       `json:"protagonist_projection"`
-	EntertainmentPlan      domain.ReaderEntertainmentPlan   `json:"reader_entertainment_plan,omitempty"`
-	TrendLanguagePlan      []domain.TrendLanguagePlan       `json:"trend_language_plan,omitempty"`
-	LongformOpening        domain.LongformOpeningDesign     `json:"longform_opening,omitempty"`
-	AntiAIExecutionPlan    domain.AntiAIExecutionPlan       `json:"anti_ai_execution_plan,omitempty"`
+	EntertainmentPlan      draftEntertainmentPlan           `json:"reader_entertainment_plan,omitempty"`
+	TrendLanguagePlan      []draftTrendLanguagePlan         `json:"trend_language_plan,omitempty"`
+	LongformOpening        draftLongformOpening             `json:"longform_opening,omitempty"`
+	AntiAIExecutionPlan    draftAntiAIPlan                  `json:"anti_ai_execution_plan,omitempty"`
 	VoiceCards             []draftVoiceCard                 `json:"voice_cards,omitempty"`
 	VisualCards            []draftVisualCard                `json:"visual_cards,omitempty"`
 	DialogueScenes         []draftDialogueScene             `json:"dialogue_scenes,omitempty"`
@@ -51,6 +51,35 @@ type draftRenderPacket struct {
 	PlanTranslationPolicy  string                           `json:"plan_translation_policy"`
 	ReaderRegisterPolicy   string                           `json:"reader_register_policy"`
 	InterfaceCompression   string                           `json:"interface_compression_policy"`
+	ScenePurposePolicy     string                           `json:"scene_purpose_policy"`
+	SpokenLanguagePolicy   string                           `json:"spoken_language_policy"`
+}
+
+type draftEntertainmentPlan struct {
+	OpeningBeat          string   `json:"opening_beat,omitempty"`
+	HumorBeats           []string `json:"humor_beats,omitempty"`
+	ImmediatePayoffs     []string `json:"immediate_payoffs,omitempty"`
+	ProcedureCompression string   `json:"procedure_compression,omitempty"`
+	CompanionVoiceBeat   string   `json:"companion_voice_beat,omitempty"`
+}
+
+type draftTrendLanguagePlan struct {
+	Item             string `json:"item,omitempty"`
+	CharacterCarrier string `json:"character_carrier,omitempty"`
+	SceneFunction    string `json:"scene_function,omitempty"`
+	UsageBudget      string `json:"usage_budget,omitempty"`
+}
+
+type draftLongformOpening struct {
+	TargetReader      string   `json:"target_reader,omitempty"`
+	OpeningHook       string   `json:"opening_hook,omitempty"`
+	FirstChapterProof []string `json:"first_chapter_proof,omitempty"`
+	RetentionRisks    []string `json:"retention_risks,omitempty"`
+}
+
+type draftAntiAIPlan struct {
+	RiskSignals  []string `json:"risk_signals,omitempty"`
+	CounterMoves []string `json:"counter_moves,omitempty"`
 }
 
 type draftProtagonistProjection struct {
@@ -66,7 +95,6 @@ type draftProtagonistProjection struct {
 type draftVoiceCard struct {
 	Character          string   `json:"character,omitempty"`
 	SpeechPrinciple    string   `json:"speech_principle,omitempty"`
-	SceneObjective     string   `json:"scene_objective,omitempty"`
 	HiddenSubtext      string   `json:"hidden_subtext,omitempty"`
 	KnowledgeBoundary  string   `json:"knowledge_boundary,omitempty"`
 	RelationshipStance string   `json:"relationship_stance,omitempty"`
@@ -95,28 +123,14 @@ type draftVisualCard struct {
 }
 
 type draftDialogueScene struct {
-	SceneID                     string                          `json:"scene_id,omitempty"`
-	DialogueMode                string                          `json:"dialogue_mode,omitempty"`
-	ScenePressure               string                          `json:"scene_pressure,omitempty"`
-	EmotionalTemperature        string                          `json:"emotional_temperature,omitempty"`
-	RelationshipFrame           string                          `json:"relationship_frame,omitempty"`
-	Medium                      string                          `json:"medium,omitempty"`
-	POVRole                     string                          `json:"pov_role,omitempty"`
-	Participants                []string                        `json:"participants,omitempty"`
-	AudiencePresence            domain.DialogueAudiencePresence `json:"audience_presence"`
-	InfoAsymmetry               domain.DialogueInfoAsymmetry    `json:"information_asymmetry"`
-	ValueShift                  domain.DialogueValueShift       `json:"value_shift"`
-	OpeningStrategy             string                          `json:"opening_strategy,omitempty"`
-	LocationAnchor              string                          `json:"location_anchor,omitempty"`
-	POVState                    string                          `json:"pov_state,omitempty"`
-	DialogueObjective           string                          `json:"dialogue_objective,omitempty"`
-	InterlocutorAgenda          string                          `json:"interlocutor_agenda,omitempty"`
-	ProtagonistResponseStrategy string                          `json:"protagonist_response_strategy,omitempty"`
-	DirectnessPolicy            string                          `json:"directness_policy,omitempty"`
-	InfoReleasePolicy           string                          `json:"info_release_policy,omitempty"`
-	ExpositionBudget            string                          `json:"exposition_budget,omitempty"`
-	ExitBeat                    string                          `json:"exit_beat,omitempty"`
-	DoNotUse                    []string                        `json:"do_not_use,omitempty"`
+	SceneID           string   `json:"scene_id,omitempty"`
+	ScenePressure     string   `json:"scene_pressure,omitempty"`
+	RelationshipFrame string   `json:"relationship_frame,omitempty"`
+	Participants      []string `json:"participants,omitempty"`
+	LocationAnchor    string   `json:"location_anchor,omitempty"`
+	DialogueObjective string   `json:"dialogue_objective,omitempty"`
+	ExitBeat          string   `json:"exit_beat,omitempty"`
+	DoNotUse          []string `json:"do_not_use,omitempty"`
 }
 
 type draftEnvironmentSignal struct {
@@ -210,14 +224,13 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 	for _, voice := range sim.VoiceLogic {
 		voices = append(voices, draftVoiceCard{
 			Character:          voice.Character,
-			SpeechPrinciple:    voice.SpeechPrinciple,
-			SceneObjective:     voice.SceneObjective,
-			HiddenSubtext:      voice.HiddenSubtext,
-			KnowledgeBoundary:  voice.KnowledgeBoundary,
+			SpeechPrinciple:    firstRenderClause(voice.SpeechPrinciple),
+			HiddenSubtext:      firstRenderClause(voice.HiddenSubtext),
+			KnowledgeBoundary:  firstRenderClause(voice.KnowledgeBoundary),
 			RelationshipStance: voice.RelationshipStance,
-			DictionAndRhythm:   voice.DictionAndRhythm,
-			TypicalMoves:       voice.TypicalMoves,
-			ForbiddenMoves:     voice.ForbiddenMoves,
+			DictionAndRhythm:   firstRenderClause(voice.DictionAndRhythm),
+			TypicalMoves:       limitRenderStrings(voice.TypicalMoves, 2),
+			ForbiddenMoves:     limitRenderStrings(voice.ForbiddenMoves, 2),
 		})
 	}
 	visuals := make([]draftVisualCard, 0, len(sim.VisualDesign))
@@ -234,31 +247,20 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 			SceneUse:        visual.SceneUse,
 		})
 	}
-	dialogueScenes := make([]draftDialogueScene, 0, len(sim.DialogueBlueprints))
+	dialogueScenes := make([]draftDialogueScene, 0, min(3, len(sim.DialogueBlueprints)))
 	for _, scene := range sim.DialogueBlueprints {
+		if !keepDraftDialogueScene(scene) || len(dialogueScenes) >= 3 {
+			continue
+		}
 		dialogueScenes = append(dialogueScenes, draftDialogueScene{
-			SceneID:                     scene.SceneID,
-			DialogueMode:                scene.DialogueMode,
-			ScenePressure:               scene.ScenePressure,
-			EmotionalTemperature:        scene.EmotionalTemperature,
-			RelationshipFrame:           scene.RelationshipFrame,
-			Medium:                      scene.Medium,
-			POVRole:                     scene.POVRole,
-			Participants:                scene.Participants,
-			AudiencePresence:            scene.AudiencePresence,
-			InfoAsymmetry:               scene.InfoAsymmetry,
-			ValueShift:                  scene.ValueShift,
-			OpeningStrategy:             scene.OpeningStrategy,
-			LocationAnchor:              scene.LocationAnchor,
-			POVState:                    scene.POVState,
-			DialogueObjective:           scene.DialogueObjective,
-			InterlocutorAgenda:          scene.InterlocutorAgenda,
-			ProtagonistResponseStrategy: scene.ProtagonistResponseStrategy,
-			DirectnessPolicy:            scene.DirectnessPolicy,
-			InfoReleasePolicy:           scene.InfoReleasePolicy,
-			ExpositionBudget:            scene.ExpositionBudget,
-			ExitBeat:                    scene.ExitBeat,
-			DoNotUse:                    scene.DoNotUse,
+			SceneID:           scene.SceneID,
+			ScenePressure:     firstRenderClause(scene.ScenePressure),
+			RelationshipFrame: firstRenderClause(scene.RelationshipFrame),
+			Participants:      limitRenderStrings(scene.Participants, 5),
+			LocationAnchor:    firstRenderClause(scene.LocationAnchor),
+			DialogueObjective: firstRenderClause(scene.DialogueObjective),
+			ExitBeat:          firstRenderClause(scene.ExitBeat),
+			DoNotUse:          limitRenderStrings(scene.DoNotUse, 3),
 		})
 	}
 	environment := make([]draftEnvironmentSignal, 0, len(sim.EnvironmentState))
@@ -285,24 +287,24 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		EmotionArc:             plan.EmotionArc,
 		MandatoryBeats:         mandatoryBeats,
 		OptionalStyleBeats:     compactStrings(optionalStyleBeats),
-		ForbiddenMoves:         plan.Contract.ForbiddenMoves,
+		ForbiddenMoves:         limitRenderStrings(plan.Contract.ForbiddenMoves, 8),
 		ContinuityChecks:       RenderContinuityChecks(plan),
-		PayoffPoints:           plan.Contract.PayoffPoints,
-		SceneAnchors:           plan.Contract.SceneAnchors,
-		CandidateBeats:         candidateBeats,
-		RevealBudget:           sim.ReaderRetentionPlan.RevealBudget,
-		CutOrCompress:          sim.ReaderRetentionPlan.CutOrCompress,
-		PageTurnQuestions:      sim.ReaderRetentionPlan.PageTurnQuestions,
+		PayoffPoints:           limitRenderStrings(plan.Contract.PayoffPoints, 3),
+		SceneAnchors:           renderSceneAnchors(plan.Contract.SceneAnchors),
+		CandidateBeats:         limitCandidateBeats(candidateBeats, 2),
+		RevealBudget:           limitRenderStrings(sim.ReaderRetentionPlan.RevealBudget, 4),
+		CutOrCompress:          limitRenderStrings(sim.ReaderRetentionPlan.CutOrCompress, 4),
+		PageTurnQuestions:      limitRenderStrings(sim.ReaderRetentionPlan.PageTurnQuestions, 2),
 		ProtagonistProjection:  projection,
-		EntertainmentPlan:      sim.EntertainmentPlan,
-		TrendLanguagePlan:      sim.TrendLanguage,
-		LongformOpening:        sim.LongformOpening,
-		AntiAIExecutionPlan:    sim.AntiAIPlan,
-		VoiceCards:             voices,
-		VisualCards:            visuals,
+		EntertainmentPlan:      leanEntertainmentPlan(sim.EntertainmentPlan),
+		TrendLanguagePlan:      leanTrendLanguagePlan(sim.TrendLanguage),
+		LongformOpening:        leanLongformOpening(sim.LongformOpening),
+		AntiAIExecutionPlan:    leanAntiAIPlan(sim.AntiAIPlan),
+		VoiceCards:             limitVoiceCards(voices, 6),
+		VisualCards:            limitVisualCards(visuals, 4),
 		DialogueScenes:         dialogueScenes,
-		GroundingDetails:       sim.GroundingDetails,
-		EnvironmentSignals:     environment,
+		GroundingDetails:       limitGroundingDetails(sim.GroundingDetails, 3),
+		EnvironmentSignals:     limitEnvironmentSignals(environment, 3),
 		EndingContract:         RenderEndingContract(plan),
 		EndingAnchorCandidate:  sim.EndingContract.ConcreteAnchor,
 		SelectionPolicy:        "mandatory_beats 是本章必须成立的结果，不是动作顺序或句子清单。每个结果只选一个最有戏、最容易看懂的页面证据；同一场景可合并多个结果。candidate_beats 通常只选 2-4 个，其余直接省略，不得用旁白、对白或流程段补交。optional_style_beats 里的热梗、颜文字和指定说法零使用也允许。",
@@ -313,7 +315,165 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		PlanTranslationPolicy:  "先把每场计划翻成三个读者问题：此刻最想看什么、最容易看不懂什么、这一场结束后什么发生了变化。再按人物欲望、阻力和结果重组场景。计划中的动作拍、举例、验证路径和句序都可删除、合并、替换或调序；只保留结果事实、因果边界、人物选择和不可改的金额地点。ending_anchor_candidate 只是候选镜头；章末只要兑现 consequence 与 next_chapter_pull，可换成更强的现场人物、动作或结果。禁止按 plan 原句顺序逐句渲染。",
 		ReaderRegisterPolicy:   "默认写给没有行业经验的大众类型文读者。优先使用能在饭桌、摊位、街边自然说出口的常用词和短解释；县城普通居民不替作者说工整对仗、验收术语或设计感强的俏皮话。每个新规则只允许一个必要概念，并立刻用人物能得到或失去什么讲明白。",
 		InterfaceCompression:   "点击、按钮变灰、改备注、删输入等界面操作本身不是戏。若两次以上试错只证明同一条边界，只保留最能改变人物判断的一次，其余用一句结果带过或直接删除；禁止把 plan 中的验证动作排成‘点击—失败—再点击—再失败’清单。",
+		ScenePurposePolicy:     "每场只保留一个主要戏剧问题。授权、询价、安装、测试、开票、付款、检查若都只是在证明事情办妥，压成一次有阻力的交涉、一个时间跳转和一个可见结果；不得让不同配角轮流替计划补齐步骤。首笔兑现的重点是主角敢不敢真花、钱是否真能花出去、结果改变了谁，不是流程是否逐项完成。",
+		SpokenLanguagePolicy:   "每句对白先问：这个人眼下在争什么、怕什么、嫌什么。若一句话只是在替作者解释流程或制造漂亮包袱，就删掉或改成当场会脱口而出的半句话。普通居民能说‘往外挪点，晃眼’，就不说工整比喻和‘你是X还是Y’式机智反问；除非人物长期声口和关系语境都明确支持这种说法。",
 	}
+}
+
+func firstRenderClause(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	for _, separator := range []string{"；", "。", "\n"} {
+		if index := strings.Index(text, separator); index >= 0 {
+			text = strings.TrimSpace(text[:index])
+		}
+	}
+	runes := []rune(text)
+	if len(runes) > 120 {
+		text = strings.TrimSpace(string(runes[:120]))
+	}
+	return text
+}
+
+func keepDraftDialogueScene(scene domain.DialogueSceneBlueprint) bool {
+	mode := strings.ToLower(strings.TrimSpace(scene.DialogueMode))
+	context := scene.SceneID + " " + scene.RelationshipFrame + " " + scene.ScenePressure + " " + scene.DialogueObjective
+	relationshipBearing := containsAnyRenderPhrase(context, []string{
+		"旧识", "亲友", "父母", "朋友", "同盟", "恋", "暧昧", "信任", "关系", "体面", "羞耻", "控制权",
+	})
+	if strings.Contains(mode, "mediated") && containsAnyRenderPhrase(context, []string{"系统", "结算", "任务卡", "额度"}) {
+		return false
+	}
+	if !strings.Contains(mode, "logistics") && !strings.Contains(mode, "settlement") &&
+		!strings.Contains(mode, "status") && !strings.Contains(mode, "report") && !strings.Contains(mode, "procedure") {
+		return true
+	}
+	return relationshipBearing
+}
+
+func renderSceneAnchors(anchors []string) []string {
+	out := make([]string, 0, len(anchors))
+	for _, anchor := range anchors {
+		if containsAnyRenderPhrase(anchor, []string{"材料清单", "采购凭证", "测试记录", "漏保测试", "电子票据"}) {
+			continue
+		}
+		out = append(out, anchor)
+	}
+	return limitRenderStrings(out, 4)
+}
+
+func leanEntertainmentPlan(plan domain.ReaderEntertainmentPlan) draftEntertainmentPlan {
+	return draftEntertainmentPlan{
+		OpeningBeat:          firstRenderClause(plan.OpeningBeat),
+		HumorBeats:           limitRenderStrings(plan.HumorBeats, 2),
+		ImmediatePayoffs:     limitRenderStrings(plan.ImmediatePayoffs, 3),
+		ProcedureCompression: firstRenderClause(plan.ProcedureCompression),
+		CompanionVoiceBeat:   firstRenderClause(plan.CompanionVoiceBeat),
+	}
+}
+
+func leanTrendLanguagePlan(plans []domain.TrendLanguagePlan) []draftTrendLanguagePlan {
+	out := make([]draftTrendLanguagePlan, 0, min(2, len(plans)))
+	for _, plan := range plans {
+		if len(out) >= 2 {
+			break
+		}
+		out = append(out, draftTrendLanguagePlan{
+			Item:             plan.Item,
+			CharacterCarrier: firstRenderClause(plan.CharacterCarrier),
+			SceneFunction:    firstRenderClause(plan.SceneFunction),
+			UsageBudget:      firstRenderClause(plan.UsageBudget),
+		})
+	}
+	return out
+}
+
+func leanLongformOpening(opening domain.LongformOpeningDesign) draftLongformOpening {
+	return draftLongformOpening{
+		TargetReader:      firstRenderClause(opening.TargetReader),
+		OpeningHook:       firstRenderClause(opening.OpeningHook),
+		FirstChapterProof: limitRenderStrings(opening.FirstChapterProof, 2),
+		RetentionRisks:    limitRenderStrings(opening.RetentionRisks, 2),
+	}
+}
+
+func leanAntiAIPlan(plan domain.AntiAIExecutionPlan) draftAntiAIPlan {
+	return draftAntiAIPlan{
+		RiskSignals:  limitRenderStrings(plan.RiskSignals, 4),
+		CounterMoves: limitRenderStrings(plan.CounterMoves, 4),
+	}
+}
+
+func limitRenderStrings(values []string, limit int) []string {
+	values = compactStrings(values)
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]string(nil), values...)
+}
+
+func containsAnyRenderPhrase(text string, phrases []string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func limitCandidateBeats(values []draftCandidateBeat, limit int) []draftCandidateBeat {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]draftCandidateBeat(nil), values...)
+}
+
+func limitVoiceCards(values []draftVoiceCard, limit int) []draftVoiceCard {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]draftVoiceCard(nil), values...)
+}
+
+func limitVisualCards(values []draftVisualCard, limit int) []draftVisualCard {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]draftVisualCard(nil), values...)
+}
+
+func limitGroundingDetails(values []domain.GroundingDetailPlan, limit int) []domain.GroundingDetailPlan {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]domain.GroundingDetailPlan(nil), values...)
+}
+
+func limitEnvironmentSignals(values []draftEnvironmentSignal, limit int) []draftEnvironmentSignal {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]draftEnvironmentSignal(nil), values...)
 }
 
 // RenderRequiredOutcomes projects the full chapter contract into the smallest

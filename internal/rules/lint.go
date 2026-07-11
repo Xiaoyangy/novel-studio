@@ -38,6 +38,8 @@ import (
 //   - abstract_system_reassurance：系统用无对象、无后果的客服式空话假装陪伴
 //   - ui_trial_checklist：把同一规则的点击、失败、改备注、删除等试错逐项渲染
 //   - opaque_procedure_jargon：对白把流程缩写/验收黑话直接丢给大众读者
+//   - designed_role_quip：普通人物为作者临时说工整角色比喻，声口不像现场口语
+//   - procedure_stage_pile：一个场景密集交齐授权、报价、安装、测试、付款和检查
 //   - dialogue_action_lead_repetition：连续对白段都以人物动作报幕再开口
 //   - trend_language_sound_effect_misuse：把“呱，”吐槽起手式写成叫声/拟声动作
 //   - system_procedure_narration：系统用后台核验术语代替可读、有人味的短回应
@@ -68,6 +70,7 @@ func Lint(text string) []Violation {
 	vs = appendSystemMessageSignals(vs, text)
 	vs = appendUITrialChecklist(vs, text)
 	vs = appendTrendAndSystemVoiceSignals(vs, text)
+	vs = appendDialogueAndProcedureNaturalness(vs, text)
 	vs = appendHumanFeelStructureSignals(vs, text)
 	vs = appendCausalIntegritySignals(vs, text)
 	vs = appendCadenceSignals(vs, text)
@@ -218,6 +221,17 @@ var trendLanguageSoundEffectMisuseRe = regexp.MustCompile(`(?:呱了(?:一)?声|
 var systemProcedureNarrationRe = regexp.MustCompile(`(?:系统(?:判定|显示|提示)[：:]?[^。！？!?\n]{0,48}(?:本地新增交付|进入核验|核验通过|额度解锁)|阶段核验通过|(?:夜市)?小额改善额度解锁[：:]?\s*\d*)`)
 var opaqueProcedureJargonTerms = []string{
 	"采购凭证", "用途说明", "测试记录", "临时固定", "补测", "核验", "验收记录", "用途不符", "真实改善消费",
+}
+var designedRoleQuipMarkers = []string{
+	"照牌", "审我", "采访", "开会", "汇报", "上课", "判案", "拍广告", "演戏", "查户口", "写报告", "走流程",
+}
+var procedureStageGroups = [][]string{
+	{"答应", "同意", "做不了主", "只动", "别动", "授权"},
+	{"报价", "总价", "多少钱", "五金店", "材料单", "四千二百八"},
+	{"安装", "送装", "接线", "线槽", "卡扣", "工具箱", "上梯"},
+	{"测试", "试过", "漏保", "保护开关", "测试键"},
+	{"开票", "电子票", "票据", "付款码", "收款码", "支付", "付款记录"},
+	{"检查", "核验", "放行", "收摊", "明早九点", "文旅中心"},
 }
 var bureaucraticRegisterCompoundRe = regexp.MustCompile(`(?:申请核验[^。！？!?；;\n]{0,48}(?:原始读取链|封存生成记录)|编号不一致[^。！？!?；;\n]{0,24}原因待核|只问版本[^。！？!?；;\n]{0,16}(?:不写人|不点名))`)
 var emptyParallelChantRe = regexp.MustCompile(`不开[，,]不报[；;][^。！？!?“”「」]{0,16}不开[，,]不认[；;][^。！？!?“”「」]{0,16}不开[，,]不替`)
@@ -476,6 +490,54 @@ func appendTrendAndSystemVoiceSignals(vs []Violation, text string) []Violation {
 			Actual:   1,
 			Severity: SeverityWarning,
 		})
+	}
+	return vs
+}
+
+func appendDialogueAndProcedureNaturalness(vs []Violation, text string) []Violation {
+	for _, match := range dialogueQuoteRe.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		message := strings.TrimSpace(match[1])
+		if !(strings.Contains(message, "，还是") || strings.Contains(message, ",还是") || strings.Contains(message, "，不是")) {
+			continue
+		}
+		if !containsAnyPhrase(message, designedRoleQuipMarkers) {
+			continue
+		}
+		vs = append(vs, Violation{
+			Rule:     "designed_role_quip",
+			Target:   truncateRunes(message, 100),
+			Limit:    "普通人物先说眼前麻烦，不替作者临时造工整比喻",
+			Actual:   1,
+			Severity: SeverityWarning,
+		})
+		break
+	}
+
+	paragraphs := narrativeParagraphs(text)
+	const windowSize = 12
+	for start := 0; start < len(paragraphs); start++ {
+		end := min(len(paragraphs), start+windowSize)
+		window := strings.Join(paragraphs[start:end], " ")
+		stages := 0
+		for _, group := range procedureStageGroups {
+			if containsAnyPhrase(window, group) {
+				stages++
+			}
+		}
+		if stages < len(procedureStageGroups) {
+			continue
+		}
+		vs = append(vs, Violation{
+			Rule:     "procedure_stage_pile",
+			Target:   truncateRunes(window, 120),
+			Limit:    "单场只保留一次关键交涉、一个结果和真正改变人物的后果",
+			Actual:   stages,
+			Severity: SeverityWarning,
+		})
+		break
 	}
 	return vs
 }
