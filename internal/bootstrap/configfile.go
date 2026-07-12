@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -44,10 +45,31 @@ func configDir() (string, error) {
 	return dir, nil
 }
 
-// projectConfigPath 返回项目级配置文件的相对路径 ./.novel-studio/config.json。
-// 项目级 dotdir 镜像全局 ~/.novel-studio/，复用同一个 configDirName；相对 cwd 解析。
+// projectConfigPath returns the nearest project config from cwd upward. Novel
+// runs execute inside data/runs/<book>, while the repository config usually
+// lives at the workspace root; checking cwd only silently selected the global
+// model roles and could send Writer or Reviewer work to the wrong provider.
+// The home-level config is skipped because it was already loaded as global.
 func projectConfigPath() string {
-	return filepath.Join(configDirName, "config.json")
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return filepath.Join(configDirName, "config.json")
+	}
+	global, _ := filepath.Abs(DefaultConfigPath())
+	for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
+		candidate := filepath.Join(dir, configDirName, "config.json")
+		absolute, _ := filepath.Abs(candidate)
+		if absolute != global {
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return filepath.Join(cwd, configDirName, "config.json")
 }
 
 // LoadConfig 按优先级加载并合并配置：
@@ -72,9 +94,10 @@ func LoadConfig(flagPath string) (Config, error) {
 
 	// 2. 项目级覆盖。坏文件 fail loud：用户在当前目录主动放的配置，静默吞掉会让
 	//    "配了不生效"无从排查（issue #37）。
-	project, found, err := loadOptionalJSON(projectConfigPath())
+	projectPath := projectConfigPath()
+	project, found, err := loadOptionalJSON(projectPath)
 	if err != nil {
-		return cfg, fmt.Errorf("项目级配置 ./.novel-studio/config.json 解析失败（请检查 JSON 语法）: %w", err)
+		return cfg, fmt.Errorf("项目级配置 %s 解析失败（请检查 JSON 语法）: %w", projectPath, err)
 	}
 	if found {
 		cfg = mergeConfig(cfg, project)

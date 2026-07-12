@@ -65,11 +65,11 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	result["prose_rendering_check"] = map[string]any{
 		"violations": proseRenderingViolations(content),
 		"scene_transition_questions": []string{
-			"上一场留下的哪一个压力，迫使或吸引主角作出下一步选择？",
-			"正文是否写清主角为什么现在去下一地点，而不只是锁屏、下楼或到达？",
-			"抵达后的第一个阻力是否与这个选择有关？",
+			"读者是否已经能从欲望、约定或常识明白主角为何来到下一处？",
+			"切场后是否很快落到人物眼下在意的事，而不是补写流程过渡？",
+			"干净切场或时间跳跃是否比解释上一场到下一场的全过程更顺？",
 		},
-		"usage": "violations 必须在 commit 前修复；换场三问逐场朗读，任一地点跳转答不出就补角色因果或删场景。",
+		"usage": "violations 逐条复核；换场只需让读者看懂，不要求专写因果桥，也不要求新地点必有阻力。",
 	}
 	wordContract := inspectChapterWordContract(t.store, content)
 	result["chapter_words_contract"] = wordContract
@@ -78,6 +78,34 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
 			"chapter_words: actual=%d, required=%d-%d；必须先用 edit_chapter 调整草稿，当前不可 commit_chapter",
 			wordContract.Actual, wordContract.Min, wordContract.Max))
+	}
+	_, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, content)
+	result["aigc_gate_check"] = aigcGate
+	externalGate, externalRerenderErr := InspectDraftExternalGate(t.store.Dir(), a.Chapter)
+	if externalRerenderErr != nil {
+		return nil, fmt.Errorf("inspect draft external gate: %w", externalRerenderErr)
+	}
+	if externalGate.Status != DraftExternalGateNotRequired && externalGate.Status != DraftExternalGateApproved {
+		result["draft_external_gate"] = externalGate
+		switch externalGate.Status {
+		case DraftExternalGateRerenderAuthorized:
+			hardGateViolations = append(hardGateViolations, draftExternalRerenderInstruction(externalGate.Requirement))
+		case DraftExternalGateAdviceIncomplete:
+			hardGateViolations = append(hardGateViolations, "外判修改建议不完整；先重新外判，禁止盲目改写")
+		default:
+			hardGateViolations = append(hardGateViolations, "整章重渲染已产生新哈希；先停止正文修改并运行外部草稿复判")
+		}
+	}
+	if !aigcGate.Passed {
+		nextAction := "按 aigc_gate_check.rewrite_focus 使用 edit_chapter 重排草稿"
+		if externalGate.Status == DraftExternalGateRerenderAuthorized {
+			nextAction = "按 draft_external_ai_review 使用 draft_chapter(mode=write) 整章覆盖；禁止局部 edit"
+		} else if externalGate.Status == DraftExternalGateRejudgePending || externalGate.Status == DraftExternalGateAdviceIncomplete {
+			nextAction = "停止正文修改，先运行外部草稿复判"
+		}
+		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+			"aigc_ratio: actual=%.2f%%, required=<%.0f%%；%s，当前不可 commit_chapter",
+			aigcGate.EffectiveGatePercent, aigcGate.PassExclusivePercent, nextAction))
 	}
 
 	// 对照数据：保留全局性的一致性检查数据，避免重复加载 novel_context 已有的窗口数据
@@ -161,6 +189,8 @@ func proseRenderingViolations(content string) []qualityrules.Violation {
 		"ui_trial_checklist":              {},
 		"dialogue_action_lead_repetition": {},
 		"templated_dialogue_chain":        {},
+		"dialogue_conveyor_overuse":       {},
+		"pov_interiority_thin":            {},
 		"bureaucratic_register_overuse":   {},
 		"dialogue_aphorism_overuse":       {},
 		"system_message_overpacked":       {},

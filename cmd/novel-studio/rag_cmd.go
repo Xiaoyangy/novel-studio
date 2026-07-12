@@ -613,6 +613,7 @@ func pipelineRAGIncrementalPlan(
 	}
 	present := make(map[string]struct{}, len(vectorStore.Points))
 	staleCount := 0
+	duplicateCount := 0
 	for _, point := range vectorStore.Points {
 		hash := strings.TrimSpace(point.Hash)
 		if hash == "" {
@@ -622,14 +623,15 @@ func pipelineRAGIncrementalPlan(
 			staleCount++
 			continue
 		}
-		if _, duplicate := present[hash]; duplicate {
-			return nil, len(desired), false, "本地向量含重复 chunk hash"
-		}
 		if len(point.Vector) != stateCfg.VectorDimension {
 			return nil, len(desired), false, "本地向量维度不一致"
 		}
 		if err := rag.ValidateVector(point.Vector); err != nil {
 			return nil, len(desired), false, "本地向量包含无效数值"
+		}
+		if _, duplicate := present[hash]; duplicate {
+			duplicateCount++
+			continue
 		}
 		present[hash] = struct{}{}
 	}
@@ -639,11 +641,11 @@ func pipelineRAGIncrementalPlan(
 			missing = append(missing, chunk)
 		}
 	}
-	if len(missing) == 0 && staleCount == 0 {
+	if len(missing) == 0 && staleCount == 0 && duplicateCount == 0 {
 		return nil, len(desired), false, "没有缺失 hash，需按其他不一致原因处理"
 	}
 	sort.SliceStable(missing, func(i, j int) bool { return missing[i].ID < missing[j].ID })
-	return missing, len(desired), true, fmt.Sprintf("复用有效向量，补齐 missing=%d，剔除 stale=%d", len(missing), staleCount)
+	return missing, len(desired), true, fmt.Sprintf("复用有效向量，补齐 missing=%d，剔除 stale=%d duplicate=%d", len(missing), staleCount, duplicateCount)
 }
 
 func reconcilePipelineRAGIncrementally(
@@ -657,6 +659,7 @@ func reconcilePipelineRAGIncrementally(
 	expected int,
 	qdrantEnabled bool,
 ) (int, error) {
+	requiresRemoteReplay := pipelineRAGVectorStoreNeedsPrune(existing, state.Chunks)
 	buildConcurrency := embCfg.BuildConcurrency
 	if buildConcurrency <= 0 {
 		buildConcurrency = 2
@@ -719,6 +722,7 @@ func reconcilePipelineRAGIncrementally(
 		merged.Config.QdrantURL = ""
 	}
 	state.Config = merged.Config
+	state.Chunks, _ = dedupeRAGChunksByHash(state.Chunks)
 	state.ChunkHashes = rebuildRAGChunkHashList(state.Chunks)
 	state.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := st.RAG.SaveVectorStore(merged); err != nil {
@@ -728,6 +732,13 @@ func reconcilePipelineRAGIncrementally(
 		return 0, err
 	}
 	if qdrantClient != nil {
+		if requiresRemoteReplay {
+			if err := restoreQdrantFromLocalVectorStore(ctx, cfg, &merged, expected); err != nil {
+				return 0, fmt.Errorf("Qdrant 清理重复或过期点失败: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "[build-rag] Qdrant 已按本地去重向量重放：points=%d（未重新 embedding）\n", expected)
+			return result.Embedded, nil
+		}
 		points := make([]rag.VectorPoint, 0, len(update.Points))
 		for _, point := range update.Points {
 			points = append(points, rag.VectorPoint{ID: point.ID, Vector: point.Vector, Payload: point.Payload, Chunk: point.Chunk})
@@ -775,6 +786,7 @@ func mergePipelineRAGVectorPoints(base *domain.RAGVectorStore, update domain.RAG
 		replaceHashes[hash] = struct{}{}
 	}
 	merged := domain.RAGVectorStore{Config: update.Config, UpdatedAt: time.Now().Format(time.RFC3339)}
+	keptHashes := make(map[string]struct{}, len(desired))
 	if base != nil {
 		merged.Config = base.Config
 		for _, point := range base.Points {
@@ -791,12 +803,57 @@ func mergePipelineRAGVectorPoints(base *domain.RAGVectorStore, update domain.RAG
 			if _, replace := replaceHashes[hash]; replace {
 				continue
 			}
+			if _, duplicate := keptHashes[hash]; duplicate {
+				continue
+			}
+			keptHashes[hash] = struct{}{}
 			merged.Points = append(merged.Points, point)
 		}
 	}
-	merged.Points = append(merged.Points, update.Points...)
+	for _, point := range update.Points {
+		hash := strings.TrimSpace(point.Hash)
+		if hash == "" {
+			hash = strings.TrimSpace(point.Chunk.Hash)
+		}
+		if _, keep := desired[hash]; !keep {
+			continue
+		}
+		if _, duplicate := keptHashes[hash]; duplicate {
+			continue
+		}
+		keptHashes[hash] = struct{}{}
+		merged.Points = append(merged.Points, point)
+	}
 	sort.SliceStable(merged.Points, func(i, j int) bool { return merged.Points[i].ID < merged.Points[j].ID })
 	return merged
+}
+
+func pipelineRAGVectorStoreNeedsPrune(vectorStore *domain.RAGVectorStore, desiredChunks []domain.RAGChunk) bool {
+	if vectorStore == nil {
+		return false
+	}
+	desired := make(map[string]struct{})
+	for _, chunk := range desiredChunks {
+		chunk = rag.NormalizeChunk(chunk)
+		if chunk.Hash != "" && !rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			desired[chunk.Hash] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(vectorStore.Points))
+	for _, point := range vectorStore.Points {
+		hash := strings.TrimSpace(point.Hash)
+		if hash == "" {
+			hash = strings.TrimSpace(point.Chunk.Hash)
+		}
+		if _, ok := desired[hash]; !ok {
+			return true
+		}
+		if _, duplicate := seen[hash]; duplicate {
+			return true
+		}
+		seen[hash] = struct{}{}
+	}
+	return false
 }
 
 func mergePendingRAGState(st *store.Store, state *domain.RAGIndexState, pending []domain.RAGChunk) {
@@ -819,13 +876,29 @@ func mergePendingRAGState(st *store.Store, state *domain.RAGIndexState, pending 
 		normalized = append(normalized, chunk)
 	}
 	merged := make([]domain.RAGChunk, 0, len(state.Chunks)+len(normalized))
+	positions := make(map[string]int, len(state.Chunks)+len(normalized))
 	for _, chunk := range state.Chunks {
 		if _, replace := sources[chunk.SourcePath]; replace {
 			continue
 		}
-		merged = append(merged, rag.NormalizeChunk(chunk))
+		chunk = rag.NormalizeChunk(chunk)
+		if chunk.Hash == "" {
+			continue
+		}
+		if _, duplicate := positions[chunk.Hash]; duplicate {
+			continue
+		}
+		positions[chunk.Hash] = len(merged)
+		merged = append(merged, chunk)
 	}
-	merged = append(merged, normalized...)
+	for _, chunk := range normalized {
+		if index, duplicate := positions[chunk.Hash]; duplicate {
+			merged[index] = chunk
+			continue
+		}
+		positions[chunk.Hash] = len(merged)
+		merged = append(merged, chunk)
+	}
 	state.Chunks = merged
 	state.ChunkHashes = rebuildRAGChunkHashList(merged)
 	state.SanitizedDigest = ragIndexSanitizationDigest(state)
@@ -1129,6 +1202,7 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	}
 	// 设计库（手法/对标）只走 craft_recall 的 BM25 确定性路由，从不做向量检索；
 	// 跳过它们的 embedding 把重建成本从小时级降回分钟级（1.7 万设计 chunk vs 数百事实 chunk）。
+	chunks, duplicateChunks := dedupeRAGChunksByHash(chunks)
 	factChunks := make([]domain.RAGChunk, 0, len(chunks))
 	designOnly := 0
 	for _, chunk := range chunks {
@@ -1140,6 +1214,9 @@ func buildRAGEmbeddings(ctx context.Context, cfg bootstrap.Config, override boot
 	}
 	if designOnly > 0 {
 		fmt.Fprintf(os.Stderr, "[build-rag] 设计库 chunk=%d 仅入词法索引（craft_recall/BM25），跳过 embedding；事实层 embedding=%d"+"\n", designOnly, len(factChunks))
+	}
+	if duplicateChunks > 0 {
+		fmt.Fprintf(os.Stderr, "[build-rag] embedding 前按内容 hash 去重：duplicate_chunks=%d\n", duplicateChunks)
 	}
 	if len(factChunks) == 0 {
 		return rag.IndexResult{}, domain.RAGVectorStore{}, fmt.Errorf("RAG 事实层 chunk 为空，不能构建语义向量")
@@ -1194,6 +1271,7 @@ func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore,
 	filtered := vectorStore.Points[:0]
 	removed := 0
 	remapped := 0
+	seenHashes := make(map[string]struct{}, len(vectorStore.Points))
 	for _, point := range vectorStore.Points {
 		chunk := rag.NormalizeChunk(point.Chunk)
 		hash := strings.TrimSpace(point.Hash)
@@ -1224,6 +1302,11 @@ func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore,
 			removed++
 			continue
 		}
+		if _, duplicate := seenHashes[hash]; duplicate {
+			removed++
+			continue
+		}
+		seenHashes[hash] = struct{}{}
 		point.Hash = hash
 		point.Chunk = chunk
 		filtered = append(filtered, point)
@@ -1233,6 +1316,25 @@ func sanitizeRAGVectorStore(st *store.Store, vectorStore *domain.RAGVectorStore,
 		vectorStore.UpdatedAt = time.Now().Format(time.RFC3339)
 	}
 	return removed, remapped
+}
+
+func dedupeRAGChunksByHash(chunks []domain.RAGChunk) ([]domain.RAGChunk, int) {
+	deduped := make([]domain.RAGChunk, 0, len(chunks))
+	seen := make(map[string]struct{}, len(chunks))
+	duplicates := 0
+	for _, chunk := range chunks {
+		chunk = rag.NormalizeChunk(chunk)
+		if chunk.Hash == "" {
+			continue
+		}
+		if _, duplicate := seen[chunk.Hash]; duplicate {
+			duplicates++
+			continue
+		}
+		seen[chunk.Hash] = struct{}{}
+		deduped = append(deduped, chunk)
+	}
+	return deduped, duplicates
 }
 
 func effectiveRAGEmbeddingBuildConcurrency(embCfg bootstrap.RAGEmbeddingConfig) int {

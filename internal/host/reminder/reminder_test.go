@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
 )
 
@@ -43,6 +45,38 @@ func TestStopGuard_AllowsStopOnlyWhenComplete(t *testing.T) {
 	decision = guard(context.Background(), agentcore.StopInfo{TurnIndex: 2})
 	if !decision.Allow {
 		t.Fatal("stop must be allowed when Phase=Complete")
+	}
+}
+
+func TestStopGuardsAllowPauseForDraftExternalRejudge(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+		t.Fatal(err)
+	}
+	oldBody := "第一章\n\n旧草稿。"
+	newBody := "第一章\n\n新哈希草稿。"
+	if err := s.Drafts.SaveDraft(1, oldBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.SetDraftExternalRerenderRequirement(s.Dir(), tools.DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(oldBody),
+		AIProbabilityPercent: 9, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"整章重排"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writerGuard := NewWriterStopGuard(s)
+	if err := s.Drafts.SaveDraft(1, newBody); err != nil {
+		t.Fatal(err)
+	}
+	if decision := writerGuard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+		t.Fatalf("writer guard must allow external-rejudge pause: %+v", decision)
+	}
+	if decision := NewStopGuard(s, nil)(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+		t.Fatalf("coordinator guard must allow external-rejudge pause: %+v", decision)
 	}
 }
 

@@ -25,6 +25,24 @@ func planArgs(chapter int) json.RawMessage {
 	return b
 }
 
+func TestFinalizeChapterPlanRejectsProseChecklistContract(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Title:   "测试章",
+		Contract: domain.ChapterContract{RequiredBeats: []string{
+			"开场变化", "运输变化", "第一位配角变化", "第二位配角变化", "章末变化",
+		}},
+	}
+	_, err := finalizeChapterPlan(s, plan, false)
+	if err == nil || !strings.Contains(err.Error(), "正文显性结果最多 4 项") {
+		t.Fatalf("five prose obligations should be rejected before full simulation validation: %v", err)
+	}
+}
+
 func testCausalSimulation(rewrite bool) map[string]any {
 	contextSources := []string{
 		"current_chapter_outline",

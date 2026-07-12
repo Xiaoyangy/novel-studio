@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
 )
 
@@ -76,10 +77,38 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 // NewWriterStopGuard 要求 writer（正文渲染阶段/drafter）本轮至少产生一次 commit_chapter。
 // HARNESS-METADATA: name=writer_stop_guard class=model_gap review=2027-Q1
 func NewWriterStopGuard(st *store.Store) agentcore.StopGuard {
-	return newCheckpointDeltaGuard(st, "writer",
+	base := newCheckpointDeltaGuard(st, "writer",
 		[]string{"commit"},
 		"你必须调用 commit_chapter 提交本章后才能结束。draft_chapter / draft_chapter_part / merge_chapter_parts 只是保存草稿，不算完成；分片写完要先合并、回读、check_consistency，再 commit_chapter。",
 	)
+	return func(ctx context.Context, info agentcore.StopInfo) agentcore.StopDecision {
+		if awaitingDraftExternalRejudge(st) {
+			return agentcore.StopDecision{Allow: true}
+		}
+		return base(ctx, info)
+	}
+}
+
+func awaitingDraftExternalRejudge(st *store.Store) bool {
+	if st == nil {
+		return false
+	}
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		return false
+	}
+	chapter := 0
+	if len(progress.PendingRewrites) > 0 {
+		chapter = progress.PendingRewrites[0]
+	} else {
+		chapter = progress.NextChapter()
+	}
+	if chapter <= 0 {
+		return false
+	}
+	inspection, err := tools.InspectDraftExternalGate(st.Dir(), chapter)
+	return err == nil && (inspection.Status == tools.DraftExternalGateRejudgePending ||
+		inspection.Status == tools.DraftExternalGateAdviceIncomplete)
 }
 
 // NewPlannerStopGuard 要求推演阶段（planner）本轮至少落盘一次章节计划（plan checkpoint）。

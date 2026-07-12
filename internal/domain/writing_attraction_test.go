@@ -29,6 +29,11 @@ func TestSystemCompanionFeedbackContradiction(t *testing.T) {
 		"系统不予回应，只做冷硬的规则重申，减少系统拟人化玩笑。",
 		"建议系统发送一条乱码或重复提示，制造断联感。",
 		"调整系统提示语的语气，保持冷感，如去掉'^_^'，改用纯文本进度条式通知。",
+		"系统类信息必须绑定界面/载体，禁止以【】作为独立叙事段。",
+		"系统以【】直接嵌入叙事，缺乏视角锚定。",
+		"系统对白只能以状态报告、数据更新、错误日志等形式出现。",
+		"将系统提示改为纯数据反馈，只提供事实，不提供感悟。",
+		"系统消息避免添加解释性后半句，如‘回来拿筷子的那位不扣你’。",
 	} {
 		if !SystemCompanionFeedbackContradicts(text) {
 			t.Fatalf("expected contradiction: %q", text)
@@ -42,6 +47,20 @@ func TestSystemCompanionFeedbackContradiction(t *testing.T) {
 		if SystemCompanionFeedbackContradicts(text) {
 			t.Fatalf("unexpected contradiction: %q", text)
 		}
+	}
+}
+
+func TestSystemCompanionFeedbackContradictsQuotedBracketEvidenceWithoutSystemWord(t *testing.T) {
+	for _, text := range []string{
+		"AI证据：‘【这一笔先别记完。】’突然出现，未交代是界面文字还是意识流，打断叙述视角。",
+		"【奖励到账。】缺乏视角锚定。",
+	} {
+		if !SystemCompanionFeedbackContradicts(text) {
+			t.Fatalf("quoted bracket-interface contradiction not detected: %q", text)
+		}
+	}
+	if SystemCompanionFeedbackContradicts("【奖励到账。】这句很简洁。") {
+		t.Fatal("ordinary bracket-line feedback must not be rejected")
 	}
 }
 

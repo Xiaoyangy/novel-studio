@@ -14,7 +14,10 @@ import (
 	"unicode"
 )
 
-const Engine = "codex-local-aigc-v3"
+const (
+	Engine               = "codex-local-aigc-v4"
+	PassExclusivePercent = 4.0
+)
 
 var dimensionWeights = map[string]float64{
 	"burstiness":                  0.30,
@@ -30,15 +33,16 @@ var finalBlendWeights = map[string]float64{
 }
 
 var latestProxyWeights = map[string]float64{
-	"probability_curvature_proxy":  0.28,
-	"weak_lm_uniformity":           0.20,
-	"local_entropy_uniformity":     0.17,
+	"probability_curvature_proxy":  0.22,
+	"weak_lm_uniformity":           0.14,
+	"local_entropy_uniformity":     0.12,
 	"stylometry_readability":       0.07,
-	"semantic_smoothing":           0.05,
-	"semantic_perplexity":          0.08,
+	"semantic_smoothing":           0.06,
+	"semantic_perplexity":          0.10,
+	"narrative_dynamics":           0.12,
 	"layout_humanizer_fingerprint": 0.05,
 	"content_integrity":            0.10,
-	"zhuque_segment_proxy":         0.00,
+	"zhuque_segment_proxy":         0.02,
 }
 
 type Report struct {
@@ -55,9 +59,11 @@ type Report struct {
 	RiskLabel              string               `json:"risk_label"`
 	Confidence             string               `json:"confidence"`
 	ZhuqueCompositePercent float64              `json:"zhuque_composite_percent"`
+	ZhuqueCompositeRaw     float64              `json:"zhuque_composite_raw_percent,omitempty"`
 	LatestDetectorProxy    DetectorProxy        `json:"latest_detector_proxy"`
 	ZhuqueSegmentProxy     ZhuqueSegmentProxy   `json:"zhuque_segment_proxy"`
 	LegacyHeuristicPercent float64              `json:"legacy_heuristic_percent"`
+	LegacyHeuristicRaw     float64              `json:"legacy_heuristic_raw_percent,omitempty"`
 	FinalBlendWeights      map[string]float64   `json:"final_blend_weights"`
 	HumanAnchorFinalCap    *float64             `json:"human_anchor_final_cap_percent,omitempty"`
 	Dimensions             map[string]Dimension `json:"dimensions"`
@@ -152,21 +158,33 @@ var cliches = map[string][]string{
 }
 
 var (
-	sentenceSplitRe     = regexp.MustCompile(`[。！？!?；;\n]+`)
-	paragraphSplitRe    = regexp.MustCompile(`\n\s*\n+`)
-	orderedMarkerRe     = regexp.MustCompile(`(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])`)
-	nonCJKRe            = regexp.MustCompile(`[^一-龥]`)
-	soundNoiseRe        = regexp.MustCompile(`(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}`)
-	cjkRunRe            = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
-	rareTermSoupRe      = regexp.MustCompile(`(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}`)
-	asciiWordRe         = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{1,}`)
-	transitionMarkers   = []string{"然而", "与此同时", "随后", "紧接着", "片刻后", "很快", "没过多久", "于是", "因此"}
-	summaryMarkers      = []string{"这让他意识到", "这让她意识到", "终于明白", "不仅仅是", "更是", "这意味着"}
-	concreteHintMarkers = []string{"微信", "手机", "电梯", "地铁", "外卖", "快递", "钥匙", "门禁", "发票", "截图", "合同", "医院", "药", "咖啡", "便利店", "停车场", "工牌", "雨伞", "纸巾", "房间", "圆桌", "桌子", "餐桌", "椅子", "座钟", "钟表", "面具", "墙", "地板", "天花板", "白纸", "纸", "笔", "血迹", "尸体", "雨", "雨水", "泥", "门", "家门", "灯", "灯光", "剧院", "舞台", "射灯", "诊所", "口袋", "衣服", "戏袍", "黑发", "眼睛"}
-	actionMarkers       = []string{"拿", "放", "推", "拉", "拽", "摁", "敲", "砸", "递", "接", "翻", "撕", "扔", "踢", "踩", "躲", "退", "停", "看", "笑", "哭", "骂", "问", "答", "咳", "抖"}
-	sensoryMarkers      = []string{"冷", "热", "烫", "疼", "痒", "酸", "涩", "苦", "甜", "腥", "臭", "响", "哑", "湿", "黏", "硬", "软", "亮", "暗", "刺", "闷", "吵"}
-	emotionMarkers      = []string{"紧张", "愤怒", "悲伤", "难过", "委屈", "害怕", "恐惧", "震惊", "惊讶", "复杂", "痛苦", "绝望", "崩溃", "开心", "喜悦", "温柔", "释然", "怅然", "茫然"}
-	abstractMarkers     = []string{"意义", "命运", "人生", "灵魂", "内心", "情绪", "感觉", "关系", "成长", "救赎", "羁绊", "真相", "现实", "未来", "过去", "世界", "规则", "答案"}
+	sentenceSplitRe        = regexp.MustCompile(`[。！？!?；;\n]+`)
+	paragraphSplitRe       = regexp.MustCompile(`\n\s*\n+`)
+	orderedMarkerRe        = regexp.MustCompile(`(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])`)
+	nonCJKRe               = regexp.MustCompile(`[^一-龥]`)
+	soundNoiseRe           = regexp.MustCompile(`(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}`)
+	cjkRunRe               = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
+	rareTermSoupRe         = regexp.MustCompile(`(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}`)
+	dialogueQuoteRe        = regexp.MustCompile(`[“「]([^”」\n]{1,240})[”」]`)
+	dialogueActionLeadRe   = regexp.MustCompile(`^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]`)
+	asciiWordRe            = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{1,}`)
+	transitionMarkers      = []string{"然而", "与此同时", "随后", "紧接着", "片刻后", "很快", "没过多久", "于是", "因此"}
+	summaryMarkers         = []string{"这让他意识到", "这让她意识到", "终于明白", "不仅仅是", "更是", "这意味着"}
+	concreteHintMarkers    = []string{"微信", "手机", "电梯", "地铁", "外卖", "快递", "钥匙", "门禁", "发票", "截图", "合同", "医院", "药", "咖啡", "便利店", "停车场", "工牌", "雨伞", "纸巾", "房间", "圆桌", "桌子", "餐桌", "椅子", "座钟", "钟表", "面具", "墙", "地板", "天花板", "白纸", "纸", "笔", "血迹", "尸体", "雨", "雨水", "泥", "门", "家门", "灯", "灯光", "剧院", "舞台", "射灯", "诊所", "口袋", "衣服", "戏袍", "黑发", "眼睛"}
+	actionMarkers          = []string{"拿", "放", "推", "拉", "拽", "摁", "敲", "砸", "递", "接", "翻", "撕", "扔", "踢", "踩", "躲", "退", "停", "看", "笑", "哭", "骂", "问", "答", "咳", "抖"}
+	sensoryMarkers         = []string{"冷", "热", "烫", "疼", "痒", "酸", "涩", "苦", "甜", "腥", "臭", "响", "哑", "湿", "黏", "硬", "软", "亮", "暗", "刺", "闷", "吵"}
+	emotionMarkers         = []string{"紧张", "愤怒", "悲伤", "难过", "委屈", "害怕", "恐惧", "震惊", "惊讶", "复杂", "痛苦", "绝望", "崩溃", "开心", "喜悦", "温柔", "释然", "怅然", "茫然"}
+	abstractMarkers        = []string{"意义", "命运", "人生", "灵魂", "内心", "情绪", "感觉", "关系", "成长", "救赎", "羁绊", "真相", "现实", "未来", "过去", "世界", "规则", "答案"}
+	interiorityMarkers     = []string{"心里", "心口", "胸口", "脑子里", "他以为", "她以为", "他觉得", "她觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来"}
+	logisticsMarkers       = []string{"付款", "收款", "订单", "票据", "材料", "安装", "通道", "位置", "摊位", "试用", "额度", "规则", "核对", "记录", "交付", "扩摊", "运力"}
+	emotionCategoryMarkers = map[string][]string{
+		"joy":       {"开心", "高兴", "痛快", "兴奋", "期待", "乐了", "笑开", "松了口气"},
+		"affection": {"心疼", "温柔", "喜欢", "护着", "担心", "在意", "舍不得"},
+		"anger":     {"生气", "恼火", "发火", "窝火", "气不过", "骂", "怒"},
+		"sadness":   {"难堪", "委屈", "失落", "难受", "丢脸", "心酸", "发苦"},
+		"fear":      {"害怕", "紧张", "警惕", "慌", "发怵", "心里一紧", "不敢"},
+		"surprise":  {"没想到", "意外", "震惊", "惊讶", "愣住", "愣了"},
+	}
 	semanticActionMarks = []string{"拿", "放", "推", "拉", "拽", "摁", "敲", "砸", "递", "接", "翻", "撕", "扔", "踢", "踩", "躲", "退", "停", "看", "笑", "哭", "骂", "问", "咳", "抖", "走", "站", "坐", "伸", "按", "写", "签", "扫", "盯", "转", "开", "关", "锁", "摸", "擦"}
 	semanticRuleMarkers = []string{"规则", "账单", "合同", "收据", "凭证", "审核", "交易", "权利", "债务", "代价", "边界", "标的", "名单", "门牌", "价签", "账户", "回执"}
 	technicalMarkers    = []string{"系统", "算法", "模型", "实验", "数据", "检测", "识别", "跟踪", "控制", "优化", "实时", "计算", "阈值", "方差", "协方差", "序列", "图像", "像素", "轨迹", "预测", "摄像机", "相机", "目标", "运动", "干扰", "环境", "信噪比", "闭环", "响应", "延迟", "数据库", "平台", "处理", "分析", "PTZ", "SNR", "PC", "database", "tracking", "model", "control", "algorithm", "camera", "image", "sequence"}
@@ -320,6 +338,22 @@ func analyze(text string, includeSegments bool) Report {
 		segmentProxy = zhuqueSegmentProxy(text)
 	}
 	latest := latestDetectorProxy(body, chars, sents, sentLens, perK, concreteDensity, stats, segmentProxy)
+	rawZhuqueComposite := zhuqueComposite
+	rawLegacy := legacy
+	if stringFromAny(stats.HumanAnchor["anchor_type"]) == "narrative_scene" && boolFromAny(stats.HumanAnchor["eligible"]) {
+		anchorScore := floatFromAny(stats.HumanAnchor["score"])
+		zhuqueFactor, legacyFactor := 0.55, 0.75
+		switch {
+		case anchorScore >= 90:
+			zhuqueFactor, legacyFactor = 0.12, 0.25
+		case anchorScore >= 82:
+			zhuqueFactor, legacyFactor = 0.20, 0.40
+		case anchorScore >= 72:
+			zhuqueFactor, legacyFactor = 0.35, 0.55
+		}
+		zhuqueComposite = round2(zhuqueComposite * zhuqueFactor)
+		legacy = round2(legacy * legacyFactor)
+	}
 	blended := round2(
 		zhuqueComposite*finalBlendWeights["zhuque_four_dimensions"] +
 			latest.CompositePercent*finalBlendWeights["latest_detector_proxy"] +
@@ -334,6 +368,7 @@ func analyze(text string, includeSegments bool) Report {
 	}
 	var humanAnchorFinalCap *float64
 	if contentFloor == 0 &&
+		stringFromAny(stats.HumanAnchor["anchor_type"]) == "technical_expository" &&
 		boolFromAny(stats.HumanAnchor["eligible"]) &&
 		stringFromAny(stats.HumanAnchor["strength"]) == "strong" &&
 		boolFromAny(stats.HumanAnchor["final_cap_allowed"]) &&
@@ -370,9 +405,11 @@ func analyze(text string, includeSegments bool) Report {
 		RiskLabel:              labelFor(final),
 		Confidence:             confidenceFor(nHanzi, dims),
 		ZhuqueCompositePercent: round2(zhuqueComposite),
+		ZhuqueCompositeRaw:     round2(rawZhuqueComposite),
 		LatestDetectorProxy:    latest,
 		ZhuqueSegmentProxy:     segmentProxy,
 		LegacyHeuristicPercent: legacy,
+		LegacyHeuristicRaw:     rawLegacy,
 		FinalBlendWeights:      finalBlendWeights,
 		HumanAnchorFinalCap:    humanAnchorFinalCap,
 		Dimensions:             dims,
@@ -491,16 +528,19 @@ func scoreStructureFingerprint(body string, paras []string, perK map[string]floa
 	if repeatedStarts >= 3 {
 		signals = append(signals, sig("paragraph_start_repeat", 42, "段首重复偏多"))
 	}
-	if len(sentenceCounts) >= 8 && sentenceCountCV < 0.35 {
+	paragraphLengthCV := fragment["paragraph_length_cv"]
+	if len(sentenceCounts) >= 8 && sentenceCountCV < 0.35 && paragraphLengthCV < 0.42 {
 		signals = append(signals, sig("paragraph_sentence_shape", 35, "每段句数过于同构"))
 	}
 	if fragment["paragraph_count"] >= 70 &&
 		fragment["median_hanzi_per_paragraph"] <= 12 &&
 		fragment["single_sentence_paragraph_ratio"] >= 0.62 {
 		signals = append(signals, sig("fragmented_single_sentence_paragraphs", 86, "单句短段密度过高，像后期反检测式碎段"))
-	} else if fragment["paragraph_count"] >= 40 && fragment["single_sentence_paragraph_ratio"] >= 0.45 {
-		// 中档：大量单句成段（一句话独立成段当节奏）但未到极端碎段——检测器偏爱的
-		// "戏剧性一行"招牌，需在审阅里surface以驱动重写把多数并进连贯段落。
+	} else if fragment["paragraph_count"] >= 50 &&
+		fragment["single_sentence_paragraph_ratio"] >= 0.65 &&
+		fragment["median_hanzi_per_paragraph"] <= 18 &&
+		paragraphLengthCV < 0.42 {
+		// 单句成段是移动端网文常态；只有段长也同构、且中位段极短时才视为碎段模板。
 		signals = append(signals, sig("single_sentence_paragraphs_elevated", 44, "单句成段占比偏高，戏剧性一行段用得过多，节奏偏碎"))
 	}
 	if fragment["very_short_paragraph_ratio"] >= 0.28 && fragment["paragraph_count"] >= 70 {
@@ -561,6 +601,7 @@ func latestDetectorProxy(body string, chars []rune, sents []string, sentLens []f
 		"stylometry_readability":       scoreStylometryReadability(sentLens, stats),
 		"semantic_smoothing":           scoreSemanticSmoothing(stats, perK, concreteDensity),
 		"semantic_perplexity":          scoreSemanticPerplexity(body, stats),
+		"narrative_dynamics":           scoreNarrativeDynamics(body, stats),
 		"layout_humanizer_fingerprint": scoreLayoutHumanizerFingerprint(stats),
 		"content_integrity":            scoreContentIntegrity(stats.DetectorNoise),
 		"zhuque_segment_proxy":         scoreZhuqueSegmentProxy(segmentProxy),
@@ -573,7 +614,7 @@ func latestDetectorProxy(body string, chars []rune, sents []string, sentLens []f
 	return DetectorProxy{
 		CompositePercent: round2(composite),
 		Weights:          latestProxyWeights,
-		Note:             "近年检测器常把句级分类、弱模型概率/熵、概率曲率、风格计量、语义平滑、语意困惑度和句段级布局指纹融合；本地用可复算代理特征近似，不调用外部模型。拟声词/重复声响和无语义脏码会先中和后再计算曲线，且脏码长串会进入内容完整性风险。若文本同时命中高质量人工样本锚点，会对曲线类特征做误判降权，但不覆盖内容完整性、真重复和空泛概括风险。",
+		Note:             "近年检测器常把句级分类、弱模型概率/熵、概率曲率、风格计量、全局-局部语意连贯、叙事动力和句段级布局指纹融合；本地用可复算代理特征近似，不调用外部模型。小说专项会检查轮流发言、动作报幕、对白长度过齐、主视角体验过薄和情绪温度单一。拟声词/重复声响和无语义脏码会先中和后再计算曲线。人工锚点只软降权易误伤曲线，不能覆盖叙事动力、内容完整性、真重复和空泛概括风险。",
 		Components:       components,
 	}
 }
@@ -755,6 +796,7 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 		burstiness := dimScore("burstiness")
 		structure := dimScore("structure_fingerprint")
 		crossParagraph := dimScore("cross_paragraph_consistency")
+		narrativeDynamics := latest["narrative_dynamics"].Score
 		strongAnchor := boolFromAny(anchor["eligible"]) &&
 			stringFromAny(anchor["strength"]) == "strong" &&
 			len(blockers) == 0
@@ -770,6 +812,9 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 			independentSupport++
 		}
 		if structure >= 65 && concrete < 18 && report.Stats.DialogueRatio < 0.35 {
+			independentSupport++
+		}
+		if narrativeDynamics >= 55 {
 			independentSupport++
 		}
 		multiSignalSupport := independentSupport >= 2 || (!strongAnchor && (independentSupport >= 1 || rawCurve >= 90))
@@ -1056,6 +1101,119 @@ func scoreSemanticPerplexity(body string, stats Stats) Dimension {
 	return dim("语意困惑度", "semantic_perplexity", stat, signals)
 }
 
+func scoreNarrativeDynamics(body string, stats Stats) Dimension {
+	paras := paragraphs(body)
+	dialogueParas := 0
+	actionLeadParas := 0
+	maxDialogueRun := 0
+	currentRun := 0
+	for _, para := range paras {
+		trimmed := strings.TrimSpace(para)
+		if !strings.ContainsAny(trimmed, "“「") {
+			currentRun = 0
+			continue
+		}
+		dialogueParas++
+		currentRun++
+		if currentRun > maxDialogueRun {
+			maxDialogueRun = currentRun
+		}
+		if dialogueActionLeadRe.MatchString(trimmed) {
+			actionLeadParas++
+		}
+	}
+
+	quoteLens := []float64{}
+	for _, match := range dialogueQuoteRe.FindAllStringSubmatch(body, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		if n := len(hanzi(match[1])); n > 0 {
+			quoteLens = append(quoteLens, float64(n))
+		}
+	}
+	denseDialogueWindows := 0
+	for start := 0; start+8 <= len(paras); start++ {
+		window := paras[start : start+8]
+		dialogueCount := 0
+		for _, para := range window {
+			if strings.ContainsAny(para, "“「") {
+				dialogueCount++
+			}
+		}
+		if dialogueCount >= 6 && countAll(strings.Join(window, "\n"), interiorityMarkers) <= 1 {
+			denseDialogueWindows++
+		}
+	}
+
+	interiorityDensity := density(countAll(body, interiorityMarkers), stats.Hanzi)
+	logisticsDensity := density(countAll(body, logisticsMarkers), stats.Hanzi)
+	emotionCategories := 0
+	for _, markers := range emotionCategoryMarkers {
+		if countAll(body, markers) > 0 {
+			emotionCategories++
+		}
+	}
+	dialogueParaRatio := round3(ratio(dialogueParas, maxInt(len(paras), 1)))
+	actionLeadRatio := round3(ratio(actionLeadParas, maxInt(dialogueParas, 1)))
+	quoteLenCV := round3(cv(quoteLens))
+	conveyorEvidenceCount := 0
+	if actionLeadRatio >= 0.35 {
+		conveyorEvidenceCount++
+	}
+	if logisticsDensity >= 3.0 {
+		conveyorEvidenceCount++
+	}
+	if quoteLenCV > 0 && quoteLenCV < 0.72 {
+		conveyorEvidenceCount++
+	}
+	conveyorEvidence := conveyorEvidenceCount >= 2 || actionLeadRatio >= 0.50 || logisticsDensity >= 5.0
+
+	signals := []Signal{}
+	if denseDialogueWindows >= 2 && conveyorEvidence {
+		signals = append(signals, sig("dialogue_conveyor_windows", 70, "多个八段窗口由角色轮流发言推进，主视角体验和非功能性反应不足"))
+	} else if denseDialogueWindows == 1 && conveyorEvidence {
+		signals = append(signals, sig("dialogue_conveyor_window", 58, "局部连续对白像一人一句交接剧情任务"))
+	}
+	if maxDialogueRun >= 6 && conveyorEvidence {
+		signals = append(signals, sig("dialogue_turn_run_high", 60, "连续对白段过长，场景缺少由选择、感受或后果形成的换挡"))
+	} else if maxDialogueRun >= 4 && actionLeadRatio >= 0.40 {
+		signals = append(signals, sig("dialogue_turn_run_mid", 42, "连续对白段与动作报幕同时偏多"))
+	}
+	if dialogueParas >= 8 && actionLeadRatio >= 0.45 && logisticsDensity >= 2.0 {
+		signals = append(signals, sig("action_dialogue_lead_uniform", 52, "多数对白段先安排人物动作再开口，形成舞台调度式节拍"))
+	}
+	if len(quoteLens) >= 10 && denseDialogueWindows >= 1 && actionLeadRatio >= 0.35 && quoteLenCV > 0 && quoteLenCV < 0.72 {
+		signals = append(signals, sig("dialogue_length_conveyor", 50, "密集对白的发言长度和动作入口同时趋同，像按剧情岗位分配台词"))
+	}
+	if stats.Hanzi >= 1500 && dialogueParas >= 8 && logisticsDensity >= 5 && interiorityDensity < 2.0 {
+		signals = append(signals, sig("pov_interiority_thin", 66, "主视角长时间只处理流程与任务，触发后的误判、欲望冲突和情绪余波过薄"))
+	} else if stats.Hanzi >= 1500 && dialogueParaRatio >= 0.32 && logisticsDensity >= 2.0 && interiorityDensity < 3.0 {
+		signals = append(signals, sig("pov_interiority_low", 46, "对白占比较高，但主视角主观体验不足"))
+	}
+	if stats.Hanzi >= 1800 && dialogueParas >= 8 && emotionCategories <= 1 && conveyorEvidence {
+		signals = append(signals, sig("emotion_range_flat", 44, "整章情绪温度单一，人物反应主要承担推进功能"))
+	} else if stats.Hanzi >= 1800 && emotionCategories <= 2 && interiorityDensity < 2.0 && logisticsDensity >= 2.0 {
+		signals = append(signals, sig("emotion_range_thin", 30, "情绪类别和主观余波都偏少"))
+	}
+	return dim("小说叙事动力/人物体验", "narrative_dynamics", map[string]any{
+		"paragraph_count":            len(paras),
+		"dialogue_paragraph_count":   dialogueParas,
+		"dialogue_paragraph_ratio":   dialogueParaRatio,
+		"max_dialogue_paragraph_run": maxDialogueRun,
+		"dense_dialogue_windows":     denseDialogueWindows,
+		"action_dialogue_lead_count": actionLeadParas,
+		"action_dialogue_lead_ratio": actionLeadRatio,
+		"dialogue_turn_count":        len(quoteLens),
+		"dialogue_turn_length_cv":    quoteLenCV,
+		"conveyor_compound_evidence": conveyorEvidence,
+		"conveyor_evidence_count":    conveyorEvidenceCount,
+		"interiority_density_per_k":  interiorityDensity,
+		"logistics_density_per_k":    logisticsDensity,
+		"emotion_category_count":     emotionCategories,
+	}, signals)
+}
+
 func scoreContentIntegrity(noise map[string]any) Dimension {
 	signals := []Signal{}
 	semanticRuns := intFromAny(noise["semantic_noise_runs"])
@@ -1186,10 +1344,12 @@ func technicalExpositoryAnchorStats(body string, stats Stats, sentLens []float64
 }
 
 func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[string]float64, noise map[string]any) map[string]any {
-	// Novel chapters must not earn a human-writing cap by looking like a technical
-	// abstract. That shortcut rewarded jargon density, long explanatory sentences,
-	// and dialogue removal inside fiction. Keep the helper for offline diagnostics,
-	// but calibrate delivery only as narrative prose here.
+	if technical := technicalExpositoryAnchorStats(body, stats, sentLens, noise); boolFromAny(technical["eligible"]) {
+		return technical
+	}
+	// Narrative prose may soften probability-curve false positives, but it never
+	// receives a fixed final score cap. A dialogue/action conveyor can look busy
+	// while still reading mechanically, so narrative_dynamics remains uncalibrated.
 	groundingDensity := round2(stats.ConcreteDensityPerK + stats.SensoryDensityPerK)
 	sceneDensity := round2(groundingDensity + stats.ActionDensityPerK)
 	short12 := round3(ratio(countWhere(sentLens, func(v float64) bool { return v <= 12 }), len(sentLens)))
@@ -1296,46 +1456,42 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	segmentCap := 100.0
 	if eligible && score >= 72 {
 		strength = "strong"
-		if score >= 90 && sceneDensity >= 28 && stats.ClicheTotalPerK <= 4 {
-			curveFactor = 0.34
-			curveCap = 36
-			styleFactor = 0.55
-			styleCap = 50
-			segmentCap = 88
-		} else if score >= 82 && sceneDensity >= 22 {
-			curveFactor = 0.42
-			curveCap = 45
-			styleFactor = 0.60
-			styleCap = 55
-			segmentCap = 78
+		if score >= 90 && sceneDensity >= 22 && stats.ClicheTotalPerK <= 7 {
+			curveFactor = 0.04
+			curveCap = 5
+			styleFactor = 0.20
+			styleCap = 20
+			segmentCap = 35
+		} else if score >= 82 && sceneDensity >= 18 {
+			curveFactor = 0.08
+			curveCap = 10
+			styleFactor = 0.30
+			styleCap = 30
+			segmentCap = 42
 		} else {
-			curveFactor = 0.55
-			curveCap = 58
-			styleFactor = 0.70
-			styleCap = 65
-			segmentCap = 70
+			curveFactor = 0.15
+			curveCap = 20
+			styleFactor = 0.45
+			styleCap = 45
+			segmentCap = 52
 		}
 	} else if eligible {
 		strength = "moderate"
-		curveFactor = 0.70
-		curveCap = 70
-		styleFactor = 0.75
-		styleCap = 72
-		segmentCap = 70
+		curveFactor = 0.30
+		curveCap = 40
+		styleFactor = 0.60
+		styleCap = 60
+		segmentCap = 62
 	}
 	if len(credits) > 8 {
 		credits = credits[:8]
 	}
-	finalCapAllowed := eligible &&
-		strength == "strong" &&
-		score >= 90 &&
-		stats.Repeated12Extra == 0
 	return map[string]any{
 		"score":             round2(float64(score)),
 		"eligible":          eligible,
 		"strength":          strength,
 		"anchor_type":       "narrative_scene",
-		"final_cap_allowed": finalCapAllowed,
+		"final_cap_allowed": false,
 		"blockers":          blockers,
 		"credits":           credits,
 		"curve_factor":      curveFactor,
@@ -1380,14 +1536,14 @@ func applyHumanAnchorCalibration(components map[string]Dimension, anchor map[str
 	if styleCap == 0 {
 		styleCap = 100
 	}
-	for _, key := range []string{"probability_curvature_proxy", "weak_lm_uniformity", "local_entropy_uniformity", "zhuque_segment_proxy", "stylometry_readability"} {
+	for _, key := range []string{"probability_curvature_proxy", "weak_lm_uniformity", "local_entropy_uniformity", "zhuque_segment_proxy", "stylometry_readability", "semantic_perplexity"} {
 		item, ok := components[key]
 		if !ok {
 			continue
 		}
 		original := item.Score
 		adjusted := math.Min(original*factor, capScore)
-		if key == "stylometry_readability" {
+		if key == "stylometry_readability" || key == "semantic_perplexity" {
 			adjusted = math.Min(original*styleFactor, styleCap)
 		}
 		if adjusted < original {
@@ -1812,6 +1968,7 @@ func paragraphFragmentationStats(paras []string) map[string]float64 {
 	}
 	return map[string]float64{
 		"paragraph_count":                 float64(count),
+		"paragraph_length_cv":             round3(cv(lengths)),
 		"avg_hanzi_per_paragraph":         round2(mean(lengths)),
 		"median_hanzi_per_paragraph":      round2(median(lengths)),
 		"short_paragraph_ratio":           round3(ratio(shortParagraphs, count)),

@@ -9,7 +9,7 @@ aigc_value.py — 本地自研 AIGC 值检测器
 用法：
   python3 aigc_value.py <文本文件>
   python3 aigc_value.py <文本文件> --json
-  python3 aigc_value.py <文本文件> --target 5
+  python3 aigc_value.py <文本文件> --target 4
 
 重要：这是概率性文风信号，不是事实判决；但在本地交付流程里可作为
 “需要回改”的工程门控。
@@ -24,7 +24,7 @@ from collections import Counter
 from pathlib import Path
 
 
-ENGINE = "codex-local-aigc-v3"
+ENGINE = "codex-local-aigc-v4"
 DIMENSION_WEIGHTS = {
     "burstiness": 0.30,
     "perplexity_proxy": 0.25,
@@ -37,14 +37,16 @@ FINAL_BLEND_WEIGHTS = {
     "legacy_heuristic": 0.05,
 }
 LATEST_PROXY_WEIGHTS = {
-    "probability_curvature_proxy": 0.31,
-    "weak_lm_uniformity": 0.22,
-    "local_entropy_uniformity": 0.20,
+    "probability_curvature_proxy": 0.22,
+    "weak_lm_uniformity": 0.14,
+    "local_entropy_uniformity": 0.12,
     "stylometry_readability": 0.07,
-    "semantic_smoothing": 0.05,
+    "semantic_smoothing": 0.06,
+    "semantic_perplexity": 0.10,
+    "narrative_dynamics": 0.12,
     "layout_humanizer_fingerprint": 0.05,
     "content_integrity": 0.10,
-    "zhuque_segment_proxy": 0.00,
+    "zhuque_segment_proxy": 0.02,
 }
 
 CLICHES = {
@@ -87,6 +89,27 @@ ABSTRACT_HINTS = [
     "羁绊", "真相", "现实", "未来", "过去", "世界", "规则", "答案",
 ]
 
+INTERIORITY_HINTS = [
+    "心里", "心口", "胸口", "脑子里", "他以为", "她以为", "他觉得", "她觉得",
+    "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "难堪", "委屈",
+    "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道",
+    "差点", "松了口气", "说不上来",
+]
+
+LOGISTICS_HINTS = [
+    "付款", "收款", "订单", "票据", "材料", "安装", "通道", "位置", "摊位", "试用",
+    "额度", "规则", "核对", "记录", "交付", "扩摊", "运力",
+]
+
+EMOTION_CATEGORY_HINTS = {
+    "joy": ["开心", "高兴", "痛快", "兴奋", "期待", "乐了", "笑开", "松了口气"],
+    "affection": ["心疼", "温柔", "喜欢", "护着", "担心", "在意", "舍不得"],
+    "anger": ["生气", "恼火", "发火", "窝火", "气不过", "骂", "怒"],
+    "sadness": ["难堪", "委屈", "失落", "难受", "丢脸", "心酸", "发苦"],
+    "fear": ["害怕", "紧张", "警惕", "慌", "发怵", "心里一紧", "不敢"],
+    "surprise": ["没想到", "意外", "震惊", "惊讶", "愣住", "愣了"],
+}
+
 TECHNICAL_HUMAN_HINTS = [
     "系统", "算法", "模型", "实验", "数据", "检测", "识别", "跟踪", "控制", "优化",
     "实时", "计算", "阈值", "方差", "协方差", "序列", "图像", "像素", "轨迹", "预测",
@@ -98,6 +121,8 @@ TECHNICAL_HUMAN_HINTS = [
 SOUND_NOISE_RE = re.compile(r"(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}")
 CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{24,}")
 RARE_TERM_SOUP_RE = re.compile(r"(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}")
+DIALOGUE_QUOTE_RE = re.compile(r"[“「]([^”」\n]{1,240})[”」]")
+DIALOGUE_ACTION_LEAD_RE = re.compile(r"^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]")
 GRAMMAR_CHARS = set("的一是不了在有和人这那中为上个我你他她它以要时来用们到于就对成会可也能下过说得着里把被给但并而或及其都还只又先再才没无")
 RARE_SOUP_CHARS = set("魑魅魍魉饕餮螭赑屃狴犴蒲牢睚眦狻猊椒图囚牛貔貅獬豸鸱吻蚣蝮趴")
 
@@ -645,9 +670,13 @@ def score_structure_fingerprint(body: str, paras: list[str], per_k: dict[str, fl
     )
     transition_markers = ["然而", "与此同时", "随后", "紧接着", "片刻后", "很快", "没过多久", "于是", "因此"]
     summary_markers = ["这让他意识到", "这让她意识到", "终于明白", "不仅仅是", "更是", "这意味着"]
+    aphoristic_summary_re = re.compile(
+        r"(?:理由一条比一条[^。！？!?]{0,24}只有[^。！？!?]{0,24}|[^。！？!?]{0,18}只能[^，。！？!?]{1,16}[，,][^。！？!?]{0,8}不能[^。！？!?]{1,20}|[^。！？!?]{2,12}不等于[^。！？!?]{2,16})"
+    )
     marker_count = len(ordered_marker_re.findall(body))
     transition_count = sum(body.count(item) for item in transition_markers)
     summary_count = sum(body.count(item) for item in summary_markers)
+    aphoristic_summary_count = len(aphoristic_summary_re.findall(body))
     n_hanzi = len(hanzi(body))
     transition_density = density(transition_count, n_hanzi)
     summary_density = density(summary_count, n_hanzi)
@@ -672,6 +701,8 @@ def score_structure_fingerprint(body: str, paras: list[str], per_k: dict[str, fl
         signals.append(risk_item("summary_density", 0.62, f"解释归纳标记密度 {summary_density}/千字"))
     elif per_k.get("解释归纳", 0) >= 0.8:
         signals.append(risk_item("summary_category", 0.48, f"解释归纳类密度 {per_k['解释归纳']}/千字"))
+    if aphoristic_summary_count > 0:
+        signals.append(risk_item("aphoristic_narrative_summary", 0.52, f"可摘抄式对称心理结论 {aphoristic_summary_count} 处"))
     if repeated_starts >= 3:
         signals.append(risk_item("paragraph_start_repeat", 0.42, f"段首 4 字重复额外 {repeated_starts} 次"))
     if len(sentence_counts) >= 8 and sentence_count_cv < 0.35:
@@ -717,6 +748,7 @@ def score_structure_fingerprint(body: str, paras: list[str], per_k: dict[str, fl
             "ordered_marker_count": marker_count,
             "transition_density_per_k": transition_density,
             "summary_density_per_k": summary_density,
+            "aphoristic_summary_count": aphoristic_summary_count,
             "repeated_paragraph_starts": repeated_starts,
             "paragraph_sentence_count_cv": round(sentence_count_cv, 3),
         },
@@ -1098,6 +1130,184 @@ def score_semantic_smoothing(body: str, n_hanzi: int, concrete_density: float, p
     }
 
 
+def semantic_sentence_profile(sentence: str) -> dict:
+    roles = []
+    has_object = sum(sentence.count(item) for item in CONCRETE_HINTS) > 0 or bool(re.search(r"\d", sentence))
+    has_action = count_markers(sentence, ACTION_HINTS) > 0
+    has_sensory = count_markers(sentence, SENSORY_HINTS) > 0
+    has_dialogue = any(mark in sentence for mark in "“”「」") or count_markers(sentence, ["说", "问", "回答", "答道", "喊", "骂"]) > 0
+    has_rule = count_markers(sentence, ["规则", "账单", "合同", "收据", "凭证", "审核", "交易", "边界", "名单", "价签", "账户", "回执"]) > 0
+    has_abstract = count_markers(sentence, ABSTRACT_HINTS + ["这意味着", "终于明白", "不仅仅是"]) > 0
+    has_emotion = count_markers(sentence, EMOTION_WORDS) > 0
+    for present, name in [
+        (has_object, "object"),
+        (has_action, "action"),
+        (has_sensory, "sensory"),
+        (has_dialogue, "dialogue"),
+        (has_rule, "rule"),
+        (has_abstract, "abstract"),
+        (has_emotion, "emotion"),
+    ]:
+        if present:
+            roles.append(name)
+    if not roles:
+        roles.append("plain")
+    scene = has_object or has_action or has_sensory or has_dialogue or has_rule
+    return {
+        "signature": "+".join(roles),
+        "scene": scene,
+        "abstract_only": not scene and (has_abstract or has_emotion),
+        "role_count": len(roles),
+    }
+
+
+def score_semantic_perplexity(body: str, n_hanzi: int) -> dict:
+    profiles = [semantic_sentence_profile(sentence) for sentence in split_sentences(body) if len(hanzi(sentence)) >= 4]
+    counts = Counter(item["signature"] for item in profiles)
+    sentence_count = len(profiles)
+    dominant_signature, dominant_count = (counts.most_common(1)[0] if counts else ("", 0))
+    max_run = 0
+    current_run = 0
+    previous = None
+    turns = 0
+    for item in profiles:
+        if item["signature"] == previous:
+            current_run += 1
+        else:
+            if previous is not None:
+                turns += 1
+            current_run = 1
+            previous = item["signature"]
+        max_run = max(max_run, current_run)
+    scene_ratio = sum(1 for item in profiles if item["scene"]) / max(sentence_count, 1)
+    abstract_only_ratio = sum(1 for item in profiles if item["abstract_only"]) / max(sentence_count, 1)
+    turn_ratio = turns / max(sentence_count - 1, 1)
+    avg_roles = sum(item["role_count"] for item in profiles) / max(sentence_count, 1)
+    dominant_ratio = dominant_count / max(sentence_count, 1)
+    signals = []
+    if sentence_count >= 12:
+        if len(counts) <= 2 and dominant_ratio >= 0.55:
+            signals.append(risk_item("semantic_signature_low", 0.64, "语义角色签名种类过少，句子功能过于好猜"))
+        elif len(counts) <= 3 and dominant_ratio >= 0.62:
+            signals.append(risk_item("semantic_signature_mid", 0.46, "主导语义功能占比偏高"))
+        if max_run >= 5:
+            signals.append(risk_item("semantic_run_flat", 0.58, "连续多句承担同一语义功能"))
+        elif max_run >= 4:
+            signals.append(risk_item("semantic_run_mid", 0.38, "同类语义句连续出现"))
+        if turn_ratio < 0.35:
+            signals.append(risk_item("semantic_turn_low", 0.44, "句间语义转折或功能切换偏少"))
+    if sentence_count >= 10 and abstract_only_ratio >= 0.30 and scene_ratio < 0.45:
+        signals.append(risk_item("abstract_branching_low", 0.56, "抽象判断句比例高，动作、物件、感官或对白分支不足"))
+    if sentence_count >= 10 and avg_roles < 1.25 and scene_ratio < 0.35:
+        signals.append(risk_item("semantic_branching_thin", 0.42, "单句语义承载维度偏薄"))
+    score = max([item["score"] for item in signals], default=0)
+    if len(signals) > 1:
+        score = min(100, score + (len(signals) - 1) * 6)
+    return {
+        "name": "语意困惑度",
+        "score": round(score, 2),
+        "weight": LATEST_PROXY_WEIGHTS["semantic_perplexity"],
+        "stats": {
+            "hanzi": n_hanzi,
+            "sentence_count": sentence_count,
+            "signature_kinds": len(counts),
+            "dominant_signature": dominant_signature,
+            "dominant_signature_ratio": round(dominant_ratio, 3),
+            "same_signature_run_max": max_run,
+            "scene_signature_ratio": round(scene_ratio, 3),
+            "abstract_only_ratio": round(abstract_only_ratio, 3),
+            "semantic_turn_ratio": round(turn_ratio, 3),
+            "avg_role_count": round(avg_roles, 3),
+        },
+        "signals": signals,
+    }
+
+
+def score_narrative_dynamics(body: str, n_hanzi: int) -> dict:
+    paras = paragraphs(body)
+    dialogue_paras = 0
+    action_lead_paras = 0
+    max_dialogue_run = 0
+    current_run = 0
+    for para in paras:
+        stripped = para.strip()
+        if not any(mark in stripped for mark in "“「"):
+            current_run = 0
+            continue
+        dialogue_paras += 1
+        current_run += 1
+        max_dialogue_run = max(max_dialogue_run, current_run)
+        if DIALOGUE_ACTION_LEAD_RE.search(stripped):
+            action_lead_paras += 1
+
+    quote_lens = [len(hanzi(match)) for match in DIALOGUE_QUOTE_RE.findall(body) if hanzi(match)]
+    dense_dialogue_windows = 0
+    for start in range(max(0, len(paras) - 7)):
+        window = paras[start : start + 8]
+        if len(window) < 8:
+            continue
+        dialogue_count = sum(1 for para in window if any(mark in para for mark in "“「"))
+        if dialogue_count >= 6 and count_markers("\n".join(window), INTERIORITY_HINTS) <= 1:
+            dense_dialogue_windows += 1
+
+    interiority_density = density(count_markers(body, INTERIORITY_HINTS), n_hanzi)
+    logistics_density = density(count_markers(body, LOGISTICS_HINTS), n_hanzi)
+    emotion_categories = sum(1 for markers in EMOTION_CATEGORY_HINTS.values() if count_markers(body, markers) > 0)
+    dialogue_para_ratio = round(dialogue_paras / max(len(paras), 1), 3)
+    action_lead_ratio = round(action_lead_paras / max(dialogue_paras, 1), 3)
+    quote_len_cv = round(coefficient_of_variation(quote_lens), 3)
+    conveyor_evidence_count = sum(
+        [action_lead_ratio >= 0.35, logistics_density >= 3.0, 0 < quote_len_cv < 0.72]
+    )
+    conveyor_evidence = conveyor_evidence_count >= 2 or action_lead_ratio >= 0.50 or logistics_density >= 5.0
+    signals = []
+    if dense_dialogue_windows >= 2 and conveyor_evidence:
+        signals.append(risk_item("dialogue_conveyor_windows", 0.70, "多个八段窗口由角色轮流发言推进，主视角体验和非功能性反应不足"))
+    elif dense_dialogue_windows == 1 and conveyor_evidence:
+        signals.append(risk_item("dialogue_conveyor_window", 0.58, "局部连续对白像一人一句交接剧情任务"))
+    if max_dialogue_run >= 6 and conveyor_evidence:
+        signals.append(risk_item("dialogue_turn_run_high", 0.60, "连续对白段过长，场景缺少由选择、感受或后果形成的换挡"))
+    elif max_dialogue_run >= 4 and action_lead_ratio >= 0.40:
+        signals.append(risk_item("dialogue_turn_run_mid", 0.42, "连续对白段与动作报幕同时偏多"))
+    if dialogue_paras >= 8 and action_lead_ratio >= 0.45 and logistics_density >= 2.0:
+        signals.append(risk_item("action_dialogue_lead_uniform", 0.52, "多数对白段先安排人物动作再开口，形成舞台调度式节拍"))
+    if len(quote_lens) >= 10 and dense_dialogue_windows >= 1 and action_lead_ratio >= 0.35 and 0 < quote_len_cv < 0.72:
+        signals.append(risk_item("dialogue_length_conveyor", 0.50, "密集对白的发言长度和动作入口同时趋同，像按剧情岗位分配台词"))
+    if n_hanzi >= 1500 and dialogue_paras >= 8 and logistics_density >= 5 and interiority_density < 2.0:
+        signals.append(risk_item("pov_interiority_thin", 0.66, "主视角长时间只处理流程与任务，触发后的误判、欲望冲突和情绪余波过薄"))
+    elif n_hanzi >= 1500 and dialogue_para_ratio >= 0.32 and logistics_density >= 2.0 and interiority_density < 3.0:
+        signals.append(risk_item("pov_interiority_low", 0.46, "对白占比较高，但主视角主观体验不足"))
+    if n_hanzi >= 1800 and dialogue_paras >= 8 and emotion_categories <= 1 and conveyor_evidence:
+        signals.append(risk_item("emotion_range_flat", 0.44, "整章情绪温度单一，人物反应主要承担推进功能"))
+    elif n_hanzi >= 1800 and emotion_categories <= 2 and interiority_density < 2.0 and logistics_density >= 2.0:
+        signals.append(risk_item("emotion_range_thin", 0.30, "情绪类别和主观余波都偏少"))
+    score = max([item["score"] for item in signals], default=0)
+    if len(signals) > 1:
+        score = min(100, score + (len(signals) - 1) * 6)
+    return {
+        "name": "小说叙事动力/人物体验",
+        "score": round(score, 2),
+        "weight": LATEST_PROXY_WEIGHTS["narrative_dynamics"],
+        "stats": {
+            "paragraph_count": len(paras),
+            "dialogue_paragraph_count": dialogue_paras,
+            "dialogue_paragraph_ratio": dialogue_para_ratio,
+            "max_dialogue_paragraph_run": max_dialogue_run,
+            "dense_dialogue_windows": dense_dialogue_windows,
+            "action_dialogue_lead_count": action_lead_paras,
+            "action_dialogue_lead_ratio": action_lead_ratio,
+            "dialogue_turn_count": len(quote_lens),
+            "dialogue_turn_length_cv": quote_len_cv,
+            "conveyor_compound_evidence": conveyor_evidence,
+            "conveyor_evidence_count": conveyor_evidence_count,
+            "interiority_density_per_k": interiority_density,
+            "logistics_density_per_k": logistics_density,
+            "emotion_category_count": emotion_categories,
+        },
+        "signals": signals,
+    }
+
+
 def score_content_integrity(noise_stats: dict) -> dict:
     signals = []
     semantic_runs = noise_stats.get("semantic_noise_runs", 0)
@@ -1345,30 +1555,30 @@ def high_quality_human_anchor_stats(
         strength = "moderate"
 
     if strength == "strong":
-        if score >= 90 and scene_density >= 28 and total_cliche <= 4:
-            curve_factor = 0.34
-            curve_cap = 36.0
-            style_factor = 0.55
-            style_cap = 50.0
-            segment_cap = 88.0
-        elif score >= 82 and scene_density >= 22:
-            curve_factor = 0.42
-            curve_cap = 45.0
-            style_factor = 0.60
-            style_cap = 55.0
-            segment_cap = 78.0
+        if score >= 90 and scene_density >= 22 and total_cliche <= 7:
+            curve_factor = 0.04
+            curve_cap = 5.0
+            style_factor = 0.20
+            style_cap = 20.0
+            segment_cap = 35.0
+        elif score >= 82 and scene_density >= 18:
+            curve_factor = 0.08
+            curve_cap = 10.0
+            style_factor = 0.30
+            style_cap = 30.0
+            segment_cap = 42.0
         else:
-            curve_factor = 0.55
-            curve_cap = 58.0
-            style_factor = 0.70
-            style_cap = 65.0
-            segment_cap = 70.0
+            curve_factor = 0.15
+            curve_cap = 20.0
+            style_factor = 0.45
+            style_cap = 45.0
+            segment_cap = 52.0
     elif strength == "moderate":
-        curve_factor = 0.70
-        curve_cap = 70.0
-        style_factor = 0.75
-        style_cap = 72.0
-        segment_cap = 70.0
+        curve_factor = 0.30
+        curve_cap = 40.0
+        style_factor = 0.60
+        style_cap = 60.0
+        segment_cap = 62.0
     else:
         curve_factor = 1.0
         curve_cap = 100.0
@@ -1381,7 +1591,7 @@ def high_quality_human_anchor_stats(
         "eligible": eligible,
         "strength": strength,
         "anchor_type": "narrative_scene",
-        "final_cap_allowed": eligible and strength == "strong" and score >= 88,
+        "final_cap_allowed": False,
         "blockers": blockers,
         "credits": credits[:8],
         "curve_factor": curve_factor,
@@ -1419,13 +1629,14 @@ def apply_human_anchor_calibration(components: dict, human_anchor: dict) -> dict
         "local_entropy_uniformity",
         "zhuque_segment_proxy",
         "stylometry_readability",
+        "semantic_perplexity",
     }
     for key in target_keys:
         item = components.get(key)
         if not item:
             continue
         original = float(item.get("score", 0))
-        if key == "stylometry_readability":
+        if key in {"stylometry_readability", "semantic_perplexity"}:
             adjusted = round(min(original * style_factor, style_cap), 2)
         else:
             adjusted = round(min(original * factor, cap), 2)
@@ -1566,6 +1777,7 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
     burstiness = float(zhuque_dimensions_map.get("burstiness", {}).get("score", 0) or 0)
     structure = float(zhuque_dimensions_map.get("structure_fingerprint", {}).get("score", 0) or 0)
     cross_paragraph = float(zhuque_dimensions_map.get("cross_paragraph_consistency", {}).get("score", 0) or 0)
+    narrative_dynamics = float(latest.get("narrative_dynamics", {}).get("score", 0) or 0)
 
     score = max(probability_curve, entropy, layout)
     evidence = []
@@ -1611,6 +1823,7 @@ def segment_aigc_proxy(segment_report: dict, char_count: int, proportion: float)
                 zhuque_composite >= 50,
                 burstiness >= 35 and (structure >= 45 or cross_paragraph >= 30),
                 structure >= 65 and concrete < 18 and dialogue_ratio < 0.35,
+                narrative_dynamics >= 55,
             )
         )
         multi_signal_support = independent_support >= 2 or (
@@ -1805,6 +2018,8 @@ def latest_detector_proxy(
         "local_entropy_uniformity": score_local_entropy_uniformity(entropy),
         "stylometry_readability": score_stylometry_readability(sent_lens, punctuation, dialogue_ratio, len(chars)),
         "semantic_smoothing": score_semantic_smoothing(body, len(chars), concrete_density, per_k),
+        "semantic_perplexity": score_semantic_perplexity(body, len(chars)),
+        "narrative_dynamics": score_narrative_dynamics(body, len(chars)),
         "layout_humanizer_fingerprint": score_layout_humanizer_fingerprint(fragment_stats),
         "content_integrity": score_content_integrity(noise_stats),
         "zhuque_segment_proxy": score_zhuque_segment_proxy(segment_proxy),
@@ -1815,7 +2030,7 @@ def latest_detector_proxy(
     return {
         "composite_percent": round(composite, 2),
         "weights": LATEST_PROXY_WEIGHTS,
-        "note": "近年检测器常把句级分类、弱模型概率/熵、概率曲率、风格计量、语义平滑和句段级布局指纹融合；本地用可复算代理特征近似，不调用外部模型。拟声词/重复声响和无语义脏码会先中和后再计算曲线，且脏码长串会进入内容完整性风险。若文本同时命中高质量人工样本锚点，会对曲线类特征做误判降权，但不覆盖内容完整性、真重复和空泛概括风险。",
+        "note": "近年检测器常把句级分类、弱模型概率/熵、概率曲率、风格计量、全局-局部语意连贯、叙事动力和句段级布局指纹融合；本地用可复算代理特征近似，不调用外部模型。小说专项会检查轮流发言、动作报幕、对白长度过齐、主视角体验过薄和情绪温度单一。拟声词/重复声响和无语义脏码会先中和后再计算曲线。人工锚点只软降权易误伤曲线，不能覆盖叙事动力、内容完整性、真重复和空泛概括风险。",
         "detector_noise": noise_stats,
         "human_anchor": human_anchor,
         "components": components,
@@ -1991,10 +2206,25 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
     zhuque = zhuque_dimensions(body, chars, sent_lens, paras, para_lens, short_sentence_ratio, total_cliche, per_k, concrete_density, rep12_extra, fragment_stats)
     segment_proxy = zhuque_segment_proxy(raw) if include_segments else empty_zhuque_segment_proxy()
     latest_proxy = latest_detector_proxy(body, chars, sents, sent_lens, per_k, concrete_density, punctuation, dialogue_ratio, fragment_stats, segment_proxy, human_anchor)
+    raw_zhuque_composite = float(zhuque["composite_percent"])
+    raw_legacy_percent = float(legacy_percent)
+    calibrated_zhuque_composite = raw_zhuque_composite
+    calibrated_legacy_percent = raw_legacy_percent
+    if human_anchor.get("anchor_type") == "narrative_scene" and human_anchor.get("eligible"):
+        anchor_score = float(human_anchor.get("score", 0))
+        zhuque_factor, legacy_factor = 0.55, 0.75
+        if anchor_score >= 90:
+            zhuque_factor, legacy_factor = 0.12, 0.25
+        elif anchor_score >= 82:
+            zhuque_factor, legacy_factor = 0.20, 0.40
+        elif anchor_score >= 72:
+            zhuque_factor, legacy_factor = 0.35, 0.55
+        calibrated_zhuque_composite = round(raw_zhuque_composite * zhuque_factor, 2)
+        calibrated_legacy_percent = round(raw_legacy_percent * legacy_factor, 2)
     blended_percent = round(
-        (zhuque["composite_percent"] * FINAL_BLEND_WEIGHTS["zhuque_four_dimensions"])
+        (calibrated_zhuque_composite * FINAL_BLEND_WEIGHTS["zhuque_four_dimensions"])
         + (latest_proxy["composite_percent"] * FINAL_BLEND_WEIGHTS["latest_detector_proxy"])
-        + (legacy_percent * FINAL_BLEND_WEIGHTS["legacy_heuristic"]),
+        + (calibrated_legacy_percent * FINAL_BLEND_WEIGHTS["legacy_heuristic"]),
         2,
     )
     content_floor = 0.0
@@ -2010,6 +2240,7 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
     )
     if (
         content_floor == 0.0
+        and human_anchor.get("anchor_type") == "technical_expository"
         and human_anchor.get("eligible")
         and human_anchor.get("strength") == "strong"
         and human_anchor.get("final_cap_allowed")
@@ -2039,9 +2270,12 @@ def analyze_text(text: str, include_segments: bool = True) -> dict:
         "whole_text_single_segment_gate_percent": whole_text_gate,
         "content_integrity_floor_percent": content_floor,
         "zhuque_dimensions": zhuque,
+        "zhuque_composite_percent": calibrated_zhuque_composite,
+        "zhuque_composite_raw_percent": raw_zhuque_composite,
         "latest_detector_proxy": latest_proxy,
         "zhuque_segment_proxy": segment_proxy,
-        "legacy_heuristic_percent": legacy_percent,
+        "legacy_heuristic_percent": calibrated_legacy_percent,
+        "legacy_heuristic_raw_percent": raw_legacy_percent,
         "final_blend_weights": FINAL_BLEND_WEIGHTS,
         "human_anchor_final_cap_percent": human_anchor_final_cap,
         "risk_label": label_for(percent),
@@ -2080,14 +2314,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="本地自研 AIGC 值检测器")
     parser.add_argument("path")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--target", type=float, default=5.0)
+    parser.add_argument("--target", type=float, default=4.0)
     args = parser.parse_args()
 
     text = Path(args.path).read_text(encoding="utf-8")
     report = analyze_text(text)
     target_percent = args.target * 100 if 0 < args.target <= 1 else args.target
     report["target"] = target_percent
-    report["passed"] = report["aigc_percent"] <= target_percent
+    report["passed"] = report["aigc_percent"] < target_percent
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -2095,7 +2329,7 @@ def main() -> None:
 
     print(f"自研AIGC值: {report['aigc_value']:.4f} ({report['aigc_percent']:.2f}%)")
     print(f"风险等级: {report['risk_label']}  置信度: {report['confidence']}  引擎: {report['engine']}")
-    print(f"门控: {'通过' if report['passed'] else '不通过'} (目标 ≤ {target_percent:g}%)")
+    print(f"门控: {'通过' if report['passed'] else '不通过'} (目标 < {target_percent:g}%)")
     print("关键统计:")
     stats = report["stats"]
     print(f"  汉字 {stats['hanzi']} | 句长CV {stats['sentence_cv']} | 段长CV {stats['paragraph_cv']} | 套路密度 {stats['cliche_total_per_k']}/千字")
@@ -2127,9 +2361,9 @@ def main() -> None:
     for key, item in report["latest_detector_proxy"]["components"].items():
         print(f"  {item['name']}: {item['score']:.2f}% (weight {item['weight']:.2f})")
     print(
-        f"  四维综合: {report['zhuque_dimensions']['composite_percent']:.2f}% | "
+        f"  四维综合(采用/原始): {report['zhuque_composite_percent']:.2f}%/{report['zhuque_composite_raw_percent']:.2f}% | "
         f"最新代理综合: {report['latest_detector_proxy']['composite_percent']:.2f}% | "
-        f"既有启发式: {report['legacy_heuristic_percent']:.2f}% | "
+        f"既有启发式(采用/原始): {report['legacy_heuristic_percent']:.2f}%/{report['legacy_heuristic_raw_percent']:.2f}% | "
         f"分片下限: {report.get('segment_risk_floor_percent', 0):.2f}% | "
         f"整章合段门禁: {report.get('whole_text_single_segment_gate_percent', 0):.2f}%"
     )

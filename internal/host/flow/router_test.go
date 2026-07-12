@@ -126,8 +126,69 @@ func TestRoute_ExistingDraftUsesRestrictedFinalizer(t *testing.T) {
 	p := writingProgress([]int{1}, domain.FlowRewriting)
 	p.PendingRewrites = []int{2}
 	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
-	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") {
+	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") ||
+		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") || !strings.Contains(got.Task, "人工验收补充属于确定性约束") {
 		t.Fatalf("existing draft should use restricted finalizer, got %+v", got)
+	}
+}
+
+func TestRoute_ExplicitRerenderUsesDrafterWithoutReplanning(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress: p, NextActionPlanReady: true, NextActionExplicitRerender: true,
+	})
+	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "profile=draft") ||
+		!strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止调用 simulate_chapter_world") {
+		t.Fatalf("explicit rerender must bypass replanning and force one full draft, got %+v", got)
+	}
+}
+
+func TestRoute_BlockingFormalReviewRequiresFreshWholeDraft(t *testing.T) {
+	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress: p, NextActionPlanReady: true, NextActionReviewRerenderRequired: true,
+	})
+	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") ||
+		!strings.Contains(got.Task, "正式复审要求") || !strings.Contains(got.Task, "禁止 simulate_chapter_world") {
+		t.Fatalf("same-hash blocking formal review must create a fresh whole draft, got %+v", got)
+	}
+}
+
+func TestRoute_BlockingExternalDraftReviewUsesDrafterForWholeChapter(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress: p, NextActionPlanReady: true, NextActionDraftReady: true,
+		NextActionDraftExternalRerenderRequired: true,
+	})
+	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止 edit_chapter") || !strings.Contains(got.Task, "写入成功后立即结束") {
+		t.Fatalf("blocking external review must route to full drafter, got %+v", got)
+	}
+}
+
+func TestRoute_ExternalRejudgePendingStopsProseDispatch(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress: p, NextActionPlanReady: true, NextActionDraftReady: true,
+		NextActionDraftExternalRejudgePending: true,
+	})
+	if got != nil {
+		t.Fatalf("pending external rejudge must pause host routing, got %+v", got)
+	}
+}
+
+func TestRoute_ExplicitRerenderSupersedesPendingJudgeForOldDraft(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress: p, NextActionPlanReady: true, NextActionExplicitRerender: true,
+		NextActionDraftExternalRejudgePending: true,
+	})
+	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "显式整章重渲染") {
+		t.Fatalf("newer explicit rerender should skip judging superseded draft, got %+v", got)
 	}
 }
 

@@ -477,6 +477,34 @@ func TestLint_IsolatedSentenceIgnoresStandaloneSystemMessages(t *testing.T) {
 	}
 }
 
+func TestLint_AllowsNaturalMobileSingleSentenceParagraphs(t *testing.T) {
+	text := `第一章 夜市开灯
+
+河风从桥洞里穿过来，摊前那张卷边的价目纸被吹得啪啪作响。
+
+林澈站在坡口看了一会儿，直到带孩子的女人因为看不清价格转身离开。
+
+马玉芬没有急着答应，她先问清灯坏了找谁、电费怎么算、收摊以后能不能搬走。
+
+这些话不客气，却比听见免费就点头稳当得多。
+
+老丁把三样东西从车斗里搬下来，价牌先靠在桌脚，黑黄护套还带着五金店里的灰。
+
+第一回送电，灯头抬得太高，白光把热气照得满锅都是。
+
+孩子隔着两步念出了牌上的数字，女人这才牵着他拐回摊前。
+
+普通的收款声响了两次，谁也没有围着林澈道谢。
+
+沈知遥到场后先看通道，再看那截斜出去的线，最后才问是谁付的钱。
+
+林澈原本想解释，目光碰到孩子的鞋尖，又把话收了回去。`
+
+	if v := findRule(Lint(text), "isolated_sentence_overuse"); v != nil {
+		t.Fatalf("natural mobile one-sentence paragraphs should be allowed: %+v", v)
+	}
+}
+
 func TestLint_TemplatedDialogueChain(t *testing.T) {
 	text := `# 第一章
 
@@ -564,16 +592,20 @@ func TestLint_PunctuationCadenceFlagsFormalSemicolonChains(t *testing.T) {
 
 func TestLintSystemMessageOverpacked(t *testing.T) {
 	text := `【用途不符。旧债不算新增消费。先别急，钱没跑。换个能留下东西的花法。】`
-	if v := findRule(Lint(text), "system_message_overpacked"); v == nil {
-		t.Fatalf("expected system_message_overpacked, got %+v", Lint(text))
+	if v := findRule(Lint(text), "abstract_system_reassurance"); v == nil {
+		t.Fatalf("abstract reassurance should be diagnosed by meaning, got %+v", Lint(text))
 	}
 	clean := "【这笔不算。旧账是昨天欠的。】\n\n【先别乱刷，我帮你挑第一笔。】"
 	if v := findRule(Lint(clean), "system_message_overpacked"); v != nil {
 		t.Fatalf("short layered system messages should pass: %+v", v)
 	}
 	bootCard := `【青山县专项经营额度已绑定：1000000元。仅限青山县内新发生的真实经营支出，不能提现、转给本人或偿还旧债；首次验证地点为河畔夜市，完成一笔能当场验货的小额实物采购。】`
-	if v := findRule(Lint(bootCard), "system_message_overpacked"); v == nil {
-		t.Fatalf("long boot card should be split into standalone system messages: %+v", Lint(bootCard))
+	if v := findRule(Lint(bootCard), "system_message_overpacked"); v != nil {
+		t.Fatalf("one readable formal task card should pass: %+v", v)
+	}
+	overpacked := `【系统核验完成。专项额度仍有九十五万元。旧债不能还。个人消费不能报。今晚任务继续。河畔夜市必须再做五十单。限时两小时。完成后发放个人奖励。别担心，我会一直陪着你。下一步先去找五家摊主，再把每一家票据都收好。】`
+	if v := findRule(Lint(overpacked), "system_message_overpacked"); v == nil || v.Severity != SeverityWarning {
+		t.Fatalf("genuinely overloaded system monologue should warn: %+v", Lint(overpacked))
 	}
 }
 
@@ -600,13 +632,29 @@ func TestLintSystemMessageMustUseStandaloneParagraph(t *testing.T) {
 }
 
 func TestLint_AbstractSystemReassurance(t *testing.T) {
-	bad := "【钱没跑。】\n\n【我陪你换条路。】"
+	bad := "【钱没跑。】\n\n【我陪你换条路。】\n\n【不是，哥们，这笔不能这么花。】"
 	if v := findRule(Lint(bad), "abstract_system_reassurance"); v == nil {
 		t.Fatalf("expected abstract_system_reassurance, got %+v", Lint(bad))
 	}
 	clean := "【这笔不算。旧账是昨天欠的。】\n\n【夜市缺灯，先去问摊主愿不愿意。】"
 	if v := findRule(Lint(clean), "abstract_system_reassurance"); v != nil {
 		t.Fatalf("concrete system reply should pass: %+v", v)
+	}
+}
+
+func TestLint_AphoristicNarrativeSummary(t *testing.T) {
+	bad := `理由一条比一条正经，只有钥匙最后揣进谁兜里，被他漏了过去。
+
+不要钱只能省钱，不能让纸箱自己腾地方。`
+	bad += "\n\n便宜不等于省事。"
+	if v := findRule(Lint(bad), "aphoristic_narrative_summary"); v == nil {
+		t.Fatalf("expected aphoristic_narrative_summary, got %+v", Lint(bad))
+	}
+	clean := `车钥匙挂在销售手里。林澈盯了两秒，还是把付款页关了。
+
+摊主没挪纸箱。他把免费试用那句咽回去，改问取餐的人从哪边走。`
+	if v := findRule(Lint(clean), "aphoristic_narrative_summary"); v != nil {
+		t.Fatalf("concrete judgment should pass: %+v", v)
 	}
 }
 
@@ -711,6 +759,64 @@ func TestLint_DialogueActionLeadRepetition(t *testing.T) {
 没人听林建国的。`
 	if v := findRule(Lint(clean), "dialogue_action_lead_repetition"); v != nil {
 		t.Fatalf("mixed dialogue topology should pass: %+v", v)
+	}
+}
+
+func TestLint_DialogueConveyorOveruse(t *testing.T) {
+	bad := `“先把桌子挪开。”林澈说。
+
+“价牌放左边。”沈知遥接话。
+
+“车只能跑一趟。”贺骁补充。
+
+“那就先装三家。”老丁回答。
+
+“剩下两家怎么办？”摊主追问。
+
+“下午再送。”林澈解释。
+
+“票据别忘了。”沈知遥提醒。
+
+“我现在就开。”老丁点头。`
+	if v := findRule(Lint(bad), "dialogue_conveyor_overuse"); v == nil {
+		t.Fatalf("expected dialogue_conveyor_overuse, got %+v", Lint(bad))
+	}
+
+	clean := `“先把桌子挪开。”
+
+林澈听见这句话，忽然想起昨晚那只差点绊倒孩子的推车。他原本只盯着灯牌，直到这会儿才承认，自己急着把钱花出去，险些把麻烦留给摊主。
+
+沈知遥没有催他回答。桥口有人端着汤绕路，她先过去让开一条缝。
+
+“桌子我来搬。”林澈说。
+
+贺骁已经抱住桌腿，嘴上还不肯饶人：“你想明白归想明白，手倒是伸快点。”`
+	if v := findRule(Lint(clean), "dialogue_conveyor_overuse"); v != nil {
+		t.Fatalf("mixed subjective scene should pass: %+v", v)
+	}
+}
+
+func TestLint_POVInteriorityThin(t *testing.T) {
+	dialogue := `“付款记上。”林澈说。
+
+“票据收好。”沈知遥回答。
+
+“材料到了。”老丁说。
+
+“通道留出来。”摊主提醒。
+
+“订单再核对。”林澈说。
+
+“收款没有错。”沈知遥回答。
+
+“安装接着做。”老丁说。
+
+“试用位置别变。”摊主提醒。
+
+`
+	bad := strings.Repeat("摊位前的灯亮着，付款记录、订单、票据和材料都摆在桌上。通道里有人走，众人继续核对交付。", 50) + dialogue
+	if v := findRule(Lint(bad), "pov_interiority_thin"); v == nil {
+		t.Fatalf("expected pov_interiority_thin, got %+v", Lint(bad))
 	}
 }
 

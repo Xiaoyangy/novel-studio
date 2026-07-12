@@ -85,6 +85,46 @@ func TestSaveReviewPersistsContractAssessment(t *testing.T) {
 	}
 }
 
+func TestSaveReviewAccumulatesPendingRewritesAcrossChapterReviews(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("多章复审", 3); err != nil {
+		t.Fatal(err)
+	}
+	for chapter := 1; chapter <= 2; chapter++ {
+		body := fmt.Sprintf("第%d章正文。", chapter)
+		if err := s.Drafts.SaveFinalChapter(chapter, body); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Progress.MarkChapterComplete(chapter, len([]rune(body)), "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tool := NewSaveReviewTool(s)
+	for chapter := 1; chapter <= 2; chapter++ {
+		args, _ := json.Marshal(map[string]any{
+			"chapter": chapter, "scope": "chapter", "dimensions": acceptDimensions(),
+			"contract_status": "met", "issues": []map[string]any{},
+			"verdict": "rewrite", "summary": "外审阻断", "affected_chapters": []int{chapter},
+		})
+		if _, err := tool.Execute(context.Background(), args); err != nil {
+			t.Fatalf("review chapter %d: %v", chapter, err)
+		}
+	}
+
+	progress, err := s.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Flow != domain.FlowRewriting || fmt.Sprint(progress.PendingRewrites) != "[1 2]" {
+		t.Fatalf("pending rewrite queue was overwritten: %+v", progress)
+	}
+}
+
 func TestSaveReviewShortGlobalAcceptCompletesAndWritesManuscript(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -837,8 +877,8 @@ func TestSaveReviewAcceptDrainsPriorRewriteForAdvisoryWarning(t *testing.T) {
 		Chapter:    3,
 		BodySHA256: reviewreport.BodySHA256(body),
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 		RuleViolations: []rules.Violation{{
 			Rule:     "isolated_sentence_overuse",

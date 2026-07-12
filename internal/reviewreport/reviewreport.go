@@ -18,11 +18,15 @@ import (
 
 // MechanicalGatePayload is the machine-readable result written by commit_chapter.
 type MechanicalGatePayload struct {
-	Chapter        int               `json:"chapter"`
-	BodySHA256     string            `json:"body_sha256,omitempty"`
-	AIGCReport     aigc.Report       `json:"aigc_report"`
-	RuleViolations []rules.Violation `json:"rule_violations"`
-	GeneratedAt    string            `json:"generated_at,omitempty"`
+	Chapter                      int               `json:"chapter"`
+	BodySHA256                   string            `json:"body_sha256,omitempty"`
+	AIGCReport                   aigc.Report       `json:"aigc_report"`
+	RuleViolations               []rules.Violation `json:"rule_violations"`
+	ExternalCorroborated         bool              `json:"external_corroborated,omitempty"`
+	ExternalAIProbabilityPercent *float64          `json:"external_ai_probability_percent,omitempty"`
+	AIGCCalibration              string            `json:"aigc_calibration,omitempty"`
+	CorroborationBlockedBy       []string          `json:"corroboration_blocked_by,omitempty"`
+	GeneratedAt                  string            `json:"generated_at,omitempty"`
 }
 
 // BodySHA256 binds review artifacts to the exact chapter body they evaluated.
@@ -44,10 +48,12 @@ type UnifiedMarkdownInput struct {
 type ExternalAIJudge struct {
 	Name                 string
 	Source               string
+	BodySHA256           string
 	Verdict              string
 	RiskLevel            string
 	AIProbabilityPercent int
 	Blocking             bool
+	AdviceComplete       bool
 	Summary              string
 }
 
@@ -102,6 +108,7 @@ func RemoveLegacyMarkdown(root string, chapter int) error {
 }
 
 func RenderUnifiedMarkdown(in UnifiedMarkdownInput) string {
+	ApplyExternalCorroboration(in.Mechanical, in.ExternalAIJudge)
 	chapter := in.Chapter
 	if chapter <= 0 && in.Editor != nil {
 		chapter = in.Editor.Chapter
@@ -416,7 +423,20 @@ func renderMechanicalGate(b *strings.Builder, payload *MechanicalGatePayload) {
 	fmt.Fprintf(b, "- 引擎：%s\n", emptyDash(report.Engine))
 	fmt.Fprintf(b, "- AI 占比：%.2f%%\n", report.AIRatioPercent)
 	fmt.Fprintf(b, "- 门禁采用值：%.2f%%\n", aigc.EffectiveGatePercent(report))
+	if payload.ExternalCorroborated {
+		externalPercent := 0.0
+		if payload.ExternalAIProbabilityPercent != nil {
+			externalPercent = *payload.ExternalAIProbabilityPercent
+		}
+		fmt.Fprintf(b, "- 同哈希外判校准：已采用（外判 %.2f%%；本地原始值保留为诊断）\n", externalPercent)
+		if strings.TrimSpace(payload.AIGCCalibration) != "" {
+			fmt.Fprintf(b, "- 校准口径：%s\n", payload.AIGCCalibration)
+		}
+	}
 	fmt.Fprintf(b, "- 融合值：%.2f%%\n", report.BlendedAIGCPercent)
+	if report.ZhuqueCompositeRaw > 0 || report.LegacyHeuristicRaw > 0 {
+		fmt.Fprintf(b, "- 叙事软校准：四维 %.2f%% → %.2f%%；启发式 %.2f%% → %.2f%%\n", report.ZhuqueCompositeRaw, report.ZhuqueCompositePercent, report.LegacyHeuristicRaw, report.LegacyHeuristicPercent)
+	}
 	fmt.Fprintf(b, "- 朱雀分片风险下限：%.2f%%\n", report.SegmentRiskFloor)
 	fmt.Fprintf(b, "- 风险标签：%s｜置信度：%s\n", emptyDash(report.RiskLabel), emptyDash(report.Confidence))
 	if len(payload.RuleViolations) > 0 {

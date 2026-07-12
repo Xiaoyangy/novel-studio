@@ -169,14 +169,22 @@ func LoadState(store *storepkg.Store) State {
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		s.NextActionExplicitRerender = toolspkg.ExplicitRerenderRequestActive(store, target)
+		s.NextActionReviewRerenderRequired = toolspkg.ReviewRequiresFreshDraft(store, target)
+		loadDraftExternalGateState(store.Dir(), target, &s)
+		rerenderReplacementApproved := toolspkg.ExplicitRerenderReplacementApproved(store, target)
+		if !s.NextActionPlanReady && (s.NextActionExplicitRerender || s.NextActionDraftExternalRerenderRequired || rerenderReplacementApproved) && toolspkg.ValidateReusableCausalPlanForRerender(store, target) == nil {
+			s.NextActionPlanReady = true
+		}
 		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, target)
-		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, target)
+		s.NextActionDraftReady = s.NextActionPlanReady && !s.NextActionReviewRerenderRequired && chapterDraftReadyForFinalize(store, target)
 		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
 		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, next)
 		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, next)
+		loadDraftExternalGateState(store.Dir(), next, &s)
 		loadNextActionPlanStage(store, next, &s)
 		loadNextActionOutline(store, next, &s)
 	}
@@ -205,6 +213,17 @@ func LoadState(store *storepkg.Store) State {
 	return s
 }
 
+func loadDraftExternalGateState(projectDir string, chapter int, state *State) {
+	inspection, err := toolspkg.InspectDraftExternalGate(projectDir, chapter)
+	if err != nil {
+		state.NextActionDraftExternalRejudgePending = true
+		return
+	}
+	state.NextActionDraftExternalRerenderRequired = inspection.Status == toolspkg.DraftExternalGateRerenderAuthorized
+	state.NextActionDraftExternalRejudgePending = inspection.Status == toolspkg.DraftExternalGateRejudgePending ||
+		inspection.Status == toolspkg.DraftExternalGateAdviceIncomplete
+}
+
 func chapterDraftReadyForFinalize(store *storepkg.Store, chapter int) bool {
 	if store == nil || chapter <= 0 {
 		return false
@@ -218,13 +237,17 @@ func chapterDraftReadyForFinalize(store *storepkg.Store, chapter int) bool {
 	if plan == nil {
 		return false
 	}
+	latestPlanSeq := plan.Seq
+	if request := store.Checkpoints.LatestByStep(scope, "rerender-request"); request != nil && request.Seq > latestPlanSeq {
+		latestPlanSeq = request.Seq
+	}
 	latestDraftSeq := int64(0)
 	for _, step := range []string{"draft", "edit"} {
 		if cp := store.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > latestDraftSeq {
 			latestDraftSeq = cp.Seq
 		}
 	}
-	return latestDraftSeq > plan.Seq
+	return latestDraftSeq > latestPlanSeq
 }
 
 func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {

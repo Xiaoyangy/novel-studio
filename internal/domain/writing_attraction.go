@@ -72,8 +72,15 @@ func SystemCompanionVoiceRequested(text string) bool {
 // 反向改成冷硬、静默或纯任务机器人。审核原件可保留，但这类建议不能进入后续 RAG。
 func SystemCompanionFeedbackContradicts(text string) bool {
 	text = strings.TrimSpace(text)
-	if text == "" || !strings.Contains(text, "系统") {
+	if text == "" {
 		return false
+	}
+	// External reviewers sometimes quote a bracketed system line without using
+	// the word "系统", then fault it for not being a UI notification. The
+	// project's established 【】 companion channel makes that the same conflict.
+	if !strings.Contains(text, "系统") {
+		return strings.Contains(text, "【") && strings.Contains(text, "】") &&
+			containsAnyAttractionPhrase(text, []string{"界面文字", "意识流", "视角锚定", "独立叙事段", "打断叙述视角"})
 	}
 	for _, aligned := range []string{
 		"不能把系统写成冷硬", "不要把系统写成冷硬", "禁止系统保持静默",
@@ -92,8 +99,22 @@ func SystemCompanionFeedbackContradicts(text string) bool {
 		"保持‘规则优先’口吻", "保持“规则优先”口吻", "避免系统代偿情绪",
 		"减少系统玩笑", "减少系统拟人化玩笑", "系统只用冷硬", "系统保持冷硬",
 		"增加措辞刻板或断联", "系统发送一条乱码或重复提示",
+		"系统类信息必须绑定界面/载体", "系统类信息必须绑定界面", "必须绑定界面/载体",
+		"禁止以【】作为独立叙事段", "以【】直接嵌入叙事", "缺乏视角锚定",
+		"系统对白只能以状态报告", "改为纯数据反馈", "只提供事实，不提供感悟",
+		"只能以状态报告、数据更新、错误日志等形式出现",
+		"系统消息避免添加解释性后半句", "回来拿筷子的那位不扣你",
 	} {
 		if strings.Contains(text, contradiction) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyAttractionPhrase(text string, phrases []string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
 			return true
 		}
 	}

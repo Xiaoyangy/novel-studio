@@ -85,6 +85,13 @@ func main() {
 		}
 		return
 	}
+	if hasDraftAIJudgeFlag(args) {
+		headlessMode = true
+		if err := draftAIJudgePipeline(opts, stripRoutingTokens(args, "--draft-ai-judge")); err != nil {
+			die("draft-ai-judge: %v", err)
+		}
+		return
+	}
 	if hasReviewExistingFlag(args) {
 		headlessMode = true
 		reviewArgs := stripRoutingTokens(args, "--review-existing")
@@ -400,7 +407,7 @@ func loadPrompt(opts cliOptions) (string, error) {
 func hasAnySubcommand(argv []string) bool {
 	for _, a := range argv {
 		switch a {
-		case "service", "skills", "--review-existing", "--rewrite-existing",
+		case "service", "skills", "--review-existing", "--rewrite-existing", "--draft-ai-judge",
 			"--check", "--diag", "--simulate", "--import-sim", "--steer",
 			"--cocreate", "--pipeline", "--architect-check", "--writing-assets", "--refresh-progress", "--build-rag", "--rag-ready", "--zero-init":
 			return true
@@ -454,6 +461,7 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "功能子命令（无 TTY、CI / 远程可用）:")
 	fmt.Fprintln(w, "  novel-studio --check                        # LLM 连通性自检（先确认能用再创作）")
 	fmt.Fprintln(w, "  novel-studio --pipeline --stages review     # 逐章 Editor 评审（不改原文）")
+	fmt.Fprintln(w, "  novel-studio --draft-ai-judge --chapter N  # 对当前草稿做独立 DeepSeek 裸正文预审")
 	fmt.Fprintln(w, "  novel-studio --pipeline --stages rewrite    # 按评审反馈逐章 Writer 重写")
 	fmt.Fprintln(w, "  novel-studio --diag                        # 诊断当前项目产物")
 	fmt.Fprintln(w, "  novel-studio --writing-assets list         # 查看/启停/组合/绑定/试写写法资产")

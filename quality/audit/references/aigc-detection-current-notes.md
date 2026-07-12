@@ -1,6 +1,26 @@
 # AI 文本识别逻辑检索摘要（2026-07-01）
 
-本文件用于维护 `codex-local-aigc-v3` 的设计依据。它不是外部检测器复刻，而是把近年公开论文/系统里可本地实现的信号转成小说生产流程的审核规则。
+本文件用于维护 `codex-local-aigc-v4` 的设计依据。它不是外部检测器复刻，而是把公开论文、外部反馈与可复算叙事信号转成小说生产流程的审核规则。下文 v2/v3 条目保留为历史校准记录，当前实现以 v4 小节和代码为准。
+
+## 2026-07-12：v4 全局/局部语义与叙事动力
+
+本轮暴露两个漏判：外部 DeepSeek 对三章给出 `12% / 5% / 5%`，旧门禁却只在高风险区阻断；叙事人工锚点又把本地结果硬压在固定 `4.8%`。同时正文出现“每个角色一句话推进计划”、主角只执行不体验的退化。v4 因此做以下调整：
+
+- 交付门槛统一为严格 `<4%`，`4%` 本身失败；外部判定必须附证据和可执行建议，不能只收数字。
+- `narrative_scene` 只允许软校准，不再有固定最终 cap；技术说明文锚点继续单独处理。
+- 对齐 Go/Python 的 `semantic_perplexity`，并加入 `narrative_dynamics`：对白密集窗口、最长对白连跑、动作开场标签比例、对白长度变异、主视角内在体验、流程语汇和情绪类别。
+- `dialogue_conveyor_overuse` 与 `pov_interiority_thin` 进入 lint、Writer、Drafter、Editor 和 rewrite brief。修法不是随机换词、故意犯错、增加打断或撒微动作，而是减少不必发言的人、延后不必说的信息，让情绪改变选择。
+
+新增研究依据：AIDER 与 2025 benchmark 说明跨题材/跨模型漂移；GL-CLiC、SenDetEX 说明全局/局部上下文和句级混合信号的重要性；MoSEs、EvoBench 说明阈值和检测器需要随来源演化；人类专家与中文风格计量研究补充对白同质、过度清楚、原创性、语气、标点和情感线索。
+
+- https://aclanthology.org/2025.coling-main.625/
+- https://aclanthology.org/2025.genaidetect-1.4/
+- https://aclanthology.org/2025.ijcnlp-long.188/
+- https://aclanthology.org/2025.emnlp-main.268/
+- https://aclanthology.org/2025.emnlp-main.294/
+- https://aclanthology.org/2025.findings-acl.754/
+- https://aclanthology.org/2025.acl-long.267/
+- https://aclanthology.org/2025.ccl-1.64/
 
 ## 公开检测主线
 

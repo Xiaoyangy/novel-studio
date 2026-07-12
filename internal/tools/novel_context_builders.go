@@ -237,6 +237,7 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	state.progress = progress
 	state.runMeta = runMeta
 	isRewrite := progress != nil && slices.Contains(progress.PendingRewrites, chapter)
+	renderOnlyRerender := isRewrite && RenderOnlyRerenderReady(t.store, chapter)
 
 	if runMeta != nil && runMeta.PlanningTier != "" {
 		envelope.Episodic["planning_tier"] = runMeta.PlanningTier
@@ -280,7 +281,7 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 			"policy":                "当前 staged plan 是唯一规划真相；不要读取或复述上一轮正式 plan。继续 plan_details 补最小缺项并 finalize，禁止转去下一章。",
 		}
 		chapterPlan = nil
-	} else if chapterPlanErr == nil && chapterPlan != nil && isRewrite && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.plan.json", chapter)) {
+	} else if chapterPlanErr == nil && chapterPlan != nil && isRewrite && !renderOnlyRerender && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.plan.json", chapter)) {
 		envelope.Working["chapter_plan_stage"] = map[string]any{
 			"status":  "stale_for_rewrite",
 			"chapter": chapter,
@@ -307,6 +308,13 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 		warn("chapter_plan", chapterPlanErr)
 	}
 	state.chapterPlan = chapterPlan
+	if renderOnlyRerender {
+		envelope.Working["explicit_rerender"] = map[string]any{
+			"status": "ready",
+			"policy": "这是 render-only 请求：复用当前 world simulation 与 POV plan，只让 draft_chapter 重新渲染正文；禁止重推演、重规划、局部编辑或直接提交。",
+		}
+		envelope.Working["next_step"] = "调用 draft_chapter(mode=write) 一次整章覆盖旧草稿；写入新哈希后立即结束，等待外层 pipeline 外判。"
+	}
 	state.chapterParticipants = t.detectChapterParticipants(currentEntry, chapterPlan, warn)
 	if len(state.chapterParticipants) > 0 {
 		envelope.Working["chapter_participants"] = state.chapterParticipants
@@ -319,7 +327,13 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	// 暴露 draft 是否已存在的事实：让 writer 被重派时能自行判断跳过重写还是覆盖。
 	// 只暴露 exists + word_count，不注入正文（正文让 writer 按需用 read_chapter 拉）。
 	if _, draftWords, draftErr := t.store.Drafts.LoadChapterContent(chapter); draftErr == nil && draftWords > 0 {
-		if isRewrite && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.draft.md", chapter)) {
+		if renderOnlyRerender {
+			envelope.Working["chapter_draft_stage"] = map[string]any{
+				"status":     "superseded_for_rerender",
+				"word_count": draftWords,
+				"policy":     "旧草稿保留作失败样本，不得提交或局部修补；本轮必须调用 draft_chapter(mode=write) 整章覆盖。",
+			}
+		} else if isRewrite && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.draft.md", chapter)) {
 			envelope.Working["chapter_draft_stage"] = map[string]any{
 				"status":     "stale_for_rewrite",
 				"word_count": draftWords,
@@ -366,6 +380,14 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 		envelope.Working["chapter_ai_voice_metrics"] = metrics
 	} else if metricErr != nil {
 		warn("chapter_ai_voice_metrics", metricErr)
+	}
+	if preflight, preflightErr := loadDraftExternalJudgeContext(t.store.Dir(), chapter); preflightErr == nil && preflight != nil {
+		if blocking, _ := preflight["blocking"].(bool); blocking {
+			envelope.Working["draft_external_ai_review"] = preflight
+			envelope.Working["draft_external_ai_review_policy"] = "这是未通过的旧稿诊断，只吸收能改善阅读的具体证据；不得照抄检测术语，不得靠错字、随机换词、碎句或无功能微动作降分。已通过的外审建议留在RAG和审阅档案，不再干扰新正文。"
+		}
+	} else if preflightErr != nil {
+		warn("draft_external_ai_review", preflightErr)
 	}
 
 	// 重写时把"为什么改 + 改哪里"交给 writer：理由来自返工队列，具体批评来自本章评审
@@ -417,6 +439,10 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 		} else if aiErr != nil {
 			warn("rewrite_ai_voice_redflags", aiErr)
 		}
+		if supplements := loadRewriteBriefHumanSupplements(t.store.Dir(), chapter); len(supplements) > 0 {
+			brief["human_acceptance_supplements"] = supplements
+			brief["human_acceptance_policy"] = "人工验收补充优先于概率代理和评审示例；其中禁止项是硬约束，示例只能说明问题，不得照搬或换皮。"
+		}
 		envelope.Working["rewrite_brief"] = brief
 		if source, body, markdown, sourceErr := loadChapterRewriteSource(t.store, chapter); sourceErr == nil && source != nil {
 			envelope.Working["rewrite_source"] = rewriteSourceContext(source, body, markdown)
@@ -467,6 +493,97 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	}
 
 	return state
+}
+
+func loadRewriteBriefHumanSupplements(outputDir string, chapter int) []string {
+	if strings.TrimSpace(outputDir) == "" || chapter <= 0 {
+		return nil
+	}
+	path := filepath.Join(outputDir, "reviews", fmt.Sprintf("%02d_rewrite_brief.md", chapter))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var sections []string
+	var current []string
+	collecting := false
+	flush := func() {
+		text := strings.TrimSpace(strings.Join(current, "\n"))
+		if text != "" {
+			sections = append(sections, text)
+		}
+		current = nil
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			if collecting {
+				flush()
+			}
+			collecting = strings.Contains(trimmed, "人工验收补充") || strings.Contains(trimmed, "知识边界补充")
+			continue
+		}
+		if collecting {
+			current = append(current, line)
+		}
+	}
+	if collecting {
+		flush()
+	}
+	if len(sections) > 3 {
+		sections = sections[len(sections)-3:]
+	}
+	for i, section := range sections {
+		runes := []rune(section)
+		if len(runes) > 3000 {
+			sections[i] = strings.TrimSpace(string(runes[:3000]))
+		}
+	}
+	return sections
+}
+
+func loadDraftExternalJudgeContext(projectDir string, chapter int) (map[string]any, error) {
+	path := filepath.Join(projectDir, "reviews", "drafts", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var artifact struct {
+		BodySHA256           string   `json:"body_sha256"`
+		AIProbabilityPercent int      `json:"ai_probability_percent"`
+		PassExclusivePercent int      `json:"pass_exclusive_percent"`
+		Blocking             bool     `json:"blocking"`
+		AdviceComplete       bool     `json:"advice_complete"`
+		Summary              string   `json:"summary"`
+		Reasons              []string `json:"reasons"`
+		Evidence             []string `json:"evidence"`
+		RevisionPlan         []string `json:"revision_plan"`
+		DialogueFixPlan      []string `json:"dialogue_fix_plan"`
+		AuthorVoicePlan      []string `json:"author_voice_plan"`
+		RAGRules             []string `json:"rag_rules"`
+	}
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		return nil, fmt.Errorf("解析草稿外审 %s: %w", path, err)
+	}
+	if !artifact.AdviceComplete {
+		return nil, fmt.Errorf("草稿外审建议不完整: %s", path)
+	}
+	return map[string]any{
+		"evaluated_body_sha256":  artifact.BodySHA256,
+		"ai_probability_percent": artifact.AIProbabilityPercent,
+		"pass_exclusive_percent": artifact.PassExclusivePercent,
+		"blocking":               artifact.Blocking,
+		"summary":                artifact.Summary,
+		"reasons":                artifact.Reasons,
+		"evidence":               artifact.Evidence,
+		"revision_plan":          artifact.RevisionPlan,
+		"dialogue_fix_plan":      artifact.DialogueFixPlan,
+		"author_voice_plan":      artifact.AuthorVoicePlan,
+		"rag_rules":              artifact.RAGRules,
+	}, nil
 }
 
 func chapterArtifactNotNewerThanFinal(dir string, chapter int, artifact string) bool {
@@ -1470,9 +1587,7 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			} else {
 				focus = append(focus, fmt.Sprintf("AIGC 门禁采用值 %.2f%%：按 EffectiveGatePercent 返工，优先看最高风险片段和 latest detector proxy，不随机换词。", gatePercent))
 			}
-			focus = append(focus, "整章重排段落功能：事故触发、口头争执、私人生活侵入、物件迟到、沉默/缺席、权限后果要轮换出现，避免每 180 字窗口都同样稳定。")
-			focus = append(focus, "降低流程句密度：连续出现“保全/导出/权限/说明/审批”时，改成角色怕担责、甩锅、拒签、误按、被私人消息打断等具体压力。")
-			focus = append(focus, "增加真实局部不均匀：允许少量由角色压力推动的口语重复、打断、没听清、改口和生活细节，但禁止无信息清单、冷僻词堆砌和脏码。")
+			focus = append(focus, aigcDetectorRewriteFocus(report)...)
 		case "chapter_words":
 			focus = append(focus, "篇幅超标只做局部压缩：优先删重复规则说明、重复互动问答和同义情绪句；保留已成立的场景、规则链、钩子和人物声口，不要整章重写。")
 		case "content_count_mismatch":
@@ -1498,7 +1613,7 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 		case "minor_mistake_overuse":
 			focus = append(focus, "刻意小失误每章最多两处；超过后删掉或改成真实代价，不要把“人味”写成新模板。")
 		case "isolated_sentence_overuse":
-			focus = append(focus, "单行孤句每章最多四个；保留最重的强调，其余并回上下文，并检查章末收束不要和相邻章节同模板。")
+			focus = append(focus, "移动端自然的一句一段不需要合并；只处理 12 字内无信息碎句成串。连续四段以上时保留真正改变局面的那句，其余删掉或并回上下文，同时检查章末收束不要和相邻章节同模板。")
 		case "supporting_quip_overuse":
 			focus = append(focus, "同一配角吐槽每章最多三句；重要节点至少让一句话无人接住，不要每句都被剧情接走。")
 		case "vague_quantifier_overuse":
@@ -1557,10 +1672,88 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "章末不要用抽象金句问号收束，改成具体动作、物件变化、新事实或未完成选择。")
 		}
 	}
-	if len(focus) == 0 && report.AIGCPercent > 5 {
+	if len(focus) == 0 && report.AIGCPercent >= aigc.PassExclusivePercent {
 		focus = append(focus, "降低 AIGC 风险时不要随机换词；优先增加场景承载、角色声口差异和段落功能变化。")
 	}
 	return uniqueFocusItems(focus)
+}
+
+func aigcDetectorRewriteFocus(report aigc.Report) []string {
+	hasSignal := func(names ...string) bool {
+		wanted := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			wanted[name] = struct{}{}
+		}
+		contains := func(dim aigc.Dimension) bool {
+			for _, signal := range dim.Signals {
+				if _, ok := wanted[signal.Name]; ok {
+					return true
+				}
+			}
+			return false
+		}
+		for _, dim := range report.LatestDetectorProxy.Components {
+			if contains(dim) {
+				return true
+			}
+		}
+		for _, dim := range report.Dimensions {
+			if contains(dim) {
+				return true
+			}
+		}
+		return false
+	}
+	narrativeStats := map[string]any{}
+	if dim, ok := report.LatestDetectorProxy.Components["narrative_dynamics"]; ok {
+		narrativeStats = dim.Stats
+	}
+	statFloat := func(key string) float64 {
+		switch value := narrativeStats[key].(type) {
+		case float64:
+			return value
+		case float32:
+			return float64(value)
+		case int:
+			return float64(value)
+		case int64:
+			return float64(value)
+		default:
+			return 0
+		}
+	}
+
+	var focus []string
+	if hasSignal("dialogue_conveyor_windows", "dialogue_conveyor_window", "dialogue_turn_run_high", "dialogue_turn_run_mid", "dialogue_length_conveyor") {
+		focus = append(focus, fmt.Sprintf(
+			"对白传送带仍在（密集窗口 %.0f，最长连续对白段 %.0f）：不要再给每句对白补动作或环境。每场只保留真正改变决定的少数原话，其余删掉或改成主视角概述；对白结束必须留下误判、关系判断或现实后果，不能换个人继续说明。",
+			statFloat("dense_dialogue_windows"), statFloat("max_dialogue_paragraph_run")))
+	}
+	if hasSignal("action_dialogue_lead_uniform") {
+		focus = append(focus, fmt.Sprintf(
+			"动作报幕式对白比例仍高（%.0f%%）：集中删除“某人做一个动作：台词”的重复入口。允许对白直接闯入、话说到一半才交代说话者，或干脆只写决定造成的后果；不要用抬眼、停手、敲桌、递物来伪装换挡。",
+			statFloat("action_dialogue_lead_ratio")*100))
+	}
+	if hasSignal("pov_interiority_thin", "pov_interiority_low", "emotion_range_flat", "emotion_range_thin") {
+		focus = append(focus, fmt.Sprintf(
+			"主视角仍被经营流程压住（主观密度 %.2f/千字，流程密度 %.2f/千字）：选一个最在意的欲望或误判，让它贯穿完整场景并改变下一步做法或对某人的判断。删掉等量安装、票据、付款说明；不要补情绪标签、身体微反应或“他意识到”。",
+			statFloat("interiority_density_per_k"), statFloat("logistics_density_per_k")))
+	}
+	if hasSignal("fast_detectgpt_curve_proxy_high", "sentence_classifier_consensus_flat", "bigram_unigram_curve_too_flat", "window_entropy_signature_flat") || report.Stats.SentenceCV < 0.50 || report.Stats.ParagraphCV < 0.50 {
+		focus = append(focus, fmt.Sprintf(
+			"整章概率与节奏曲线仍过平（句长 CV %.3f，段长 CV %.3f）：停止逐句润色，也不要把每段焊成两三句完整说明。移动端允许一个完整动作、判断或一轮对白自然独段；按焦点真实换段，并保留少数较长的主观沉浸或结果蒙太奇，使长短差异来自场景功能。禁止随机碎句、错字和噪声。",
+			report.Stats.SentenceCV, report.Stats.ParagraphCV))
+	}
+	if report.Stats.ShortSentenceRatio < 0.10 {
+		focus = append(focus, "短句只占很少：在争执、失误或突然选择处允许自然断气、抢话和一句未说完的话；不要把每句话都补成主谓宾齐全的说明句，也不要为了指标制造无信息孤句。")
+	}
+	if hasSignal("zhuque_like_suspected_span_ratio_mid", "zhuque_like_ai_span_ratio_high") || report.WholeTextSegmentGate >= aigc.PassExclusivePercent {
+		focus = append(focus, "整章或主片段被同一风格覆盖时，必须重写整段的场景组织，不能只换同义词。先砍掉重复角色发言和重复经营步骤，再围绕一个人物选择重建该段。")
+	}
+	if len(focus) == 0 {
+		focus = append(focus, "先删重复解释和同功能段落，再让主角的误判、关系理解或代价改变行动；不要靠补微动作、环境音、冷僻词或随机碎句制造人味。")
+	}
+	return focus
 }
 
 func uniqueFocusItems(values []string) []string {

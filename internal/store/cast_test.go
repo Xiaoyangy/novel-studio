@@ -187,6 +187,53 @@ func TestCastRecentActive_SkipsPromoted(t *testing.T) {
 	}
 }
 
+func TestCastMergeAppearancesKeepsCrowdRolesOutOfDurableLedger(t *testing.T) {
+	s := newCastTestStore(t)
+	if err := s.Cast.MergeAppearances(3,
+		[]string{"赵航", "烧烤摊主", "冷饮摊老板", "申请加入的摊主"},
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("MergeAppearances: %v", err)
+	}
+	entries, err := s.Cast.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "赵航" {
+		t.Fatalf("crowd role labels must stay out of cast ledger: %+v", entries)
+	}
+}
+
+func TestCastMergeAppearancesAllowsExplicitlyIntroducedTitleIdentity(t *testing.T) {
+	s := newCastTestStore(t)
+	intro := []domain.CastIntro{{Name: "烧烤摊主", BriefRole: "实名未揭示但会持续回归的东区摊主"}}
+	if err := s.Cast.MergeAppearances(3, []string{"烧烤摊主"}, intro, nil); err != nil {
+		t.Fatalf("MergeAppearances: %v", err)
+	}
+	entries, err := s.Cast.Load()
+	if err != nil || len(entries) != 1 || entries[0].BriefRole == "" {
+		t.Fatalf("explicit CastIntro should opt a title identity into the ledger: %+v err=%v", entries, err)
+	}
+}
+
+func TestCastMergeAppearancesCleansLegacyCrowdPlaceholders(t *testing.T) {
+	s := newCastTestStore(t)
+	if err := s.Cast.Save([]domain.CastEntry{
+		{Name: "冷饮摊老板", LastSeenChapter: 2, AppearanceCount: 1, AppearanceChapters: []int{2}},
+		{Name: "老丁", BriefRole: "五金店老板", LastSeenChapter: 2, AppearanceCount: 1, AppearanceChapters: []int{2}},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.Cast.MergeAppearances(3, []string{"老丁"}, nil, nil); err != nil {
+		t.Fatalf("MergeAppearances: %v", err)
+	}
+	entries, err := s.Cast.Load()
+	if err != nil || len(entries) != 1 || entries[0].Name != "老丁" {
+		t.Fatalf("legacy placeholder should be cleaned on merge: %+v err=%v", entries, err)
+	}
+}
+
 func TestCastMergeAppearances_NoOpOnEmpty(t *testing.T) {
 	s := newCastTestStore(t)
 	if err := s.Cast.MergeAppearances(5, nil, nil, nil); err != nil {

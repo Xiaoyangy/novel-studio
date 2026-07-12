@@ -26,6 +26,12 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 			},
 		},
 		CausalSimulation: domain.ChapterCausalSimulation{
+			EmotionalLogic: []domain.CharacterEmotionalLogic{{
+				Character: "林澈", ImmediateState: "被亲戚追问后表面还能笑", PrimaryEmotion: "难堪和警惕",
+				EmotionalTrigger: "父母越替他挡话，他越清楚自己让家里担心", GoalAppraisal: "争辩不能恢复体面，必须做出结果",
+				RegulationStrategy: "把翻身冲动压成小额试验", EmotionLedAction: "不炫耀额度，离席验证",
+				EvidenceInScene: []string{"护住被添满的碗", "没有在饭桌公开系统", "第三条不得泄露"},
+			}},
 			ReaderRetentionPlan: domain.ReaderRetentionPlan{
 				SurfaceBeats:  []domain.RetentionSurfaceBeat{{MustShow: "饭桌压力"}, {MustShow: "消费见效"}, {MustShow: "项目核验"}},
 				LatentContext: []string{"亲戚私下另有打算"},
@@ -64,7 +70,8 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 			"character_decisions": []domain.CharacterWorldDecision{{Character: "亲戚"}},
 			"protagonist_projection": domain.ProtagonistDecisionProjection{
 				Protagonist: "林澈", ObservableEffects: []string{"亲戚当面催工作"}, HiddenPressures: []string{"亲戚私下联络媒人"},
-				ChosenDecision: "离席验证额度", DecisionReason: "不想继续被比较", CausalChain: []string{"饭桌受压", "尝试花钱"},
+				ChosenDecision: "离席验证额度", DecisionReason: "不想继续被比较；后续分析不进正文", CausalChain: []string{"饭桌受压", "尝试花钱"},
+				AvailableOptions: []string{"当场炫耀", "离席验证"}, PlanConstraints: []string{"先点按钮再付款"},
 			},
 		},
 	}
@@ -75,7 +82,7 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if !ok {
 		t.Fatalf("render_packet type = %T", result["render_packet"])
 	}
-	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 1 {
+	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 0 {
 		t.Fatalf("mandatory/optional = %#v / %#v", packet.MandatoryBeats, packet.OptionalStyleBeats)
 	}
 	if len(packet.ForbiddenMoves) != 2 {
@@ -87,16 +94,20 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 		packet.InterfaceCompression,
 		packet.ScenePurposePolicy,
 		packet.SpokenLanguagePolicy,
+		packet.EmotionalRenderPolicy,
 	} {
 		if strings.TrimSpace(policy) == "" {
 			t.Fatalf("render translation policy missing: %#v", packet)
 		}
 	}
-	if len(packet.ContinuityChecks) != 1 || !strings.Contains(packet.ContinuityChecks[0], "首单已经发生") {
-		t.Fatalf("render packet leaked presentation-only continuity checks: %#v", packet.ContinuityChecks)
+	if len(packet.EmotionalLenses) != 0 {
+		t.Fatalf("scene evidence must remain in planning, not prose packet: %#v", packet.EmotionalLenses)
 	}
-	if packet.EndingContract.ConcreteAnchor != "" || packet.EndingContract.WhyNotUI != "" || packet.EndingAnchorCandidate != "票据和测试记录" {
-		t.Fatalf("ending anchor should be a candidate, not a hard contract: %#v / %q", packet.EndingContract, packet.EndingAnchorCandidate)
+	if len(packet.ContinuityChecks) != 0 {
+		t.Fatalf("continuity checklist must remain an outer validation concern: %#v", packet.ContinuityChecks)
+	}
+	if packet.EndingContract.Consequence != "" || packet.EndingAnchorCandidate != "" {
+		t.Fatalf("hook already carries the ending pull; detailed ending choreography must stay out: %#v / %q", packet.EndingContract, packet.EndingAnchorCandidate)
 	}
 	raw, err := json.Marshal(packet)
 	if err != nil {
@@ -105,11 +116,15 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	serialized := string(raw)
 	for _, forbidden := range []string{
 		"turn_progression", "action_beat", "proof_on_page", "latent_context", "hidden_pressures", "每句先夹菜",
-		"scene_objective", "sentence_rhythm_policy", "review_checks",
+		"scene_objective", "sentence_rhythm_policy", "review_checks", "candidate_beats", "dialogue_scenes",
+		"饭桌压力", "被亲戚追问后表面还能笑", "票据和测试记录", "饭桌受压", "当场炫耀", "先点按钮再付款",
 	} {
 		if strings.Contains(serialized, forbidden) {
 			t.Fatalf("draft render packet leaked %q: %s", forbidden, serialized)
 		}
+	}
+	if len(raw) > 5000 {
+		t.Fatalf("prose-facing packet regrew into a planning dossier: %d bytes", len(raw))
 	}
 	if _, exists := result["causal_simulation"]; exists {
 		t.Fatal("draft profile must hide full causal_simulation")
@@ -122,13 +137,16 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if len(projection.ObservableEffects) != 1 {
 		t.Fatalf("observable effects lost: %#v", projection)
 	}
+	if len(projection.CausalChain) != 0 || len(projection.AvailableOptions) != 0 || len(projection.PlanConstraints) != 0 || projection.DecisionReason != "不想继续被比较" {
+		t.Fatalf("draft projection still carries planning choreography: %#v", projection)
+	}
 	leanPlan := result["chapter_plan"].(map[string]any)
 	if _, exists := leanPlan["causal_simulation"]; exists {
 		t.Fatal("lean chapter plan must not embed causal_simulation")
 	}
 }
 
-func TestDraftRenderPacketKeepsRelationshipScenesAndDropsProcessScenes(t *testing.T) {
+func TestDraftRenderPacketKeepsRelationshipLensButDropsDialogueChoreography(t *testing.T) {
 	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
 		DialogueBlueprints: []domain.DialogueSceneBlueprint{
 			{SceneID: "dinner", DialogueMode: "public_confrontation", RelationshipFrame: "亲友争夺体面"},
@@ -137,15 +155,84 @@ func TestDraftRenderPacketKeepsRelationshipScenesAndDropsProcessScenes(t *testin
 			{SceneID: "supplier", DialogueMode: "logistics_under_stress", RelationshipFrame: "付款方与供货方"},
 			{SceneID: "review", DialogueMode: "status_report", RelationshipFrame: "旧识在职责与关心之间"},
 			{SceneID: "settlement", DialogueMode: "mediated_exchange", RelationshipFrame: "系统结算"},
+			{SceneID: "payoff", DialogueMode: "private_reconciliation", RelationshipFrame: "朋友终于停止试探", ExitBeat: "对方替主角留了门"},
 		},
 	}}
 
 	packet := newDraftRenderPacket(plan)
-	if len(packet.DialogueScenes) != 3 {
-		t.Fatalf("dialogue scenes should contain only relationship-bearing scenes: %#v", packet.DialogueScenes)
+	if len(packet.DialogueScenes) != 0 {
+		t.Fatalf("turn-level dialogue blueprints must stay out of prose context: %#v", packet.DialogueScenes)
 	}
-	if packet.DialogueScenes[0].SceneID != "dinner" || packet.DialogueScenes[1].SceneID != "phone" || packet.DialogueScenes[2].SceneID != "review" {
-		t.Fatalf("unexpected dialogue scene projection: %#v", packet.DialogueScenes)
+	if len(packet.RelationshipLenses) != 1 || !strings.Contains(packet.RelationshipLenses[0].CurrentBond, "朋友") {
+		t.Fatalf("one relationship-level intention should survive: %#v", packet.RelationshipLenses)
+	}
+}
+
+func TestDraftRenderPacketSamplesCandidateBeatsAcrossChapterArc(t *testing.T) {
+	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
+		ReaderRetentionPlan: domain.ReaderRetentionPlan{SurfaceBeats: []domain.RetentionSurfaceBeat{
+			{MustShow: "opening"},
+			{MustShow: "setup"},
+			{MustShow: "obstacle"},
+			{MustShow: "turn"},
+			{MustShow: "payoff"},
+		}},
+	}}
+
+	packet := newDraftRenderPacket(plan)
+	if len(packet.CandidateBeats) != 0 {
+		t.Fatalf("candidate menu duplicates mandatory outcomes and should stay out of prose context: %#v", packet.CandidateBeats)
+	}
+}
+
+func TestDraftRenderPacketKeepsHumorPlanOutOfProseObligations(t *testing.T) {
+	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
+		EntertainmentPlan: domain.ReaderEntertainmentPlan{
+			HumorBeats: []string{"opening joke", "front-loaded echo", "closing callback"},
+		},
+	}}
+
+	packet := newDraftRenderPacket(plan)
+	if len(packet.EntertainmentPlan.HumorBeats) != 0 {
+		t.Fatalf("prescribed jokes must remain optional planning evidence: %#v", packet.EntertainmentPlan.HumorBeats)
+	}
+}
+
+func TestDraftRenderPacketSynthesizesRelationshipLensFromStrongestDialogue(t *testing.T) {
+	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
+		DialogueBlueprints: []domain.DialogueSceneBlueprint{
+			{
+				SceneID: "opening", DialogueMode: "public_confrontation", RelationshipFrame: "三人把时间与车辆边界说清",
+				DialogueObjective: "立刻出发", ExitBeat: "众人上车",
+			},
+			{
+				SceneID: "supplier", DialogueMode: "logistics_under_stress", RelationshipFrame: "付款方与供货方",
+				DialogueObjective: "核对付款流程", ExitBeat: "完成开票",
+			},
+			{SceneID: "hall", DialogueMode: "public_confrontation", RelationshipFrame: "父子还在互相防备"},
+			{
+				SceneID: "door", DialogueMode: "private_reconciliation", RelationshipFrame: "旧友一边试探一边护短",
+				DialogueObjective: "确认对方是否还愿意信任自己", ExitBeat: "对方没有追问，却替他留了门",
+				TurnProgression: []domain.DialogueTurnDesign{{Speaker: "旧友", ActionBeat: "relationship-action-leak"}},
+			},
+		},
+	}}
+
+	packet := newDraftRenderPacket(plan)
+	if len(packet.RelationshipLenses) != 1 {
+		t.Fatalf("expected one synthesized relationship lens: %#v", packet.RelationshipLenses)
+	}
+	lens := packet.RelationshipLenses[0]
+	if len(lens.Pair) != 0 || lens.CurrentBond != "旧友一边试探一边护短" ||
+		lens.EmotionalWant != "确认对方是否还愿意信任自己" || lens.NextEmotionalBeat != "对方没有追问，却替他留了门" {
+		t.Fatalf("relationship lens should use only the strongest dialogue's relationship fields: %#v", lens)
+	}
+	raw, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "turn_progression") || strings.Contains(string(raw), "relationship-action-leak") {
+		t.Fatalf("relationship fallback leaked dialogue choreography: %s", raw)
 	}
 }
 
@@ -192,8 +279,18 @@ func TestRenderRequiredOutcomesKeepsEventWhenTrendLiteralIsEmbedded(t *testing.T
 		},
 	}
 	got := RenderRequiredOutcomes(plan)
-	if len(got) != 1 || !strings.Contains(got[0], "林澈最终离席") {
-		t.Fatalf("event outcome was incorrectly demoted with its optional wording: %#v", got)
+	if len(got) != 1 || got[0] != "饭桌上亲戚挤兑林澈" || strings.Contains(got[0], "呱") {
+		t.Fatalf("prose outcome should keep the event but drop prescribed style/choreography: %#v", got)
+	}
+}
+
+func TestRenderRequiredOutcomesCapsLegacyChecklistPlans(t *testing.T) {
+	plan := domain.ChapterPlan{Contract: domain.ChapterContract{RequiredBeats: []string{
+		"开场结果", "运输结果", "摊主甲结果", "摊主乙结果", "关系变化", "章末结果",
+	}}}
+	got := RenderRequiredOutcomes(plan)
+	if len(got) != 4 || got[0] != "开场结果" || got[len(got)-1] != "章末结果" {
+		t.Fatalf("legacy checklist should become four spread outcomes: %#v", got)
 	}
 }
 

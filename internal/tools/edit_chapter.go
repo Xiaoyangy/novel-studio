@@ -51,7 +51,7 @@ func (t *EditChapterTool) Description() string {
 	return "对章节草稿做定点字符串替换（打磨场景首选，比 draft_chapter 整章重写省 token）。" +
 		"找到 old_string 并替换为 new_string，要求精确匹配且唯一（多处匹配需 replace_all=true）。" +
 		"写入 drafts/{ch}.draft.md；drafts 不存在时自动从 chapters 播种。" +
-		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。每次调用只改一处，多处修改请多次调用。"
+		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。若外部草稿审核要求结构级重渲染，本工具会拒绝，必须先用 draft_chapter(mode=write) 整章覆盖。若当前哈希已通过外判，本工具只允许改一处，落盘后必须立即停笔并复判新哈希，禁止连续编辑。"
 }
 
 func (t *EditChapterTool) Schema() map[string]any {
@@ -81,6 +81,18 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	}
 	if a.OldString == a.NewString {
 		return nil, fmt.Errorf("old_string 与 new_string 相同，无需修改: %w", errs.ErrToolArgs)
+	}
+	externalGateBefore, err := InspectDraftExternalGate(t.store.Dir(), a.Chapter)
+	if err != nil {
+		return nil, fmt.Errorf("读取草稿外审门禁: %w: %w", err, errs.ErrStoreRead)
+	}
+	switch externalGateBefore.Status {
+	case DraftExternalGateRerenderAuthorized:
+		return nil, fmt.Errorf("%s: %w", draftExternalRerenderInstruction(externalGateBefore.Requirement), errs.ErrToolPrecondition)
+	case DraftExternalGateAdviceIncomplete:
+		return nil, fmt.Errorf("第 %d 章外判建议不完整，禁止局部编辑；先重新外判: %w", a.Chapter, errs.ErrToolPrecondition)
+	case DraftExternalGateRejudgePending:
+		return nil, fmt.Errorf("第 %d 章当前草稿哈希尚未外判，禁止继续局部编辑；先停止正文修改并复判: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 
 	// 归属检查：已完成章节必须在重写队列中，避免污染终稿
@@ -124,7 +136,12 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 		return result, nil
 	}
 	passthrough["chapter"] = a.Chapter
-	passthrough["next_step"] = "edit 已落盘。仍有硬伤可再次 edit_chapter；否则 check_consistency 后 commit_chapter"
+	if externalGateBefore.Status == DraftExternalGateApproved {
+		passthrough["external_rejudge_required"] = true
+		passthrough["next_step"] = "edit 已使外判哈希失效：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，先复判新哈希"
+	} else {
+		passthrough["next_step"] = "edit 已落盘。仍有硬伤可再次 edit_chapter；否则 check_consistency 后 commit_chapter"
+	}
 	return json.Marshal(passthrough)
 }
 

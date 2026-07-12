@@ -134,3 +134,44 @@ func TestChapterPlanReadyForDraftRejectsStaleRewriteBrief(t *testing.T) {
 		t.Fatal("changed rewrite brief must invalidate the old plan")
 	}
 }
+
+func TestChapterDraftReadyForFinalizeHonorsExplicitRerenderRequest(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 2, Title: "第二章"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(2), "plan", "drafts/02.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(2, "第二章\n\n旧草稿"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !chapterDraftReadyForFinalize(s, 2) {
+		t.Fatal("draft newer than plan should be ready")
+	}
+	requestPath := filepath.Join(s.Dir(), "drafts", "02.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":2,"reason":"human readability"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(2), "rerender-request", "drafts/02.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	if chapterDraftReadyForFinalize(s, 2) {
+		t.Fatal("explicit rerender request must make the old draft stale")
+	}
+	if err := s.Drafts.SaveDraft(2, "第二章\n\n新草稿"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !chapterDraftReadyForFinalize(s, 2) {
+		t.Fatal("new draft after rerender request should be ready")
+	}
+}

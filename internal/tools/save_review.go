@@ -133,12 +133,20 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 	}
 	escalationReason := strings.Join(escalationReasons, "；")
 
+	progress, _ := t.store.Progress.Load()
 	affected := r.AffectedChapters
+	queueChapters := append([]int(nil), affected...)
 	if finalVerdict == "rewrite" || finalVerdict == "polish" {
 		if len(affected) == 0 && r.Chapter > 0 {
 			affected = []int{r.Chapter}
 		}
-		if err := t.store.Progress.ValidatePendingRewrites(affected); err != nil {
+		queueChapters = append([]int(nil), affected...)
+		if progress != nil {
+			queueChapters = append(queueChapters, progress.PendingRewrites...)
+		}
+		slices.Sort(queueChapters)
+		queueChapters = slices.Compact(queueChapters)
+		if err := t.store.Progress.ValidatePendingRewrites(queueChapters); err != nil {
 			return nil, fmt.Errorf("validate pending rewrites: %w", err)
 		}
 	}
@@ -149,8 +157,6 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 	// 根据最终 verdict 更新 Progress。
 	// 写失败必须早返回——后续会 append review checkpoint，若此处吞 err 会让 Coordinator
 	// 看到 saved:true 但 Store 仍处于旧 Flow / 缺失 PendingRewrites 的中间态。
-	progress, _ := t.store.Progress.Load()
-
 	// 复审归档：覆盖前把上一轮章级审阅追加进 history，历史零丢失。
 	// review_round = 历史轮数 + 1（本轮），随事实透出供 Coordinator/Editor 感知循环。
 	reviewRound := 1
@@ -187,8 +193,16 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		flow := domain.FlowRewriting
 		if finalVerdict == "polish" {
 			flow = domain.FlowPolishing
+			if progress != nil && progress.Flow == domain.FlowRewriting {
+				for _, pending := range progress.PendingRewrites {
+					if !slices.Contains(affected, pending) {
+						flow = domain.FlowRewriting
+						break
+					}
+				}
+			}
 		}
-		if err := t.store.Progress.SetPendingRewritesAndFlow(affected, r.Summary, flow); err != nil {
+		if err := t.store.Progress.SetPendingRewritesAndFlow(queueChapters, r.Summary, flow); err != nil {
 			return nil, fmt.Errorf("set pending rewrites and flow %s: %w", flow, err)
 		}
 	} else {

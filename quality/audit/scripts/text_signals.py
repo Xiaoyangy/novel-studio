@@ -11,7 +11,7 @@ text_signals.py — 复刻并扩充 review/SKILL.md 的量化信号
   5. 标点习惯
   6. 段落级真重复（独立段落间的逐字重复，发布系统级别）
   7. AI 味风险分（本地信号分 + 可选外部 AIGC 分）
-  8. 自研 AIGC 值（codex-local-aigc-v3）
+  8. 自研 AIGC 值（codex-local-aigc-v4）
 
 用法：
   python3 text_signals.py <文本文件> [--json] [--min-dup-len N] [--min-dup-distance N]
@@ -176,9 +176,9 @@ def ai_taste_risk(n_han, cv, total_cliche, per_k, rep8_all, rep12_all, punct, pa
         if local_aigc_percent >= 35:
             combined_score = max(combined_score, round(local_aigc_percent))
             reasons.append({"加分": 0, "原因": f"自研 AIGC 检测 {local_aigc_percent}% 为高风险硬信号"})
-        elif local_aigc_percent >= 5:
+        elif local_aigc_percent >= 4:
             combined_score = max(combined_score, round(local_aigc_percent))
-            reasons.append({"加分": 0, "原因": f"自研 AIGC 检测 {local_aigc_percent}% 未过 5% 门禁"})
+            reasons.append({"加分": 0, "原因": f"自研 AIGC 检测 {local_aigc_percent}% 未过严格 <4% 门禁"})
     if external_percent is not None:
         if external_percent >= 60:
             combined_score = max(combined_score, round(external_percent))
@@ -186,6 +186,9 @@ def ai_taste_risk(n_han, cv, total_cliche, per_k, rep8_all, rep12_all, punct, pa
         elif external_percent >= 20:
             combined_score = max(combined_score, round(external_percent))
             reasons.append({"加分": 0, "原因": f"外部 AIGC 检测 {external_percent}% 需要复核"})
+        elif external_percent >= 4:
+            combined_score = max(combined_score, round(external_percent))
+            reasons.append({"加分": 0, "原因": f"外部 AIGC 检测 {external_percent}% 未过严格 <4% 门禁"})
 
     return {
         "本地信号分": local_score,

@@ -60,6 +60,40 @@ func TestOrderedMarkersKeepExplicitOutlineSequence(t *testing.T) {
 	}
 }
 
+func TestStructureFingerprintAllowsVariedMobileSingleSentenceParagraphs(t *testing.T) {
+	body := `河风从桥洞里穿过来。
+
+摊前那张卷边的价目纸被吹得啪啪作响，马玉芬抬头看了一眼，没有腾出手去压。
+
+林澈等到带孩子的女人转身，才沿着坡口走下去。
+
+灯坏了。
+
+价却不能跟着看不见。
+
+老丁搬来支架、护套和新牌，车斗里还留着五金店的灰。
+
+第一次送电，白光正照进翻滚的锅里，连热气都显得扎眼。
+
+“往下压。”
+
+灯头低下去以后，孩子隔着两步念出了价钱。
+
+女人牵着他回来，要了两碗，其中一碗少糖。
+
+普通的收款声响过两次，沈知遥才从坡口走进灯下。
+
+她没看票，先看那截斜出去的线。`
+	paras := paragraphs(body)
+	fragment := paragraphFragmentationStats(paras)
+	dimension := scoreStructureFingerprint(body, paras, map[string]float64{}, 0, 0, fragment)
+	for _, signal := range dimension.Signals {
+		if signal.Name == "single_sentence_paragraphs_elevated" || signal.Name == "fragmented_single_sentence_paragraphs" || signal.Name == "paragraph_sentence_shape" {
+			t.Fatalf("varied mobile paragraphs should not be treated as a fragmentation template: %+v", dimension)
+		}
+	}
+}
+
 func TestZhuqueWholeTextSegmentPreservesParagraphLayout(t *testing.T) {
 	body := "第一段有现场动作。\n\n第二段有不同长度的对白：“先等等。”\n\n第三段继续推进。"
 	visible := make([]rune, 0, len(body))
@@ -75,7 +109,7 @@ func TestZhuqueWholeTextSegmentPreservesParagraphLayout(t *testing.T) {
 	}
 }
 
-func TestNarrativeHumanAnchorAllowsFinalCapForStrongScenes(t *testing.T) {
+func TestNarrativeHumanAnchorOnlySoftCalibratesStrongScenes(t *testing.T) {
 	stats := Stats{
 		Hanzi:               1500,
 		SentenceCV:          0.75,
@@ -89,14 +123,17 @@ func TestNarrativeHumanAnchorAllowsFinalCapForStrongScenes(t *testing.T) {
 	}
 	body := "门铃响了。“别开门。”他把欠费单压住，回头问：“你刚才听见什么？”她说：“有人在念我的房号。”"
 	anchor := humanAnchorStats(body, stats, []float64{8, 22, 10, 18, 9, 24, 11, 17}, map[string]float64{}, map[string]any{})
-	if !boolFromAny(anchor["final_cap_allowed"]) {
-		t.Fatalf("expected strong narrative anchor to allow final cap: %+v", anchor)
+	if !boolFromAny(anchor["eligible"]) {
+		t.Fatalf("expected strong narrative anchor to remain eligible for soft calibration: %+v", anchor)
+	}
+	if boolFromAny(anchor["final_cap_allowed"]) {
+		t.Fatalf("narrative anchor must never allow a final cap: %+v", anchor)
 	}
 
 	stats.Repeated12Extra = 1
 	anchor = humanAnchorStats(body, stats, []float64{8, 22, 10, 18, 9, 24, 11, 17}, map[string]float64{}, map[string]any{})
 	if boolFromAny(anchor["final_cap_allowed"]) {
-		t.Fatalf("expected repeated text to disable final cap: %+v", anchor)
+		t.Fatalf("repetition must not restore a narrative final cap: %+v", anchor)
 	}
 }
 

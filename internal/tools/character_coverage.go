@@ -23,7 +23,7 @@ func requiredDossierCharacterNames(s *store.Store, chapter int) []string {
 		if resolved := canonical[name]; resolved != "" {
 			name = resolved
 		}
-		if name == "" {
+		if name == "" || domain.IsCrowdRoleLabel(name) {
 			return
 		}
 		if _, ok := seen[name]; ok {

@@ -15,7 +15,83 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+func TestPipelineDraftNeedsExternalJudgeIncludesFirstUnjudgedHash(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		inspection tools.DraftExternalGateInspection
+		want       bool
+	}{
+		{
+			name: "new draft without artifact",
+			inspection: tools.DraftExternalGateInspection{
+				Status:            tools.DraftExternalGateNotRequired,
+				CurrentBodySHA256: "new-body",
+			},
+			want: true,
+		},
+		{
+			name:       "no draft yet",
+			inspection: tools.DraftExternalGateInspection{Status: tools.DraftExternalGateNotRequired},
+		},
+		{
+			name: "approved hash",
+			inspection: tools.DraftExternalGateInspection{
+				Status:            tools.DraftExternalGateApproved,
+				CurrentBodySHA256: "approved-body",
+				ArtifactExists:    true,
+			},
+		},
+		{
+			name:       "changed hash",
+			inspection: tools.DraftExternalGateInspection{Status: tools.DraftExternalGateRejudgePending},
+			want:       true,
+		},
+		{
+			name: "blocking hash authorized for rerender",
+			inspection: tools.DraftExternalGateInspection{
+				Status:            tools.DraftExternalGateRerenderAuthorized,
+				CurrentBodySHA256: "blocking-body",
+				Requirement:       &tools.DraftExternalRerenderRequirement{Chapter: 3},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pipelineDraftNeedsExternalJudge(test.inspection); got != test.want {
+				t.Fatalf("pipelineDraftNeedsExternalJudge() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPipelineExplicitRerenderSkipsJudgeForSupersededDraft(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(2, "第二章\n\n已被人工否掉的旧候选。"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(dir, "drafts", "02.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "rerender-request", "drafts/02.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	inspection := tools.DraftExternalGateInspection{
+		Status: tools.DraftExternalGateRejudgePending, CurrentBodySHA256: "superseded",
+	}
+	if pipelineDraftNeedsExternalJudgeForChapter(dir, 2, inspection) {
+		t.Fatal("newer explicit rerender request should skip judging the superseded draft")
+	}
+}
 
 func TestVerifyPipelineWriteStageRequiresProgressChapterAndCheckpoint(t *testing.T) {
 	dir := t.TempDir()
@@ -850,12 +926,91 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 }
 
 func TestParsePipelineFlagsSupportsOpeningRefresh(t *testing.T) {
-	flags, extra, err := parsePipelineFlags([]string{"--refresh-architect", "--refresh-zero-init", "--stages", "architect,zero-init"})
+	flags, extra, err := parsePipelineFlags([]string{"--refresh-architect", "--refresh-zero-init", "--force-rerender", "--stages", "architect,zero-init"})
 	if err != nil {
 		t.Fatalf("parsePipelineFlags: %v", err)
 	}
-	if len(extra) != 0 || !flags.RefreshArchitect || !flags.RefreshZeroInit {
+	if len(extra) != 0 || !flags.RefreshArchitect || !flags.RefreshZeroInit || !flags.ForceRerender {
 		t.Fatalf("unexpected refresh flags: flags=%+v extra=%v", flags, extra)
+	}
+}
+
+func TestPipelineRequestFullRerenderInvalidatesExistingDraftWithoutChangingPlan(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{{Name: "主角", Role: "主角", Tier: "core"}}); err != nil {
+		t.Fatal(err)
+	}
+	decision := domain.CharacterWorldDecision{
+		Character: "主角", Location: "夜市", CurrentGoal: "完成试点", Pressure: "时间有限",
+		KnowledgeBoundary: "只知道现场事实", AvailableOptions: []string{"继续", "停止"},
+		Decision: "继续", DecisionReason: "结果可核验", Action: "完成试点", ActionDuration: "半天",
+		CompletionState: "completed", ImmediateResult: "试点完成", StateAfter: "准备复盘",
+		ButterflyEffects: []domain.DecisionButterflyEffect{{
+			Effect: "下一步扩展", TransmissionPath: "现场结果", ArrivalChapter: 2,
+			Visibility: "visible", ProtagonistImpact: "形成新选择",
+		}},
+	}
+	sim := domain.ChapterWorldSimulation{
+		Version: 1, SimulationID: "sim-2", Chapter: 2, TimeWindow: "次日上午至傍晚",
+		CharacterDecisions: []domain.CharacterWorldDecision{decision},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "主角", ObservableEffects: []string{"试点完成"}, HiddenPressures: []string{"后续申请"},
+			AvailableOptions: []string{"继续", "停止"}, ChosenDecision: "继续", DecisionReason: "结果可核验",
+			PlanConstraints: []string{"只写主视角可见事实"}, CausalChain: []string{"试点完成 -> 申请增加"},
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{
+		Chapter: 2, Title: "皮卡一到，五个摊主点头了",
+		Contract: domain.ChapterContract{RequiredBeats: []string{"完成试点"}},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			WorldSimulationID: "sim-2", ProtagonistDecision: "继续",
+			ContextSources: []string{"chapter_world_simulation:sim-2"},
+			CausalBeats:    []domain.CausalSimulationBeat{{Cause: "需求出现", CharacterChoice: "继续", StoryResult: "试点完成"}},
+			OutcomeShift:   []string{"试点完成"},
+		},
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "plan", "drafts/02.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(2, "第二章\n\n旧草稿"); err != nil {
+		t.Fatal(err)
+	}
+	draftCheckpoint, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requested, err := pipelineRequestFullRerender(st, []int{2}, "读起来像流程播报")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(requested, []int{2}) {
+		t.Fatalf("requested = %v", requested)
+	}
+	requestCheckpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(2), "rerender-request")
+	if requestCheckpoint == nil || requestCheckpoint.Seq <= draftCheckpoint.Seq {
+		t.Fatalf("rerender checkpoint = %+v, draft=%+v", requestCheckpoint, draftCheckpoint)
+	}
+	var request pipelineRerenderRequest
+	raw, err := os.ReadFile(filepath.Join(st.Dir(), "drafts", "02.rerender_request.json"))
+	if err != nil || json.Unmarshal(raw, &request) != nil {
+		t.Fatalf("rerender request unreadable: err=%v body=%s", err, raw)
+	}
+	if request.Chapter != 2 || request.PlanSHA256 == "" || request.SupersededDraftSHA256 == "" || request.InstructionSHA256 == "" {
+		t.Fatalf("rerender request incomplete: %+v", request)
+	}
+	loadedPlan, err := st.Drafts.LoadChapterPlan(2)
+	if err != nil || loadedPlan == nil || loadedPlan.Title != plan.Title {
+		t.Fatalf("force rerender changed plan: plan=%+v err=%v", loadedPlan, err)
 	}
 }
 
@@ -1130,6 +1285,7 @@ func mustWriteCurrentReviewArtifactsWithVerdict(t *testing.T, dir string, chapte
 	}
 	judge := deepseekAIJudgeArtifact{
 		Chapter: chapter, BodySHA256: bodyHash, RawBodyOnly: true, UserPayloadKind: "chapter_body_only", Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, PassExclusivePercent: 4, AdviceComplete: true,
 	}
 	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d_ai_gate.json", chapter)), mechanical)
 	mustWriteJSONFile(t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d_ai_voice_redflags.json", chapter)), voice)

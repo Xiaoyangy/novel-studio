@@ -323,6 +323,9 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
+	if err := RequireDraftExternalApproval(t.store.Dir(), a.Chapter); err != nil {
+		return nil, err
+	}
 	if err := requireCurrentDraftConsistency(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
@@ -935,6 +938,9 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", chapter, errs.ErrToolPrecondition)
 	}
+	if err := RequireDraftExternalApproval(t.store.Dir(), chapter); err != nil {
+		return nil, err
+	}
 	if err := requireCurrentDraftConsistency(t.store, chapter, content); err != nil {
 		return nil, err
 	}
@@ -958,6 +964,13 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	}
 	if err := requireChapterAttractionContent(t.store, chapter, content); err != nil {
 		return nil, err
+	}
+	// 因果重写明确承诺严格本地门禁，必须在覆盖终稿和世界状态前拦住。
+	// 旧 polishing 路径保留原有有限重试语义，避免改变兼容命令的恢复协议。
+	if progress != nil && progress.Flow == domain.FlowRewriting {
+		if err := requireDraftAIGCGate(t.store, chapter, content); err != nil {
+			return nil, err
+		}
 	}
 	characterStage = mergeRewriteCharacterStage(t.store, chapter, characterStage)
 	if len(characterStage) > 0 || len(requiredDossierCharacterNames(t.store, chapter)) > 0 {
@@ -1475,7 +1488,7 @@ func (t *CommitChapterTool) enqueueMechanicalGateFailure(chapter int, reason str
 
 func aigcViolation(report aigc.Report) []rules.Violation {
 	gatePercent := aigcGatePercent(report)
-	if gatePercent <= 5 {
+	if gatePercent < aigc.PassExclusivePercent {
 		return nil
 	}
 	severity := rules.SeverityWarning
@@ -1486,7 +1499,7 @@ func aigcViolation(report aigc.Report) []rules.Violation {
 		{
 			Rule:      "aigc_ratio",
 			Target:    report.Engine,
-			Limit:     "5%",
+			Limit:     "<4%",
 			Actual:    gatePercent,
 			Deviation: gatePercent / 100,
 			Severity:  severity,

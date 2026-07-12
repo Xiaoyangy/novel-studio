@@ -37,6 +37,16 @@ func NewStopGuard(st *store.Store, onBlock func(reason string, consecutive int32
 			lastBlockTurn.Store(-1)
 			return agentcore.StopDecision{Allow: true}
 		}
+		// A full draft rerender intentionally pauses before consistency/commit so
+		// the outer pipeline can judge the new body hash. Treat this as a normal
+		// host boundary, not an unfinished-book failure loop.
+		if awaitingDraftExternalRejudge(st) {
+			slog.Info("stop_guard 放行 end_turn：等待草稿新哈希外判",
+				"module", "host.reminder", "turn", info.TurnIndex)
+			consecutive.Store(0)
+			lastBlockTurn.Store(-1)
+			return agentcore.StopDecision{Allow: true}
+		}
 		// 零章卡点场景放行：foundation 已齐但第 1 章的 zero-init 未就绪时，
 		// writer 派发会被 writerZeroInitGate 拒绝，Coordinator 在会话内没有合法下一步——
 		// 必须允许收工，交还宿主 pipeline 自动执行 --zero-init 后续跑。

@@ -514,6 +514,34 @@ func TestPipelineRAGIncrementalPlanCanPruneStaleWithoutEmbedding(t *testing.T) {
 	}
 }
 
+func TestPipelineRAGIncrementalPlanPrunesDuplicateHashWithoutEmbedding(t *testing.T) {
+	state := &domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config:        domain.RAGIndexConfig{EmbeddingProvider: "local", EmbeddingModel: "qwen", VectorDimension: 2},
+		Chunks: []domain.RAGChunk{
+			{ID: "formal-review", Hash: "same-hash", SourcePath: "reviews/02.json", SourceKind: "review", Text: "同一份审核"},
+			{ID: "draft-review", Hash: "same-hash", SourcePath: "reviews/drafts/02.json", SourceKind: "review", Text: "同一份审核"},
+		},
+	}
+	vectors := &domain.RAGVectorStore{
+		Config: state.Config,
+		Points: []domain.RAGVectorPoint{
+			{ID: "formal-review", Hash: "same-hash", Vector: []float32{1, 2}},
+			{ID: "draft-review", Hash: "same-hash", Vector: []float32{1, 2}},
+		},
+	}
+	missing, expected, ok, reason := pipelineRAGIncrementalPlan(
+		state, vectors, bootstrap.RAGEmbeddingConfig{Provider: "local", Model: "qwen"},
+	)
+	if !ok || expected != 1 || len(missing) != 0 || !strings.Contains(reason, "duplicate=1") {
+		t.Fatalf("duplicate hash should prune without embedding: ok=%v expected=%d missing=%+v reason=%s", ok, expected, missing, reason)
+	}
+	merged := mergePipelineRAGVectorPoints(vectors, domain.RAGVectorStore{Config: state.Config}, state.Chunks)
+	if len(merged.Points) != 1 || merged.Points[0].Hash != "same-hash" {
+		t.Fatalf("duplicate merge should keep one hash: %+v", merged.Points)
+	}
+}
+
 func TestPipelineRAGIncrementalPlanRejectsInvalidExistingVector(t *testing.T) {
 	state := &domain.RAGIndexState{
 		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
@@ -604,6 +632,24 @@ func TestMergePendingRAGStateReplacesSource(t *testing.T) {
 		if chunk.Hash == old.Hash {
 			t.Fatalf("old source survived pending merge: %+v", state.Chunks)
 		}
+	}
+}
+
+func TestMergePendingRAGStatePrefersPendingChunkForDuplicateContentHash(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	draft := rag.NormalizeChunk(domain.RAGChunk{
+		ID: "draft-review", SourcePath: "reviews/drafts/02.json", SourceKind: "review", Text: "同一份审核结论",
+	})
+	formal := draft
+	formal.ID = "formal-review"
+	formal.SourcePath = "reviews/02.json"
+	state := &domain.RAGIndexState{Chunks: []domain.RAGChunk{draft}}
+	mergePendingRAGState(st, state, []domain.RAGChunk{formal})
+	if len(state.Chunks) != 1 || state.Chunks[0].ID != "formal-review" || len(state.ChunkHashes) != 1 {
+		t.Fatalf("pending formal chunk should replace duplicate draft content: %+v", state.Chunks)
 	}
 }
 

@@ -69,8 +69,8 @@ func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8, // 干净短章：raw 与 blended 一致，EffectiveGatePercent ≤5 才允许仅告警通过
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8, // 干净短章：raw 与 blended 一致，EffectiveGatePercent <4 才允许仅告警通过
+			BlendedAIGCPercent: 3.8,
 			Dimensions: map[string]aigc.Dimension{
 				"perplexity_proxy": {
 					Name:  "困惑度代理",
@@ -130,8 +130,8 @@ func TestAcceptedCleanChapterTreatsFlatObjectRhythmAsAdvisory(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 		RuleViolations: []rules.Violation{{
 			Rule:     "object_response_rhythm_flat",
@@ -166,8 +166,8 @@ func TestAcceptedLowAIGCChapterTreatsStyleWarningsAsAdvisory(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 		RuleViolations: []rules.Violation{
 			{Rule: "isolated_sentence_overuse", Severity: rules.SeverityWarning, Actual: 28},
@@ -193,13 +193,113 @@ func TestAcceptedLowAIGCChapterTreatsStyleWarningsAsAdvisory(t *testing.T) {
 	}
 }
 
+func TestCurrentHashExternalPassCalibratesStrongNarrativeLocalDiagnostic(t *testing.T) {
+	bodyHash := BodySHA256("第一章\n\n林澈回到青山县，饭桌上的话还没说完。")
+	payload := &MechanicalGatePayload{
+		Chapter:    1,
+		BodySHA256: bodyHash,
+		AIGCReport: aigc.Report{
+			AIGCPercent:            11.19,
+			AIRatioPercent:         11.19,
+			BlendedAIGCPercent:     11.19,
+			ZhuqueCompositePercent: 3.36,
+			LegacyHeuristicPercent: 4.30,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene",
+				"score": float64(88), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{
+			{Rule: "object_response_overuse", Severity: rules.SeverityWarning, Actual: 8},
+			{Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning, Actual: 8},
+			{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 11.19},
+		},
+	}
+	external := &ExternalAIJudge{
+		Name: "DeepSeek 裸正文", BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, AdviceComplete: true,
+	}
+	editor := &domain.ReviewEntry{
+		Chapter: 1, Verdict: "accept", ContractStatus: "met",
+		Dimensions: []domain.DimensionScore{{Dimension: "aesthetic", Score: 90, Verdict: "pass"}},
+	}
+
+	if !ApplyExternalCorroboration(payload, external) {
+		t.Fatal("same-hash external pass should calibrate a strong narrative local diagnostic")
+	}
+	if got := aigc.EffectiveGatePercent(payload.AIGCReport); got != 3.36 {
+		t.Fatalf("calibrated gate = %.2f, want 3.36", got)
+	}
+	if got := RewriteDisposition(payload, nil, external, editor); got != "可选" {
+		t.Fatalf("RewriteDisposition = %q, want 可选", got)
+	}
+	md := RenderUnifiedMarkdown(UnifiedMarkdownInput{Chapter: 1, Mechanical: payload, ExternalAIJudge: external, Editor: editor})
+	for _, want := range []string{"机械门禁：有警告", "同哈希外判校准：已采用", "本地原始值保留为诊断", "无需返工"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("calibrated report missing %q:\n%s", want, md)
+		}
+	}
+}
+
+func TestCurrentHashExternalPassDemotesHighAggregateProxiesWhenSegmentsPass(t *testing.T) {
+	bodyHash := BodySHA256("第三章\n\n人群堵在桥头，林澈先让开取餐口，沈知遥守住另一边。")
+	payload := &MechanicalGatePayload{
+		Chapter: 3, BodySHA256: bodyHash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 9.18, ZhuqueCompositePercent: 8.39, SegmentRiskFloor: 2.7,
+			LegacyHeuristicPercent: 9.18, WholeTextSegmentGate: 2.7,
+			Stats: aigc.Stats{Hanzi: 2200, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(88), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 9.18}},
+	}
+	external := &ExternalAIJudge{
+		BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true,
+	}
+	if !ApplyExternalCorroboration(payload, external) {
+		t.Fatal("safe current-hash external and segment evidence should calibrate aggregate proxies")
+	}
+	if got := aigc.EffectiveGatePercent(payload.AIGCReport); got != 2.7 {
+		t.Fatalf("calibrated gate = %.2f, want 2.70", got)
+	}
+}
+
+func TestExternalPassCannotOverrideDeterministicReadabilityFailure(t *testing.T) {
+	bodyHash := BodySHA256("第一章\n\n【系统提示】他接着说话。")
+	payload := &MechanicalGatePayload{
+		Chapter:    1,
+		BodySHA256: bodyHash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 11.19, ZhuqueCompositePercent: 3.0, LegacyHeuristicPercent: 4.3,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene",
+				"score": float64(88), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{{Rule: "system_message_inline", Severity: rules.SeverityWarning}},
+	}
+	external := &ExternalAIJudge{
+		BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, AdviceComplete: true,
+	}
+
+	if ApplyExternalCorroboration(payload, external) {
+		t.Fatal("deterministic readability failure must block external corroboration")
+	}
+	if len(payload.CorroborationBlockedBy) != 1 || payload.CorroborationBlockedBy[0] != "system_message_inline" {
+		t.Fatalf("corroboration blockers = %#v", payload.CorroborationBlockedBy)
+	}
+}
+
 func TestEditorAcceptWithOpenIssuesIsNotCompletePass(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			AIRatioPercent:     4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			AIRatioPercent:     3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 	}
 	editor := &domain.ReviewEntry{
@@ -233,9 +333,9 @@ func TestEditorAcceptWithWarningIssuesIsCompletePass(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			AIRatioPercent:     4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			AIRatioPercent:     3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 	}
 	editor := &domain.ReviewEntry{
@@ -269,9 +369,9 @@ func TestBlockingExternalAIJudgeOverridesAcceptedReview(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			AIRatioPercent:     4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			AIRatioPercent:     3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 	}
 	editor := &domain.ReviewEntry{
@@ -311,7 +411,7 @@ func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
 			Engine:             aigc.Engine,
 			AIGCPercent:        80,
 			AIRatioPercent:     80,
-			BlendedAIGCPercent: 4.8,
+			BlendedAIGCPercent: 3.8,
 			Stats:              aigc.Stats{Hanzi: 3000},
 			SegmentRiskFloor:   80,
 		},
@@ -322,7 +422,7 @@ func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
 		Mechanical: payload,
 		Editor:     &domain.ReviewEntry{Chapter: 1, Verdict: "accept", Summary: "编辑通过"},
 	})
-	for _, want := range []string{"AI 占比：80.00%", "门禁采用值：80.00%", "融合值：4.80%", "朱雀分片风险下限：80.00%"} {
+	for _, want := range []string{"AI 占比：80.00%", "门禁采用值：80.00%", "融合值：3.80%", "朱雀分片风险下限：80.00%"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("unified markdown missing %q:\n%s", want, md)
 		}
@@ -330,10 +430,10 @@ func TestMechanicalGateRendersEffectiveGatePercent(t *testing.T) {
 }
 
 func TestBlockingAIGCDimensionsAreSuppressedByHumanAnchorCap(t *testing.T) {
-	capValue := 4.8
+	capValue := 3.8
 	reasons := BlockingAIGCDimensionReasons(aigc.Report{
 		AIGCPercent:         80,
-		BlendedAIGCPercent:  4.8,
+		BlendedAIGCPercent:  3.8,
 		SegmentRiskFloor:    80,
 		HumanAnchorFinalCap: &capValue,
 		Dimensions: map[string]aigc.Dimension{
@@ -433,9 +533,9 @@ func TestNearThresholdAIVoiceWarningDoesNotBlockAcceptedReview(t *testing.T) {
 	payload := &MechanicalGatePayload{
 		Chapter: 1,
 		AIGCReport: aigc.Report{
-			AIGCPercent:        4.8,
-			AIRatioPercent:     4.8,
-			BlendedAIGCPercent: 4.8,
+			AIGCPercent:        3.8,
+			AIRatioPercent:     3.8,
+			BlendedAIGCPercent: 3.8,
 		},
 	}
 	analysis := &domain.AIVoiceAnalysis{
@@ -503,7 +603,7 @@ func TestUnifiedMarkdownDoesNotResurrectAcceptedEditorIssuesBecauseOfMechanicalW
 		Chapter: 1,
 		Mechanical: &MechanicalGatePayload{
 			Chapter:    1,
-			AIGCReport: aigc.Report{AIGCPercent: 4.8, BlendedAIGCPercent: 4.8},
+			AIGCReport: aigc.Report{AIGCPercent: 3.8, BlendedAIGCPercent: 3.8},
 			RuleViolations: []rules.Violation{{
 				Rule: "isolated_sentence_overuse", Severity: rules.SeverityWarning, Actual: 28,
 			}},

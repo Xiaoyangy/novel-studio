@@ -64,7 +64,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_gate.json"), `{
   "chapter": 1,
   "rule_violations": [
-    {"rule": "aigc_ratio", "severity": "warning", "actual": 7.5, "limit": "5%"}
+    {"rule": "aigc_ratio", "severity": "warning", "actual": 7.5, "limit": "<4%"}
   ]
 }`)
 
@@ -73,7 +73,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	if !plan.HasRed {
 		t.Fatalf("expected red plan, got %+v", plan)
 	}
-	for _, want := range []string{"catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：≤5%", "禁止注水", "改成交易动作和可见事实"} {
+	for _, want := range []string{"catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：本地与外部均严格 <4%", "禁止注水", "改成交易动作和可见事实"} {
 		if !strings.Contains(plan.Brief, want) {
 			t.Fatalf("brief missing %q:\n%s", want, plan.Brief)
 		}
@@ -92,7 +92,7 @@ func TestBuildRevisionPlanTreatsAIVoiceAndHighRiskDimensionsAsBlocking(t *testin
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_gate.json"), `{
   "chapter": 1,
   "aigc_report": {
-    "engine": "codex-local-aigc-v3",
+    "engine": "codex-local-aigc-v4",
     "dimensions": {
       "structure_fingerprint": {
         "name": "结构指纹",
@@ -240,7 +240,7 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 }`)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_gate.json"), `{
   "chapter": 1,
-  "aigc_report": {"aigc_percent": 4.8, "blended_aigc_percent": 4.8},
+	  "aigc_report": {"aigc_percent": 3.8, "blended_aigc_percent": 3.8},
   "rule_violations": [
     {"rule": "fatigue_words", "severity": "warning", "actual": 2, "limit": 1}
   ]
@@ -452,12 +452,11 @@ func TestRolePromptsKeepFirstChapterRewriteRulesAligned(t *testing.T) {
 				"既定数字",
 				"眼前一个问题",
 				"首笔交付",
-				"测试结果",
-				"人物反应",
+				"足够的现场",
+				"三件套",
 				"施工教程",
 				"连续三句",
 				"时限、权限、责任",
-				"插话、漏答或反问",
 				"席间反应",
 				"不要求第二句续梗",
 				"生硬时",

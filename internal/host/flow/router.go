@@ -62,8 +62,14 @@ type State struct {
 	NextActionPlanPartial    bool
 	NextActionPlanRepairTask string
 	// 当前 plan 之后已经生成过 draft 时，恢复流程只做局部验收与提交，
-	// 不应再次整章抽样覆盖。
-	NextActionDraftReady bool
+	// 不应再次整章抽样覆盖；外部草稿审核明确要求结构级重渲染时例外。
+	NextActionDraftReady                    bool
+	NextActionExplicitRerender              bool
+	NextActionReviewRerenderRequired        bool
+	NextActionDraftExternalRerenderRequired bool
+	// A full rerender has consumed the blocking judgment's one-use hash token.
+	// Host must stop prose dispatch until the outer pipeline judges the new hash.
+	NextActionDraftExternalRejudgePending bool
 
 	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
 	// 避免大上下文裁剪把当前章标题/核心事件挤掉。
@@ -110,6 +116,13 @@ func Route(s State) *Instruction {
 	//    阶段拆分：计划未按审阅结论重推演 → planner 先重做计划；已就绪 → drafter 渲染。
 	if len(p.PendingRewrites) > 0 {
 		ch := p.PendingRewrites[0]
+		if s.NextActionDraftExternalRejudgePending && !s.NextActionExplicitRerender {
+			// The outer pipeline owns provider-backed draft judgment. Returning nil
+			// lets the current headless run finish instead of dispatching another
+			// prose agent against an unreviewed hash. A newer explicit rerender
+			// request has already superseded that hash and may proceed directly.
+			return nil
+		}
 		verb := "重写"
 		if p.Flow == domain.FlowPolishing {
 			verb = "打磨"
@@ -162,10 +175,40 @@ func Route(s State) *Instruction {
 			}
 		}
 		if s.NextActionDraftReady {
+			if s.NextActionDraftExternalRerenderRequired {
+				return &Instruction{
+					Agent:   "drafter",
+					Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d)，只修正 draft_external_ai_review 的旧稿失败证据；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
+					Reason:  fmt.Sprintf("第 %d 章外部草稿审核要求结构级重渲染", ch),
+					Chapter: ch,
+				}
+			}
 			return &Instruction{
 				Agent:   "draft_finalizer",
-				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，逐条核对 rewrite_brief 的“必须修正”和机械门禁；明确的局部硬伤与 warning 都用 edit_chapter 修正，必要时连续编辑多处，禁止只修第一项就提交。随后 check_consistency 并 commit_chapter；禁止重新整章生成", ch),
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获外判严格 <4%% 且一致性门禁通过，不得因概率代理的诊断提示继续润色，直接 commit_chapter。只有 rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；外判通过稿一旦编辑，只允许一处并必须立即结束子任务，禁止再次读取、检查、编辑或提交，外层 pipeline 会先复判新哈希。禁止重新整章生成", ch, ch),
 				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
+				Chapter: ch,
+			}
+		}
+		if s.NextActionReviewRerenderRequired {
+			return &Instruction{
+				Agent: "drafter",
+				Task: fmt.Sprintf(
+					"正式复审要求第 %d 章产生新稿：只调用一次 novel_context(chapter=%d, profile=draft)，复用已批准的 world simulation 与 POV plan，逐条落实当前 rewrite_brief。随后调用 draft_chapter(mode=write) 一次整章覆盖；禁止 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。写入新哈希后立即结束，交外层 pipeline 做完整裸正文外判",
+					ch, ch,
+				),
+				Reason:  fmt.Sprintf("第 %d 章正式 rewrite 结论仍对应当前终稿，必须先生成不同哈希的新草稿", ch),
+				Chapter: ch,
+			}
+		}
+		if s.NextActionExplicitRerender {
+			return &Instruction{
+				Agent: "drafter",
+				Task: fmt.Sprintf(
+					"显式整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，复用已经批准的 world simulation 与 POV plan；忽略其中已声明为 source-version-only 的旧正文/brief 哈希差。随后必须调用 draft_chapter(mode=write) 一次覆盖旧草稿，禁止调用 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。新草稿写入后立即结束，交由外层 pipeline 做同哈希外判",
+					ch, ch,
+				),
+				Reason:  fmt.Sprintf("第 %d 章收到显式 render-only 请求，旧草稿已失效", ch),
 				Chapter: ch,
 			}
 		}
@@ -251,6 +294,9 @@ func Route(s State) *Instruction {
 	if next <= 0 {
 		return nil
 	}
+	if s.NextActionDraftExternalRejudgePending {
+		return nil
+	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
 		if s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady {
@@ -282,9 +328,17 @@ func Route(s State) *Instruction {
 		}
 	}
 	if s.NextActionDraftReady {
+		if s.NextActionDraftExternalRerenderRequired {
+			return &Instruction{
+				Agent:   "drafter",
+				Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d)，只修正 draft_external_ai_review 的旧稿失败证据；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", next, next),
+				Reason:  "外部草稿审核要求结构级重渲染",
+				Chapter: next,
+			}
+		}
 		return &Instruction{
 			Agent:   "draft_finalizer",
-			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，只对明确硬伤使用 edit_chapter；随后 check_consistency 并 commit_chapter。禁止重新整章生成", next),
+			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft) 和 check_consistency。当前哈希已获外判严格 <4%% 且一致性门禁通过时直接 commit_chapter，不得按概率代理提示继续润色。只对确定性事实/范围/高置信模板硬伤使用 edit_chapter；外判通过稿一旦编辑，只允许一处并立即结束子任务，先复判新哈希。禁止重新整章生成", next),
 			Reason:  "已有绑定当前 plan 的草稿，恢复时只需验收提交",
 			Chapter: next,
 		}

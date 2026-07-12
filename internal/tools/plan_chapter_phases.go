@@ -54,7 +54,7 @@ func (t *PlanStructureTool) Schema() map[string]any {
 		schema.Property("hook", schema.String("章末钩子")).Required(),
 		schema.Property("emotion_arc", schema.String("情绪曲线")),
 		schema.Property("notes", schema.String("自由备忘；写明本章承接的历史数据、大纲、动态台账、资源/人物连续性、写法资产或 RAG 召回依据")),
-		schema.Property("required_beats", schema.Array("本章必须成立的 3-7 个结果级推进项；每项只写谁使什么发生变化，不写点击、验证次数、动作拍、台词原句或流程步骤", schema.String(""))),
+		schema.Property("required_beats", schema.Array("本章正文必须让读者看见的 2-4 个结果级变化；能并成一项就并，不写离屏台账、点击、验证次数、动作拍、台词原句或流程步骤", schema.String(""))),
 		schema.Property("forbidden_moves", schema.Array("本章明确不能发生的推进", schema.String(""))),
 		schema.Property("continuity_checks", schema.Array("本章需特别核对的连续性点", schema.String(""))),
 		schema.Property("evaluation_focus", schema.Array("Editor 重点检查项", schema.String(""))),
@@ -130,15 +130,12 @@ func applyRewriteAnchorsToStructure(s *store.Store, chapter int, structure map[s
 	if err != nil || source == nil {
 		return err
 	}
-	required := stringSliceFromAny(structure["required_beats"])
-	for _, fact := range source.PreserveFacts {
-		required = appendUniqueString(required, fact)
-	}
-	if len(required) > 0 {
-		structure["required_beats"] = required
-	}
+	// PreserveFacts protect canon in the world/review layer; they are not a list
+	// of scenes the new prose must replay. Copying every old event into
+	// required_beats made rewrites preserve the old paragraph order and rendered
+	// the chapter as a compliance checklist.
 	checks := stringSliceFromAny(structure["continuity_checks"])
-	checks = appendUniqueString(checks, fmt.Sprintf("局部返工必须继承 %s 的事实链；源正文 sha256=%s，允许改写表达，不得改动事件顺序、金额、地点、角色出场、结果、伏笔与章末钩子。", source.BodyPath, source.BodySHA256))
+	checks = appendUniqueString(checks, fmt.Sprintf("局部返工以 %s（sha256=%s）为事实来源；保留明确列入 preserve_constraints 的世界事实、金额、秘密边界与章末后果，但允许删场、并场、换序和省略非关键过场。", source.BodyPath, source.BodySHA256))
 	structure["continuity_checks"] = checks
 	return nil
 }
@@ -565,9 +562,8 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 
 func planDetailsRecommendedBatches() []string {
 	return []string{
-		"batch1_causal_foundation: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state + environment_state + causal_beats + decision_points + outcome_shift（initial_state 只需覆盖主角）",
-		"batch2_voice_and_entertainment: voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan + reader_entertainment_plan；显式要求热梗时同时补 trend_language_plan",
-		"batch3_reader_contract: reader_reward_plan + reader_retention_plan + ending_consequence_contract；第一章长篇项目同时补 longform_opening；返工章同时补 review_refinement",
+		"batch1_pov_projection: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state(max 2) + causal_beats(max 4) + decision_points(max 4) + outcome_shift(max 4)",
+		"batch2_voice_and_rewrite: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker)；返工章同时补 review_refinement。dialogue/emotional/anti_ai/reader_reward/retention/ending/entertainment/longform/trend 均为可选，默认不要重复生成",
 	}
 }
 
@@ -585,36 +581,13 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 		"chapter_function",
 		"context_sources",
 		"initial_state",
-		"environment_state",
 		"causal_beats",
 		"decision_points",
 		"outcome_shift",
 		"voice_logic",
-		"dialogue_scene_blueprints",
-		"emotional_logic",
-		"anti_ai_execution_plan",
-		"reader_reward_plan",
-		"reader_retention_plan",
-		"ending_consequence_contract",
 	} {
 		if _, ok := merged[field]; !ok {
 			gaps = append(gaps, "missing "+field)
-		}
-	}
-	attraction := attractionRequirementsForChapter(s, chapter)
-	if attraction.Trend {
-		if _, ok := merged["trend_language_plan"]; !ok {
-			gaps = append(gaps, "missing trend_language_plan")
-		}
-	}
-	if attraction.Entertainment {
-		if _, ok := merged["reader_entertainment_plan"]; !ok {
-			gaps = append(gaps, "missing reader_entertainment_plan")
-		}
-	}
-	if attraction.Longform {
-		if _, ok := merged["longform_opening"]; !ok {
-			gaps = append(gaps, "missing longform_opening")
 		}
 	}
 	if rewrite, _ := partial["rewrite"].(bool); rewrite {
@@ -633,9 +606,6 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 			if strings.TrimSpace(state.Character) != "" && strings.TrimSpace(state.ActionTendency) == "" {
 				gaps = append(gaps, fmt.Sprintf("initial_state(%s).action_tendency", state.Character))
 			}
-		}
-		if missing := missingEmotionalLogicCoverage(protagonistOnly, plan.CausalSimulation.EmotionalLogic); len(missing) > 0 {
-			gaps = append(gaps, formatMissingCharacterCoverage("emotional_logic", missing))
 		}
 		if protagonist != "" && !voiceLogicContainsCharacter(plan.CausalSimulation.VoiceLogic, protagonist) {
 			gaps = append(gaps, formatMissingCharacterCoverage("voice_logic", []string{protagonist}))

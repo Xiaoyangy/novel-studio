@@ -124,6 +124,39 @@ func TestLoadConfig_ValidMergeWorks(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_NestedRunInheritsNearestAncestorProject(t *testing.T) {
+	writeGlobal(t, validGlobal)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	writeProjectConfig(t, `{
+  "provider": "codex",
+  "model": "gpt-5.6-sol",
+  "roles": {
+    "writer": {"provider":"codex","model":"gpt-5.6-sol","reasoning_effort":"ultra","fallbacks":[]},
+    "reviewer": {"provider":"deepseek","model":"deepseek-v4-pro","reasoning_effort":"max"}
+  }
+}`)
+	nested := filepath.Join(repo, "data", "runs", "book")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "codex" || cfg.ModelName != "gpt-5.6-sol" {
+		t.Fatalf("nested run lost ancestor project model: %s/%s", cfg.Provider, cfg.ModelName)
+	}
+	if got := cfg.Roles["reviewer"]; got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" {
+		t.Fatalf("nested run lost ancestor reviewer: %+v", got)
+	}
+	if got := cfg.Roles["writer"]; len(got.Fallbacks) != 0 || got.ReasoningEffort != "ultra" {
+		t.Fatalf("nested run did not preserve strict writer config: %+v", got)
+	}
+}
+
 func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 	base := Config{
 		Provider:  "openrouter",

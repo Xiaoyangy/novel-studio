@@ -1,45 +1,62 @@
 # 3000 字整章 AI 检测口径
 
-本文用于 writer / drafter / editor 共用：把一章约 3000 字的小说当成读者会整段复制到检测平台的真实场景处理，不得只看局部片段或 blended 平均值。
+本文供 Writer、Drafter、Editor 共用。约 3000 字小说章按读者会整章提交检测的真实场景处理；不能用局部片段、融合平均值或人工锚点固定低分替代整章风险。
 
-## 外部机制摘录
+## 当前研究结论
 
-- Turnitin 的 AI Writing Report 要求至少 300 words 的长篇 prose，且可处理到 30,000 words。约 3000 中文字的小说章已经远超“可生成百分比”的长文门槛，应按整篇长文被评分处理。来源：https://guides.turnitin.com/hc/en-us/articles/22774058814093-Using-the-AI-Writing-Report
-- Turnitin 早期 FAQ 披露过分段思路：提交会被拆成重叠的几百词片段，对句子和片段打分后再汇总。工程含义：约 3000 字整章如果每个窗口都节奏均匀，平台可能给出很高的整体比例；只改开头/结尾几句很难拉低。来源：https://cte.ku.edu/sites/cte/files/images/2023/AI%20Writing%20FAQs%20March%202023%20%281%29.pdf
-- Copyleaks AI Text Detection API 返回整体分类，也返回 section 位置、classification 和 probability。工程上必须保留“整章值”和“分段最高风险”两条线，不能只看平均。来源：https://docs.copyleaks.com/reference/data-types/ai-detector/ai-text-detector-response/
-- Copyleaks 页面说明其报告会给出 AI Logic、AI Phrases 和 Source Match。工程含义：不要只做同义词替换；高频 AI 短语、结构化说明和可追溯来源匹配都可能暴露问题。来源：https://copyleaks.com/ai-detector
-- GPTZero 对公开机制的解释包括 perplexity 与 burstiness：文本太可预测、全篇节奏太均匀会更像 AI；人类文本通常有短长句、简单句和复杂句混合。来源：https://gptzero.me/news/how-ai-detectors-work/
-- GPTZero 当前公开 FAQ 也把检测描述为综合 patterns、perplexity、burstiness、style/repetition 等大量因素，并提醒没有检测器完美。工程含义：外部 70% 不能直接等同作弊判定，但足以说明整章统计结构需要返工。来源：https://gptzero.me/
-- Originality.ai 对 perplexity/burstiness 的说明强调：过于可预测的下一个词、重复词爆发、缺少句式变化会抬高 AI 风险。工程含义：章节要改段落功能、信息释放和词汇场，而不是局部加冷僻词。来源：https://originality.ai/blog/perplexity-and-burstiness-in-writing
-- Stanford SCALE 对 GPTZero 的评估提醒：AI 检测存在混合准确度和误伤风险。工程含义：报告不能当唯一事实，但用户要投平台/外审时，工程门禁应按更严格的整章风险处理。来源：https://scale.stanford.edu/ai/repository/assessing-gptzeros-accuracy-identifying-ai-vs-human-written-essays
-- 腾讯朱雀公开报道描述其文本检测会对比检测文本与大模型预测内容，推测 AI 生成概率，并覆盖新闻、公文、小说、散文等文体。来源：https://m.dzplus.dzng.com/share/general/0/NEWS2096476LYGRELBVDXQED
-- Pangram 对困惑度/突发性路线的批评提醒：这些指标会误伤训练集中常见、规范、被反复转载的文本。工程上不能靠脏码和随机词“骗分”，应让正文真实承担功能差异。来源：https://www.pangram.com/zh/blog/why-perplexity-and-burstiness-fail-to-detect-ai
+单一词表、困惑度或句长指标不足以稳定识别不同题材和不同模型的文本。本工程采用可解释的多路风险代理，并把它当生产质量门禁，不把分数表述为作者身份事实。
 
-## 本工程门禁
+- Fast-DetectGPT 代表条件概率曲率路线，DNA-GPT 使用续写分布差异，Ghostbuster 融合弱语言模型特征；本地对应概率曲率、语意困惑度和弱模型一致性代理。
+  - https://arxiv.org/abs/2310.05130
+  - https://arxiv.org/abs/2305.17359
+  - https://arxiv.org/abs/2305.15047
+- RAID、AIDER 与 2025 跨域基准显示检测器会随模型、题材、领域和改写方式漂移；不能拿单一旧阈值或单一样本泛化。
+  - https://aclanthology.org/2024.acl-long.674/
+  - https://aclanthology.org/2025.coling-main.625/
+  - https://aclanthology.org/2025.genaidetect-1.4/
+- GL-CLiC 与 SenDetEX 强调全局/局部上下文、词汇复杂度和句级混合信号；本地不能只看整章平均，也要看句群功能和跨段语义变化。
+  - https://aclanthology.org/2025.ijcnlp-long.188/
+  - https://aclanthology.org/2025.emnlp-main.268/
+- MoSEs 与 EvoBench 说明风格阈值应随来源和新模型演化；当前协议、提示和缓存必须带版本，不复用旧判定。
+  - https://aclanthology.org/2025.emnlp-main.294/
+  - https://aclanthology.org/2025.findings-acl.754/
+- 人类专家常用词汇、句法、标点、原创性/幽默、对白同质性、过度清楚、语气与情绪等线索；中文研究也显示结构、语用风格、可读性、标点和情感信号有辨识作用。
+  - https://aclanthology.org/2025.acl-long.267/
+  - https://aclanthology.org/2025.ccl-1.64/
+- 腾讯朱雀公开页面说明覆盖小说等文本并提供可疑片段；外部报告仍是概率性风险信号，不是作者身份裁决。
+  - https://matrix.tencent.com/ai-detect/ai_gen_txt/
 
-- `EffectiveGatePercent` 是唯一门禁采用值。短章（`hanzi <= 5000`）按整章单检测片段处理，`segment_risk_floor` 或 raw AI 占比高时，不得被普通 `blended_aigc_percent` 稀释放行；如果朱雀式代理显示整章单段高风险，`human_anchor_final_cap_percent` 不能覆盖该风险。只有不存在整章单段高风险、无脏码/真重复、AI voice 与 Editor 均通过时，强人工锚点 cap 才能成为门禁采用值，同时仍展示 raw floor。
-- 整章单段高风险必须有复合证据支撑：底层曲线原始高值之外，还需要当前曲线、朱雀四维综合、结构/段落节奏或人味锚点缺失等信号共同成立；不能只凭一个被校准前的曲线值把强叙事章节锁死为高风险。
-- 概率曲率、弱语言模型一致性、局部熵三条原始曲线同时过平只能作为待复核信号，仍需当前曲线、结构、节奏或人味缺失中的独立证据支持。2026-07 的一次 3000 字小说外部朱雀曾报 80.29%，该结果按正文 hash 登记；不能把这一个外部样本泛化成“三曲线共振即高风险”，否则会把已知人工章节大面积误判。
-- 统一审核报告必须同时展示 `AI 占比`、`门禁采用值`、`融合值`、`朱雀分片风险下限`。交付判断看 `门禁采用值`，不是只看 `融合值`。
-- `aigc_ratio >= 35%` 是 error，必须返工；`5% <= aigc_ratio < 35%` 是 warning，也不得作为交付完成。
-- 报告中“主要问题”不是装饰文字。只要主要问题仍列出机械 error、阻断 warning、Editor warning 或功能性风险，就不能称为完全通过；应继续改到机械规则清空、AI voice 通过、Editor 主要问题为空或只剩非交付阻断的题材取舍。
-- 外部平台出现约 70% 的整章 AI 判断时，按“章节统计结构失败”处理，而不是按局部措辞失败处理：必须重新选择页面显性节拍、压缩计划清单、改变段落功能分布，并保留整章/分段两套证据。
+## 交付门禁
 
-## 写作策略
+- 本地 `EffectiveGatePercent` 必须严格 `<4%`；`4.00%` 也不通过。
+- 外部 DeepSeek 裸正文判定必须严格 `<4%`。每次判定必须返回至少 2 条正文证据、2 条修改方案、1 条对白方案、1 条作者声口方案和 2 条可沉淀规则；建议不完整与分数超线同样阻断。
+- 外部请求只提交章节原文，不附带本地报告、旧分数或诱导性作者画像。缓存键必须包含正文 hash、模型、provider、系统提示 hash 与协议版本。
+- 报告同时展示 raw 分、门禁采用值、分片风险与各代理维度。叙事 `human_anchor` 只能软校准容易误伤的曲线和风格项，不能提供固定最终低分；技术说明文锚点才允许最终 cap。
+- 主要问题中仍有机械 error、阻断 warning、Editor warning、外部建议未落实或功能性风险时，不能称为通过。
+- 随机错字、病句、乱码、稀有词堆叠、拟声噪声、任意断句和同义词替换属于绕检或内容损伤，不得用于降分。
 
-目标不是随机换词，而是破除“整章每 180 字窗口都同样稳定”的机器曲线：
+## 本地 v4 信号
 
-- 让段落功能换挡：事故触发、误判、口头争执、物件迟到、私人生活侵入、现场沉默、权限后果不能都用同一叙述速度。
-- 让词汇场切换自然发生：技术词、生活词、人物口癖、动作词、物件部件名分布要随场景改变，而不是整章平均铺开。
-- 允许局部普通、重复、口语和不完整：真人争执会重复“别点”“我没点”“谁签”，但重复必须由角色压力推动，不能堆无意义字串。
-- 降低功能句密度：不要连续多段都在说“保全/导出/权限/说明/审批”。每一条流程信息必须由谁怕担责、谁想甩锅、谁不愿签字来驱动。
-- 具体物件不是清单：只保留会触发行动、入账、被拍照、被误读或后文回收的物件。为抬 TTR 堆物件、店名、冷僻词，一律视为清单灌水。
-- 主角必须有可见裂缝：她可以专业，但不能全程像审核员。用误按、删掉文件名、差点截图、没听清、被私人消息打断等具体动作替代“内心复杂”。
-- 计划是素材池，不是正文清单：把大纲、台账、角色状态、世界层、信息差先筛成 `surface_beats`、`latent_context`、`reveal_budget`、`cut_or_compress`。正文只显性写 surface；latent 只约束行动；reveal 只露证据；cut/compress 不得还原成长篇说明。
+`codex-local-aigc-v4` 综合以下代理，不宣称复刻任一商业检测器：
 
-## 审核策略
+- 概率曲率、弱语言模型一致性、局部熵/TTR、语意困惑度。
+- 句长/段长、标点、段首、孤句、规则块和跨段稳定度等风格计量。
+- 全局/局部语义功能是否长期一致，抽象总结是否压过现场选择。
+- 内容完整性、真重复、工程词泄漏和 humanizer 噪声。
+- **叙事动力**：密集短对白窗口、连续对白轮次、动作开场标签同构、对白长度过齐、主视角内在体验稀薄、流程/验收语汇过密、情绪范围过平。
 
-- 先看 `mechanical_gate.effective_gate_percent` / `gate_percent`，再看四维、latest detector proxy 和 `zhuque_segment_proxy.segments`。
-- 若 `segment_risk_floor >= 50`，必须把整章当一个风险片段读，检查局部熵/TTR曲线是否过平、语义功能是否过稳、段落是否均匀正确；若报告同时出现 `human_anchor_final_cap_percent`，只能说明文本有部分人工叙事锚点，不能压过整章合段门禁。
-- Editor 不得因为正文“看起来不错”而覆盖机械 error。Editor accept 只能说明设定/角色/钩子可用，不代表可交付。
-- 返工建议必须具体到段落功能：例如“第18-24段连续流程辩论，改成安全组甩锅、投屏同事自保、记录员怕签错、主角被私人消息打断”，不能只写“增加人味”。
+叙事动力不是“对话多就危险”。真正的风险是六到八段由不同人物各说一句，精准完成提问、补背景、解围和宣布下一步；主角只负责到场和执行，情绪没有改变判断或选择。
+
+## 写作回改
+
+1. 先读外部证据和建议，区分整章结构问题与个别措辞问题。`>=4%` 默认整章重渲染。
+2. 重筛 3-6 个页面显性节拍。计划里的手续、验证、人物状态和世界台账不是正文交付清单。
+3. 决定谁必须说、谁可以沉默、哪条信息本章根本不说。不能把一段信息倾倒拆成多人各一句。
+4. 至少两次让主角的主观体验改变注意、误判、选择或关系理解。微动作和情绪标签不算选择变化。
+5. 一组密集对白完成一个局面变化后，切到有后果的行动、主角判断、现场变化或未被回答的沉默。
+6. 笑点来自处境、误会、关系和反应，不让每个角色都负责抖一句工整包袱。
+7. 复检时同时看整章分、最高风险项和实际读感；不得为了过检测牺牲通顺、爽点和情感。
+
+## 外部建议沉淀
+
+外部返回的 `rag_writing_rules` 只有满足以下条件才进入通用资产：不绑定本章专名；描述可观察症状；给出结构性修法；不鼓励噪声或规避检测；至少被一次正文证据支持。章节特有建议只进入当章 `rewrite_brief`，不污染全局规则。

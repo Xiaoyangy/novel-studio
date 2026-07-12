@@ -5,7 +5,7 @@
 ## 脚本
 
 ```bash
-python3 quality/audit/scripts/aigc_value.py <正文路径> --target 5
+python3 quality/audit/scripts/aigc_value.py <正文路径> --target 4
 python3 quality/audit/scripts/text_signals.py <正文路径>
 python3 quality/audit/scripts/paragraph_dup.py <正文路径>
 python3 quality/audit/scripts/content_lint.py <正文路径>
@@ -24,6 +24,8 @@ python3 quality/audit/scripts/register_external_detection.py --project <output/n
 ```
 
 校准语料与 judge 漂移冻结样本在 `quality/calibration/`（human/llm/mixed 清单 + golden_reviews）。
+
+当前小说交付门槛为严格 `<4%`，`4%` 也不通过。pipeline 的 DeepSeek 裸正文分支还要求返回完整证据与修改建议；建议缺失不会写入有效缓存。`codex-local-aigc-v4` 新增叙事动力检查，覆盖对白传送带、动作开场标签同构、POV 内在体验薄、流程语汇和情绪范围过平。
 
 `scripts/` 和 `references/` 是审核能力的唯一源目录。`skills/review/SKILL.md` 只保留 agent 流程说明；`novel-studio skills export --to <dir>` 会在导出产物里按需装配这些脚本和参考资料。
 

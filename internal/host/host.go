@@ -369,6 +369,15 @@ func (h *Host) Resume() (string, error) {
 		h.mu.Unlock()
 		return "", fmt.Errorf("resume prompt: %w", err)
 	}
+	// PendingSteer is a delivery queue, not a permanent project rule. Once the
+	// coordinator has accepted the resume prompt, the message is durable in its
+	// session history; keeping it in run.json would inject the same surgical edit
+	// on every later resume and leave diag reporting an orphan forever.
+	if meta, loadErr := h.store.RunMeta.Load(); loadErr == nil && meta != nil && strings.TrimSpace(meta.PendingSteer) != "" {
+		if clearErr := h.store.RunMeta.ClearPendingSteer(); clearErr != nil {
+			slog.Warn("清除已投递 steer 失败", "module", "host", "err", clearErr)
+		}
+	}
 	// 主动派发一次首条指令，避免 Coordinator 对恢复 prompt 只回文字而 StopGuard 反复拦截。
 	h.router.Dispatch()
 

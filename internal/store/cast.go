@@ -78,6 +78,18 @@ func (s *CastStore) MergeAppearances(
 			}
 		}
 
+		// Old projects may already contain descriptive crowd labels from earlier
+		// commits. Drop only unintroduced placeholders; an explicit CastIntro is
+		// the opt-in that says the title is a durable individual identity.
+		filtered := entries[:0]
+		for _, entry := range entries {
+			if domain.IsCrowdRoleLabel(entry.Name) && entry.BriefRole == "" {
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		entries = filtered
+
 		index := make(map[string]int, len(entries))
 		for i, e := range entries {
 			index[e.Name] = i
@@ -93,6 +105,9 @@ func (s *CastStore) MergeAppearances(
 			}
 			seen[name] = true
 			if knownCore[name] {
+				continue
+			}
+			if _, explicitlyIntroduced := introMap[name]; !explicitlyIntroduced && domain.IsCrowdRoleLabel(name) {
 				continue
 			}
 			if i, ok := index[name]; ok {
@@ -141,7 +156,7 @@ func (s *CastStore) RecentActive(limit int) ([]domain.CastEntry, error) {
 	}
 	active := entries[:0:0]
 	for _, e := range entries {
-		if e.Promoted {
+		if e.Promoted || (e.BriefRole == "" && domain.IsCrowdRoleLabel(e.Name)) {
 			continue
 		}
 		active = append(active, e)

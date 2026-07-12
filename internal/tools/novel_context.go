@@ -265,6 +265,10 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 		warn("chapter_world_simulation", err)
 	} else if sim != nil {
 		gaps := chapterWorldSimulationGaps(t.store, *sim)
+		renderOnlyRerender := RenderOnlyRerenderReady(t.store, chapter)
+		if renderOnlyRerender {
+			gaps = reusableChapterWorldSimulationGaps(t.store, *sim)
+		}
 		if len(gaps) > 0 {
 			result["chapter_world_simulation"] = map[string]any{
 				"status":             "invalid",
@@ -275,7 +279,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			}
 			return
 		}
-		result["chapter_world_simulation"] = map[string]any{
+		ready := map[string]any{
 			"status":                 "ready",
 			"simulation_id":          sim.SimulationID,
 			"base_tick_id":           sim.BaseTickID,
@@ -287,6 +291,10 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			"rewrite_fact_coverage":  sim.RewriteFactCoverage,
 			"render_policy":          "character_decisions 仅用于全角色连续性与 commit 回填；正文只能渲染 protagonist_projection.observable_effects 和主角合法获得的信息，hidden/delayed 不得泄露。",
 		}
+		if renderOnlyRerender {
+			ready["source_version_policy"] = "显式 render-only 已校验世界推演和 POV plan；旧正文/brief hash 只表示版本差，不触发重推演。"
+		}
+		result["chapter_world_simulation"] = ready
 		return
 	}
 	result["chapter_world_simulation"] = map[string]any{

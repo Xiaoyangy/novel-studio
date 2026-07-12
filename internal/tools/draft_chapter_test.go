@@ -3,10 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -138,6 +141,173 @@ func TestDraftChapterRejectsConsecutiveDraftWithoutConsistencyCheck(t *testing.T
 	}
 }
 
+func TestDraftChapterConsumesExactlyOneExternalRerenderToken(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	oldDraft := "第一章\n\n旧草稿仍然像流程报告。"
+	if err := s.Drafts.SaveDraft(1, oldDraft); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(oldDraft), AIProbabilityPercent: 17, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"重排人物体验和页面结果"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "第一章\n\n这是从人物选择重新组织的整章正文。", "mode": "write",
+	})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectDraftExternalGate(s.Dir(), 1)
+	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.Requirement == nil {
+		t.Fatalf("gate after full write = %+v, err=%v", inspection, err)
+	}
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "必须先运行外部草稿复判") {
+		t.Fatalf("expected second rerender rejection, got %v", err)
+	}
+}
+
+func TestDraftChapterExplicitRerenderSupersedesPendingJudgeHash(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "第一章\n\n第一份完整候选正文。", "mode": "write",
+	})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(s.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "第一章\n\n人工已否掉旧候选，这是一份不同的新正文。", "mode": "write",
+	})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), second); err != nil {
+		t.Fatalf("newer explicit rerender request should allow replacing unjudged old draft: %v", err)
+	}
+}
+
+func TestDraftChapterAppendCannotClearExternalRerenderRequirement(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	oldDraft := "第一章\n\n旧草稿。"
+	if err := s.Drafts.SaveDraft(1, oldDraft); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(oldDraft), AIProbabilityPercent: 17, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"整章重排"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "只补一段。", "mode": "append",
+	})
+	_, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "append 不能解除") {
+		t.Fatalf("expected append rejection, got %v", err)
+	}
+}
+
+func TestDraftChapterRejectsOperationalErrorReportAsProse(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1,
+		"content": "未能提交。\n\n阻塞原因：当前工作区为只读，Qdrant 不可用，本会话未挂载 draft_chapter。",
+		"mode":    "write",
+	})
+	_, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "不能写入小说草稿") {
+		t.Fatalf("expected operational-report rejection, got %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != "" {
+		t.Fatalf("operational report persisted: %q", draft)
+	}
+}
+
+func TestDraftChapterRejectsGenericSystemRefusalAndAphoristicSummary(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章\n\n理由一条比一条正经，只有钥匙揣进谁兜里被他漏了。\n\n【不是，哥们，这笔不能这么花。】"
+	args, _ := json.Marshal(map[string]any{"chapter": 1, "content": content, "mode": "write"})
+	_, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "高置信正文模板") {
+		t.Fatalf("expected high-confidence prose-template rejection, got %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != "" {
+		t.Fatalf("rejected template persisted: %q", draft)
+	}
+}
+
+func TestDraftChapterExternalRerenderKeepsOldDraftWhenCandidateTooShort(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{
+		ChapterWords: &rules.WordRange{Min: 100, Max: 200},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, "旧草稿正文应当保留。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256("旧草稿正文应当保留。"), AIProbabilityPercent: 17, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"整章重排"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "太短。", "mode": "write",
+	})
+	_, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "一次提交完整小说正文") {
+		t.Fatalf("expected completeness rejection, got %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != "旧草稿正文应当保留。" {
+		t.Fatalf("short candidate overwrote old draft: %q", draft)
+	}
+	if required, _ := DraftExternalRerenderRequired(s.Dir(), 1); !required {
+		t.Fatal("short candidate cleared full-rerender requirement")
+	}
+}
+
 func TestDraftChapterPersistsButFlagsWordContractFailure(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
@@ -166,6 +336,40 @@ func TestDraftChapterPersistsButFlagsWordContractFailure(t *testing.T) {
 	}
 	if draft, _ := s.Drafts.LoadDraft(1); draft != content {
 		t.Fatalf("out-of-range draft should remain editable, got %q", draft)
+	}
+}
+
+func TestValidateDraftChapterHeadingRequiresPlanTitleAndChapterNumber(t *testing.T) {
+	plan := domain.ChapterPlan{Chapter: 2, Title: "皮卡一到，五个摊主点头了"}
+	if err := validateDraftChapterHeading(plan, "皮卡一到，五个摊主点头了\n\n正文"); err == nil {
+		t.Fatal("heading without chapter number must be rejected")
+	}
+	for _, heading := range []string{"第2章 皮卡一到，五个摊主点头了", "第二章 皮卡一到，五个摊主点头了"} {
+		if err := validateDraftChapterHeading(plan, heading+"\n\n正文"); err != nil {
+			t.Fatalf("valid heading %q rejected: %v", heading, err)
+		}
+	}
+}
+
+func TestValidateDraftWorldVisibilityRejectsOffscreenNamedCharacter(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 2, SimulationID: "sim-2", TimeWindow: "当天",
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			{Character: "林澈", VisibleToPOV: true},
+			{Character: "梁广财", VisibleToPOV: false},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDraftWorldVisibility(s, 2, "第2章 标题\n\n梁广财端来两盘货，催着老丁改牌。"); err == nil || !strings.Contains(err.Error(), "梁广财") {
+		t.Fatalf("offscreen role drift should be rejected, got %v", err)
+	}
+	if err := validateDraftWorldVisibility(s, 2, "第2章 标题\n\n林澈端来两盘货，催着老丁改牌。"); err != nil {
+		t.Fatalf("visible protagonist rejected: %v", err)
 	}
 }
 

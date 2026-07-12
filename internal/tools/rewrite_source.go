@@ -170,6 +170,6 @@ func rewriteSourceContext(source *domain.ChapterRewriteSource, body, brief strin
 		"current_body":        body,
 		"brief_markdown":      brief,
 		"required_sources":    []string{rewriteSourceToken(source), rewriteBriefToken(source)},
-		"preservation_policy": "这是局部返工，不是重新发明本章。世界模拟必须逐条覆盖 preserve_facts，并保持当前正文的事件顺序、金额、地点、角色出场、结果、伏笔和章末钩子；只围绕审核目标改动。",
+		"preservation_policy": "这是同一章的重新讲述。世界模拟必须逐条覆盖 preserve_facts，正文必须守住金额、秘密边界、关键选择、最终结果和章末后果；旧稿的场景数量、事件顺序、过场动作、对白、非关键角色出场都可以删除、合并、换序或改写，不得把 preserve_facts 逐条渲染成清单。",
 	}
 }

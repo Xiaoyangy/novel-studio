@@ -9,6 +9,7 @@ package main
 // review/rewrite 按章号），两层恢复叠加。
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1267,6 +1268,27 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 		maxRounds = 3
 	}
 	st := store.NewStore(cfg.OutputDir)
+	if flags.ForceRerender {
+		progress, loadErr := st.Progress.Load()
+		if loadErr != nil {
+			return loadErr
+		}
+		pending, pendingErr := pipelineCausalRewritePending(progress, flags.Start, flags.End)
+		if pendingErr != nil {
+			return pendingErr
+		}
+		instruction := ""
+		if state != nil {
+			instruction = state.Prompt
+		}
+		requested, requestErr := pipelineRequestFullRerender(st, pending, instruction)
+		if requestErr != nil {
+			return requestErr
+		}
+		if len(requested) > 0 {
+			fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 已显式使旧草稿失效，保留既有世界推演与 plan，整章重新渲染：%v\n", requested)
+		}
+	}
 	if flags.PolishWarnings {
 		queued, queueErr := pipelineQueueAcceptedWarningPolish(st, flags.Start, flags.End)
 		if queueErr != nil {
@@ -1336,6 +1358,72 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 		return fmt.Errorf("达到最大因果重写轮数 %d 后仍有 pending_rewrites=%v", maxRounds, pending)
 	}
 	return nil
+}
+
+type pipelineRerenderRequest struct {
+	Version               int    `json:"version"`
+	Chapter               int    `json:"chapter"`
+	PlanSHA256            string `json:"plan_sha256"`
+	SupersededDraftSHA256 string `json:"superseded_draft_sha256"`
+	InstructionSHA256     string `json:"instruction_sha256,omitempty"`
+	Reason                string `json:"reason"`
+	RequestedAt           string `json:"requested_at"`
+}
+
+func pipelineRequestFullRerender(st *store.Store, chapters []int, instruction string) ([]int, error) {
+	if st == nil || len(chapters) == 0 {
+		return nil, nil
+	}
+	var requested []int
+	for _, chapter := range chapters {
+		if chapter <= 0 {
+			continue
+		}
+		if err := tools.ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
+			return nil, fmt.Errorf("第 %d 章不能只重渲染，必须先修复推演/plan: %w", chapter, err)
+		}
+		planRel := filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.plan.json", chapter)))
+		draftRel := filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", chapter)))
+		planRaw, planErr := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(planRel)))
+		draftRaw, draftErr := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(draftRel)))
+		if planErr != nil || len(bytes.TrimSpace(planRaw)) == 0 {
+			return nil, fmt.Errorf("第 %d 章 force-rerender 缺少正式 plan: %w", chapter, planErr)
+		}
+		if draftErr != nil || len(bytes.TrimSpace(draftRaw)) == 0 {
+			return nil, fmt.Errorf("第 %d 章 force-rerender 缺少现有草稿: %w", chapter, draftErr)
+		}
+		planSum := sha256.Sum256(planRaw)
+		draftSum := sha256.Sum256(draftRaw)
+		instructionSum := sha256.Sum256([]byte(strings.TrimSpace(instruction)))
+		request := pipelineRerenderRequest{
+			Version:               1,
+			Chapter:               chapter,
+			PlanSHA256:            hex.EncodeToString(planSum[:]),
+			SupersededDraftSHA256: hex.EncodeToString(draftSum[:]),
+			Reason:                "explicit pipeline --force-rerender; reuse approved causal simulation and POV plan",
+			RequestedAt:           time.Now().Format(time.RFC3339),
+		}
+		if strings.TrimSpace(instruction) != "" {
+			request.InstructionSHA256 = hex.EncodeToString(instructionSum[:])
+		}
+		raw, err := json.MarshalIndent(request, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		requestRel := filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.rerender_request.json", chapter)))
+		requestPath := filepath.Join(st.Dir(), filepath.FromSlash(requestRel))
+		if err := os.MkdirAll(filepath.Dir(requestPath), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(requestPath, raw, 0o644); err != nil {
+			return nil, err
+		}
+		if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chapter), "rerender-request", requestRel); err != nil {
+			return nil, fmt.Errorf("记录第 %d 章整章重渲染请求: %w", chapter, err)
+		}
+		requested = append(requested, chapter)
+	}
+	return requested, nil
 }
 
 func pipelineQueueAcceptedWarningPolish(st *store.Store, start, end int) ([]int, error) {
@@ -1479,6 +1567,11 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
 			return nil
 		}
+		if judged, err := pipelineJudgePendingDraftHash(opts, cfg.OutputDir, prog); err != nil {
+			return err
+		} else if judged {
+			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+		}
 		// zero-init（--reset-simulation-state）会切换 progress 的推演线，
 		// 必须重载后再做推演线一致性检查，否则拿旧快照误报不一致。
 		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
@@ -1534,6 +1627,61 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+func pipelineJudgePendingDraftHash(opts cliOptions, outputDir string, progress *domain.Progress) (bool, error) {
+	if progress == nil {
+		return false, nil
+	}
+	chapter := 0
+	if len(progress.PendingRewrites) > 0 {
+		chapter = progress.PendingRewrites[0]
+	} else {
+		chapter = progress.NextChapter()
+	}
+	if chapter <= 0 {
+		return false, nil
+	}
+	inspection, err := tools.InspectDraftExternalGate(outputDir, chapter)
+	if err != nil {
+		return false, fmt.Errorf("检查第 %d 章草稿外部门禁: %w", chapter, err)
+	}
+	if !pipelineDraftNeedsExternalJudgeForChapter(outputDir, chapter, inspection) {
+		return false, nil
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章当前草稿尚无完整外判，先暂停 Writer 并获取修改建议\n", chapter)
+	judgeOpts := opts
+	judgeOpts.Dir = outputDir
+	if err := draftAIJudgePipeline(judgeOpts, []string{"--chapter", strconv.Itoa(chapter), "--budget", "5m"}); err != nil {
+		return true, fmt.Errorf("第 %d 章草稿外判失败，已保持复判锁，未继续生成: %w", chapter, err)
+	}
+	after, err := tools.InspectDraftExternalGate(outputDir, chapter)
+	if err != nil {
+		return true, fmt.Errorf("复核第 %d 章草稿外部门禁: %w", chapter, err)
+	}
+	if after.Status == tools.DraftExternalGateRejudgePending || after.Status == tools.DraftExternalGateAdviceIncomplete {
+		return true, fmt.Errorf("第 %d 章外判未形成完整的新哈希结论，已停止流水线", chapter)
+	}
+	return true, nil
+}
+
+func pipelineDraftNeedsExternalJudgeForChapter(outputDir string, chapter int, inspection tools.DraftExternalGateInspection) bool {
+	if tools.ExplicitRerenderRequestActive(store.NewStore(outputDir), chapter) {
+		return false
+	}
+	return pipelineDraftNeedsExternalJudge(inspection)
+}
+
+func pipelineDraftNeedsExternalJudge(inspection tools.DraftExternalGateInspection) bool {
+	if inspection.Status == tools.DraftExternalGateRejudgePending || inspection.Status == tools.DraftExternalGateAdviceIncomplete {
+		return true
+	}
+	// A newly rendered draft has no marker or judge artifact yet. Treat that as
+	// pending instead of letting the finalizer read, edit, or commit an unjudged
+	// hash. A blocking artifact with a same-hash requirement remains authorized
+	// for its single full rerender and is intentionally not caught here.
+	return inspection.Status == tools.DraftExternalGateNotRequired &&
+		inspection.CurrentBodySHA256 != "" && !inspection.ArtifactExists && inspection.Requirement == nil
 }
 
 func latestPipelineChapterCommitSeq(outputDir string, chapter int) int64 {

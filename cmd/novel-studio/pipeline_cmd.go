@@ -48,6 +48,7 @@ type pipelineFlags struct {
 	MaxRewriteRounds int
 	PolishWarnings   bool
 	RewriteBriefOnly bool
+	ForceRerender    bool
 	NewNovel         bool
 	RefreshArchitect bool
 	RefreshZeroInit  bool
@@ -74,6 +75,7 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.IntVar(&f.MaxRewriteRounds, "max-rewrite-rounds", 0, "rewrite 阶段红旗重写-复审闭环最多轮数，0 = 使用默认 3")
 	fs.BoolVar(&f.PolishWarnings, "polish-warnings", false, "rewrite 阶段无红旗但存在黄旗时，也按质量优先原则择优打磨")
 	fs.BoolVar(&f.RewriteBriefOnly, "brief-only", false, "rewrite 阶段只刷新 rewrite brief，不调用 Writer、不改正文")
+	fs.BoolVar(&f.ForceRerender, "force-rerender", false, "rewrite 阶段显式让现有 plan 重新渲染整章；保留世界推演，不伪造外判阻断")
 	fs.BoolVar(&f.NewNovel, "new-novel", false, "新建小说：先跑头脑风暴（web/RAG 调研 + 落盘 brainstorm.md），再据此初始化并写作")
 	fs.BoolVar(&f.RefreshArchitect, "refresh-architect", false, "已有 foundation 仍强制 Architect 按本次 prompt 重规划开篇/大纲；只在 architect 阶段生效")
 	fs.BoolVar(&f.RefreshZeroInit, "refresh-zero-init", false, "已有正文时安全刷新 zero-init 开篇计划和 RAG，不覆盖活动资源/关系台账")

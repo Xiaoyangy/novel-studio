@@ -207,16 +207,17 @@ func addDeepSeekAIJudgeToPlan(
 		return
 	}
 	addSource(rel)
-	label := fmt.Sprintf("DeepSeek 裸正文 AI 判定: verdict=%s risk=%s ai=%d%% model=%s/%s", artifact.Verdict, artifact.RiskLevel, artifact.AIProbabilityPercent, artifact.Provider, artifact.Model)
-	if artifact.Blocking {
+	label := fmt.Sprintf("DeepSeek 裸正文 AI 判定: verdict=%s risk=%s ai=%d%% target=<%d%% advice_complete=%t model=%s/%s", artifact.Verdict, artifact.RiskLevel, artifact.AIProbabilityPercent, deepseekAIJudgePassExclusive, artifact.AdviceComplete, artifact.Provider, artifact.Model)
+	if artifact.Blocking || deepseekJudgeBlocking(artifact) {
 		addRed(label)
-	} else if artifact.AIProbabilityPercent >= 15 || artifact.RiskLevel == "medium" {
-		addYellow(label)
 	} else if deepSeekJudgeHasActionableLowRiskPolish(artifact) {
 		addYellow("DeepSeek 裸正文 AI 判定给出非阻断修改方案，按黄旗择优打磨")
 	}
 	if strings.TrimSpace(artifact.ParseWarning) != "" {
 		addYellow("DeepSeek 判定配置/解析提示: " + artifact.ParseWarning)
+	}
+	if strings.TrimSpace(artifact.AdviceWarning) != "" {
+		addRed("DeepSeek 修改建议契约未满足: " + artifact.AdviceWarning)
 	}
 	for _, reason := range artifact.Reasons {
 		addSuggestion("DeepSeek AI味原因: " + reason)
@@ -236,7 +237,7 @@ func addDeepSeekAIJudgeToPlan(
 }
 
 func deepSeekJudgeHasActionableLowRiskPolish(artifact deepseekAIJudgeArtifact) bool {
-	if artifact.AIProbabilityPercent < 10 || artifact.RiskLevel == "low" || artifact.Verdict == "human_like" {
+	if !artifact.AdviceComplete || artifact.AIProbabilityPercent >= deepseekAIJudgePassExclusive || artifact.RiskLevel == "low" || artifact.Verdict == "human_like" {
 		return false
 	}
 	return len(artifact.RevisionPlan) > 0 || len(artifact.DialogueFixPlan) > 0 || len(artifact.AuthorVoicePlan) > 0
@@ -416,7 +417,7 @@ func renderRevisionBrief(plan revisionPlan, reviewMarkdown string) string {
 	b.WriteString("## 门禁结论\n\n")
 	fmt.Fprintf(&b, "- 红旗阻断：%t\n", plan.HasRed)
 	fmt.Fprintf(&b, "- 黄旗存在：%t\n", plan.HasYellow)
-	b.WriteString("- AI率目标：≤5%；不得追求 <1% 而牺牲正文质量\n")
+	b.WriteString("- AI率目标：本地与外部均严格 <4%（4% 也失败）；不得追求 0% 而牺牲正文质量\n")
 	if len(plan.Sources) > 0 {
 		fmt.Fprintf(&b, "- 汇总来源：%s\n", strings.Join(plan.Sources, "、"))
 	}

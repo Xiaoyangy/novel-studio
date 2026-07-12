@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -136,6 +139,84 @@ func TestEditChapterRejectsCompletedWithoutQueue(t *testing.T) {
 	}
 	if !errors.Is(err, errs.ErrToolPrecondition) {
 		t.Fatalf("expected ErrToolPrecondition, got %v", err)
+	}
+}
+
+func TestEditChapterRejectsBlockingExternalFullRerender(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, "旧草稿仍按流程逐项推进。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256("旧草稿仍按流程逐项推进。"), AIProbabilityPercent: 17, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"整章重排"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "逐项推进", "new_string": "换一种推进",
+	})
+	_, err := NewEditChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !errors.Is(err, errs.ErrToolPrecondition) || !strings.Contains(err.Error(), "整章覆盖") {
+		t.Fatalf("expected full-rerender rejection, got %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != "旧草稿仍按流程逐项推进。" {
+		t.Fatalf("blocking edit changed draft: %q", draft)
+	}
+}
+
+func TestEditChapterApprovedHashAllowsOneEditThenRequiresExternalRejudge(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	content := "林澈把价牌放稳，沈知遥站在一旁看着。"
+	if err := s.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	reviewDir := filepath.Join(s.Dir(), "reviews", "drafts")
+	if err := os.MkdirAll(reviewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(content), AdviceComplete: true,
+		AIProbabilityPercent: 3, PassExclusivePercent: 4,
+	})
+	if err := os.WriteFile(filepath.Join(reviewDir, "01_deepseek_ai_judge.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewEditChapterTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "放稳", "new_string": "扶稳",
+	})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("first edit of approved hash should be allowed: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["external_rejudge_required"] != true || !strings.Contains(payload["next_step"].(string), "立即停止") {
+		t.Fatalf("edit must force immediate rejudge: %+v", payload)
+	}
+
+	args, _ = json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "一旁", "new_string": "旁边",
+	})
+	_, err = tool.Execute(context.Background(), args)
+	if err == nil || !errors.Is(err, errs.ErrToolPrecondition) || !strings.Contains(err.Error(), "尚未外判") {
+		t.Fatalf("second edit before rejudge must be blocked: %v", err)
 	}
 }
 

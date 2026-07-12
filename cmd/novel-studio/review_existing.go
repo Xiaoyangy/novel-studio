@@ -95,13 +95,13 @@ type deepseekAIJudgeBranchResult struct {
 func parseReviewFlags(argv []string) (reviewFlags, []string, error) {
 	fs := flag.NewFlagSet("review-existing", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "用法: novel-studio --review-existing [--budget 90s] [--from N] [--to N]\n\n")
+		fmt.Fprintf(os.Stderr, "用法: novel-studio --review-existing [--budget 180s] [--from N] [--to N]\n\n")
 		fmt.Fprintf(os.Stderr, "兼容别名：执行时会委派到 novel-studio --pipeline --stages review。\n")
 		fmt.Fprintf(os.Stderr, "逐章调用 Editor LLM 出评审报告（不改原文）。\n\n选项：\n")
 		fs.PrintDefaults()
 	}
 	var f reviewFlags
-	f.Budget = 90 * time.Second
+	f.Budget = 180 * time.Second
 	fs.StringVar(&f.ReviewExisting, "review-existing", "", "项目根目录（缺省当前目录）")
 	fs.DurationVar(&f.Budget, "budget", f.Budget, "每章并行审核总墙钟预算（Editor 与 Reviewer 共用截止时间）")
 	fs.IntVar(&f.Start, "from", 0, "起始章号（含），0 = 自动")
@@ -319,6 +319,27 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		}
 		deepseekJudge := deepseekBranch.Artifact
 		sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
+		if !deepseekJudge.AdviceComplete {
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 建议经项目门禁净化后不完整，已回源重新估分\n", chNum)
+			fresh, freshErr := runDeepSeekAIJudge(reviewerModel, reviewerSelection, chNum, frozenBody, flags.Budget)
+			if freshErr != nil || fresh == nil {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 净化后回源失败：%v\n", chNum, freshErr)
+				failureCount++
+				continue
+			}
+			if saveErr := saveDeepSeekAIJudgeCache(eng.Dir(), fresh); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 刷新缓存写入失败：%v\n", chNum, saveErr)
+				failureCount++
+				continue
+			}
+			deepseekJudge = fresh
+			sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
+			if !deepseekJudge.AdviceComplete {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 二次建议仍不完整：%s\n", chNum, deepseekJudge.AdviceWarning)
+				failureCount++
+				continue
+			}
+		}
 		if err := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定写入失败：%v\n", chNum, err)
 			failureCount++
@@ -330,6 +351,15 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			if mechanicalErr != nil {
 				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 机械门禁读取失败：%v\n", chNum, mechanicalErr)
 			}
+		}
+		externalJudge := deepSeekExternalAIJudge(deepseekJudge)
+		if reviewreport.ApplyExternalCorroboration(mechanical, externalJudge) {
+			if err := writeMechanicalGateForExistingChapter(st, mechanical); err != nil {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 同哈希外判校准写入失败：%v\n", chNum, err)
+				failureCount++
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 本地概率代理已由同哈希 DeepSeek <4%% 校准为诊断项\n", chNum)
 		}
 		if deepseekJudge.Blocking {
 			entry.Verdict = "rewrite"
@@ -364,7 +394,7 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 			Chapter:         chNum,
 			Mechanical:      mechanical,
 			AIVoice:         &analysis,
-			ExternalAIJudge: deepSeekExternalAIJudge(deepseekJudge),
+			ExternalAIJudge: externalJudge,
 			Editor:          &entry,
 			EditorMarkdown:  review,
 		}); err != nil {
@@ -640,7 +670,7 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 	}
 	violations = append(violations, rules.Check(body, wordCount, structured)...)
 	violations = append(violations, toolspkg.SecondAlgorithmProjectContaminationViolations(st, body)...)
-	if gatePercent := reviewExistingAIGCGatePercent(report); gatePercent > 5 {
+	if gatePercent := reviewExistingAIGCGatePercent(report); gatePercent >= deepseekAIJudgePassExclusive {
 		severity := rules.SeverityWarning
 		if gatePercent >= 35 {
 			severity = rules.SeverityError
@@ -648,13 +678,13 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		violations = append(violations, rules.Violation{
 			Rule:      "aigc_ratio",
 			Target:    report.Engine,
-			Limit:     "5%",
+			Limit:     "<4%",
 			Actual:    gatePercent,
 			Deviation: gatePercent / 100,
 			Severity:  severity,
 		})
 	}
-	if external, ok := latestExternalAIGCDetection(st.Dir(), chapter, body); ok && external.ScorePercent > 5 {
+	if external, ok := latestExternalAIGCDetection(st.Dir(), chapter, body); ok && external.ScorePercent >= deepseekAIJudgePassExclusive {
 		severity := rules.SeverityWarning
 		if external.ScorePercent >= 35 {
 			severity = rules.SeverityError
@@ -666,7 +696,7 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		violations = append(violations, rules.Violation{
 			Rule:      "external_aigc_ratio",
 			Target:    target,
-			Limit:     "5%",
+			Limit:     "<4%",
 			Actual:    external.ScorePercent,
 			Deviation: external.ScorePercent / 100,
 			Severity:  severity,
@@ -679,18 +709,25 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		RuleViolations: violations,
 		GeneratedAt:    time.Now().Format(time.RFC3339),
 	}
-	dir := filepath.Join(st.Dir(), "reviews")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	raw, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%02d_ai_gate.json", chapter)), raw, 0o644); err != nil {
+	if err := writeMechanicalGateForExistingChapter(st, &payload); err != nil {
 		return nil, err
 	}
 	return &payload, nil
+}
+
+func writeMechanicalGateForExistingChapter(st *store.Store, payload *reviewreport.MechanicalGatePayload) error {
+	if st == nil || payload == nil || payload.Chapter <= 0 {
+		return fmt.Errorf("mechanical gate payload is incomplete")
+	}
+	dir := filepath.Join(st.Dir(), "reviews")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%02d_ai_gate.json", payload.Chapter)), raw, 0o644)
 }
 
 func reviewExistingAIGCGatePercent(report aigc.Report) float64 {
@@ -931,17 +968,17 @@ func reconcileWarningOnlyEditorReview(
 	if entry == nil || mechanical == nil || judge == nil || strings.TrimSpace(bodyHash) == "" {
 		return false
 	}
-	if entry.ContractStatus != "met" || len(entry.ContractMisses) > 0 || judge.Blocking ||
+	if entry.ContractStatus != "met" || len(entry.ContractMisses) > 0 || judge.Blocking || deepseekJudgeBlocking(*judge) ||
 		mechanical.BodySHA256 != bodyHash || analysis.BodySHA256 != bodyHash || judge.BodySHA256 != bodyHash {
 		return false
 	}
+	reviewreport.ApplyExternalCorroboration(mechanical, deepSeekExternalAIJudge(judge))
 	if !strings.Contains(strings.ToLower(judge.Verdict), "human") ||
-		!(strings.Contains(analysis.Label, "通过") || strings.Contains(analysis.Summary, "未发现硬性")) ||
-		len(analysis.RedFlags) > 0 || reviewExistingAIGCGatePercent(mechanical.AIGCReport) > 5 {
+		reviewreport.HasBlockingAIVoice(&analysis) || reviewExistingAIGCGatePercent(mechanical.AIGCReport) >= deepseekAIJudgePassExclusive {
 		return false
 	}
 	for _, violation := range mechanical.RuleViolations {
-		if violation.Severity == rules.SeverityError {
+		if reviewreport.IsDeterministicMechanicalViolation(violation) {
 			return false
 		}
 	}
@@ -1427,7 +1464,7 @@ func extractLine(md, header string) string {
 // printReviewUsage 主动打印 --review-existing 子命令 usage。
 func printReviewUsage(w *os.File) {
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "用法: novel-studio --review-existing [--budget 90s] [--from N] [--to N]")
+	fmt.Fprintln(w, "用法: novel-studio --review-existing [--budget 180s] [--from N] [--to N]")
 	fmt.Fprintln(w, "兼容别名：执行时会委派到 novel-studio --pipeline --stages review")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "示例:")

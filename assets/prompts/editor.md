@@ -29,7 +29,9 @@
 随后只审核 POV plan 对正文真正有用的核心：章节契约、主角初始状态、因果节拍、对白目标、情绪到行动、反 AI 预案、可见爽点与代价、章末承接。世界层、仪式日历、宇宙观、视觉套件、关系弧等扩展模块仅在计划实际提交且本章使用时检查；轻都市、日常、轻喜剧章节没有这些模块，不得以“推演证据不足”机械扣分。若存在 simulation_restart_policy，仍须确认当前 generation 边界，旧章节与旧账本只能作种子。
 
 若 `render_packet.dialogue_scenes` 或 `causal_simulation.dialogue_scene_blueprints` 存在，必须对照正文检查关键对白是否执行场景目的、人物目标、信息差、关系压力和价值变化；蓝图不是句序，更不能把上游 `turn_progression` 或 `action_beat` 逐项翻译成正文。谈判应有筹码和让步，审问应有信息差和套话，求助应有转嫁/自尊/恐惧，告白或告解应有边界与代价，互怼/调情应有关系推进而不是纯吐槽，沉默压迫应让无人接话承担信息。还要检查是否出现“点名/叫人 -> 停笔或抬眼 -> 补口径/查字段 -> 第三人追问”的模板对白链；命中即归 aesthetic / ai_voice_detection。连续双人对白若每行都标“某某说/问/答”、连续三段都以“某人做动作：台词”起头、每个说话人都先夹菜/抬眼/推物件再开口，或出现“人物：台词”剧本格式，同样归 ai_voice_detection；可辨认说话人时应允许裸对白、简短标签、打断、漏答、答非所问、群体反应和无人接话。若正文先整段背景再对白、照抄样本题材/话术、主角第一轮就全懂、对手只等着被收、对白像系统菜单/选项展示，或用突然声响和金句替代现场退出，归 character / pacing / aesthetic / ai_voice_detection。
-对白必须额外做朗读测试：若角色轮流精准接话、每句都说成完整书面句、一个人一次讲齐金额/时限/售后/责任，或频繁出现“答完/问完/说完后，另一人才……”的舞台调度，应归 aesthetic / ai_voice_detection。监管、授权或谈判对白若连续三句完整讲齐时限、权限、责任，且三项说齐前没有真正的插话、漏答或反问，同样判 fail；句间只塞一个无功能动作不能放行。县城普通居民或大众职业角色的台词还要能在饭桌、摊位、街边自然说出口；为了抖包袱临时说工整对仗、验收术语或设计感强的俏皮话，按声口失真处理。对“你是X，还是Y”“这是X，不是Y”这类整齐反问逐句检查：两边若只是作者临时凑出的比喻，角色没有稳定的机智声口，或当场正忙着经营、害怕损失、处理风险，本应只说直白抱怨，却突然替作者造梗，直接判 aesthetic fail。系统内容必须先区分正式任务卡与系统人格对白：正式任务卡/结算卡允许紧凑列出本章已经确定的目标、时限、奖励并保留既定数字，不得要求隐藏数字、拆散任务或让主角自行推断；人格对白每次只回答眼前一个问题，或给一条规则/一个可执行提示。首次规则或任务必须让普通读者立刻回答“能做什么、不能做什么、现在去哪里做什么”；任一项仍靠读者猜，判 readability fail。“钱没跑、陪你换条路、规矩不撤、先喘半口气”这类客服腔，以及“系统判定、阶段核验通过、进入核验”这类后台流程腔，直接判 aesthetic fail。专业角色说“补测、核验、用途说明、临时固定、采购凭证、测试记录”等词时，普通读者必须立刻看懂会坏在哪里、谁会吃亏、下一步做什么；术语成串、只有业内人看得懂时判 readability/aesthetic fail。用户允许的颜文字只能少量出现在私聊/群聊/手机消息中。热梗要核对完整句法和语境：`呱，……` 若使用，逗号后必须是完整吐槽并有同席人物的自然席间反应；不要求第二句续梗，生硬时允许整句删除，不得审成拟声词或单独一声。
+对白必须额外做朗读测试：若角色轮流精准接话、每个发言者都顺手补齐下一条流程，或频繁出现“答完/问完/说完后，另一人才……”的舞台调度，应归 aesthetic / ai_voice_detection。一个人确实有话时可以说完一整段；不得因为台词完整就强迫加插话、漏答、反问或微动作。监管、授权或谈判对白若连续三句只是讲时限、权限、责任，应删掉当场无用的信息，或压成一人会真说的话、一张纸、一句结果，不得要求三项说齐前必须插话。县城普通居民或大众职业角色的台词还要能在饭桌、摊位、街边自然说出口；为了抖包袱临时说工整对仗、验收术语或设计感强的俏皮话，按声口失真处理。对“你是X，还是Y”“这是X，不是Y”这类整齐反问逐句检查：两边若只是作者临时凑出的比喻，角色没有稳定的机智声口，或当场正忙着经营、害怕损失、处理风险，本应只说直白抱怨，却突然替作者造梗，直接判 aesthetic fail。系统内容必须先区分正式任务卡与系统人格对白：正式任务卡/结算卡允许紧凑列出本章已经确定的目标、时限、奖励并保留既定数字，不得要求隐藏数字、拆散任务或让主角自行推断；人格对白每次只回答眼前一个问题，或给一条规则/一个可执行提示。首次规则或任务必须让普通读者立刻回答“能做什么、不能做什么、现在去哪里做什么”；任一项仍靠读者猜，判 readability fail。“钱没跑、陪你换条路、规矩不撤、先喘半口气”这类客服腔，以及“系统判定、阶段核验通过、进入核验”这类后台流程腔，直接判 aesthetic fail。专业角色说“补测、核验、用途说明、临时固定、采购凭证、测试记录”等词时，普通读者必须立刻看懂会坏在哪里、谁会吃亏、下一步做什么；术语成串、只有业内人看得懂时判 readability/aesthetic fail。用户允许的颜文字只能少量出现在私聊/群聊/手机消息中。热梗要核对完整句法和语境：`呱，……` 若使用，逗号后必须是完整吐槽并有同席人物的自然席间反应；不要求第二句续梗，生硬时允许整句删除，不得审成拟声词或单独一声。
+
+对白还必须做**说话人身份核对**：先明确每句是谁说的，再看称谓、人称和已知信息是否可能。人物无明确表演目的时，不会用姓名或职务第三人称指自己；例如某会长本人说“某会长正在……”属于硬语义错误。逐段朗读普通词组和搭配，出现错词、硬拼搭配、指代不明、动作对象不可能、前句问题与后句回答错位时，优先按 readability / continuity 给出原句级问题，不能因为结构分数或 AIGC 分数好看而放行。
 
 必须专项检查 **plan 逐句渲染**：如果正文把上游的多个验证动作依次写成“点按钮 -> 失败 -> 再点 -> 改备注 -> 删除”，或一个段落逐项交付计划里的每个名词，即使事实都对，也应在 aesthetic / pacing / ai_voice_detection 给 issue。审阅只要求结果事实成立；同一规则最多保留一次真正改变人物判断的试错，其余应合并成生活化理解或删除。不能反过来建议 Writer 把省略过程补齐。
 
@@ -37,14 +39,14 @@
 
 `ending_consequence_contract` 只硬核对 `consequence`、`next_chapter_pull` 和 `forbidden_endings`。上游 `concrete_anchor` 若被移入 `ending_anchor_candidate`，它只是候选镜头，不要求最后一段逐物回收；正文已经让期限、责任和下一步压力成立时，可以用新的现场人物、主动请求、未完成动作或可见结果收尾。不得为了“更贴 plan”把更强的追读钩子改回票据、测试记录、材料名称等静态清单。
 
-每次换地点都做一次因果朗读：上一场留下了什么压力，主角为什么现在去下一处，抵达后先撞上什么与选择有关的阻力。若正文只写锁屏、下楼、到了某地，删掉中间动机让场景凭作者需要跳转，归 pacing / causality fail；不得用“节奏快”放行。
-若首笔交付、首次安装或第一次兑现承担本章闭环，必须检查正文是否保留一个真实阻力或调整、一次可见的测试结果和人物反应。只写“花了一个多小时”“忙完已经……”再直接宣布完成，归 pacing / payoff fail；但不得反向要求补齐材料、接线、操作步骤或施工教程，一两个决定成败的场景拍已经足够。
+每次换地点做一次因果朗读：读者是否已经知道主角为什么会去下一处。答案可以来自上一场的欲望、约定或常识，也可以用干净切场和时间跳跃完成；不要求专门补一段过渡，更不要求抵达后必有阻力。只有地点变化让人物像被作者瞬移、关键因果无法推断时，才归 pacing / causality fail。
+若首笔交付、首次安装或第一次兑现承担本章核心爽点，必须检查正文是否留了足够的现场，让读者相信结果确实发生。只写“花了一个多小时”“忙完已经……”再直接宣布完成，归 pacing / payoff fail；但不得反向要求补齐“阻力+测试结果+人物反应”三件套，也不得展开材料、接线、操作步骤或施工教程。
 rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色位置、行动、知识边界、资源、关系、死亡/失踪/异化状态、时间线或世界反馈，但本章 `character_stage_records`、`state_changes`、`resource_updates`、`timeline_events`、`relationship_changes` 或 `chapter_world_deltas` 仍沿用旧事实，必须给 continuity/consistency issue，并要求重新 commit 同步覆盖。
-如果存在 `emotional_logic`、`relationship_emotion_arcs` 或 `visual_design`，必须做专项检查。`emotional_logic` 要证明角色行动不是只被事件推着走，而是由身体/即时状态、原始和复合情绪、目标评估、边界威胁、调节策略、防御机制、认知偏差、趋近/回避、短期/长期、自我/关系、显性理由/隐藏理由、意义需求和元认知共同推出；如果角色只有情绪标签没有动作证据，或所有人都像无情工具人，归 character / ai_voice_detection。`relationship_emotion_arcs` 要检查亲情、合作、敌对、债务和恋爱/暧昧潜势是否有情绪推进、亲密阶段、信任债、权力不对等、表达方式和边界；关系突然亲密、突然忠诚、突然发糖或恋爱线没有阻碍，归 character / consistency。`visual_design` 要检查人物长相、发型、穿衣、轮廓、色彩、身体语言、标志物和状态磨损是否在正文中承担识别、情绪、关系或世界状态；只有帅/美/普通、全员黑衣冷脸或外观不随章节状态改变，归 aesthetic。
+如果存在 `emotional_logic`、`relationship_emotion_arcs` 或 `visual_design`，只检查正文用到的部分。角色这一章有一个清楚的在意点或压力，并因此改变选择、说法或关系判断，就足以成立；不得要求正文逐项展示心理学字段。关系推进核对是否符合当前亲密阶段和既有边界；视觉信息只在首次出场、状态明显变化或确实承担识别/关系功能时需要出现，不要求每章更新穿着与磨损。
 `initial_state` 只需把主角开章目标、压力、行动倾向和信息边界说清；全角色的可选项、决定理由与蝴蝶效应以 `chapter_world_simulation.character_decisions` 为准。审阅重点是正文中的主角选择能否从可见证据推出，而不是检查 POV plan 是否复制了每个角色的完整心理表。
 如果存在 `crowd_roles`，检查它们是否只承担群体反应、规模感、现场压力、样本后果或后勤功能。某个成员一旦被命名并做出会影响后续的选择，就应进入角色册和下一轮全角色世界模拟，而不是临时补进 POV 正文。
 
-如果存在 `writing_norms_applied`、`anti_ai_execution_plan`、`external_reference_plan`、`trend_language_plan`、`reader_entertainment_plan` 或 `grounding_details`，必须检查正文是否执行核心写前约束。`writing_norms_applied` 不能只列资料名，必须能在正文中找到对应的开场策略、物件承载、对白功能、句式节奏、约 3000 字整章检测自检或审核证据；若计划和正文脱节，归 aesthetic 或 contract。`reader_entertainment_plan` 按**读者效果**核对：前200字是否真的发生冲突/尴尬/误会/反转，至少两种喜剧机制是否在正文整体成立，即时兑现是否在页面可见，流程说明是否压缩，系统/搭档是否有性格化回应；不要求把计划为这些效果列出的每个候选动作逐项写出。只有俏皮措辞、没有事件反应，不算喜剧；只有付款和核验流程、没有面子/关系/结果变化，不算爽点。`anti_ai_execution_plan` 要核对本章是否仍有整齐解释段、同型短句、金句收尾、物件即时回应过密、条款打印稿感或对白讲设定。外部资料只能变成可见细节、生活动作、制度压力、角色资源、交通耗时或误判，不能把网页摘要搬进旁白。`trend_language_plan` 是候选与使用上限，不要求正文逐项执行；正文没用不构成 issue，用了才核对角色、语境、句法和预算；`呱，……` 前若出现“怪叫一声”“叫了一声”“发出一声”仍属于拟声误用，用了还必须有完整吐槽和席间反应，但不要求第二句续梗，生硬时应要求删除而不是迁移重塞。系统出现“系统判定/阶段核验通过/本地新增交付/进入核验”等后台播报时，只有正式任务卡中既定的目标/时限/奖励数字可以保留；人格对白必须改成回答主角眼前一个问题的短回应。
+如果存在 `writing_norms_applied`、`anti_ai_execution_plan`、`external_reference_plan`、`trend_language_plan`、`reader_entertainment_plan` 或 `grounding_details`，只按**读者效果**检查本章真正启用的核心约束，不把写前表格逐项对账。轻松项目应有自然的松弛感、人物反应或可见兑现，但不要求每章固定两种笑法、两个爽点，也不要求所有候选物件和节拍出现。只有俏皮措辞、没有事件反应，不算喜剧；只有付款和核验流程、没有面子/关系/结果变化，不算爽点。外部资料不能变成网页摘要；热梗未使用不构成问题，使用后才核对角色、语境和句法。系统后台播报只保留正式任务所需数字，人格对白回答眼前问题。
 如果 contract 中包含 `emotion_target`、`payoff_points`、`hook_goal`，还要检查：
 - emotion_target 是否在正文里形成清晰的情绪主色
 - payoff_points 是否得到合理回应；如果本章本来就是铺垫/过渡章，不要因为“爽点不够强”而机械扣分
@@ -56,7 +58,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 **必须**调用 read_chapter 读取要审阅的章节原文。不能只看摘要就下结论。
 对于普通全局审阅，至少读最近 3-5 章的原文。
 对于任务写明"短篇完稿审阅 / 全文终审 / scope=global 且 chapter=最后一章"时，必须调用 `read_chapter(source="final", from=1, to=最后一章, max_runes=40000)` 读取完整终稿；这是三万字内短篇/单卷项目完成前的最后门禁，不允许只读摘要或最近几章。
-进入具体问题前先做全局体检：段落长度分布、连续段首主语、每千字比喻密度、微动作密度、句长方差。按 `reference_pack.references.fiction_paragraphing` 检查是否有文字墙候选、同段多说话人轮流发言、流程记录式大段、或为规避大段而造成连续孤句网格。把统计结论放在审阅 comment / summary 最前部；再列保护项（私人道具、口癖、互不信任、好句子），最后才列需要改的句子。
+进入具体问题前先通读并朗读：优先找错词、指代、身份、人称、因果和普通人不会这样说的话；这些基础可读性问题高于统计指标。段落分布、段首主语、比喻密度、微动作密度和句长方差只用来定位可疑区域，不能为了调指标要求作者随机拆句、换词或补动作。comment / summary 先给最影响阅读的原句级问题，再给必要统计和保护项。
 
 ### 3. 八维结构化审阅
 
@@ -107,15 +109,15 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 
 - **叙事手法**：视角是否统一或有意切换？时间处理（闪回/预叙/留白）是否自然？信息释放节奏是否合理（该藏的藏、该露的露）？引用视角混乱或信息释放不当的段落。
 
-- **情感打动力**：是否有让读者心跳加速、喉头发紧或嘴角上扬的段落？如果整章情感平淡，指出最该加强的 1-2 个位置和建议手法（如延迟揭示、感官特写、节奏突变）。
+- **情感打动力**：是否有让读者心跳加速、喉头发紧或嘴角上扬的段落？重要刺激之后，主角的感知、误判、压住的反应是否改变了选择或关系判断，还是补一个“心里一暖/手指一顿”就继续执行计划？如果整章情感平淡，指出最该加强的 1-2 个因果位置，写清刺激、主观体验、选择变化和余波，不给通用微动作补丁。
 
 - **标题与总体基调**：核对章节标题是否兑现本书 user_rules 的题材温度和追读承诺。轻松搞笑/爽文的标题应抓反差、即时爽点、关系糖、尴尬笑点或结果悬念；“第一张清单”“某某的表”“雨夜验收”这类流程/文档标签若没有人物反应或反差结果，归 consistency issue。正文允许短暂低谷，但整章若连续由流程、训话、压抑和失败主导，结尾又没有同伴感、小胜或下一步期待，归 aesthetic / pacing，不得以“现实感”为由放行。
 
 - **全书级固化（style_stats）**：`episodic_memory.style_stats`（如有）是代码对全部已写章节的确定性统计：句式模式类计数（patterns，含章均 per_chapter）、近期高频短语（top_phrases）、跨章逐字重复句（repeated_sentences）、章末形态（ending.short_ratio 为短句收尾章占比）、开篇时间词率（opening_time_rate）、标题格式混用（title_formats）。审阅窗口内每处都"正常"的句式，全书章均几十次就是病——当某模式章均次数明显异常、章末短句占比逼近 1、同一长句跨多章复现、标题格式混用时，必须在 aesthetic（标题问题归 consistency）出 issue 并直接引用统计数字。统计只给事实，是否成病由你按题材与文风裁定。
 - **写法资产（writing_engine）**：`reference_pack.writing_engine` 是当前启用的写法特征池编译结果。审稿时检查正文是否执行 active_rules、是否违背 taboos、是否只机械套用 samples 形成模板感。发现问题归 aesthetic；不要要求照抄样本。
 - **生产链路诊断（production_playbook）**：`reference_pack.references.production_playbook` 用来区分问题层级。表达偏移、AI 腔、样本机械套用归 aesthetic；章节任务未完成归 contract / pacing / continuity；本书世界、资源账本、角色状态被写错归 consistency / continuity；RAG 或拆书资料污染正文时指出来源越权。可用正文加局部 warning 不应直接升级为全书重规划，除非后续任务单或事实资产已经失效。
-- **人工感正向标尺（human_feel_craft）**：`reference_pack.references.human_feel_craft` 是《同桌是只假装高冷的猫》80% 人工度样本文沉淀。审稿时检查正文是否有现场异常、主观误判、物件回扣、短对话/动作拍、现实支架和可复核因果链。缺失时归 aesthetic 或 pacing，并给出“补哪个物件、哪处误判、哪条可见因果”的修法；不要要求照抄样本文原句或校园桥段。
-- **制度戏不齐整**：摆桌子、排队、立规矩、登记、签条款、分发物资等场景若写成一人一轮、每句都服务主线、流程像打印好的制度，必须在 pacing / aesthetic 出 issue。检查是否有人写、有人犹豫、有人骂、有人追问生活麻烦，是否有临期货、胶带、退烧贴等市井物件打断齐整流程。
+- **人工感正向标尺（human_feel_craft）**：`reference_pack.references.human_feel_craft` 是正向写法资产。审稿时检查现场异常、主观误判、物件回扣、现实支架和可复核情绪因果；尤其检查情绪是否真正改变注意、判断、选择或关系理解。缺失时归 aesthetic 或 pacing，并给出“哪次刺激、怎样误判、改变哪个选择”的修法；不要要求补通用微动作或照抄样本原句。
+- **对白传送带专项**：多人在场不等于人人发言。若连续六到八个对白段由不同人物依次完成提问、补背景、反驳、解围和宣布下一步，或每段都以一个动作接一句精准推进台词，必须在 pacing / aesthetic / ai_voice_detection 出 issue。修法先删掉不必发言的人和不必当场说的信息，再补主角受影响后的选择或现场余波；不能靠更多打断、反问和微动作伪装自然。
 - **表层结构痕迹专项**：必须检查便签/备忘录是否三条平行并列、黑卡/系统提示是否 ToS 式完整列项、童谣是否空对仗、"X得发Y"是否复现过多、相邻对白是否同一骂点重复、猫眼/门缝视角是否能读到对应文字、身体/影子方位是否可成像。命中时归 aesthetic 或 continuity；如果同时是 AI 味信号，在 ai_voice_detection 里同步点名。
 - **系统消息排版专项**：每条 `【...】` 必须独立成段。若人物问句、旁白与系统回答粘在同一段，或两条系统消息连续贴在一个段落，按 `system_message_inline` 处理；这是阅读流畅性硬问题，不能因对白内容自然而放行。
 - **黄金三章专项**：审阅第 1-3 章时同时检查跨章留存。第 1 章要有能力与首次兑现，第 2 章要有升级、小胜和关键关系同场，第 3 章要完成首个小闭环并给出外界反馈/结算/更大期待。任何一章只在解释、开会、列单、准备开工，均在 pacing/hook/ai_voice_detection 中指出并触发返工。
@@ -162,7 +164,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 | `forbidden_phrases` | aesthetic | 同上 |
 | `fatigue_words` | aesthetic | severity=warning → issue 一条，evidence 引用原文 |
 | `chapter_words` | pacing | severity=error → polish/rewrite；warning → 视情况 |
-| `aigc_ratio` | aesthetic | 读取 `aigc_report.effective_gate_percent` / 门禁采用值、`ai_ratio_percent`、四维 `dimensions` 和 `latest_detector_proxy`；门禁采用值 ≥35% 或 severity=error → polish，必要时 rewrite；5%-35% → warning，指出最高的 1-2 个维度/代理层 |
+| `aigc_ratio` | aesthetic / ai_voice_detection | 读取 `aigc_report.effective_gate_percent`、raw 值、分片和 `latest_detector_proxy`；门禁采用值 `>=4%` 即未通过，默认整章 rewrite，并指出最高的 1-2 个代理层及结构修法 |
 | `content_count_mismatch` | continuity | severity=error → 至少 issue 一条，verdict 升级 polish/rewrite；引用原文说明数词和实际内容不一致 |
 | `awkward_simile` | aesthetic | severity=warning → issue 一条；若出现在开篇、章末或密集出现，verdict 升级 polish |
 | `dangling_order_word` | continuity | severity=warning → issue 一条；若造成句意不明，verdict 升级 polish |
@@ -185,19 +187,21 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 | `precise_measure_overuse` | aesthetic | severity=warning → issue 一条；一指/半寸/两寸等精确量词只留给真正需要精确的时刻，其余改模糊感知 |
 | `patch_phrase_overuse` | aesthetic / ai_voice_detection | severity=warning → issue 一条；修掉“了一下”后不能复读“停了一拍/停了停”，补丁痕迹也要不均匀 |
 | `minor_mistake_overuse` | aesthetic | severity=warning → issue 一条；刻意小失误每章不超过 2 处，超过会变成新模板 |
-| `isolated_sentence_overuse` | aesthetic / pacing / ai_voice_detection | severity=warning → 阻断项；单行孤句每章不超过 4，过量会让章节像分镜提纲，必须先合并或改写 |
+| `isolated_sentence_overuse` | aesthetic / pacing / ai_voice_detection | severity=warning → 阻断项；仅指 12 字内无信息单句连续成串或占比失控，不把移动端正常的一句一段算错；只合并碎片，不得把全章焊成同构的两三句段 |
 | `supporting_quip_overuse` | character / aesthetic | severity=warning → issue 一条；同一配角吐槽每章不超过 3，重要节点至少留一句无人接的话 |
 | `vague_quantifier_overuse` | aesthetic | severity=warning → issue 一条；半/一点/几分等虚量词同字每章不超过 4，具体物件不计 |
 | `object_response_overuse` | pacing / ai_voice_detection | severity=warning → 阻断项；屏幕/纸面/门牌/灯光等物件回应主角言行每章最多 4 次，过量会变成立刻确认模板，必须先删减或改成延迟/缺席 |
 | `object_response_rhythm_flat` | pacing / ai_voice_detection | severity=warning → 阻断项；物件回应必须不等距，至少一次延迟、一次缺席/静默，允许一次抢拍；缺席没有落实时不得放行 |
 | `dialogue_aphorism_overuse` | character / ai_voice_detection | severity=warning → issue 一条；金句限流扩到主角，双人对手戏检查语域是否可分，连续警句式应答不超过 3 回合 |
 | `templated_dialogue_chain` | aesthetic / ai_voice_detection | severity=warning → issue 一条；点名/叫人、停笔或抬眼、补口径/查字段、第三人追问的三拍对白链命中即改，换成目标冲突、误读、拒写、打断、物件承压或信息延迟 |
+| `dialogue_conveyor_overuse` | pacing / aesthetic / ai_voice_detection | severity=warning → 阻断项；删掉不必发言的人和不必当场说的信息，让一组对白只完成一个局面变化，随后回到 POV 选择或现场余波 |
+| `pov_interiority_thin` | character / aesthetic / ai_voice_detection | severity=warning → 阻断项；至少两处补齐“刺激/主观体验或误判/调节/选择变化/关系余波”，微动作和情绪标签不算 |
 | `bureaucratic_register_overuse` | aesthetic / ai_voice_detection | severity=warning → issue 一条；制度/纪要/表单词连续驱动场景时，要求把信息拆进人物口语、担责压力、误读、拒写、私人消息打断和动作，不要写成规范性文章 |
 | `serial_device_repetition` | hook / pacing | severity=warning → issue 一条；登记每章开头/结尾装置类型，同一装置连续使用不超过 2 章，章尾显字 3/3 必须换装置 |
 | `catalog_stuffing` | aesthetic / ai_voice_detection | severity=warning/error → issue 一条；连续 8 个以上物件、铺名、冷僻词或标签名视为清单灌水，不能因 AIGC 数值低而放行 |
 | `catalog_stuffing_run` | pacing / aesthetic / ai_voice_detection | severity=error → verdict 至少 rewrite；连续多段清单说明正文在用堆词抬 TTR，必须改成动作、对话摩擦、规则代价或可见事实 |
 
-`aigc_report` 是本地确定性检测结果，引擎 `codex-local-aigc-v3`。最终交付看 `effective_gate_percent` / 门禁采用值；短章或约 3000 字章节按整章单检测片段处理时，不得用普通 `blended_aigc_percent` 覆盖 raw 值、segment floor 或主要问题。最终 AI 占比由三层合成：近年检测器代理层、朱雀四维综合、既有 AI 味启发式；其中 `human_anchor` 用于降低高质量人工类型文的曲线、风格计量和分片误判。只有 `human_anchor.final_cap_allowed=true` 且无脏码、无真重复、AI voice 与 Editor 均通过时，`human_anchor_final_cap_percent` 才能作为门禁采用值；报告仍必须展示 raw segment floor 供复核。脏码、真重复和工程词泄漏不享受锚点上限。
+`aigc_report` 是本地确定性检测结果，引擎 `codex-local-aigc-v4`。最终交付看 `effective_gate_percent`，严格 `<4%`；短章或约 3000 字章节按整章单检测片段处理时，不得用 `blended_aigc_percent` 覆盖 raw 值、segment floor 或主要问题。叙事 `human_anchor` 只能软校准曲线、风格计量和分片误判，不能提供固定最终低分；仅 `technical_expository` 可在无硬风险时允许最终 cap。外部 DeepSeek 裸正文判定也必须 `<4%`，且证据、修改方案、对白方案、作者声口方案和 RAG 规则完整，旧协议缓存不得放行。
 
 - `burstiness`：突发性，句长/段长变化过低会升高。
 - `perplexity_proxy`：困惑度代理，本地用字熵、TTR、套路密度、具体物密度和重复模拟“用词可预测性”。
@@ -208,8 +212,9 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 - `latest_detector_proxy.stylometry_readability`：风格计量/可读性，句长分布集中、表层风格单一会升高。
 - `latest_detector_proxy.semantic_smoothing`：语义平滑/概括腔，抽象概括和情绪命名压过动作、物件、感官锚点会升高。
 - `latest_detector_proxy.semantic_perplexity`：语意困惑度，句子长期承担同一语义功能、抽象判断连续出现、动作/物件/感官/对话分支不足会升高。
+- `latest_detector_proxy.narrative_dynamics`：叙事动力，检查密集对白轮拍、动作开场标签同构、对白长度过齐、POV 主观体验稀薄、流程语汇过密和情绪范围过平。
 
-审阅时把 `aigc_report.effective_gate_percent` / 门禁采用值和 `aigc_report.ai_ratio_percent` 写进 aesthetic comment；如果有 issue，evidence 必须引用最高风险维度的具体 stats 或 signals，不能只写“AI 味偏重”。若“主要问题”仍列出机械 error、阻断 warning、Editor warning 或功能性风险，不得在总结里写完全通过。
+审阅时把本地门禁采用值、raw 值和外部 DeepSeek 分数写进 aesthetic comment；如果有 issue，evidence 必须引用最高风险维度或外部证据，不能只写“AI 味偏重”。外部 `>=4%`、建议不完整、机械 error、阻断 warning、Editor warning 或功能性风险任一存在，都不得写完全通过。
 
 审阅标点时不要只数逗号/句号比例。必须看标点是否承担情绪和语义功能：账单、规则、备忘录是否用冒号/分号分层；对话里的问号/叹号是否来自真实疑问或惊惧；破折号是否表示突然中断或话锋转折；省略号是否表示迟疑、未尽或断续。若标点全章只是把句子切短，aesthetic 维度应要求回改。
 

@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
 )
@@ -61,10 +63,13 @@ func TestBuildEditorChapterReviewContextUsesResultLevelContract(t *testing.T) {
 	if strings.Contains(context, "两至三个短动作") {
 		t.Fatalf("Editor context leaked process recipe: %s", context)
 	}
-	for _, want := range []string{"系统绑定一百万元额度", "结果级要求", "逐项照抄 plan"} {
+	for _, want := range []string{"系统显示一百万元额度", "结果级要求", "逐项照抄 plan"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("Editor context missing %q: %s", want, context)
 		}
+	}
+	if strings.Contains(context, "系统绑定一百万元额度") {
+		t.Fatalf("Editor context kept duplicate staging language instead of the visible result: %s", context)
 	}
 }
 
@@ -140,7 +145,10 @@ func TestReconcileWarningOnlyEditorReviewUsesIndependentSameHashGates(t *testing
 		Chapter: 1, BodySHA256: hash, Label: "✅ 可通过", Summary: "规则引擎未发现硬性 AI 腔红旗。",
 		Metrics: domain.ChapterAIVoiceMetrics{Chapter: 1, ParagraphCount: 2, SentenceCount: 2},
 	}
-	judge := &deepseekAIJudgeArtifact{Chapter: 1, BodySHA256: hash, Verdict: "human_like", Blocking: false}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 1, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, AdviceComplete: true, Blocking: false,
+	}
 
 	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
 		t.Fatal("same-hash independent passing gates should reconcile warning-only Editor drift")
@@ -155,6 +163,90 @@ func TestReconcileWarningOnlyEditorReviewUsesIndependentSameHashGates(t *testing
 	blockedJudge.Blocking = true
 	if reconcileWarningOnlyEditorReview(&blocked, hash, mechanical, analysis, &blockedJudge) {
 		t.Fatal("blocking independent judge must never be overridden")
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewAcceptsCalibratedLocalFalsePositive(t *testing.T) {
+	body := "第一章\n\n林澈回到青山县，先把眼前的事做完。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "met", Verdict: "rewrite",
+		Issues:     []domain.ConsistencyIssue{{Type: "pacing", Severity: "warning", Description: "饭桌对白略平"}},
+		Dimensions: []domain.DimensionScore{{Dimension: "pacing", Score: 90, Verdict: "pass"}},
+	}
+	mechanical := &reviewreport.MechanicalGatePayload{
+		Chapter: 1, BodySHA256: hash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 11.19, ZhuqueCompositePercent: 3.36, LegacyHeuristicPercent: 4.3,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene",
+				"score": float64(88), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{
+			{Rule: "object_response_overuse", Severity: rules.SeverityWarning},
+			{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 11.19},
+		},
+	}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 1, BodySHA256: hash, Label: "需打磨", Summary: "规则引擎未发现硬性 AI 腔红旗。",
+		Metrics:  domain.ChapterAIVoiceMetrics{Chapter: 1, ParagraphCount: 2, SentenceCount: 2},
+		RedFlags: []domain.AIVoiceRedFlag{{Rule: "chapter_function_repetition", Severity: "warning"}},
+	}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 1, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, AdviceComplete: true,
+	}
+
+	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("current-hash external pass should reconcile local heuristic false positive")
+	}
+	if entry.Verdict != "accept" || len(entry.Issues) != 0 || !mechanical.ExternalCorroborated {
+		t.Fatalf("reconciled entry=%+v mechanical=%+v", entry, mechanical)
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewAcceptsNonblockingAIVoiceFailDimension(t *testing.T) {
+	body := "第二章\n\n林澈借来皮卡，和沈知遥把五块价牌立在桥头。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 2, ContractStatus: "met", Verdict: "rewrite",
+		Issues: []domain.ConsistencyIssue{
+			{Type: "aesthetic", Severity: "warning", Description: "可删一处不是而是句式"},
+			{Type: "aesthetic", Severity: "warning", Description: "章末共同动作可再收声"},
+		},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Score: 100, Verdict: "pass"},
+			{Dimension: "character", Score: 100, Verdict: "pass"},
+			{Dimension: "aesthetic", Score: 100, Verdict: "pass"},
+			{Dimension: "ai_voice_detection", Score: 50, Verdict: "fail", Comment: "命中 warning 级章节功能重复"},
+		},
+	}
+	cap := 2.0
+	mechanical := &reviewreport.MechanicalGatePayload{
+		Chapter: 2, BodySHA256: hash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 9.18, HumanAnchorFinalCap: &cap,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(88), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{{Rule: "not_but_overuse", Severity: rules.SeverityWarning}},
+	}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 2, BodySHA256: hash, Label: "需打磨", Summary: "命中 1 项 warning 级红旗。",
+		Metrics:  domain.ChapterAIVoiceMetrics{Chapter: 2, ParagraphCount: 40, SentenceCount: 80},
+		RedFlags: []domain.AIVoiceRedFlag{{Rule: "chapter_function_repetition", Severity: "warning"}},
+	}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 2, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true,
+	}
+	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("warning-only AI voice fail dimension must not override same-hash external and human-readable chapter")
+	}
+	if entry.Verdict != "accept" || len(entry.Issues) != 0 || entry.Dimensions[3].Verdict != "pass" {
+		t.Fatalf("reconciled entry = %+v", entry)
 	}
 }
 
@@ -273,7 +365,7 @@ func TestReviewBranchCachesAreIndependent(t *testing.T) {
 	}
 
 	editorModel := &reviewCacheModel{response: editorCacheTestMarkdown}
-	deepseekModel := &reviewCacheModel{response: `{"verdict":"human_like","risk_level":"low","ai_probability_percent":5,"confidence":"high","summary":"自然"}`}
+	deepseekModel := &reviewCacheModel{response: deepseekCompleteHumanResponse}
 	editorResult, deepseekResult := runReviewExistingBranchesConcurrently(
 		func() editorReviewBranchResult {
 			return loadOrGenerateEditorReview(
@@ -300,7 +392,7 @@ func TestReviewBranchCachesAreIndependent(t *testing.T) {
 	}
 
 	editorModel = &reviewCacheModel{response: editorCacheTestMarkdown}
-	deepseekModel = &reviewCacheModel{response: `{"verdict":"human_like","risk_level":"low","ai_probability_percent":5}`}
+	deepseekModel = &reviewCacheModel{response: deepseekCompleteHumanResponse}
 	editorResult, deepseekResult = runReviewExistingBranchesConcurrently(
 		func() editorReviewBranchResult {
 			return loadOrGenerateEditorReview(

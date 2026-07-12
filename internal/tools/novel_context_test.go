@@ -1183,6 +1183,97 @@ func TestContextToolHidesStaleRewritePlanAndDraft(t *testing.T) {
 	}
 }
 
+func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "夜市试点", CoreEvent: "完成首轮试点"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{
+		NovelName: "test", TotalChapters: 3, Phase: domain.PhaseWriting, Flow: domain.FlowRewriting,
+		CompletedChapters: []int{1}, PendingRewrites: []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := "# 第1章 夜市试点\n\n林澈和沈知遥在夜市把首轮试点做完。"
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveRewriteBrief(1, "# 返工\n\n只改善正文朗读感，保留既定事实。"); err != nil {
+		t.Fatal(err)
+	}
+	decision := "继续完成首轮试点"
+	sim := domain.ChapterWorldSimulation{
+		Version: 1, SimulationID: "sim-force-1", Chapter: 1, TimeWindow: "当晚两小时",
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", decision, true),
+			simulatedDecision("沈知遥", "守住通道并配合林澈", true),
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"试点完成"}, HiddenPressures: []string{"后续申请增加"},
+			AvailableOptions: []string{"继续", "停止"}, ChosenDecision: decision, DecisionReason: "结果可核验",
+			PlanConstraints: []string{"只写主视角可见事实"}, CausalChain: []string{"试点完成 -> 申请增加"},
+		},
+		RewriteSource: &domain.ChapterRewriteSource{
+			BodyPath: "chapters/01.md", BodySHA256: "old-body", BriefPath: "reviews/01_rewrite_brief.md", BriefSHA256: "old-brief",
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{
+		Chapter: 1, Title: "夜市试点", Goal: "做完首轮试点", Hook: "更多摊主来问",
+		Contract: domain.ChapterContract{RequiredBeats: []string{"首轮试点产生可见结果"}},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			WorldSimulationID: sim.SimulationID, ProtagonistDecision: decision,
+			ContextSources: []string{"chapter_world_simulation:" + sim.SimulationID},
+			CausalBeats:    []domain.CausalSimulationBeat{{Cause: "摊主愿意试", CharacterChoice: decision, StoryResult: "试点完成"}},
+			OutcomeShift:   []string{"从准备转为真实营业"},
+		},
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, "# 第1章 夜市试点\n\n旧草稿"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(st.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1,"reason":"human readability"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"draft"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	working := payload["working_memory"].(map[string]any)
+	if working["explicit_rerender"].(map[string]any)["status"] != "ready" || !strings.Contains(working["next_step"].(string), "draft_chapter") {
+		t.Fatalf("explicit rerender directive missing: %#v", working)
+	}
+	if _, ok := working["render_packet"]; !ok {
+		t.Fatalf("validated stale-source plan was hidden from draft profile: %#v", working)
+	}
+	if working["chapter_draft_stage"].(map[string]any)["status"] != "superseded_for_rerender" {
+		t.Fatalf("old draft not marked superseded: %#v", working["chapter_draft_stage"])
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "ready" || !strings.Contains(world["source_version_policy"].(string), "不触发重推演") {
+		t.Fatalf("world simulation was not safely reused: %#v", world)
+	}
+}
+
 func TestContextToolSelectedMemoryRecallsStoryThreadsAndReviewLessons(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -1906,11 +1997,11 @@ func TestContextToolInjectsMechanicalGateBriefForPendingRewrite(t *testing.T) {
 	if err := s.Progress.MarkChapterComplete(2, 3000, "", ""); err != nil {
 		t.Fatalf("MarkChapterComplete: %v", err)
 	}
-	if err := s.Progress.SetPendingRewrites([]int{2}, "机械审核未通过：aigc_ratio=codex-local-aigc-v3"); err != nil {
+	if err := s.Progress.SetPendingRewrites([]int{2}, "机械审核未通过：aigc_ratio=codex-local-aigc-v4"); err != nil {
 		t.Fatalf("SetPendingRewrites: %v", err)
 	}
 	report := aigc.Report{
-		Engine:             "codex-local-aigc-v3",
+		Engine:             "codex-local-aigc-v4",
 		AIGCPercent:        72.5,
 		AIRatioPercent:     72.5,
 		BlendedAIGCPercent: 18.2,
@@ -1940,7 +2031,7 @@ func TestContextToolInjectsMechanicalGateBriefForPendingRewrite(t *testing.T) {
 		},
 	}
 	violations := []rules.Violation{
-		{Rule: "aigc_ratio", Target: "codex-local-aigc-v3", Limit: "5%", Actual: 72.5, Severity: rules.SeverityError},
+		{Rule: "aigc_ratio", Target: "codex-local-aigc-v4", Limit: "<4%", Actual: 72.5, Severity: rules.SeverityError},
 	}
 	if err := NewCommitChapterTool(s).saveAIGCReviewFiles(2, "第二章测试正文", report, violations); err != nil {
 		t.Fatalf("saveAIGCReviewFiles: %v", err)
