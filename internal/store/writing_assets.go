@@ -449,6 +449,19 @@ func defaultWritingAssetFeatures(now string) []domain.WritingFeature {
 			UpdatedAt: now,
 		},
 		{
+			ID:          "default:dialogue:breath_groups",
+			Name:        "普通口述按完整气口",
+			Category:    "dialogue",
+			Description: "快节奏来自选择和后果，不来自把人口述切成两三个字一段。",
+			Enabled:     true,
+			Rules: []string{
+				"普通平静口述以一个完整气口承载对象、原因、条件或补充；同一意思不得切成连续 2—4 汉字句号短句。",
+				"短答可以短；连续碎断只用于抢险、被打断、惊吓、喘不上气或刻意拒绝，且现场必须给出原因。",
+			},
+			Source:    "default:genre_style_craft",
+			UpdatedAt: now,
+		},
+		{
 			ID:          "default:taboo:dirty_humanizer",
 			Name:        "禁止脏码绕检",
 			Category:    "taboo",
@@ -527,7 +540,7 @@ func CompileWritingAssetsForScope(lib domain.WritingAssetLibrary, sampleLimit in
 	enabledIDs := make(map[string]struct{})
 	compiled := domain.WritingCompiled{}
 	for _, feature := range lib.Features {
-		if !feature.Enabled {
+		if !feature.Enabled || !writingFeatureHasContent(feature) {
 			continue
 		}
 		if _, scoped := scopedFeatureIDs[feature.ID]; scoped {
@@ -577,6 +590,18 @@ func CompileWritingAssetsForScope(lib domain.WritingAssetLibrary, sampleLimit in
 		compiled.Trace = append(compiled.Trace, fmt.Sprintf("scope=%s", renderWritingBindingTarget(*scope)))
 	}
 	return compiled
+}
+
+func writingFeatureHasContent(feature domain.WritingFeature) bool {
+	if strings.TrimSpace(feature.Name) != "" || strings.TrimSpace(feature.Description) != "" || len(feature.SampleIDs) > 0 {
+		return true
+	}
+	for _, rule := range feature.Rules {
+		if strings.TrimSpace(rule) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *WritingAssetStore) SaveTrial(scope domain.WritingBinding, brief string, compiled domain.WritingCompiled) (string, error) {

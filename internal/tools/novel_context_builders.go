@@ -371,8 +371,10 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	}
 
 	if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
-		envelope.Working["ai_voice_redflags"] = analysis
-		envelope.Working["ai_voice_redflags_policy"] = "Editor 必须先读此 JSON；ai_voice_detection 维度必须逐项引用其中的数值、阈值和命中句。"
+		if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
+			envelope.Working["ai_voice_redflags"] = actionable
+			envelope.Working["ai_voice_redflags_policy"] = "Editor 只按此处当前章 blocking/error/warning 评分；info/note 与 chapter_function_repetition 已过滤并保留在长期审阅档案。"
+		}
 	} else if aiErr != nil {
 		warn("ai_voice_redflags", aiErr)
 	}
@@ -435,7 +437,9 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 			warn("mechanical_gate", gateErr)
 		}
 		if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
-			brief["ai_voice_redflags"] = analysis
+			if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
+				brief["ai_voice_redflags"] = actionable
+			}
 		} else if aiErr != nil {
 			warn("rewrite_ai_voice_redflags", aiErr)
 		}
@@ -543,6 +547,23 @@ func loadRewriteBriefHumanSupplements(outputDir string, chapter int) []string {
 }
 
 func loadDraftExternalJudgeContext(projectDir string, chapter int) (map[string]any, error) {
+	inspection, inspectErr := InspectDraftExternalGate(projectDir, chapter)
+	if inspectErr != nil {
+		return nil, inspectErr
+	}
+	if inspection.Status == DraftExternalGateRerenderAuthorized && inspection.Requirement != nil {
+		requirement := inspection.Requirement
+		return map[string]any{
+			"evaluated_body_sha256":  requirement.EvaluatedBodySHA256,
+			"source":                 requirement.Source,
+			"ai_probability_percent": requirement.AIProbabilityPercent,
+			"pass_exclusive_percent": requirement.PassExclusivePercent,
+			"blocking":               true,
+			"summary":                requirement.Summary,
+			"evidence":               requirement.Evidence,
+			"revision_plan":          requirement.RevisionPlan,
+		}, nil
+	}
 	path := filepath.Join(projectDir, "reviews", "drafts", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter))
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -573,6 +594,7 @@ func loadDraftExternalJudgeContext(projectDir string, chapter int) (map[string]a
 	}
 	return map[string]any{
 		"evaluated_body_sha256":  artifact.BodySHA256,
+		"source":                 "deepseek_external_judge",
 		"ai_probability_percent": artifact.AIProbabilityPercent,
 		"pass_exclusive_percent": artifact.PassExclusivePercent,
 		"blocking":               artifact.Blocking,
@@ -1416,7 +1438,25 @@ func (t *ContextTool) buildChapterReferencePack(envelope *chapterContextEnvelope
 	t.addProjectWebReferenceBrief(refs, warn)
 	t.addPrewriteStorycraftPlan(refs, warn)
 	t.addWorldBackgroundPlan(refs, warn)
+	t.addGenreStyleReference(envelope.References, refs, warn)
 	envelope.References["references"] = refs
+	if cards, err := decodeLiteraryRenderingCards(t.refs.LiteraryRenderingCards); err != nil {
+		warn("literary_rendering_cards", fmt.Errorf("decode compact literary card catalog: %w", err))
+	} else if cards != nil {
+		envelope.References["literary_rendering_cards"] = cards
+	}
+}
+
+func decodeLiteraryRenderingCards(raw string) (any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var cards any
+	if err := json.Unmarshal([]byte(raw), &cards); err != nil {
+		return nil, err
+	}
+	return cards, nil
 }
 
 func (t *ContextTool) detectChapterParticipants(entry *domain.OutlineEntry, plan *domain.ChapterPlan, warn func(string, error)) []string {
@@ -1624,6 +1664,8 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 			focus = append(focus, "物件回应不能等距；至少补一次延迟、一次缺席/静默，允许一次抢拍，但不要每句重话后立刻显字或亮灯。")
 		case "dialogue_aphorism_overuse":
 			focus = append(focus, "金句限流扩到主角；连续警句式应答最多三回合，双人对手戏要用语域、句长、利益点和错答区分声口。")
+		case "dialogue_micro_period_chain":
+			focus = append(focus, "普通人口述被句号切碎：把同一意图里的对象、原因、条件、补充或请求还原为一个自然气口。短答可以短，但不要用填充词补长度；真实抢险、打断、惊吓或刻意拒绝必须由现场证据支撑。")
 		case "templated_dialogue_chain":
 			focus = append(focus, "删掉重复的“点名/叫人→停笔或抬眼→补口径/查字段→第三人追问”三拍对白链；改成目标冲突、误读、拒写、打断、物件承压或信息延迟。")
 		case "serial_device_repetition":
@@ -1728,6 +1770,11 @@ func aigcDetectorRewriteFocus(report aigc.Report) []string {
 		focus = append(focus, fmt.Sprintf(
 			"对白传送带仍在（密集窗口 %.0f，最长连续对白段 %.0f）：不要再给每句对白补动作或环境。每场只保留真正改变决定的少数原话，其余删掉或改成主视角概述；对白结束必须留下误判、关系判断或现实后果，不能换个人继续说明。",
 			statFloat("dense_dialogue_windows"), statFloat("max_dialogue_paragraph_run")))
+	}
+	if hasSignal("dialogue_micro_period_chain") {
+		focus = append(focus, fmt.Sprintf(
+			"普通口述存在 %.0f 个句号微短句话轮：把同一人物一口气能说完的对象、原因、条件和补充合回自然复句。短答可以短，但不要把‘两个字。两个字。再解释’当快节奏；只有抢险、打断、惊吓或刻意拒绝且现场有证据时才保留碎断。",
+			statFloat("dialogue_micro_period_chain_turns")))
 	}
 	if hasSignal("action_dialogue_lead_uniform") {
 		focus = append(focus, fmt.Sprintf(
@@ -1836,7 +1883,7 @@ func compileWritingAssetsLocal(lib domain.WritingAssetLibrary, sampleLimit int) 
 	enabled := make(map[string]struct{})
 	var c domain.WritingCompiled
 	for _, f := range lib.Features {
-		if !f.Enabled {
+		if !f.Enabled || (strings.TrimSpace(f.Name) == "" && strings.TrimSpace(f.Description) == "" && len(f.Rules) == 0 && len(f.SampleIDs) == 0) {
 			continue
 		}
 		c.EnabledFeatures = append(c.EnabledFeatures, f)

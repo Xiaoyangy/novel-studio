@@ -41,6 +41,8 @@ type draftRenderPacket struct {
 	DialogueScenes          []draftDialogueScene             `json:"dialogue_scenes,omitempty"`
 	EmotionalLenses         []draftEmotionalLens             `json:"emotional_lenses,omitempty"`
 	RelationshipLenses      []draftRelationshipLens          `json:"relationship_lenses,omitempty"`
+	LiteraryRenderContract  draftLiteraryRenderContract      `json:"literary_render_contract"`
+	StyleContract           *draftStyleContract              `json:"style_contract,omitempty"`
 	VisibleCharacters       []string                         `json:"visible_characters,omitempty"`
 	ExcludedNamedCharacters []string                         `json:"excluded_named_characters,omitempty"`
 	GroundingDetails        []domain.GroundingDetailPlan     `json:"grounding_details,omitempty"`
@@ -63,6 +65,7 @@ type draftRenderPacket struct {
 	ProofFocusPolicy        string                           `json:"proof_focus_policy"`
 	NamedRolePolicy         string                           `json:"named_role_policy"`
 	RelationshipPriority    string                           `json:"relationship_priority_policy"`
+	CharacterEntrancePolicy string                           `json:"character_entrance_policy"`
 }
 
 type draftEntertainmentPlan struct {
@@ -122,6 +125,7 @@ type draftCandidateBeat struct {
 
 type draftVisualCard struct {
 	Character       string `json:"character,omitempty"`
+	FirstAppearance bool   `json:"first_appearance,omitempty"`
 	Silhouette      string `json:"silhouette,omitempty"`
 	FaceAndHair     string `json:"face_and_hair,omitempty"`
 	ClothingStyle   string `json:"clothing_style,omitempty"`
@@ -163,6 +167,40 @@ type draftRelationshipLens struct {
 	NextEmotionalBeat string   `json:"next_emotional_beat,omitempty"`
 }
 
+// draftLiteraryRenderContract is the compact, prose-facing projection of the
+// chapter's literary choices. It carries decisions and provenance, not the
+// full research reference or planning dossier.
+type draftLiteraryRenderContract struct {
+	Source                string                    `json:"source"`
+	Focalizer             string                    `json:"focalizer"`
+	NarrativeAccess       string                    `json:"narrative_access"`
+	KnowledgeBoundary     string                    `json:"knowledge_boundary"`
+	PerceptualBias        string                    `json:"perceptual_bias,omitempty"`
+	SceneModes            []draftLiterarySceneMode  `json:"scene_modes,omitempty"`
+	ActiveLenses          []draftLiteraryActiveLens `json:"active_lenses,omitempty"`
+	SummaryOmissionPolicy string                    `json:"summary_omission_policy,omitempty"`
+	Afterimage            string                    `json:"afterimage,omitempty"`
+	SourceRefs            []string                  `json:"source_refs"`
+	UsagePolicy           string                    `json:"usage_policy"`
+}
+
+type draftLiterarySceneMode struct {
+	Target      string `json:"target"`
+	Mode        string `json:"mode"`
+	Distance    string `json:"distance"`
+	StateChange string `json:"state_change"`
+	RenderMove  string `json:"render_move"`
+}
+
+type draftLiteraryActiveLens struct {
+	Kind       string   `json:"kind"`
+	Target     string   `json:"target"`
+	Move       string   `json:"move"`
+	Why        string   `json:"why"`
+	Avoid      string   `json:"avoid"`
+	SourceRefs []string `json:"source_refs"`
+}
+
 type draftEnvironmentSignal struct {
 	Place              string `json:"place,omitempty"`
 	VisibleState       string `json:"visible_state,omitempty"`
@@ -188,7 +226,7 @@ func applyWorldSimulationContextProfile(result map[string]any) {
 		"outline", "progression_snapshot", "project_progress", "evolution_report",
 		"chapter_world_deltas", "side_character_journeys", "future_outline_window",
 		"recent_summaries", "previous_tail", "references", "writing_engine",
-		"style_rules", "style_stats", "voice_samples", "rag_recall", "retrieval_trace",
+		"literary_rendering_cards", "genre_style_profile", "style_rules", "style_stats", "voice_samples", "rag_recall", "retrieval_trace",
 		"chapter_plan", "chapter_contract", "causal_simulation", "next_plan",
 	} {
 		deleteContextKey(result, key)
@@ -214,12 +252,16 @@ func applyPlanningContextProfile(result map[string]any) {
 func applyDraftContextProfile(result map[string]any) {
 	working, _ := result["working_memory"].(map[string]any)
 	compactDraftRewriteBrief(result)
+	compactDraftRewriteSource(result)
 	if working != nil {
 		compactDraftRewriteBrief(working)
+		compactDraftRewriteSource(working)
 	}
+	sanitizeDraftExternalReview(result)
 	plan := chapterPlanFromContext(result, working)
 	if plan != nil {
 		packet := newDraftRenderPacket(*plan)
+		packet.StyleContract = newDraftStyleContract(result)
 		if simulation, ok := result["chapter_world_simulation"].(map[string]any); ok {
 			if projection, ok := draftProjectionFromAny(simulation["protagonist_projection"]); ok {
 				packet.ProtagonistProjection = leanDraftProjection(projection)
@@ -231,23 +273,23 @@ func applyDraftContextProfile(result map[string]any) {
 			working["render_packet"] = packet
 		}
 
-		leanContract := plan.Contract
-		leanContract.RequiredBeats = append([]string(nil), packet.MandatoryBeats...)
 		leanPlan := map[string]any{
 			"chapter":       plan.Chapter,
 			"title":         plan.Title,
 			"goal":          plan.Goal,
 			"conflict":      plan.Conflict,
 			"hook":          plan.Hook,
-			"contract":      leanContract,
-			"render_policy": "范围与禁区仍以本对象为准；正文素材只从 render_packet 选择，不展开完整 causal_simulation。",
+			"render_policy": "本对象只用于确认章号与目标；章节合同已经完整投影到 render_packet，正文不得展开旧 contract 或 causal_simulation。",
 		}
 		result["chapter_plan"] = leanPlan
 		if working != nil {
 			working["chapter_plan"] = leanPlan
-			working["chapter_contract"] = leanContract
 		}
-		result["chapter_contract"] = leanContract
+		// render_packet is the draft-stage canonical contract. Keeping the original
+		// chapter_contract beside it pays for the same mandatory beats, exclusions
+		// and continuity clauses a second time and tempts agents to serialize the
+		// planning checklist into prose.
+		deleteContextKey(result, "chapter_contract")
 	}
 
 	for _, key := range []string{"causal_simulation", "causal_simulation_policy"} {
@@ -255,6 +297,16 @@ func applyDraftContextProfile(result map[string]any) {
 		if working != nil {
 			delete(working, key)
 		}
+	}
+	// The prose-facing repair/style contract above is the only draft-stage view
+	// of writing assets and AI-voice diagnostics. Keeping raw reports here makes
+	// non-Codex providers see advisory flags and full metric dossiers that Codex's
+	// final-prose whitelist removes, creating provider-dependent rewrite loops.
+	for _, key := range []string{
+		"ai_voice_redflags", "ai_voice_redflags_policy", "chapter_ai_voice_metrics",
+		"genre_style_profile", "literary_rendering_cards", "writing_engine", "style_rules",
+	} {
+		deleteContextKey(result, key)
 	}
 	sanitizeDraftWorldSimulation(result)
 	for _, key := range []string{
@@ -264,6 +316,69 @@ func applyDraftContextProfile(result map[string]any) {
 		"future_outline_window", "next_chapter_outline",
 	} {
 		deleteContextKey(result, key)
+	}
+}
+
+// compactDraftRewriteSource keeps the immutable source identity and preservation
+// contract while hiding the old chapter body and the full review markdown. Those
+// two prose blobs are required while planning a rewrite, but the draft stage must
+// re-render from the approved packet instead of paraphrasing the previous surface.
+func compactDraftRewriteSource(container map[string]any) {
+	if container == nil {
+		return
+	}
+	source, ok := container["rewrite_source"].(map[string]any)
+	if !ok || source == nil {
+		return
+	}
+	compact := map[string]any{
+		"source_body_policy": "旧正文与完整评审原文只用于上游定事实，draft profile 已隐藏；按 render_packet 重新讲述，不得追忆或同义改写旧稿表面。",
+	}
+	for _, key := range []string{"chapter", "required_sources", "preservation_policy"} {
+		if value, exists := source[key]; exists {
+			compact[key] = value
+		}
+	}
+	container["rewrite_source"] = compact
+}
+
+func sanitizeDraftExternalReview(result map[string]any) {
+	containers := []map[string]any{result}
+	for _, sectionName := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
+		if section, ok := result[sectionName].(map[string]any); ok {
+			containers = append(containers, section)
+		}
+	}
+	for _, container := range containers {
+		raw, exists := container["draft_external_ai_review"]
+		if !exists {
+			delete(container, "draft_external_ai_review_policy")
+			continue
+		}
+		var review map[string]any
+		encoded, err := json.Marshal(raw)
+		if err != nil || json.Unmarshal(encoded, &review) != nil {
+			delete(container, "draft_external_ai_review")
+			delete(container, "draft_external_ai_review_policy")
+			continue
+		}
+		blocking, _ := review["blocking"].(bool)
+		if !blocking {
+			delete(container, "draft_external_ai_review")
+			delete(container, "draft_external_ai_review_policy")
+			continue
+		}
+		lean := map[string]any{
+			"blocking":   true,
+			"use_policy": "只吸收旧稿失败的可读性证据；示例场景、示例动作、示例台词与完整修改计划不是正文指令，不得照搬或换皮。",
+		}
+		for _, key := range []string{"summary", "reasons", "evidence"} {
+			if value, ok := review[key]; ok {
+				lean[key] = value
+			}
+		}
+		container["draft_external_ai_review"] = lean
+		container["draft_external_ai_review_policy"] = "仅保留 blocking 诊断的摘要、原因和证据；修改示例与逐项方案已跨 provider 删除。"
 	}
 }
 
@@ -351,7 +466,7 @@ func compactDraftAIVoiceRules(raw any, limit int) []string {
 			break
 		}
 		rule := strings.TrimSpace(flag.Rule)
-		if rule != "" {
+		if rule != "" && !domain.IsAdvisoryAIVoiceFlag(flag) {
 			rules = append(rules, rule)
 		}
 	}
@@ -405,6 +520,28 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 			ForbiddenMoves:    limitRenderStrings(voice.ForbiddenMoves, 1),
 		})
 	}
+	firstAppearances := make(map[string]bool, len(sim.CharacterKit))
+	for _, kit := range sim.CharacterKit {
+		if kit.FirstAppearance {
+			firstAppearances[strings.TrimSpace(kit.Character)] = true
+		}
+	}
+	visuals := make([]draftVisualCard, 0, len(sim.VisualDesign))
+	for _, visual := range sim.VisualDesign {
+		name := strings.TrimSpace(visual.Character)
+		visuals = append(visuals, draftVisualCard{
+			Character:       name,
+			FirstAppearance: firstAppearances[name],
+			Silhouette:      firstRenderClause(visual.Silhouette),
+			FaceAndHair:     firstRenderClause(visual.FaceAndHair),
+			ClothingStyle:   firstRenderClause(visual.ClothingStyle),
+			BodyLanguage:    firstRenderClause(visual.BodyLanguage),
+			SignatureObject: firstRenderClause(visual.SignatureObject),
+			FirstImpression: firstRenderClause(visual.FirstImpression),
+			StatusWear:      firstRenderClause(visual.StatusWear),
+			SceneUse:        firstRenderClause(visual.SceneUse),
+		})
+	}
 	relationshipLenses := make([]draftRelationshipLens, 0, min(2, len(sim.RelationshipArcs)))
 	for _, arc := range sim.RelationshipArcs {
 		if len(relationshipLenses) >= 2 {
@@ -435,33 +572,242 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		PlanConstraints:   sim.SceneConstraints,
 		ObservableEffects: append([]string(nil), plan.Contract.RequiredBeats...),
 	})
+	literaryContract := newDraftLiteraryRenderContract(plan, protagonist)
 	return draftRenderPacket{
-		Version:                3,
-		Chapter:                plan.Chapter,
-		Title:                  plan.Title,
-		Hook:                   plan.Hook,
-		MandatoryBeats:         mandatoryBeats,
-		ForbiddenMoves:         limitRenderStrings(plan.Contract.ForbiddenMoves, 5),
-		ProtagonistProjection:  projection,
-		VoiceCards:             selectEssentialVoiceCards(voices),
-		RelationshipLenses:     sampleRenderValues(relationshipLenses, 1),
-		SelectionPolicy:        "通常只写2-4场；几个结果可以在一场里同时成立，离屏台账不写。",
-		SceneBridgePolicy:      "可以直接跳时间或地点，不为转场另写解释。",
-		DialogueTopologyPolicy: "谁眼下真有话谁说；允许一人连续说完，删掉替计划报步骤的台词。",
-		SystemVoicePolicy:      "系统像支持主角的熟人，只接眼前具体的人或事，不说客服套话。",
-		JargonPolicy:           "不用计划、审核和项目管理词；用普通人当场会说的话。",
-		PlanTranslationPolicy:  "只保留欲望、风险、选择和结果，不复刻计划句序、动作或验证路径。",
-		ReaderRegisterPolicy:   "面向大众读者，县城居民说日常话，不替作者总结方法。",
-		InterfaceCompression:   "界面操作只留会改变选择的一次，其余直接略过。",
-		ScenePurposePolicy:     "每场只让一个局面真正变化，办妥的过程可以略过。",
-		SpokenLanguagePolicy:   "对白先服从说话人的身份、关系和眼前目的；朗读不顺就删或重说。",
-		EmotionalRenderPolicy:  "只跟一条个人牵挂；情绪必须改变紧接着的选择，不写替读者标重的总结。",
-		GroupCompressionPolicy: "多人做同类决定时只展开一个真正改变主角选择的代表；其余只落总结果，禁止按‘第一个、另一家、最后一家’逐人分配理由。",
-		ChronologyPolicy:       "全章最多保留两个具体钟点；现实耗时用午饭、日光、库存或工作状态跨越，禁止按时间戳报站。",
-		ProofFocusPolicy:       "小胜只跟一组顾客完整看价、付款并拿走东西；其他摊位退成背景，禁止并排举三个成功案例。",
-		NamedRolePolicy:        "无名摊主保持无名；不得拿角色册里的亲戚或离屏人物给泛化摊主补名字，更不得改变已命名人物的职业和当日行踪。",
-		RelationshipPriority:   "正事中留一处男女主的判断互相改变下一步选择；不靠票据问答替代关系推进，也不硬凑肢体暧昧。",
+		Version:               6,
+		Chapter:               plan.Chapter,
+		Title:                 plan.Title,
+		Goal:                  firstRenderClause(plan.Goal),
+		Conflict:              firstRenderClause(plan.Conflict),
+		Hook:                  plan.Hook,
+		EmotionArc:            firstRenderClause(plan.EmotionArc),
+		MandatoryBeats:        mandatoryBeats,
+		ForbiddenMoves:        compactStrings(plan.Contract.ForbiddenMoves),
+		ContinuityChecks:      RenderContinuityChecks(plan),
+		PayoffPoints:          limitRenderStrings(plan.Contract.PayoffPoints, 4),
+		SceneAnchors:          renderSceneAnchors(plan.Contract.SceneAnchors),
+		ProtagonistProjection: projection,
+		VoiceCards:            selectEssentialVoiceCards(voices),
+		// A first chapter can introduce the protagonist, love interest, parents,
+		// pressure character and two or three local anchors in one continuous
+		// opening. Keep enough cards for every meaningful entrance instead of
+		// silently dropping the later (often more important) arrivals.
+		VisualCards:             selectEntranceVisualCards(visuals, 8),
+		RelationshipLenses:      sampleRenderValues(relationshipLenses, 1),
+		LiteraryRenderContract:  literaryContract,
+		SelectionPolicy:         "mandatory_beats 只是终局事实，不是镜头清单；只挑最有情绪、笑点或关系变化的场面写，其余允许离屏成立。",
+		SceneBridgePolicy:       "转场服从人物注意力；能自然跳过就跳过，不为解释时间和因果另写汇报段。",
+		DialogueTopologyPolicy:  "先朗读再保留台词；人物只说此刻会说的话，不替作者补全背景、规则和步骤，也不强制轮流发言。普通平静口述按完整气口说完，同一意思不得切成连续2—4汉字句号短句。",
+		SystemVoicePolicy:       "若本章存在系统、界面或非人媒介，它只能按既定声口回应眼前具体刺激；不复述读者刚看见的结果，不用客服套话替人物作决定。",
+		JargonPolicy:            "计划、审核、项目管理和运营复盘语言不得进入叙述或日常对白；事实用生活经验表达。",
+		PlanTranslationPolicy:   "从计划中取事实和人物欲望，重新组织成小说；不得照着 required_beats 的句序逐项证明。",
+		ReaderRegisterPolicy:    "面向本项目约定的读者与题材语域；旁白贴着当前焦点人物当时的好恶、误判和词汇习惯，不替作者总结方法。",
+		InterfaceCompression:    "界面只在惊讶、限制或奖励真正改变当下感受时出现，禁止连续用页面反馈替代人物反应。",
+		ScenePurposePolicy:      "场景可以同时有正事、闲话、尴尬和关系余波；不要求每段都推进指标，也不写成办事过程复盘。",
+		SpokenLanguagePolicy:    "对白服从身份、熟悉程度和现场情绪；普通人口述通常用一个完整气口承载对象、原因或条件，不能把同一判断切成连续2—4汉字句号碎片。短答可以短；连续碎断只用于抢险、打断、惊吓或刻意拒绝且现场有证据。不顺口的整轮推倒重说，不机械补口头禅。",
+		EmotionalRenderPolicy:   "允许情绪在人物身上多停一会儿，也允许暂时没有结论；只写主角真的会注意到的细节，不在动作后逐句解释动机。",
+		GroupCompressionPolicy:  "群体用嘈杂、等待、插话或背景动作形成现场感；只有真正与主角发生关系的人才展开，不能给每个人分配一条功能。",
+		ChronologyPolicy:        "现实耗时要可信，但不按钟点报站；用饭点、天光、库存、疲劳和朋友手头的活自然表现时间过去。",
+		ProofFocusPolicy:        "不强制跟拍看价、付款、取货、登记、测试等完整证明链；结果已由可见后果成立时可以一笔带过，把篇幅留给人物选择与关系余波。",
+		NamedRolePolicy:         "无名功能角色保持无名；不得从角色册借用离屏人物姓名给路人补位，更不得改变已命名人物的职业、关系或当日行踪。",
+		RelationshipPriority:    "核心关系人物同场时，先写他们怎样一起做事、怎样误读或修正对方；关系可以藏在偏心、边界、拒绝和没说完的话里，不靠手续问答或作者判词宣布推进。",
+		CharacterEntrancePolicy: "实名角色首次进入读者视野时，在首次动作或对白附近落一个能画出人的视觉锚点：优先轮廓/脸发、穿着/标志物、身体语言三类中最贴 POV 与现场的一项，并让它同时传达身份、状态或关系印象。主配角至少一项，核心角色宜用两项分散落地；禁止证件照式罗列、镜前自检、只写帅美高冷，也禁止人物出场数段后才补长相。非首次出场只在状态变化或识别需要时提醒旧锚点。",
 	}
+}
+
+func newDraftLiteraryRenderContract(plan domain.ChapterPlan, protagonist string) draftLiteraryRenderContract {
+	const usagePolicy = "这是本章已选择的镜头决定，不是技法清单：信息权限为硬边界；距离、场景/概述、意象、句法、自由间接话语和潜台词只在其目标位置按功能使用，不补齐未选卡，不统计次数。"
+	sim := plan.CausalSimulation
+	if literary := sim.LiteraryRendering; literary != nil {
+		contract := draftLiteraryRenderContract{
+			Source:                "explicit_plan",
+			Focalizer:             firstRenderClause(literary.Focalizer),
+			NarrativeAccess:       string(literary.NarrativeAccess),
+			KnowledgeBoundary:     firstRenderClause(literary.KnowledgeBoundary),
+			PerceptualBias:        firstRenderClause(literary.PerceptualBias),
+			SummaryOmissionPolicy: firstRenderClause(literary.SummaryOmissionPolicy),
+			Afterimage:            firstRenderClause(literary.Afterimage),
+			SourceRefs:            compactLiterarySourceRefs(literary.SourceRefs),
+			UsagePolicy:           usagePolicy,
+		}
+		for _, scene := range literary.SceneModes {
+			contract.SceneModes = append(contract.SceneModes, draftLiterarySceneMode{
+				Target:      firstRenderClause(scene.Target),
+				Mode:        string(scene.Mode),
+				Distance:    string(scene.Distance),
+				StateChange: firstRenderClause(scene.StateChange),
+				RenderMove:  firstRenderClause(scene.RenderMove),
+			})
+		}
+		for _, lens := range literary.ActiveLenses {
+			contract.ActiveLenses = append(contract.ActiveLenses, draftLiteraryActiveLens{
+				Kind:       firstRenderClause(lens.Kind),
+				Target:     firstRenderClause(lens.Target),
+				Move:       firstRenderClause(lens.Move),
+				Why:        firstRenderClause(lens.Why),
+				Avoid:      firstRenderClause(lens.Avoid),
+				SourceRefs: compactLiterarySourceRefs(lens.SourceRefs),
+			})
+		}
+		return contract
+	}
+
+	// Legacy plans remain usable. Project a small contract from durable POV,
+	// appraisal, retention and voice fields instead of making a rewrite wait for
+	// a new 90KB planning pass. This is deliberately a projection: no scene
+	// evidence, turn choreography or full anti-AI checklist crosses the boundary.
+	focalizer := strings.TrimSpace(protagonist)
+	if focalizer == "" && len(sim.VoiceLogic) > 0 {
+		focalizer = strings.TrimSpace(sim.VoiceLogic[0].Character)
+	}
+	if focalizer == "" {
+		focalizer = "当前章主视角人物"
+	}
+	contract := draftLiteraryRenderContract{
+		Source:            "legacy_projection",
+		Focalizer:         focalizer,
+		NarrativeAccess:   string(domain.LiteraryNarrativeAccessInternal),
+		KnowledgeBoundary: "只使用焦点位置可感知、记忆和有依据推断的信息；不得读取未表达的他人内心或幕后事实。",
+		Afterimage:        firstRenderClause(plan.Hook),
+		SourceRefs:        []string{"literary-rendering#focalization-boundary"},
+		UsagePolicy:       usagePolicy,
+	}
+
+	if voice, ok := draftVoiceForCharacter(sim.VoiceLogic, focalizer); ok {
+		if boundary := firstRenderClause(voice.KnowledgeBoundary); boundary != "" {
+			contract.KnowledgeBoundary = boundary
+		}
+		move := firstNonemptyRenderClause(voice.SubtextStrategy, voice.HiddenSubtext, voice.SpeechPrinciple)
+		why := firstNonemptyRenderClause(voice.HiddenSubtext, voice.RelationshipStance, voice.SceneObjective)
+		if move != "" && why != "" {
+			contract.ActiveLenses = append(contract.ActiveLenses, draftLiteraryActiveLens{
+				Kind:       "dialogue-subtext",
+				Target:     focalizer + "参与的关键对白",
+				Move:       move,
+				Why:        why,
+				Avoid:      "不让角色替作者解释潜台词，也不把所有直率信息强行写成闪避。",
+				SourceRefs: []string{"literary-rendering#dialogue-subtext"},
+			})
+			contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#dialogue-subtext")
+		}
+	}
+
+	if emotion, ok := draftEmotionForCharacter(sim.EmotionalLogic, focalizer); ok {
+		contract.PerceptualBias = firstNonemptyRenderClause(emotion.CognitiveBias, emotion.GoalAppraisal, emotion.MeaningNeed)
+		move := firstNonemptyRenderClause(emotion.EmotionLedAction, emotion.RegulationStrategy)
+		why := firstNonemptyRenderClause(emotion.GoalAppraisal, emotion.EmotionalTrigger)
+		if move != "" && why != "" {
+			contract.ActiveLenses = append(contract.ActiveLenses, draftLiteraryActiveLens{
+				Kind:       "emotion-appraisal",
+				Target:     focalizer + "重新评价局面并作出选择的时刻",
+				Move:       move,
+				Why:        why,
+				Avoid:      "不把情绪分析词或解释性结论写进正文；让注意、选择和代价留下证据。",
+				SourceRefs: []string{"literary-rendering#emotion-appraisal"},
+			})
+			contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#emotion-appraisal")
+		}
+	}
+	if contract.PerceptualBias == "" {
+		if state, ok := draftStateForCharacter(sim.InitialState, focalizer); ok {
+			contract.PerceptualBias = firstNonemptyRenderClause(strings.Join(state.Misbeliefs, "；"), state.ActionTendency, state.CurrentGoal)
+		}
+	}
+
+	if len(sim.OutcomeShift) > 0 {
+		contract.SceneModes = append(contract.SceneModes, draftLiterarySceneMode{
+			Target:      focalizer + "作出本章不可逆选择的关键场面",
+			Mode:        string(domain.LiterarySceneModeScene),
+			Distance:    string(domain.LiteraryNarrativeDistanceClose),
+			StateChange: firstRenderClause(sim.OutcomeShift[0]),
+			RenderMove:  "把触发、误判或重新评价、被放弃的动作与选择后果留在实时现场。",
+		})
+		contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#psychic-distance", "literary-rendering#scene-summary")
+	}
+	if len(sim.ReaderRetentionPlan.CutOrCompress) > 0 {
+		contract.SummaryOmissionPolicy = joinRenderClauses(sim.ReaderRetentionPlan.CutOrCompress, 2)
+		contract.SceneModes = append(contract.SceneModes, draftLiterarySceneMode{
+			Target:      firstRenderClause(sim.ReaderRetentionPlan.CutOrCompress[0]),
+			Mode:        string(domain.LiterarySceneModeSummary),
+			Distance:    string(domain.LiteraryNarrativeDistanceFar),
+			StateChange: "只保留对人物选择、关系或现场后果有影响的结果",
+			RenderMove:  "概述或直接跳过重复过程，不把手续和验证步骤还原成镜头清单。",
+		})
+		contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#scene-summary")
+	}
+	if rhythm := firstRenderClause(sim.AntiAIPlan.SentenceRhythmPolicy); rhythm != "" {
+		contract.ActiveLenses = append(contract.ActiveLenses, draftLiteraryActiveLens{
+			Kind:       "syntax-rhythm",
+			Target:     "本章压力、犹疑、决定与余波之间的句法换挡",
+			Move:       rhythm,
+			Why:        "让句法结构跟随认知负荷和信息重量，而不是全章维持同一概率分布。",
+			Avoid:      "不随机轮换长短句，不用错字、碎句或冷僻词扰动检测。",
+			SourceRefs: []string{"literary-rendering#syntax-rhythm"},
+		})
+		contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#syntax-rhythm")
+	}
+	contract.SourceRefs = compactLiterarySourceRefs(contract.SourceRefs)
+	return contract
+}
+
+func draftVoiceForCharacter(values []domain.CharacterVoiceLogic, character string) (domain.CharacterVoiceLogic, bool) {
+	for _, value := range values {
+		if strings.TrimSpace(value.Character) == strings.TrimSpace(character) {
+			return value, true
+		}
+	}
+	return domain.CharacterVoiceLogic{}, false
+}
+
+func draftEmotionForCharacter(values []domain.CharacterEmotionalLogic, character string) (domain.CharacterEmotionalLogic, bool) {
+	for _, value := range values {
+		if strings.TrimSpace(value.Character) == strings.TrimSpace(character) {
+			return value, true
+		}
+	}
+	return domain.CharacterEmotionalLogic{}, false
+}
+
+func draftStateForCharacter(values []domain.CharacterSimulationState, character string) (domain.CharacterSimulationState, bool) {
+	for _, value := range values {
+		if strings.TrimSpace(value.Character) == strings.TrimSpace(character) {
+			return value, true
+		}
+	}
+	return domain.CharacterSimulationState{}, false
+}
+
+func firstNonemptyRenderClause(values ...string) string {
+	for _, value := range values {
+		if value = firstRenderClause(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func joinRenderClauses(values []string, limit int) string {
+	clauses := make([]string, 0, min(limit, len(values)))
+	for _, value := range values {
+		if len(clauses) >= limit {
+			break
+		}
+		if value = firstRenderClause(value); value != "" {
+			clauses = append(clauses, value)
+		}
+	}
+	return strings.Join(clauses, "；")
+}
+
+func compactLiterarySourceRefs(values []string) []string {
+	refs := compactStrings(values)
+	for i := range refs {
+		refs[i] = strings.TrimSpace(refs[i])
+		if utf8.RuneCountInString(refs[i]) > 180 {
+			refs[i] = string([]rune(refs[i])[:180])
+		}
+	}
+	return refs
 }
 
 func draftVisibilityFromSimulation(simulation map[string]any) (visible, excluded []string) {
@@ -733,6 +1079,31 @@ func limitVisualCards(values []draftVisualCard, limit int) []draftVisualCard {
 	return append([]draftVisualCard(nil), values...)
 }
 
+func selectEntranceVisualCards(values []draftVisualCard, limit int) []draftVisualCard {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	selected := make([]draftVisualCard, 0, min(limit, len(values)))
+	for _, value := range values {
+		if value.FirstAppearance {
+			selected = append(selected, value)
+			if len(selected) == limit {
+				return selected
+			}
+		}
+	}
+	for _, value := range values {
+		if value.FirstAppearance {
+			continue
+		}
+		selected = append(selected, value)
+		if len(selected) == limit {
+			break
+		}
+	}
+	return selected
+}
+
 func limitGroundingDetails(values []domain.GroundingDetailPlan, limit int) []domain.GroundingDetailPlan {
 	if limit <= 0 || len(values) == 0 {
 		return nil
@@ -781,10 +1152,65 @@ func RenderRequiredOutcomes(plan domain.ChapterPlan) []string {
 			out = append(out, beat)
 		}
 	}
-	// Old rewrite plans may predate the 2-4 outcome contract. Keep their full
-	// simulation on disk, but do not feed more than four visible obligations to
-	// prose or review; the first, middle shifts and final consequence are sampled.
-	return sampleRenderStrings(compactStrings(out), 4)
+	// Prose should see an opening pressure, one central human/system payoff and
+	// the final consequence. The full contract remains on disk for consistency
+	// review; feeding every process beat to the Drafter turns the chapter into a
+	// shot-by-shot acceptance checklist.
+	return selectEssentialRenderOutcomes(compactStrings(out), 3)
+}
+
+func selectEssentialRenderOutcomes(values []string, limit int) []string {
+	values = compactStrings(values)
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) <= limit {
+		return append([]string(nil), values...)
+	}
+
+	selected := map[int]bool{0: true, len(values) - 1: true}
+	for len(selected) < limit {
+		bestIndex, bestScore := -1, -1
+		for i := 1; i < len(values)-1; i++ {
+			if selected[i] {
+				continue
+			}
+			score := renderOutcomeHumanPriority(values[i])
+			if score > bestScore {
+				bestIndex, bestScore = i, score
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+		selected[bestIndex] = true
+	}
+
+	out := make([]string, 0, len(selected))
+	for i, value := range values {
+		if selected[i] {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func renderOutcomeHumanPriority(text string) int {
+	score := 0
+	for _, marker := range []string{
+		"系统", "奖励", "个人账户", "秘密", "坦白", "信任", "怀疑", "关系", "感情",
+		"父亲", "母亲", "朋友", "女主", "男主", "沈知遥", "贺骁",
+	} {
+		if strings.Contains(text, marker) {
+			score += 10
+		}
+	}
+	for _, marker := range []string{"票据", "逐笔", "安装", "运输", "登记", "测试", "核验", "名单"} {
+		if strings.Contains(text, marker) {
+			score--
+		}
+	}
+	return score
 }
 
 // RenderContinuityChecks keeps factual continuity in the prose packet while
@@ -801,6 +1227,10 @@ func RenderContinuityChecks(plan domain.ChapterPlan) []string {
 }
 
 func renderOnlyContinuityCheck(text string) bool {
+	if strings.Contains(text, "sha256") || strings.Contains(text, "局部返工源正文") ||
+		(strings.Contains(text, "chapters/") && strings.Contains(text, "事实来源")) {
+		return true
+	}
 	for _, marker := range []string{
 		"章末具体锚点", "短消息分开发送", "颜文字", "拟声", "吐槽的起头",
 		"每次只承担拒绝", "不能连续用界面", "必须位于报价确认后", "台词原句",

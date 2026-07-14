@@ -92,11 +92,33 @@ CAT_EYE_IMPOSSIBLE_READ_RE = re.compile(r"(?:猫眼|门里|1704)[^。！？!?；
 FORM_IMAGE_MISMATCH_RE = re.compile(r"四栏[^。！？!?；;\n]{0,30}像临时盖上去的章")
 DIALOGUE_RE = re.compile(r"[“\"「]([^”\"」]{2,160})[”\"」]")
 SYSTEM_MESSAGE_RE = re.compile(r"【([^】]{2,240})】")
+PERSON_DIALOGUE_QUOTE_RE = re.compile(r"[“「]([^”」\n]+)[”」]")
+DIALOGUE_MICRO_PERIOD_EXEMPTIONS = {
+    "好", "好的", "好吧", "行", "行吧", "可以",
+    "知道", "知道了", "明白", "明白了",
+    "是", "是的", "是啊", "对", "对的", "对啊", "没错",
+    "不是", "不是的", "不用", "不用了", "没事", "没事了",
+    "谢谢", "谢了", "抱歉", "对不起",
+    "嗯", "嗯嗯", "嗯哼", "哦", "噢", "啊", "哎", "唉", "喂",
+}
 ABSTRACT_SYSTEM_REASSURANCE_RE = re.compile(
     r"(?:钱没跑|陪你(?:换条路|找(?:条)?路)|规矩不撤|先喘(?:半)?口气|这笔不能这么花|(?:这回)?算你[^。！？!?]{0,8}挣来的)"
 )
 APHORISTIC_NARRATIVE_SUMMARY_RE = re.compile(
     r"(?:理由一条比一条[^。！？!?]{0,24}只有[^。！？!?]{0,24}|[^。！？!?]{0,18}只能[^，。！？!?]{1,16}[，,][^。！？!?]{0,8}不能[^。！？!?]{1,20}|[^。！？!?]{2,12}不等于[^。！？!?]{2,16})"
+)
+AUTHORIAL_ABSTRACT_SUMMARY_RE = re.compile(
+    r"(?:"
+    r"(?:今天|今晚|眼下|此刻|现在|这一刻|到头来)?"
+    r"(?:他|她|我|[\u4e00-\u9fff]{2,3})?"
+    r"真正(?:要解|要解决|想要|想做|该做|需要解决|要面对|要证明)的"
+    r"[，,]?(?:从来|根本|压根)?不是[^。！？!?；;\n]{1,48}|"
+    r"眼前(?:真正)?的[，,]?不是(?:麻烦|问题|阻力|困难|失败|结果|答案|终点|任务|选择|考验|机会|代价)"
+    r"[^。！？!?；;\n]{0,48}|"
+    r"(?:这|那)(?:才|总算)让(?:他|她|我|[\u4e00-\u9fff]{2,3})"
+    r"(?:确定|明白|意识到|知道|相信|认定)[^。！？!?；;\n]{0,40}"
+    r"(?:全都|都)?(?:没有|没)白费"
+    r")"
 )
 UI_TRIAL_ACTION_RE = re.compile(
     r"(?:试着?还[^。！？!?；;\n]{0,12}(?:信用卡|欠款|账)|点(?:击|开|了)?[^。！？!?；;\n]{0,10}(?:提现|转账|确认|按钮)|"
@@ -265,6 +287,99 @@ def style_diagnostics(raw: str) -> dict:
 
 def line_number(raw: str, index: int) -> int:
     return raw.count("\n", 0, index) + 1
+
+
+def dialogue_micro_period_chain_stats(raw: str) -> dict:
+    """Find the Go lint's narrow 2-4-Hanzi non-final-period dialogue shape."""
+    clean_parts: list[str] = []
+    in_system_message = False
+    for char in raw:
+        if char == "【":
+            in_system_message = True
+        elif char == "】":
+            in_system_message = False
+        elif not in_system_message:
+            clean_parts.append(char)
+    clean = "".join(clean_parts)
+
+    turn_examples: list[str] = []
+    for paragraph in split_paragraphs(clean):
+        for match in PERSON_DIALOGUE_QUOTE_RE.finditer(paragraph):
+            quote = match.group(1).strip()
+            clause_start = 0
+            has_hit = False
+            for index, char in enumerate(quote):
+                if char == "。":
+                    # A closing period is an ordinary short reply, not a chain.
+                    if not re.search(r"[\u4e00-\u9fff]", quote[index + 1 :]):
+                        clause_start = index + 1
+                        continue
+                    candidate = "".join(
+                        re.findall(r"[\u4e00-\u9fff]", quote[clause_start:index])
+                    )
+                    if (
+                        2 <= len(candidate) <= 4
+                        and candidate not in DIALOGUE_MICRO_PERIOD_EXEMPTIONS
+                    ):
+                        has_hit = True
+                        break
+                    clause_start = index + 1
+                    continue
+                if char in "！!？?；;…":
+                    clause_start = index + 1
+
+            if has_hit:
+                # A dialogue tag may split one turn into several quote spans
+                # in one paragraph. Count that paragraph only once.
+                turn_examples.append(quote[:48])
+                break
+
+    return {
+        "turn_count": len(turn_examples),
+        "triggered": len(turn_examples) >= 3,
+        "examples": turn_examples[:4],
+    }
+
+
+def dialogue_micro_period_chain_issues(raw: str) -> list[dict]:
+    stats = dialogue_micro_period_chain_stats(raw)
+    if not stats["triggered"]:
+        return []
+    examples = stats["examples"]
+    first_index = raw.find(examples[0]) if examples else 0
+    return [
+        {
+            "rule": "dialogue_micro_period_chain",
+            "severity": "warning",
+            "line": line_number(raw, max(first_index, 0)),
+            "limit": "同章不同话轮中二至四字句号短句 < 3；短答、语气词和问叹/未尽语气不计",
+            "actual": stats["turn_count"],
+            "target": " / ".join(examples),
+            "evidence": (
+                f"{stats['turn_count']} 个不同人物话轮在同一引号内用"
+                "2—4 汉字的非末尾句号短句切开后续表达"
+            ),
+        }
+    ]
+
+
+def authorial_abstract_summary_issues(raw: str) -> list[dict]:
+    quoted_spans = [match.span() for match in DIALOGUE_RE.finditer(raw)]
+    quoted_spans.extend(match.span() for match in SYSTEM_MESSAGE_RE.finditer(raw))
+    issues: list[dict] = []
+    for match in AUTHORIAL_ABSTRACT_SUMMARY_RE.finditer(raw):
+        if any(start <= match.start() < end for start, end in quoted_spans):
+            continue
+        issues.append(
+            {
+                "rule": "authorial_abstract_summary",
+                "severity": "error",
+                "line": line_number(raw, match.start()),
+                "target": match.group(0).strip()[:100],
+                "evidence": "动作或场景已经给出含义后，不得再用“真正要解的不是……”或“这才让他确定……没有白费”替读者作抽象总结",
+            }
+        )
+    return issues
 
 
 def count_mismatch_issues(raw: str) -> list[dict]:
@@ -720,7 +835,7 @@ def cadence_issues(raw: str) -> list[dict]:
         ("minor_mistake_overuse", MINOR_MISTAKE_RE, 2, "刻意安排的小失误每章不超过 2 处；超过后会变成新模板"),
         ("vague_quantifier_overuse", VAGUE_QUANTIFIER_RE, 4, "半、一点、几分等虚量词同类每章不超过 4；半袋米这类具体物件不计"),
     ]
-    issues: list[dict] = []
+    issues: list[dict] = dialogue_micro_period_chain_issues(raw)
     for rule, regex, limit, evidence in checks:
         matches = list(regex.finditer(body))
         if len(matches) <= limit:
@@ -976,7 +1091,15 @@ def cadence_issues(raw: str) -> list[dict]:
             }
         )
         break
-    object_matches = list(OBJECT_RESPONSE_RE.finditer(body))
+    # A required "no response" beat is evidence of absence, not another
+    # object response.  Without this filter phrases such as "手机没有动静"
+    # both satisfy the rhythm guard and increment the overuse counter because
+    # the generic response regex sees "手机" + "动" inside "动静".
+    object_matches = [
+        match
+        for match in OBJECT_RESPONSE_RE.finditer(body)
+        if not OBJECT_RESPONSE_ABSENCE_RE.search(match.group(0))
+    ]
     if len(object_matches) > 4:
         first_target = object_matches[0].group(0).strip()
         first_index = raw.find(first_target)
@@ -1152,7 +1275,12 @@ def serial_device_issue(raw: str) -> dict | None:
 
 
 def lint_text(raw: str) -> list[dict]:
-    return count_mismatch_issues(raw) + causal_integrity_issues(raw)
+    return (
+        count_mismatch_issues(raw)
+        + causal_integrity_issues(raw)
+        + authorial_abstract_summary_issues(raw)
+        + dialogue_micro_period_chain_issues(raw)
+    )
 
 
 def lint_file(path: Path) -> dict:
@@ -1160,7 +1288,11 @@ def lint_file(path: Path) -> dict:
     return {
         "文件": str(path),
         "style_diagnostics": style_diagnostics(raw),
-        "content_logic_issues": count_mismatch_issues(raw) + causal_integrity_issues(raw),
+        "content_logic_issues": (
+            count_mismatch_issues(raw)
+            + causal_integrity_issues(raw)
+            + authorial_abstract_summary_issues(raw)
+        ),
         "awkward_style_issues": awkward_style_issues(raw),
         "semantic_clarity_issues": semantic_clarity_issues(raw),
         "punctuation_emotion_issues": punctuation_emotion_issues(raw),

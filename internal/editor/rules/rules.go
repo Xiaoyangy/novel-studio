@@ -38,16 +38,17 @@ var (
 	atmosphereRe = regexp.MustCompile(`(雨|雾|风|冷|潮|灰尘|霉味|灯|影|钟声|走廊|窗|门缝|古堡|墓园|月光)`)
 	hookRe       = regexp.MustCompile(`(下一秒|下一刻|下一章|第三响|谁|还没|没有结束|露出|钥匙|名单|照片|来信|遗书|信封|短信|血|契约|吗[？?]|[？！]{1,2})`)
 
-	numberedLadderRe = regexp.MustCompile(`(?s)(第一|首先|一是|一、|1[.、）\)]).{0,80}?(第二|其次|二是|二、|2[.、）\)]).{0,80}?(第三|最后|三是|三、|3[.、）\)])`)
-	openingGoldRe    = regexp.MustCompile(`(命运|黑暗|自由|勇敢|恐惧|孤独|残缺|真相|世界|人心|从来|真正|原来|不是[^。！？!?；;\n]{0,20}而是|才会|终究|总会)`)
-	actionSensoryRe  = regexp.MustCompile(`(说|问|答|喊|推|拉|握|攥|摸|碰|退|走|站|坐|听|闻|嗅|疼|冷|热|雨|风|门|灯|血|气味|脚步|钟声|指尖|手套|杯|纸|钥匙)`)
-	purposeAnswerRe  = regexp.MustCompile(`我(?:从一开始|一开始|本来|原本|早就)[^。！？!?；;\n”」]{0,18}(?:为|为了|冲着|奔着)[^。！？!?；;\n”」]{0,20}(?:来|来的)|我就是[^。！？!?；;\n”」]{0,20}来的`)
-	hesitationRe     = regexp.MustCompile(`(?:沉默|迟疑|犹豫|改口|话到嘴边|没答|没有回答|答非所问|反问|只说了?半句|没说完|说到一半|隔了[^。！？!?；;\n]{0,8}(?:拍|秒)|半晌|一会儿)`)
-	endingQuestionRe = regexp.MustCompile(`[？?]\s*$`)
-	endingGoldRe     = regexp.MustCompile(`(?:命运|人生|世界|人心|救赎|自由|勇敢|孤独|残缺|意义|真正|所谓|原来|终究|从来|难道|谁又能|又有谁|还算|才是|最终的答案|真正的答案|最终的选择|真正的选择)[^。！？!?；;\n]{0,48}[？?]\s*$`)
-	endingSentenceRe = regexp.MustCompile(`[^。！？!?；;\n]+[。！？!?]?`)
-	catalogRunRe     = regexp.MustCompile(`[\p{Han}A-Za-z0-9“”《》]{2,18}(?:[、，,；;][\p{Han}A-Za-z0-9“”《》]{2,18}){5,}`)
-	catalogSplitRe   = regexp.MustCompile(`[、，,；;]+`)
+	numberedLadderRe     = regexp.MustCompile(`(?s)(第一|首先|一是|一、|1[.、）\)]).{0,80}?(第二|其次|二是|二、|2[.、）\)]).{0,80}?(第三|最后|三是|三、|3[.、）\)])`)
+	openingGoldRe        = regexp.MustCompile(`(命运|黑暗|自由|勇敢|恐惧|孤独|残缺|真相|世界|人心|从来|真正|原来|不是[^。！？!?；;\n]{0,20}而是|才会|终究|总会)`)
+	actionSensoryRe      = regexp.MustCompile(`(说|问|答|喊|推|拉|握|攥|摸|碰|退|走|站|坐|听|闻|嗅|疼|冷|热|雨|风|门|灯|血|气味|脚步|钟声|指尖|手套|杯|纸|钥匙)`)
+	purposeAnswerRe      = regexp.MustCompile(`我(?:从一开始|一开始|本来|原本|早就)[^。！？!?；;\n”」]{0,18}(?:为|为了|冲着|奔着)[^。！？!?；;\n”」]{0,20}(?:来|来的)|我就是[^。！？!?；;\n”」]{0,20}来的`)
+	hesitationRe         = regexp.MustCompile(`(?:沉默|迟疑|犹豫|改口|话到嘴边|没答|没有回答|答非所问|反问|只说了?半句|没说完|说到一半|隔了[^。！？!?；;\n]{0,8}(?:拍|秒)|半晌|一会儿)`)
+	endingQuestionRe     = regexp.MustCompile(`[？?]\s*$`)
+	endingGoldRe         = regexp.MustCompile(`(?:命运|人生|世界|人心|救赎|自由|勇敢|孤独|残缺|意义|真正|所谓|原来|终究|从来|难道|谁又能|又有谁|还算|才是|最终的答案|真正的答案|最终的选择|真正的选择)[^。！？!?；;\n]{0,48}[？?]\s*$`)
+	pendingArrivalHookRe = regexp.MustCompile(`第[一二三四五六七八九十百0-9]+(?:张|个|家|辆|封|份|位|道|次|批)?[^。！？!?；;\n]{0,24}(?:已经|正|还)?(?:停|摆|站|等|堵|落|送|到|出现)在(?:眼前|门外|桥头|路边)`)
+	endingSentenceRe     = regexp.MustCompile(`[^。！？!?；;\n]+[。！？!?]?`)
+	catalogRunRe         = regexp.MustCompile(`[\p{Han}A-Za-z0-9“”《》]{2,18}(?:[、，,；;][\p{Han}A-Za-z0-9“”《》]{2,18}){5,}`)
+	catalogSplitRe       = regexp.MustCompile(`[、，,；;]+`)
 )
 
 const dialogueRatioNearMissTolerance = 0.005
@@ -525,7 +526,7 @@ func endingHookUsed(paragraphs []string) bool {
 	}
 	start := max(0, len(paragraphs)-2)
 	tail := strings.Join(paragraphs[start:], "\n")
-	if hookRe.MatchString(tail) {
+	if hookRe.MatchString(tail) || pendingArrivalHookRe.MatchString(tail) {
 		return true
 	}
 	last := paragraphs[len(paragraphs)-1]
@@ -548,21 +549,15 @@ func aiVoiceScore(metrics domain.ChapterAIVoiceMetrics, history []domain.Chapter
 	if metrics.EndingHookUsed {
 		score += 0.04
 	}
-	if len(history) >= 2 {
+	recentHistory := recentDistinctChapterMetrics(history, metrics.Chapter, 4)
+	if len(recentHistory) >= 2 {
 		recentHooks := 0
-		recentSameFunction := 0
-		for _, h := range history[max(0, len(history)-4):] {
+		for _, h := range recentHistory {
 			if h.EndingHookUsed {
 				recentHooks++
 			}
-			if h.ChapterFunction == metrics.ChapterFunction {
-				recentSameFunction++
-			}
 		}
 		if recentHooks >= 3 && metrics.EndingHookUsed {
-			score += 0.08
-		}
-		if recentSameFunction >= 2 {
 			score += 0.08
 		}
 	}
@@ -618,10 +613,11 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 			Suggestion: "增加至少一处真实动摇：判断错误、动作迟疑、话说半句吞回去，随后付出小代价。",
 		})
 	}
-	if len(history) > 0 {
+	recentHistory := recentDistinctChapterMetrics(history, metrics.Chapter, 4)
+	if len(recentHistory) > 0 {
 		recentHooks := 0
 		recentSameFunction := 0
-		for _, h := range history[max(0, len(history)-4):] {
+		for _, h := range recentHistory {
 			if h.EndingHookUsed {
 				recentHooks++
 			}
@@ -638,13 +634,34 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 		}
 		if recentSameFunction >= 2 {
 			flags = append(flags, domain.AIVoiceRedFlag{
-				Rule:       "chapter_function_repetition",
-				Severity:   "warning",
-				Suggestion: "下一版改变章节主功能：对质后接互动/氛围/留白，不继续同一种推进形态。",
+				Rule:       domain.AIVoiceChapterFunctionRepetitionRule,
+				Severity:   "info",
+				Suggestion: "若本章已有独立事件和结果，只记录为下一章换型建议，不返工本章；只有重复结构已损害本章阅读体验时，才按当前章原文证据修改。",
 			})
 		}
 	}
 	return flags
+}
+
+// recentDistinctChapterMetrics prevents repeated review/rewrite snapshots of
+// one chapter from masquerading as several consecutive chapters. Only the
+// latest metric for each completed chapter before the current chapter may
+// influence cross-chapter repetition rules.
+func recentDistinctChapterMetrics(history []domain.ChapterAIVoiceMetrics, currentChapter, limit int) []domain.ChapterAIVoiceMetrics {
+	if currentChapter <= 0 || limit <= 0 || len(history) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, limit)
+	out := make([]domain.ChapterAIVoiceMetrics, 0, limit)
+	for i := len(history) - 1; i >= 0 && len(out) < limit; i-- {
+		metric := history[i]
+		if metric.Chapter <= 0 || metric.Chapter >= currentChapter || seen[metric.Chapter] {
+			continue
+		}
+		seen[metric.Chapter] = true
+		out = append(out, metric)
+	}
+	return out
 }
 
 func dialogueRatioNearMiss(actual, limit float64) bool {
@@ -664,7 +681,12 @@ func dialogueRatioLimitForSize(totalChars, sentenceCount, paragraphCount int) fl
 
 func labelFor(metrics domain.ChapterAIVoiceMetrics, flags []domain.AIVoiceRedFlag) string {
 	hasError := false
+	hasActionableFlag := false
 	for _, flag := range flags {
+		if domain.IsAdvisoryAIVoiceFlag(flag) {
+			continue
+		}
+		hasActionableFlag = true
 		if flag.Severity == "error" {
 			hasError = true
 			break
@@ -673,7 +695,7 @@ func labelFor(metrics domain.ChapterAIVoiceMetrics, flags []domain.AIVoiceRedFla
 	switch {
 	case hasError || metrics.AIVoiceScore >= 0.55:
 		return "❌ 需返工"
-	case len(flags) > 0 || metrics.AIVoiceScore >= 0.25:
+	case hasActionableFlag || metrics.AIVoiceScore >= 0.25:
 		return "⚠️ 需打磨"
 	default:
 		return "✅ 可通过"
@@ -681,10 +703,22 @@ func labelFor(metrics domain.ChapterAIVoiceMetrics, flags []domain.AIVoiceRedFla
 }
 
 func summaryFor(metrics domain.ChapterAIVoiceMetrics, flags []domain.AIVoiceRedFlag) string {
-	if len(flags) == 0 {
+	actionable := 0
+	advisory := 0
+	for _, flag := range flags {
+		if domain.IsAdvisoryAIVoiceFlag(flag) {
+			advisory++
+			continue
+		}
+		actionable++
+	}
+	if actionable == 0 {
+		if advisory > 0 {
+			return fmt.Sprintf("规则引擎未发现硬性 AI 腔红旗；记录 %d 项非阻断跨章规划建议。", advisory)
+		}
 		return "规则引擎未发现硬性 AI 腔红旗。"
 	}
-	return fmt.Sprintf("命中 %d 项红旗；比喻密度 %.2f，对话占比 %.2f，格言命中 %d。", len(flags), metrics.FigurativeDensity, metrics.DialogueRatio, len(metrics.AphorismHits))
+	return fmt.Sprintf("命中 %d 项红旗；比喻密度 %.2f，对话占比 %.2f，格言命中 %d。", actionable, metrics.FigurativeDensity, metrics.DialogueRatio, len(metrics.AphorismHits))
 }
 
 func ratio(n, d int) float64 {

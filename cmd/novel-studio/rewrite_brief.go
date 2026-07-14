@@ -323,6 +323,8 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 		return "把补测、核验、用途说明、临时固定等流程黑话改成普通读者能当场看懂的后果：哪里会坏、谁会吃亏、现在要怎么办。"
 	case "dialogue_action_lead_repetition":
 		return "重排整组对白段落：定住人物和空间后改用裸对白、简短标签、打断、漏答、群体反应或无人接话；动作只留会改变权力、证据或现场结果的部分。"
+	case "dialogue_micro_period_chain":
+		return "把普通人物同一口气能说完的对象、原因、条件、抱怨和请求合回自然复句；短答只留给借用上文、抢话、急令、接听或真实噎住，不要用‘那个、就是、然后’机械补长度。"
 	case "structured_note_triplet":
 		return "便签和备忘录不要三条工整并列；改成划掉、补字、写半截和现场犹豫。"
 	case "card_tos_block":
@@ -371,6 +373,9 @@ func mechanicalViolationBriefLabel(violation rules.Violation) string {
 func addAIVoiceAnalysisToPlan(analysis domain.AIVoiceAnalysis, addRed, addYellow, addSuggestion func(string)) {
 	flags := analysis.RedFlags
 	for _, flag := range flags {
+		if domain.IsAIVoicePlanningAdvice(flag) {
+			continue
+		}
 		label := flag.Rule
 		if flag.Evidence != "" {
 			label += "｜" + flag.Evidence

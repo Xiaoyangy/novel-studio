@@ -1273,7 +1273,7 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 		if loadErr != nil {
 			return loadErr
 		}
-		pending, pendingErr := pipelineCausalRewritePending(progress, flags.Start, flags.End)
+		pending, pendingErr := pipelineForceRerenderTargets(progress, flags.Start, flags.End)
 		if pendingErr != nil {
 			return pendingErr
 		}
@@ -1286,10 +1286,17 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 			return requestErr
 		}
 		if len(requested) > 0 {
+			if err := st.Progress.SetPendingRewritesAndFlow(
+				requested,
+				"用户显式要求整章重渲染；复用既有世界推演与 POV plan",
+				domain.FlowRewriting,
+			); err != nil {
+				return err
+			}
 			fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 已显式使旧草稿失效，保留既有世界推演与 plan，整章重新渲染：%v\n", requested)
 		}
 	}
-	if flags.PolishWarnings {
+	if flags.PolishWarnings && !flags.ForceRerender {
 		queued, queueErr := pipelineQueueAcceptedWarningPolish(st, flags.Start, flags.End)
 		if queueErr != nil {
 			return queueErr
@@ -1358,6 +1365,20 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 		return fmt.Errorf("达到最大因果重写轮数 %d 后仍有 pending_rewrites=%v", maxRounds, pending)
 	}
 	return nil
+}
+
+func pipelineForceRerenderTargets(progress *domain.Progress, start, end int) ([]int, error) {
+	if progress == nil {
+		return nil, nil
+	}
+	if len(progress.PendingRewrites) > 0 {
+		return pipelineCausalRewritePending(progress, start, end)
+	}
+	selected := filterChaptersForPipelineRange(progress.CompletedChapters, pipelineFlags{Start: start, End: end})
+	if start > 0 && len(selected) == 0 {
+		return nil, fmt.Errorf("--force-rerender 指定范围 %d-%d 没有已完成章节", start, end)
+	}
+	return selected, nil
 }
 
 type pipelineRerenderRequest struct {
@@ -1896,7 +1917,7 @@ func pipelineWorldSimulationRepairSteer(chapter int, cause string) string {
 }
 
 func pipelineStagedPlanRepairSteer(chapter int, cause string) string {
-	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 修复，不写正文，不调用 craft_recall/read_chapter。先调用 novel_context(chapter=%d) 一次读取紧凑状态并严格执行 next_step。返工章的 rewrite_source 已直接注入当前终稿、正文 hash、完整 brief 和 preserve_facts：若 chapter_world_simulation 未完成或 invalid，分批调用 simulate_chapter_world，每批最多8名角色，让全部实名角色各自提交目标、压力、可选项、决定、决定理由、行动和蝴蝶效应，并用 rewrite_fact_coverage 逐条覆盖 preserve_facts 后 finalize；模拟更新或 structure_source_status=stale 时必须重新 plan_structure，不能沿用旧骨架。之后再调用 plan_details。POV plan 最小分组：batch1=world_simulation_id+protagonist_decision+project_promise+chapter_function+context_sources+initial_state+environment_state+causal_beats+decision_points+outcome_shift（initial_state 只覆盖主角；context_sources 必须含 rewrite_source 和 rewrite_brief 精确令牌），batch2=voice_logic+dialogue_scene_blueprints+emotional_logic+anti_ai_execution_plan+reader_entertainment_plan（显式要求热梗时同时补 trend_language_plan），batch3=reader_reward_plan+reader_retention_plan+ending_consequence_contract（第一章长篇项目同时补 longform_opening）；返工章同时补 review_refinement，并将全部 preserve_facts 原样写入 preserve_constraints。最后调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
+	return fmt.Sprintf("Pipeline staged-plan repair：第%d章已有 drafts/%02d.plan.partial.json，但收口为正式计划失败。请立即派 writer 修复，不写正文，不调用 craft_recall/read_chapter。先调用 novel_context(chapter=%d) 一次读取紧凑状态并严格执行 next_step。返工章的 rewrite_source 已直接注入当前终稿、正文 hash、完整 brief 和 preserve_facts：若 chapter_world_simulation 未完成或 invalid，分批调用 simulate_chapter_world，每批最多8名角色，让全部实名角色各自提交目标、压力、可选项、决定、决定理由、行动和蝴蝶效应，并用 rewrite_fact_coverage 逐条覆盖 preserve_facts 后 finalize；模拟更新或 structure_source_status=stale 时必须重新 plan_structure，不能沿用旧骨架。之后再调用 plan_details。POV plan 最小分组：batch1=world_simulation_id+protagonist_decision+project_promise+chapter_function+context_sources+initial_state+environment_state+causal_beats+decision_points+outcome_shift（initial_state 只覆盖主角；context_sources 必须含 rewrite_source 和 rewrite_brief 精确令牌），batch2=voice_logic+literary_rendering_plan+dialogue_scene_blueprints+emotional_logic+anti_ai_execution_plan+reader_entertainment_plan（literary_rendering_plan 只选本章有功能的镜头并保留 source_refs，不做九项清单；显式要求热梗时同时补 trend_language_plan），batch3=reader_reward_plan+reader_retention_plan+ending_consequence_contract（第一章长篇项目同时补 longform_opening）；返工章同时补 review_refinement，并将全部 preserve_facts 原样写入 preserve_constraints。最后调用 plan_details(chapter=%d, finalize=true)。缺项摘要：%s",
 		chapter, chapter, chapter, chapter, truncateForPipelineSteer(cause, 6000))
 }
 

@@ -178,14 +178,14 @@ func Route(s State) *Instruction {
 			if s.NextActionDraftExternalRerenderRequired {
 				return &Instruction{
 					Agent:   "drafter",
-					Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d)，只修正 draft_external_ai_review 的旧稿失败证据；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
+					Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d, profile=draft)，共同落实 draft_external_ai_review 的旧稿失败证据与 rewrite_brief 的 mechanical_gate/rewrite_focus；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
 					Reason:  fmt.Sprintf("第 %d 章外部草稿审核要求结构级重渲染", ch),
 					Chapter: ch,
 				}
 			}
 			return &Instruction{
 				Agent:   "draft_finalizer",
-				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获外判严格 <4%% 且一致性门禁通过，不得因概率代理的诊断提示继续润色，直接 commit_chapter。只有 rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；外判通过稿一旦编辑，只允许一处并必须立即结束子任务，禁止再次读取、检查、编辑或提交，外层 pipeline 会先复判新哈希。禁止重新整章生成", ch, ch),
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获外判严格 <4%% 且一致性门禁通过，可对该哈希调用 commit_chapter 一次；软概率诊断本身不授权润色，但 commit_chapter 返回的 whole_text/segment、corroboration blocker 或确定性 AIGC 门禁属于结构级阻断。任何 commit_chapter 失败后必须立即结束子任务，禁止再次 commit、check、read 或 edit，外层 pipeline 会保存阻断证据并整章重渲染。只有在第一次提交前，rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；一旦编辑只允许一处并立即结束，交外层复判新哈希。禁止重新整章生成", ch, ch),
 				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
 				Chapter: ch,
 			}

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -887,6 +889,47 @@ func TestContextToolInjectsWritingTechniquesDigestReference(t *testing.T) {
 	}
 }
 
+func TestContextToolInjectsLiteraryRenderingReference(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tool := NewContextTool(s, References{
+		LiteraryRendering:      "文学渲染协议：焦点化、目标因果、自由间接话语与适用边界",
+		LiteraryRenderingCards: `{"version":1,"cards":[{"id":"focalization-boundary","decision":"谁在感知"}]}`,
+	}, "default")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":8}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack")
+	}
+	refs, ok := pack["references"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack.references")
+	}
+	if got, ok := refs["literary_rendering"].(string); !ok || !strings.Contains(got, "适用边界") {
+		t.Fatalf("expected literary_rendering reference, got %#v", refs["literary_rendering"])
+	}
+	cards, ok := pack["literary_rendering_cards"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected compact literary_rendering_cards, got %#v", pack["literary_rendering_cards"])
+	}
+	items, ok := cards["cards"].([]any)
+	if !ok || len(items) != 1 || items[0].(map[string]any)["id"] != "focalization-boundary" {
+		t.Fatalf("unexpected compact literary card catalog: %#v", cards)
+	}
+}
+
 func TestContextToolInjectsRAGWritingGuidelinesReference(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -1004,10 +1047,16 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 				"b": strings.Repeat("y", 200),
 			},
 			"style_rules": []string{"克制"},
+			"literary_rendering_cards": map[string]any{
+				"version": 1,
+				"cards":   []any{map[string]any{"id": "focalization-boundary"}},
+			},
 		},
 	}
 
-	trimByBudget(result, 80)
+	if trimByBudget(result, 80) {
+		t.Fatal("80-byte budget should report that the protected compact catalog cannot safely fit")
+	}
 
 	if _, ok := result["references"]; ok {
 		t.Fatal("expected top-level references to be trimmed")
@@ -1018,6 +1067,142 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 	}
 	if _, ok := pack["references"]; ok {
 		t.Fatal("expected mirrored references to be trimmed from reference_pack")
+	}
+	if _, ok := pack["literary_rendering_cards"]; !ok {
+		t.Fatal("compact literary card catalog must survive full-reference budget trimming")
+	}
+}
+
+func TestTrimByBudgetPreservesCompactLiteraryCardsAtPlanningBudget(t *testing.T) {
+	cardIDs := []string{
+		"focalization-boundary",
+		"psychic-distance",
+		"scene-summary",
+		"goal-causality",
+		"emotion-appraisal",
+		"motif-return",
+		"syntax-rhythm",
+		"free-indirect-discourse",
+		"dialogue-subtext",
+	}
+	cards := make([]any, 0, len(cardIDs))
+	for _, id := range cardIDs {
+		cards = append(cards, map[string]any{
+			"id":       id,
+			"decision": "本章是否需要这项文学决策",
+			"move":     "按场景功能选择，不设置次数或比例",
+			"avoid":    "不要机械套用",
+		})
+	}
+	fullReferences := map[string]string{
+		"literary_rendering": strings.Repeat("完整论文摘要与中文转译边界。", 8000),
+		"other_reference":    strings.Repeat("其他低优先级参考。", 2000),
+	}
+	result := map[string]any{
+		"references": fullReferences,
+		"reference_pack": map[string]any{
+			"references": fullReferences,
+			"literary_rendering_cards": map[string]any{
+				"version": 1,
+				"policy":  "按本章功能选择，不做九项清单",
+				"cards":   cards,
+			},
+		},
+		"chapter_contract": map[string]any{
+			"chapter": 1,
+			"goal":    strings.Repeat("不可裁剪的当前章任务。", 500),
+		},
+	}
+
+	const planningBudget = 64 * 1024
+	if !trimByBudget(result, planningBudget) {
+		t.Fatal("expected low-priority full references to make the planning payload fit")
+	}
+
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if len(encoded) > planningBudget {
+		t.Fatalf("trimmed planning context exceeds budget: got=%d budget=%d", len(encoded), planningBudget)
+	}
+	pack, ok := result["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatal("expected reference_pack to survive planning budget trimming")
+	}
+	if _, ok := pack["references"]; ok {
+		t.Fatal("expected full reference essays to be trimmed at planning budget")
+	}
+	catalog, ok := pack["literary_rendering_cards"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact literary rendering catalog must survive planning budget trimming: %#v", pack)
+	}
+	keptCards, ok := catalog["cards"].([]any)
+	if !ok || len(keptCards) != len(cardIDs) {
+		t.Fatalf("expected all compact literary cards after trimming, got %#v", catalog["cards"])
+	}
+	if _, ok := result["chapter_contract"]; !ok {
+		t.Fatal("current chapter contract must survive reference trimming")
+	}
+}
+
+func TestContextToolPlanningProfileFinalPayloadFitsBudgetAndKeepsCards(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	tool := NewContextTool(s, References{
+		Consistency:            strings.Repeat("低优先级一致性资料。", 7000),
+		LiteraryRendering:      strings.Repeat("完整文学研究论证。", 7000),
+		LiteraryRenderingCards: `{"version":1,"policy":"按章选择","cards":[{"id":"focalization-boundary","decision":"谁在感知","move":"限定信息权限","avoid":"跨脑读取"}]}`,
+	}, "default")
+	raw, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(raw) > contextBudget(1, "planning") {
+		t.Fatalf("final planning payload exceeds budget: got=%d budget=%d", len(raw), contextBudget(1, "planning"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload["_context_profile"] != "planning" || payload["_reading_guide"] == "" || payload["_loading_summary"] == "" {
+		t.Fatalf("final metadata must be counted inside the payload budget: %#v", payload)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reference_pack after planning trim, got %#v", payload["reference_pack"])
+	}
+	if _, ok := pack["references"]; ok {
+		t.Fatal("full reference essays should be trimmed before compact cards")
+	}
+	if _, ok := pack["literary_rendering_cards"].(map[string]any); !ok {
+		t.Fatalf("compact literary cards must survive final Execute budget: %#v", pack)
+	}
+	trimmed, ok := payload["_trimmed"].([]any)
+	if !ok || len(trimmed) == 0 || !strings.Contains(payload["_loading_summary"].(string), "裁剪:") {
+		t.Fatalf("trim history and loading summary must be part of final payload: trimmed=%#v summary=%#v", payload["_trimmed"], payload["_loading_summary"])
+	}
+}
+
+func TestFinalizeContextResultRejectsOversizedCriticalPayload(t *testing.T) {
+	result := map[string]any{
+		"active_chapter_task": map[string]any{
+			"mode":   "rewrite",
+			"policy": strings.Repeat("不可静默删除的当前任务。", 12000),
+		},
+	}
+	raw, err := finalizeContextResult(result, 1, "planning")
+	if err == nil || raw != nil {
+		t.Fatalf("expected oversized critical payload to fail explicitly, raw=%d err=%v", len(raw), err)
+	}
+	if !errors.Is(err, errs.ErrToolPrecondition) {
+		t.Fatalf("expected ErrToolPrecondition, got %v", err)
+	}
+	if _, ok := result["active_chapter_task"]; !ok {
+		t.Fatal("budget failure must not delete the active chapter task")
 	}
 }
 
@@ -1096,9 +1281,14 @@ func TestContextToolPartialPlanHidesStaleFormalPlan(t *testing.T) {
 		t.Fatalf("SaveChapterPlanPartial: %v", err)
 	}
 
-	raw, err := NewContextTool(st, References{}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
+	raw, err := NewContextTool(st, References{
+		LiteraryRenderingCards: `{"version":1,"cards":[{"id":"focalization-boundary","decision":"谁在感知"}]}`,
+	}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+	if len(raw) > contextBudget(1, "planning") {
+		t.Fatalf("staged plan repair bypassed planning budget: %d", len(raw))
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -1118,6 +1308,21 @@ func TestContextToolPartialPlanHidesStaleFormalPlan(t *testing.T) {
 	fields, ok := stage["causal_fields_present"].([]any)
 	if !ok || len(fields) != 2 {
 		t.Fatalf("expected staged causal fields, got %#v", stage["causal_fields_present"])
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("staged plan repair must keep compact literary cards, got %#v", payload["reference_pack"])
+	}
+	catalog, ok := pack["literary_rendering_cards"].(map[string]any)
+	if !ok {
+		t.Fatalf("staged plan repair compact catalog missing, got %#v", pack)
+	}
+	cards, ok := catalog["cards"].([]any)
+	if !ok || len(cards) != 1 || cards[0].(map[string]any)["id"] != "focalization-boundary" {
+		t.Fatalf("unexpected staged plan repair cards: %#v", catalog)
+	}
+	if payload["_context_profile"] != "planning" || payload["_reading_guide"] == "" {
+		t.Fatalf("staged plan repair must use the common finalizer: %#v", payload)
 	}
 }
 

@@ -166,6 +166,189 @@ func TestReconcileWarningOnlyEditorReviewUsesIndependentSameHashGates(t *testing
 	}
 }
 
+func TestEditorAIVoicePayloadPassedAllowsNonblockingChapterFunctionAdvice(t *testing.T) {
+	body := "第三章\n\n林澈把车停在桥头，改口问摊主愿不愿意先试一晚。"
+	for _, severity := range []string{"info", "warning"} {
+		t.Run(severity, func(t *testing.T) {
+			analysis := domain.AIVoiceAnalysis{
+				Chapter: 3, BodySHA256: reviewreport.BodySHA256(body), Label: "✅ 可通过",
+				Summary:  "规则引擎未发现硬性 AI 腔红旗；记录 1 项非阻断跨章规划建议。",
+				Metrics:  domain.ChapterAIVoiceMetrics{Chapter: 3, ParagraphCount: 2, SentenceCount: 2},
+				RedFlags: []domain.AIVoiceRedFlag{{Rule: "chapter_function_repetition", Severity: severity}},
+			}
+			if !editorAIVoicePayloadPassed(3, body, analysis) {
+				t.Fatalf("nonblocking planning advice severity=%q invalidated an otherwise clean exact-body payload", severity)
+			}
+		})
+	}
+}
+
+func TestEditorSystemPromptKeepsCrossChapterAdviceNonblocking(t *testing.T) {
+	for _, want := range []string{"chapter_function_repetition", "非阻断规划建议", "不得降低当前章任何维度评分", "不得写入当前章主要问题"} {
+		if !strings.Contains(editorSystemPrompt, want) {
+			t.Fatalf("embedded review-existing prompt missing cross-chapter boundary %q", want)
+		}
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewKeepsStructuralProseFailureBlocking(t *testing.T) {
+	body := "第一章\n\n众人轮流把流程说完。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "met", Verdict: "rewrite",
+		Issues: []domain.ConsistencyIssue{{
+			Type: "aesthetic", Severity: "warning",
+			Description: "dialogue_conveyor_overuse：对白传送带让场景像工作汇报。",
+		}},
+		Dimensions: []domain.DimensionScore{{Dimension: "aesthetic", Score: 75, Verdict: "warning"}},
+	}
+	mechanical := &reviewreport.MechanicalGatePayload{Chapter: 1, BodySHA256: hash}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 1, BodySHA256: hash, Label: "可通过", Summary: "未发现机械硬伤",
+		Metrics: domain.ChapterAIVoiceMetrics{Chapter: 1, ParagraphCount: 2, SentenceCount: 2},
+	}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 1, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true,
+	}
+
+	if reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("external low score must not erase a structural prose failure")
+	}
+	if entry.Verdict != "rewrite" || len(entry.Issues) != 1 {
+		t.Fatalf("structural warning was mutated: %+v", entry)
+	}
+}
+
+func TestMechanicalHasStructuralProseWarning(t *testing.T) {
+	if mechanicalHasStructuralProseWarning(nil) {
+		t.Fatal("nil mechanical gate must not report a structural warning")
+	}
+	plain := &reviewreport.MechanicalGatePayload{RuleViolations: []rules.Violation{{
+		Rule: "object_response_overuse", Severity: rules.SeverityWarning,
+	}}}
+	if mechanicalHasStructuralProseWarning(plain) {
+		t.Fatal("ordinary style warning must not enter Editor structural calibration path")
+	}
+	plain.RuleViolations = append(plain.RuleViolations, rules.Violation{
+		Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning,
+	})
+	if !mechanicalHasStructuralProseWarning(plain) {
+		t.Fatal("structural warning should enter the narrow Editor calibration path")
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewAcceptsExplicitlyClearedStructuralWarning(t *testing.T) {
+	body := "第三章\n\n林澈把手机塞回口袋，先看了一眼桥口的人群。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 3, BodySHA256: hash, ContractStatus: "met", Verdict: "rewrite",
+		Issues: []domain.ConsistencyIssue{{
+			Type: "aesthetic", Severity: "warning",
+			Description: "一句现场调侃略硬，但当前表达不伤害阅读体验。",
+		}},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Score: 100, Verdict: "pass", Comment: "合同一致。"},
+			{Dimension: "character", Score: 100, Verdict: "pass", Comment: "人物一致。"},
+			{Dimension: "pacing", Score: 100, Verdict: "pass", Comment: "节奏通过。"},
+			{Dimension: "continuity", Score: 100, Verdict: "pass", Comment: "连续性通过。"},
+			{Dimension: "foreshadow", Score: 100, Verdict: "pass", Comment: "伏笔通过。"},
+			{Dimension: "hook", Score: 100, Verdict: "pass", Comment: "钩子通过。"},
+			{Dimension: "aesthetic", Score: 90, Verdict: "pass", Comment: "审美通过。"},
+			{Dimension: "ai_voice_detection", Score: 90, Verdict: "pass", Comment: "dialogue_conveyor_overuse 提示为 warning，原文已通过主视角停留有效打断，无需改写。"},
+		},
+	}
+	mechanical := &reviewreport.MechanicalGatePayload{
+		Chapter: 3, BodySHA256: hash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 2.57, BlendedAIGCPercent: 2.57,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(98), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{{
+			Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning, Actual: 1,
+		}},
+	}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 3, BodySHA256: hash, Label: "需打磨", Summary: "命中 1 项 warning 级红旗。",
+		Metrics:  domain.ChapterAIVoiceMetrics{Chapter: 3, ParagraphCount: 40, SentenceCount: 80},
+		RedFlags: []domain.AIVoiceRedFlag{{Rule: "chapter_function_repetition", Severity: "warning"}},
+	}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 3, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true, Blocking: false,
+	}
+
+	if reviewHasStructuralProseFailure(&entry, mechanical) {
+		t.Fatal("an explicitly inspected and effectively interrupted structural warning should not preempt consensus reconciliation")
+	}
+	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("same-hash independent passing gates should reconcile the explicitly cleared warning")
+	}
+	if entry.Verdict != "accept" || len(entry.Issues) != 0 {
+		t.Fatalf("reconciled entry = %+v", entry)
+	}
+	if !reviewreport.ApplyExternalCorroborationWithEditor(mechanical, deepSeekExternalAIJudge(judge), &entry) {
+		t.Fatal("accepted exact-body Editor evidence should permit same-hash external calibration")
+	}
+	if got := reviewreport.RewriteDisposition(mechanical, &analysis, deepSeekExternalAIJudge(judge), &entry); got != "可选" {
+		t.Fatalf("shared artifact gate disposition = %q, want 可选", got)
+	}
+}
+
+func TestReconcileWarningOnlyEditorReviewAcceptsChineseExactBodyClearance(t *testing.T) {
+	body := "第一章\n\n饭桌上的快接话停在父亲推开的鱼盘旁。"
+	hash := reviewreport.BodySHA256(body)
+	entry := domain.ReviewEntry{
+		Chapter: 1, BodySHA256: hash, ContractStatus: "met", Verdict: "rewrite",
+		Issues: []domain.ConsistencyIssue{{
+			Type: "pacing", Severity: "warning",
+			Description: "对白传送带在家庭饭桌快接话中成立，但本章不构成强制改写。",
+		}},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Score: 100, Verdict: "pass"},
+			{Dimension: "character", Score: 100, Verdict: "pass"},
+			{Dimension: "pacing", Score: 100, Verdict: "pass"},
+			{Dimension: "continuity", Score: 90, Verdict: "pass"},
+			{Dimension: "foreshadow", Score: 100, Verdict: "pass"},
+			{Dimension: "hook", Score: 100, Verdict: "pass"},
+			{Dimension: "aesthetic", Score: 100, Verdict: "pass"},
+			{Dimension: "ai_voice_detection", Score: 90, Verdict: "pass", Comment: "物件回应延迟命中3次、对白传送带19个重叠窗口，均为警示级别；正文已有动作与沉默作为有效打断，且有物件延迟与缺席；不影响本单章阅读，无需改写。"},
+		},
+	}
+	mechanical := &reviewreport.MechanicalGatePayload{
+		Chapter: 1, BodySHA256: hash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 7.17, ZhuqueCompositePercent: 2.02, LegacyHeuristicPercent: 1.49,
+			Stats: aigc.Stats{Hanzi: 2400, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(100), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{
+			{Rule: "object_response_rhythm_flat", Severity: rules.SeverityWarning, Actual: 3},
+			{Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning, Actual: 19},
+			{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 7.17},
+		},
+	}
+	analysis := domain.AIVoiceAnalysis{
+		Chapter: 1, BodySHA256: hash, Label: "需打磨", Summary: "仅有 advisory warning。",
+		Metrics: domain.ChapterAIVoiceMetrics{Chapter: 1, ParagraphCount: 52, SentenceCount: 105},
+	}
+	judge := &deepseekAIJudgeArtifact{
+		Chapter: 1, BodySHA256: hash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 3, AdviceComplete: true,
+	}
+
+	if !reconcileWarningOnlyEditorReview(&entry, hash, mechanical, analysis, judge) {
+		t.Fatal("exact-body Chinese clearance and passing external evidence should reconcile statistical warnings")
+	}
+	if entry.Verdict != "accept" || len(entry.Issues) != 0 || !mechanical.ExternalCorroborated ||
+		reviewExistingAIGCGatePercent(mechanical.AIGCReport) >= deepseekAIJudgePassExclusive {
+		t.Fatalf("reconciled entry=%+v mechanical=%+v", entry, mechanical)
+	}
+}
+
 func TestReconcileWarningOnlyEditorReviewAcceptsCalibratedLocalFalsePositive(t *testing.T) {
 	body := "第一章\n\n林澈回到青山县，先把眼前的事做完。"
 	hash := reviewreport.BodySHA256(body)
@@ -231,7 +414,7 @@ func TestReconcileWarningOnlyEditorReviewAcceptsNonblockingAIVoiceFailDimension(
 				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(88), "blockers": []string{},
 			}},
 		},
-		RuleViolations: []rules.Violation{{Rule: "not_but_overuse", Severity: rules.SeverityWarning}},
+		RuleViolations: []rules.Violation{{Rule: "object_response_overuse", Severity: rules.SeverityWarning}},
 	}
 	analysis := domain.AIVoiceAnalysis{
 		Chapter: 2, BodySHA256: hash, Label: "需打磨", Summary: "命中 1 项 warning 级红旗。",

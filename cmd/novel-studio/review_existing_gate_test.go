@@ -66,12 +66,34 @@ func TestParseReviewIssuesSkipsNonActionablePraiseAndOptionalAdvice(t *testing.T
 ## 主要问题（按严重度排序）
 1. **无严重问题。** 本章各项 red flag 检测的"警告"实为优秀写作的表现。
 2. **次要优化建议（审美，非必要）：** 某句可以更含混，但非必需。
+3. protagonist_waver_missing 已有正文证据，无需补充修改。
+4. dialogue_conveyor_overuse 已被动作打断，不构成当前章问题。
+5. 某个判断可再强化，但已满足后果链，属可选优化。
 
 ## 结论
 通过，不建议改写。`
 
 	if issues := parseReviewIssues(md); len(issues) != 0 {
 		t.Fatalf("expected non-actionable lines to be skipped, got %+v", issues)
+	}
+}
+
+func TestParseReviewDimensionsPreservesStructuralClearanceTail(t *testing.T) {
+	longPrefix := strings.Repeat("前置证据，", 70)
+	md := "| 8 AI 腔检测 | 3 | " + longPrefix +
+		"dialogue_conveyor_overuse warning：已有动作换挡，不触发返工。" +
+		"object_response_rhythm_flat warning：已有延迟回应，无需改写。 |"
+	dimensions := parseReviewDimensions(md)
+	if len(dimensions) != 1 {
+		t.Fatalf("dimensions=%d, want 1", len(dimensions))
+	}
+	for _, want := range []string{
+		"dialogue_conveyor_overuse warning", "不触发返工",
+		"object_response_rhythm_flat warning", "无需改写",
+	} {
+		if !strings.Contains(dimensions[0].Comment, want) {
+			t.Fatalf("long dimension comment lost clearance %q: %s", want, dimensions[0].Comment)
+		}
 	}
 }
 
@@ -90,6 +112,44 @@ func TestParseReviewIssuesKeepsActionableIssue(t *testing.T) {
 	}
 	if issues[0].Description != "第12段总结腔仍需改成动作后果。" {
 		t.Fatalf("unexpected issue: %+v", issues[0])
+	}
+}
+
+func TestSanitizeEditorReviewAcceptsExplicitZeroActionRewrite(t *testing.T) {
+	dimensions := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
+	for _, name := range reviewDimensionNames {
+		dimensions = append(dimensions, domain.DimensionScore{
+			Dimension: name, Score: 100, Verdict: "pass", Comment: "通过",
+		})
+	}
+	zeroAction := "无。本章所有 review_checks 逐项通过；AI 腔仅命中非阻断 warning，本章已有独立事件与结果，无需返工。"
+	entry := domain.ReviewEntry{
+		Chapter: 3, ContractStatus: "met", Verdict: "rewrite", AffectedChapters: []int{3},
+		Dimensions: dimensions,
+		Issues: []domain.ConsistencyIssue{{
+			Type: "aesthetic", Severity: "warning", Description: zeroAction, Evidence: zeroAction,
+		}},
+	}
+
+	removed := sanitizeEditorReviewForProject(nil, 3, "正文", domain.AIVoiceAnalysis{}, &entry)
+	if len(removed) != 1 || len(entry.Issues) != 0 || entry.Verdict != "accept" || len(entry.AffectedChapters) != 0 {
+		t.Fatalf("zero-action contradiction was not normalized: removed=%v entry=%+v", removed, entry)
+	}
+}
+
+func TestSanitizeEditorReviewKeepsExplicitActionableRewrite(t *testing.T) {
+	entry := domain.ReviewEntry{
+		Chapter: 3, ContractStatus: "met", Verdict: "rewrite", AffectedChapters: []int{3},
+		Dimensions: []domain.DimensionScore{{Dimension: "aesthetic", Score: 100, Verdict: "pass", Comment: "通过"}},
+		Issues: []domain.ConsistencyIssue{{
+			Type: "aesthetic", Severity: "warning",
+			Description: "无需整章返工，但第12段对白传送带仍需修改，必须返工该段。",
+		}},
+	}
+
+	removed := sanitizeEditorReviewForProject(nil, 3, "正文", domain.AIVoiceAnalysis{}, &entry)
+	if len(removed) != 0 || len(entry.Issues) != 1 || entry.Verdict != "rewrite" {
+		t.Fatalf("actionable rewrite was incorrectly relaxed: removed=%v entry=%+v", removed, entry)
 	}
 }
 
@@ -163,6 +223,190 @@ func TestSanitizeEditorReviewDropsClaimsContradictedByBodyAndApprovedPlan(t *tes
 	}
 	if strings.Contains(entry.Summary, "动摇缺失") || strings.Contains(entry.Dimensions[0].Comment, "waver_missing") {
 		t.Fatalf("stale contradicted diagnosis survived: %+v", entry)
+	}
+}
+
+func TestSanitizeEditorReviewDropsFutureAppointmentAndExistingCauseChoiceMisreads(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Contract: domain.ChapterContract{
+			RequiredBeats:   []string{"返工完成后约好明早九点复看；主角先应下未来约定，再主动查看首笔结算。"},
+			ForbiddenMoves:  []string{"不得提前完成次日复看。"},
+			EvaluationFocus: []string{"父亲护场必须直接推动主角守密选择。"},
+		},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			TrendLanguage: []domain.TrendLanguagePlan{{Item: "呱，", CharacterCarrier: "表弟可选使用。"}},
+			DecisionPoints: []string{
+				"父亲替主角挡话后，主角必须在公开秘密与守密之间选择，落点为收起手机。",
+				"应下明早九点后，主角主动查看结算；复看本身留到次日。",
+			},
+			CausalBeats: []domain.CausalSimulationBeat{{
+				Cause:           "父亲替主角挡住追问并接走目光。",
+				CharacterChoice: "主角压下公开秘密的冲动，收起手机守密。",
+			}},
+			EndingContract: domain.EndingConsequenceContract{
+				EndingMode:      "未来约定先落地，能力结算随后确认。",
+				ConcreteAnchor:  "主角应下明早九点后主动查看结算。",
+				NextChapterPull: "次日复看尚未发生。",
+				ForbiddenEndings: []string{
+					"提前写次日复看。",
+				},
+			},
+		},
+	}
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	body := `父亲把鱼盘推开。只要把那张额度卡亮出来，桌上的追问马上能停；可父亲仍握着酒杯，像替他挡住问话，也接走了全桌人的目光。
+
+他把手机塞回兜里，没有报出数字。
+
+巡查人说：“明早九点我再来复看。”
+
+“九点，我到。”
+
+等两人的话落稳，他才主动点开卡片。
+
+【首笔支出结算完成。】`
+	dimensions := []domain.DimensionScore{
+		{Dimension: "pacing", Score: 90, Verdict: "pass", Comment: "鱼盘后的父亲护场因果缺失，未兑现守密选择。"},
+		{Dimension: "ai_voice_detection", Score: 90, Verdict: "pass", Comment: "热梗‘呱’没有出现，应补上。Contract 要求结算延至次日九点，需将当前结算移至次日九点场景。dialogue_conveyor_overuse warning：饭桌已有沉默和动作换挡，不触发返工。"},
+	}
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "met", Verdict: "rewrite", AffectedChapters: []int{1}, Dimensions: dimensions,
+		Summary: "当前章违反延迟查看约定，家庭守密因果也断裂。",
+		Issues: []domain.ConsistencyIssue{
+			{Severity: "warning", Description: "系统结算违反延迟约定，需将蓝色卡片结算移至次日九点场景。"},
+			{Severity: "warning", Description: "饭桌因果断裂：父亲护场没有推动守密选择，鱼盘后的心理因果缺失。"},
+			{Severity: "warning", Description: "某句标签化，仍可改得更具体。"},
+		},
+	}
+
+	removed := sanitizeEditorReviewForProject(s, 1, body, domain.AIVoiceAnalysis{}, &entry)
+	if len(entry.Issues) != 1 || !strings.Contains(entry.Issues[0].Description, "标签化") {
+		t.Fatalf("mixed issues were not narrowly sanitized: removed=%v issues=%+v", removed, entry.Issues)
+	}
+	if strings.Contains(entry.Summary, "违反延迟") || strings.Contains(entry.Summary, "因果也断裂") {
+		t.Fatalf("stale summary survived: %s", entry.Summary)
+	}
+	if strings.Contains(entry.Dimensions[0].Comment, "因果缺失") ||
+		!strings.Contains(entry.Dimensions[0].Comment, "护场已经直接推动守密选择") {
+		t.Fatalf("cause-choice dimension was not repaired: %s", entry.Dimensions[0].Comment)
+	}
+	aiComment := entry.Dimensions[1].Comment
+	for _, stale := range []string{"呱", "移至次日九点"} {
+		if strings.Contains(aiComment, stale) {
+			t.Fatalf("stale AI dimension claim %q survived: %s", stale, aiComment)
+		}
+	}
+	for _, want := range []string{"object_response_rhythm_flat warning", "无需改写", "dialogue_conveyor_overuse warning", "不触发返工"} {
+		if !strings.Contains(aiComment, want) {
+			t.Fatalf("AI dimension missing %q after repair: %s", want, aiComment)
+		}
+	}
+}
+
+func TestDeferredCheckMisreadGuardKeepsRealOrUnprovenFailures(t *testing.T) {
+	basePlan := domain.ChapterPlan{
+		Contract: domain.ChapterContract{
+			RequiredBeats:  []string{"约好明早九点后，主角主动查看结算。"},
+			ForbiddenMoves: []string{"不得提前完成次日复看。"},
+		},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			DecisionPoints: []string{"应下明早九点后主动查看结算。"},
+			EndingContract: domain.EndingConsequenceContract{
+				NextChapterPull:  "次日复看尚未发生。",
+				ForbiddenEndings: []string{"提前写次日复看。"},
+			},
+		},
+	}
+	complaint := "需将结算移至次日九点场景。"
+	validBody := "巡查人约明早九点复看。主角说：‘九点，我到。’等人走后，他才主动点开卡片。【支出结算完成。】"
+	if !reviewMisreadsDeferredCheckAfterFutureAppointment(complaint, validBody, &basePlan) {
+		t.Fatal("valid appointment -> acceptance -> active check -> settlement evidence was not recognized")
+	}
+
+	arrivalPlan := basePlan
+	arrivalPlan.Contract.RequiredBeats = []string{"次日九点到场复看完成后，主角主动查看结算。"}
+	arrivalPlan.CausalSimulation.DecisionPoints = []string{"次日九点复看完成后主动查看结算。"}
+	arrivalPlan.CausalSimulation.EndingContract = domain.EndingConsequenceContract{}
+	if reviewMisreadsDeferredCheckAfterFutureAppointment(complaint, validBody, &arrivalPlan) {
+		t.Fatal("guard cleared a plan that truly requires next-day arrival before checking")
+	}
+
+	reversedBody := "主角先主动点开卡片。【支出结算完成。】巡查人才约明早九点复看。主角说：‘九点，我到。’"
+	if reviewMisreadsDeferredCheckAfterFutureAppointment(complaint, reversedBody, &basePlan) {
+		t.Fatal("guard cleared reversed body evidence")
+	}
+
+	farBody := "巡查人约明早九点复看。主角说：‘九点，我到。’" + strings.Repeat("过场", 1000) + "他才主动点开卡片。【支出结算完成。】"
+	if reviewMisreadsDeferredCheckAfterFutureAppointment(complaint, farBody, &basePlan) {
+		t.Fatal("guard stitched evidence across a distant scene")
+	}
+}
+
+func TestSanitizeEditorReviewDoesNotOverrideContractMiss(t *testing.T) {
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Contract: domain.ChapterContract{
+			RequiredBeats:  []string{"约好明早九点后主动查看结算。"},
+			ForbiddenMoves: []string{"不得提前完成次日复看。"},
+		},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			DecisionPoints: []string{"应下明早九点后主动查看结算。"},
+			EndingContract: domain.EndingConsequenceContract{NextChapterPull: "次日复看尚未发生。", ForbiddenEndings: []string{"提前写次日复看。"}},
+		},
+	}
+	s := store.NewStore(t.TempDir())
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	body := "巡查人约明早九点复看。主角说：‘九点，我到。’他才主动点开卡片。【支出结算完成。】"
+	entry := domain.ReviewEntry{
+		Chapter: 1, ContractStatus: "miss", ContractMisses: []string{"真实合同缺口"}, Verdict: "rewrite",
+		Issues: []domain.ConsistencyIssue{{Severity: "warning", Description: "需将结算移至次日九点场景。"}},
+		Dimensions: []domain.DimensionScore{{
+			Dimension: "continuity", Score: 60, Verdict: "fail",
+			Comment: "系统结算需将当前结算移至次日九点场景。",
+		}},
+	}
+	removed := sanitizeEditorReviewForProject(s, 1, body, domain.AIVoiceAnalysis{}, &entry)
+	if len(removed) != 0 || len(entry.Issues) != 1 {
+		t.Fatalf("contract miss was incorrectly overridden: removed=%v entry=%+v", removed, entry)
+	}
+	if entry.Dimensions[0].Score != 60 || entry.Dimensions[0].Verdict != "fail" ||
+		!strings.Contains(entry.Dimensions[0].Comment, "移至次日九点") {
+		t.Fatalf("contract-miss dimension evidence was incorrectly sanitized: %+v", entry.Dimensions[0])
+	}
+}
+
+func TestSanitizeEditorReviewRepairsColdDrinkOwnerVetoMisread(t *testing.T) {
+	body := `冷饮摊那边第一次把短杆固定在桌脚外侧，老板把空箱往外一推，轮子差点擦上支架。她当场摇头，让他们往里收两指。贺骁拆下重装。`
+	dimensions := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
+	for _, name := range reviewDimensionNames {
+		dimensions = append(dimensions, domain.DimensionScore{Dimension: name, Score: 90, Verdict: "pass", Comment: "通过"})
+	}
+	dimensions[1].Score = 80
+	dimensions[1].Comment = "冷饮摊的空箱试走否决是沈知遥和林澈自己做的，第四家本人没有行动级阻力。"
+	entry := domain.ReviewEntry{
+		Chapter: 2, ContractStatus: "met", Verdict: "accept", Dimensions: dimensions,
+		Issues: []domain.ConsistencyIssue{{
+			Type: "character", Severity: "warning",
+			Description: "冷饮摊本人没有行动级阻力，未由摊主现场否决。",
+		}},
+	}
+
+	removed := sanitizeEditorReviewForProject(nil, 2, body, domain.AIVoiceAnalysis{}, &entry)
+	if len(removed) != 1 || len(entry.Issues) != 0 {
+		t.Fatalf("veto misread was not removed: removed=%v issues=%+v", removed, entry.Issues)
+	}
+	if entry.Dimensions[1].Score < 90 || !strings.Contains(entry.Dimensions[1].Comment, "老板亲自把空箱往外推") ||
+		!strings.Contains(entry.Dimensions[1].Comment, "迫使方案拆下重装") {
+		t.Fatalf("character dimension was not repaired from body facts: %+v", entry.Dimensions[1])
 	}
 }
 

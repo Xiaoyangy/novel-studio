@@ -1,5 +1,9 @@
 package domain
 
+import "strings"
+
+const AIVoiceChapterFunctionRepetitionRule = "chapter_function_repetition"
+
 // AphorismHit 是反 AI 腔规则命中的格言/宣言式句子。
 type AphorismHit struct {
 	Rule      string `json:"rule"`
@@ -19,6 +23,47 @@ type AIVoiceRedFlag struct {
 	Limit       float64 `json:"limit,omitempty"`
 	Suggestion  string  `json:"suggestion,omitempty"`
 	Replacement string  `json:"replacement,omitempty"`
+}
+
+// IsAIVoicePlanningAdvice identifies a future-facing chapter-shape note. It is
+// rule-based rather than severity-only so reports persisted before the rule
+// changed from warning to info remain non-blocking when reloaded.
+func IsAIVoicePlanningAdvice(flag AIVoiceRedFlag) bool {
+	return strings.TrimSpace(flag.Rule) == AIVoiceChapterFunctionRepetitionRule
+}
+
+// IsAdvisoryAIVoiceFlag identifies diagnostics that must not alter the current
+// chapter score, label, rewrite queue, or prose-facing repair rules.
+func IsAdvisoryAIVoiceFlag(flag AIVoiceRedFlag) bool {
+	if IsAIVoicePlanningAdvice(flag) {
+		return true
+	}
+	switch strings.TrimSpace(flag.Severity) {
+	case "info", "note":
+		return true
+	default:
+		return false
+	}
+}
+
+// ActionableAIVoiceAnalysis returns the current-chapter portion of an analysis.
+// Advisory notes remain durable in the review artifact, but must not leak into
+// Editor scoring, rewrite briefs, or prose-facing provider contexts.
+func ActionableAIVoiceAnalysis(analysis *AIVoiceAnalysis) *AIVoiceAnalysis {
+	if analysis == nil {
+		return nil
+	}
+	copy := *analysis
+	copy.RedFlags = nil
+	for _, flag := range analysis.RedFlags {
+		if !IsAdvisoryAIVoiceFlag(flag) {
+			copy.RedFlags = append(copy.RedFlags, flag)
+		}
+	}
+	if len(copy.RedFlags) == 0 {
+		return nil
+	}
+	return &copy
 }
 
 // AIVoiceScorePoint 记录模型/规则在不同轮次给出的 AI 腔风险。

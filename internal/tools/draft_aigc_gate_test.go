@@ -222,6 +222,52 @@ func TestDraftAIGCGateKeepsRealWholeSegmentRiskBlocking(t *testing.T) {
 	}
 }
 
+func TestDraftAIGCBlockPersistsSingleUseWholeRerenderEvidence(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("林澈把价牌搬到灯下，回头又看了一眼入口。", 90)
+	if err := st.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	external := 2.0
+	gate := draftAIGCGateResult{
+		RawLocalGatePercent:          79.33,
+		EffectiveGatePercent:         79.33,
+		PassExclusivePercent:         4,
+		ExternalAIProbabilityPercent: &external,
+		CorroborationBlockedBy:       []string{"whole_text_or_segment_risk"},
+		RewriteFocus: []string{
+			"拆开连续对白传送带，让主视角判断在现场留下余波。",
+			"减少物件对每个动作的即时确认。",
+		},
+	}
+
+	if err := persistDraftAIGCRerenderRequirement(st, 1, content, gate); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectDraftExternalGate(st.Dir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Status != DraftExternalGateRerenderAuthorized || inspection.Requirement == nil {
+		t.Fatalf("whole-text block did not authorize one full rerender: %+v", inspection)
+	}
+	requirement := inspection.Requirement
+	if requirement.Source != "local_mechanical_gate" || requirement.EvaluatedBodySHA256 != reviewreport.BodySHA256(content) ||
+		requirement.AIProbabilityPercent != 79 || len(requirement.RevisionPlan) != 2 {
+		t.Fatalf("persisted gate evidence incomplete: %+v", requirement)
+	}
+	context, err := loadDraftExternalJudgeContext(st.Dir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if context["blocking"] != true || context["source"] != "local_mechanical_gate" || context["revision_plan"] == nil {
+		t.Fatalf("draft context did not expose the local whole-text block: %#v", context)
+	}
+}
+
 func writeDraftExternalJudgeStatus(t *testing.T, projectDir string, chapter int, status draftExternalJudgeStatus) {
 	t.Helper()
 	dir := filepath.Join(projectDir, "reviews", "drafts")

@@ -28,7 +28,7 @@ func NewPlanChapterTool(store *store.Store) *PlanChapterTool {
 
 func (t *PlanChapterTool) Name() string { return "plan_chapter" }
 func (t *PlanChapterTool) Description() string {
-	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、读者留存筛选、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；计划是素材池与边界，不是正文清单，必须明确哪些只留台账、哪些延后揭示、哪些压缩不写；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
+	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、文学渲染镜头合同、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、读者留存筛选、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；计划是素材池与边界，不是正文清单，必须明确哪些只留台账、哪些延后揭示、哪些压缩不写；文学渲染只选择本章真正有功能的卡并保留 source_refs，不得做成固定次数或九项全填；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
 }
 func (t *PlanChapterTool) Label() string { return "规划章节" }
 
@@ -761,6 +761,11 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	require(len(sim.DecisionPoints) > 0, "causal_simulation.decision_points")
 	require(len(sim.OutcomeShift) > 0, "causal_simulation.outcome_shift")
 	require(len(sim.VoiceLogic) > 0, "causal_simulation.voice_logic")
+	if sim.LiteraryRendering != nil {
+		if err := sim.LiteraryRendering.Validate(); err != nil {
+			require(false, "causal_simulation.literary_rendering_plan("+err.Error()+")")
+		}
+	}
 	if len(sim.TrendLanguage) > 0 {
 		require(domain.CompleteTrendLanguagePlan(sim.TrendLanguage), "causal_simulation.trend_language_plan")
 		if problems := domain.TrendLanguagePlanProblems(sim.TrendLanguage); len(problems) > 0 {
@@ -1196,6 +1201,37 @@ func hasEndingConsequenceContract(contract domain.EndingConsequenceContract) boo
 		len(contract.ForbiddenEndings) > 0
 }
 
+func literaryRenderingPlanSchema() map[string]any {
+	sourceRefsDescription := "来源追踪；优先使用 literary-rendering#<card_id>（如 focalization-boundary、psychic-distance、scene-summary、goal-causality、emotion-appraisal、motif-return、syntax-rhythm、free-indirect-discourse、dialogue-subtext），也接受 URL 或 RAG trace ID；只要求非空且不重复"
+	sceneMode := schema.Object(
+		schema.Property("target", schema.String("要渲染的既定场景、事件或状态变化；不能借此新增剧情义务")).Required(),
+		schema.Property("mode", schema.Enum("叙事呈现方式", "scene", "summary", "omission", "pause")).Required(),
+		schema.Property("distance", schema.Enum("与焦点人物意识/感官的叙事距离", "close", "medium", "far")).Required(),
+		schema.Property("state_change", schema.String("该目标完成后读者能确认的状态变化")).Required(),
+		schema.Property("render_move", schema.String("把状态变化落实为感知、动作、句法、留白或现场证据的具体做法")).Required(),
+	)
+	activeLens := schema.Object(
+		schema.Property("kind", schema.String("开放式文学镜头名称；按本章需要命名，不限定固定分类")).Required(),
+		schema.Property("target", schema.String("该镜头作用的场景、对象、关系或句群")).Required(),
+		schema.Property("move", schema.String("正文中的具体操作")).Required(),
+		schema.Property("why", schema.String("为何该操作服务本章焦点和状态变化")).Required(),
+		schema.Property("avoid", schema.String("需要避免的解释腔、套话、越界信息或过度修辞")).Required(),
+		schema.Property("source_refs", schema.Array(sourceRefsDescription, schema.String("稳定卡 ID、URL 或 RAG trace ID"))).Required(),
+	)
+
+	return schema.Object(
+		schema.Property("focalizer", schema.String("本章感知与判断的焦点人物或受限观察位置")).Required(),
+		schema.Property("narrative_access", schema.Enum("叙述可进入焦点人物意识的范围", "internal", "external", "mixed")).Required(),
+		schema.Property("knowledge_boundary", schema.String("正文不可越过的知识、证据和推断边界")).Required(),
+		schema.Property("perceptual_bias", schema.String("焦点人物会优先注意、误读或忽略什么")).Required(),
+		schema.Property("scene_modes", schema.Array("可选且可为空；按目标选择 scene/summary/omission/pause，不设数量配额", sceneMode)),
+		schema.Property("active_lenses", schema.Array("可选且可为空；文学镜头 kind 保持开放，不设数量配额", activeLens)),
+		schema.Property("summary_omission_policy", schema.String("哪些过程概述、跳过或只留后果，以及为何不削弱因果可读性")).Required(),
+		schema.Property("afterimage", schema.String("章末留在读者感官、情绪或意象中的具体余波")).Required(),
+		schema.Property("source_refs", schema.Array(sourceRefsDescription, schema.String("稳定卡 ID、URL 或 RAG trace ID"))).Required(),
+	)
+}
+
 // causalSimulationSchema 的分批路径只暴露正文真正依赖的紧凑契约，完整性由
 // finalize 的服务端校验兜底。单发路径暂保留兼容 schema，旧调用不会失效。
 func causalSimulationSchema(strict bool) map[string]any {
@@ -1376,6 +1412,7 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("outcome_shift", schema.Array("最多4项章末状态变化", schema.String(""))),
 		schema.Property("voice_logic", schema.Array("最多4张：主角、关系核心、系统、一名关键配角", voiceLogic)),
 		schema.Property("dialogue_scene_blueprints", schema.Array("可选；默认省略，勿重复世界模拟或预写对白", dialogueBlueprint)),
+		schema.Property("literary_rendering_plan", literaryRenderingPlanSchema()),
 		schema.Property("emotional_logic", schema.Array("可选；默认由主角选择承载，不逐项填心理矩阵", emotionalLogic)),
 		schema.Property("anti_ai_execution_plan", antiAI),
 		schema.Property("trend_language_plan", schema.Array("可选热梗上限；默认省略，不把梗变成硬台词", trendLanguage)),
@@ -1986,6 +2023,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("initial_state", schema.Array("关键角色开章状态", characterState)),
 		schema.Property("voice_logic", schema.Array("关键角色本章说话逻辑：证据来源、常用话术、禁用偏移和对话自检", characterVoiceLogic)),
 		schema.Property("dialogue_scene_blueprints", schema.Array("关键对白场景蓝图：按场景压力、情绪温度、关系权力和角色目标选择对话模式；对白先入场只是一种 opening_strategy", dialogueSceneBlueprint)),
+		schema.Property("literary_rendering_plan", literaryRenderingPlanSchema()),
 		schema.Property("crowd_roles", schema.Array("捧场/凑数/群体角色的轻量设计；不作为完整人物动力学，除非升级为关键角色", crowdRole)),
 		schema.Property("review_refinement", reviewRefinement),
 		schema.Property("environment_state", schema.Array("环境信息性规划：地点/物件/空间如何承载信息、规则压力和状态变化", environmentSignal)),

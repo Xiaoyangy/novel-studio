@@ -193,6 +193,7 @@ func proseRenderingViolations(content string) []qualityrules.Violation {
 		"pov_interiority_thin":            {},
 		"bureaucratic_register_overuse":   {},
 		"dialogue_aphorism_overuse":       {},
+		"dialogue_micro_period_chain":     {},
 		"system_message_overpacked":       {},
 	}
 	var out []qualityrules.Violation

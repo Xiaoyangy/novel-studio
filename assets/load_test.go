@@ -1,6 +1,7 @@
 package assets
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,11 @@ func TestLoadPromptsIncludeGoldenThreeAndWholeTextAIGCContracts(t *testing.T) {
 	if !strings.Contains(bundle.Prompts.Writer, "三条原始曲线") {
 		t.Fatalf("writer prompt missing whole-text raw-curve contract")
 	}
+	for _, want := range []string{"跨章功能建议边界", "不得降低当前章任何维度评分", "不能把面向下一章的优化意见倒签成当前章返工理由"} {
+		if !strings.Contains(bundle.Prompts.Editor, want) {
+			t.Fatalf("editor prompt missing next-chapter advice boundary %q", want)
+		}
+	}
 }
 
 func TestLoadReferencesIncludesWritingTechniquesDigest(t *testing.T) {
@@ -101,6 +107,125 @@ func TestLoadReferencesIncludesWebReferenceGuidelines(t *testing.T) {
 	}
 	if !strings.Contains(bundle.References.WebReferenceGuidelines, "热梗") {
 		t.Fatalf("expected web reference guidelines to define trend language handling")
+	}
+}
+
+func TestLoadReferencesIncludesLiteraryRendering(t *testing.T) {
+	bundle := Load("default")
+	for _, want := range []string{
+		"文学渲染协议",
+		"焦点化",
+		"自由间接话语",
+		"不得设置固定次数、固定比例或统一句长",
+		"中文转译边界",
+		"话题持续、零回指、承前连接和上下文可恢复性",
+		"https://www-archiv.fdm.uni-hamburg.de/lhn/node/26.html",
+		"https://www.qk.sjtu.edu.cn/cfls/CN/10.3969/j.issn.1674-8921.2015.12.014",
+		"card_id: focalization-boundary",
+		"card_id: psychic-distance",
+		"card_id: scene-summary",
+		"card_id: goal-causality",
+		"card_id: emotion-appraisal",
+		"card_id: motif-return",
+		"card_id: syntax-rhythm",
+		"card_id: free-indirect-discourse",
+		"card_id: dialogue-subtext",
+	} {
+		if !strings.Contains(bundle.References.LiteraryRendering, want) {
+			t.Fatalf("expected literary rendering reference to contain %q", want)
+		}
+	}
+	for _, want := range []string{
+		`"version": 1`,
+		`"id": "focalization-boundary"`,
+		`"id": "dialogue-subtext"`,
+		`"hard_boundary": true`,
+		"不做九项清单",
+	} {
+		if !strings.Contains(bundle.References.LiteraryRenderingCards, want) {
+			t.Fatalf("expected compact literary rendering cards to contain %q", want)
+		}
+	}
+	var catalog struct {
+		Version int `json:"version"`
+		Cards   []struct {
+			ID           string `json:"id"`
+			Decision     string `json:"decision"`
+			Move         string `json:"move"`
+			Avoid        string `json:"avoid"`
+			HardBoundary bool   `json:"hard_boundary"`
+		} `json:"cards"`
+	}
+	if err := json.Unmarshal([]byte(bundle.References.LiteraryRenderingCards), &catalog); err != nil {
+		t.Fatalf("decode compact literary rendering cards: %v", err)
+	}
+	if catalog.Version != 1 || len(catalog.Cards) != 9 {
+		t.Fatalf("unexpected compact literary rendering catalog: version=%d cards=%d", catalog.Version, len(catalog.Cards))
+	}
+	for _, card := range catalog.Cards {
+		if card.ID == "" || card.Decision == "" || card.Move == "" || card.Avoid == "" {
+			t.Fatalf("compact literary rendering card is incomplete: %#v", card)
+		}
+	}
+}
+
+func TestLoadReferencesIncludesGenreStyleProfiles(t *testing.T) {
+	bundle := Load("default")
+	for _, want := range []string{
+		"题材专项写法：轻松县城经营、系统、单女主",
+		"card_id: spoken-breath-group",
+		"一个“气口”",
+		"唯一恋爱指向",
+	} {
+		if !strings.Contains(bundle.References.GenreStyleCraft, want) {
+			t.Fatalf("expected genre style craft to contain %q", want)
+		}
+	}
+	var catalog struct {
+		Version  int `json:"version"`
+		Profiles []struct {
+			ID                   string `json:"id"`
+			DialogueBreathPolicy string `json:"dialogue_breath_policy"`
+			RomancePolicy        string `json:"romance_policy"`
+			Cards                []struct {
+				ID string `json:"id"`
+			} `json:"cards"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(bundle.References.GenreStyleProfiles), &catalog); err != nil {
+		t.Fatalf("decode genre style profiles: %v", err)
+	}
+	if catalog.Version != 1 || len(catalog.Profiles) != 1 {
+		t.Fatalf("unexpected genre style catalog: version=%d profiles=%d", catalog.Version, len(catalog.Profiles))
+	}
+	profile := catalog.Profiles[0]
+	if profile.ID != "county-light-comedy-system-single-romance" || len(profile.Cards) != 8 {
+		t.Fatalf("unexpected genre style profile: %#v", profile)
+	}
+	if !strings.Contains(profile.DialogueBreathPolicy, "完整气口") || !strings.Contains(profile.RomancePolicy, "唯一恋爱线") {
+		t.Fatalf("genre style profile lost hard boundaries: %#v", profile)
+	}
+}
+
+func TestWritingPromptsCarryLiteraryRenderingContractWithoutQuotas(t *testing.T) {
+	bundle := Load("default")
+	for name, prompt := range map[string]string{
+		"writer":  bundle.Prompts.Writer,
+		"drafter": bundle.Prompts.Drafter,
+		"editor":  bundle.Prompts.Editor,
+	} {
+		if !strings.Contains(prompt, "literary_render") {
+			t.Fatalf("%s prompt does not connect the literary rendering contract", name)
+		}
+	}
+	if !strings.Contains(bundle.Prompts.Writer, "literary-rendering#<card_id>") {
+		t.Fatal("writer prompt must preserve stable literary card provenance")
+	}
+	if !strings.Contains(bundle.Prompts.Drafter, "文学合同不是九项清单") {
+		t.Fatal("drafter prompt must treat literature methods as selected decisions, not a checklist")
+	}
+	if !strings.Contains(bundle.Prompts.Editor, "才是硬问题") || !strings.Contains(bundle.Prompts.Editor, "软诊断") {
+		t.Fatal("editor prompt must separate hard evidence boundaries from aesthetic diagnostics")
 	}
 }
 

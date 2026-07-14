@@ -169,6 +169,7 @@ func (t *ContextTool) buildArchitectReferences(envelope *architectContextEnvelop
 	t.addPrewriteStorycraftPlan(refs, warn)
 	t.addWorldBackgroundPlan(refs, warn)
 	t.addBrainstorm(refs, warn)
+	t.addGenreStyleReference(envelope.References, refs, warn)
 	envelope.References["references"] = refs
 }
 

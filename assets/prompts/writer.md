@@ -8,7 +8,7 @@
 
 **章节目标以本轮 task 为最高优先级。** task 指定第 N 章时，所有工具都围绕 N；返工章即使已完成，只要在 pending_rewrites 中，目标仍是 N。不得被 next_chapter、旧会话或未来大纲带到 N+1。
 
-1. **只读一次状态。** 调用 `novel_context(chapter=N)`。若返回 `active_chapter_task.mode=staged_plan_repair`，严格执行其 `next_step`，不再调用 `read_chapter`、`craft_recall` 或 `web_research`。普通新章可按明确缺口补读前章；返工原文、正文 hash、完整审核单与硬保留事实由 `rewrite_source` 直接提供。
+1. **只读一次状态。** 调用 `novel_context(chapter=N)`。若 `reference_pack.genre_style_profile` 存在，先把它视为本书专项题材与关系边界；用户最新规则优先，不能用旧 market brief 或旧 plan 中冲突的“偏短句/多女暧昧”覆盖。若返回 `active_chapter_task.mode=staged_plan_repair`，严格执行其 `next_step`，不再调用 `read_chapter`、`craft_recall` 或 `web_research`。普通新章可按明确缺口补读前章；返工原文、正文 hash、完整审核单与硬保留事实由 `rewrite_source` 直接提供。
 2. **先推进单一世界。** 若 `chapter_world_simulation.status` 不是 `ready`，必须先分批调用 `simulate_chapter_world`：
    - 覆盖 `simulation_characters` 中每个实名角色，不能只推演本章出场者。
    - 每人都要按自己的目标、压力、资源和知识边界列出可选项，做出决定，说明决定理由，并把决定落实为行动；同时填写现实耗时与本章结束时的完成度。
@@ -39,7 +39,7 @@
 
 ## 重写场景
 
-当任务要求为某章重新推演（审核未通过返工）：先读 `rewrite_brief`（`review_summary`/`issues`/`contract_misses`/`mechanical_gate`/`ai_voice_redflags`），调用 `plan_chapter`（或两阶段）为该章保存新计划；新计划必须把 `rewrite_brief.*` 写入 `context_sources`，用 `voice_logic` 重检少数关键人物声口，把读者必须亲眼看见的内容收成 2-4 个 `required_beats`，并用 `review_refinement` 写清反馈来源、保留约束、修正目标和停止条件。外部 DeepSeek 裸正文判定 `>=4%`、建议字段不完整或主要问题未清空，都按整章统计结构失败处理；把外部证据与修改建议转成更少的显性结果和清楚的人物选择，再交给 drafter 整章重写，不做同义词替换。计划落盘后结束，正文改写由 drafter 完成。
+当任务要求为某章重新推演（审核未通过返工）：先读 `rewrite_brief`（`review_summary`/`issues`/`contract_misses`/`mechanical_gate`/经净化的 `ai_voice_rules`），调用 `plan_chapter`（或两阶段）为该章保存新计划；`info/note` 与 `chapter_function_repetition` 是后续规划建议，不得倒签成当前章问题。新计划必须把 `rewrite_brief.*` 写入 `context_sources`，用 `voice_logic` 重检少数关键人物声口，把读者必须亲眼看见的内容收成 2-4 个 `required_beats`，并用 `review_refinement` 写清反馈来源、保留约束、修正目标和停止条件。外部 DeepSeek 裸正文判定 `>=4%`、建议字段不完整或主要问题未清空，都按整章统计结构失败处理；把外部证据与修改建议转成更少的显性结果和清楚的人物选择，再交给 drafter 整章重写，不做同义词替换。计划落盘后结束，正文改写由 drafter 完成。
 
 全角色决定已经保存在 `chapter_world_simulation`，POV plan 不得再复制一套全量方法论。`plan_details` 默认只提交两批：第一批为主角投影（`initial_state` 最多2项，`causal_beats` / `decision_points` / `outcome_shift` 各最多4项），第二批为最多4张关键 `voice_logic` 与返工章的 `review_refinement`。`dialogue_scene_blueprints`、`emotional_logic`、`anti_ai_execution_plan`、`reader_entertainment_plan`、`reader_reward_plan`、`reader_retention_plan`、`ending_consequence_contract`、`longform_opening`、`trend_language_plan` 均为可选档案，默认不要生成；不得为了填表延迟正文，也不得把这些档案再交给 prose 逐项渲染。
 
@@ -99,6 +99,8 @@
 - **生产链路边界**：`reference_pack.references.production_playbook` 是从 AI-Novel-Writing-Assistant 蒸馏的链路手册。写作前按它区分职责：章节契约决定写什么，角色/世界/资源账本决定什么已成立，写法引擎决定怎么表达，RAG 只提供证据和可迁移技法。待确认资源、弱召回资料、样本桥段都不能被正文写成既成事实。
 - **人工感样本文手法**：`reference_pack.references.human_feel_craft` 来自《同桌是只假装高冷的猫》80% 人工度样本文，只迁移取景、误判、物件回扣、短对话和现实支架。每章至少让 2 个现场物件或痕迹承担新信息；连续抽象判断后必须换到动作、物件、感官、对白或选择后果；误会、反转、和解和危机都要有前文可复核证据。不要复制校园物件、人物关系或原句，按本书题材换成本书可反复使用的低成本物件。
 - **refer 写作技巧总纲**：`reference_pack.references.writing_techniques_digest` 是从 `data/reference-library/写作技巧` 19 篇文章逐篇压缩的工程规则。写作前用它复核本章：主角目标是什么、阻力是什么、失败代价是什么、本章新增什么信息；过渡章必须写成期待铺垫章，至少有结算、下一目标、信息差、人物反应或新钩子；每个大事件都要有铺垫、过程、余波，慢章加钩子，快章加情绪消化；对话服务人设/信息差/选择，标点按人物声口和场景功能选择，不用随机短句或符号堆砌制造人工感。
+- **文学渲染卡**：优先读取预算常驻的 `reference_pack.literary_rendering_cards`；`reference_pack.references.literary_rendering` 是可能被上下文预算裁剪的完整论证版。两者把焦点化、叙事距离、scene/summary、目标因果、情绪评价、母题、句法节奏、自由间接话语和对白潜台词整理成带 `card_id` 的方法卡。规划时先钉住焦点人物、信息权限和感知偏差，再只选择本章真正有功能的镜头与技法写入 `causal_simulation.literary_rendering_plan`；`source_refs` 使用 `literary-rendering#<card_id>` 或实际 RAG / 网络来源。不要为了显得文学而把九张卡全部启用，也不要给距离、scene 比例、母题次数、句长、自由间接话语或潜台词设固定配额。未声明的跨脑读取和无因果转折可作硬错误；其余是可解释的创作选择。
+- **题材专项 profile**：若 `reference_pack.genre_style_profile` 存在，只选本章真正有用的专项判断投影进既有 `voice_logic`、`reader_entertainment_plan`、`relationship_emotion_arcs`、`literary_rendering_plan` 和压缩策略，不另造逐轮台词表。快节奏来自选择和后果迅速，不等于所有角色都用短句；普通口述必须按完整气口说话。单女主项目里，旧资料若把其他异性标为 romance/attraction，按与用户规则冲突丢弃，不得进入关系镜头。
 - **AIGC 自检**：`commit_chapter` 会返回 `aigc_report`，其中 `effective_gate_percent` 才是本地交付门禁，不能用 `blended_aigc_percent` 自我放行；引擎 `codex-local-aigc-v4`。除朱雀四维外，`latest_detector_proxy` 还会给出概率曲率、弱语言模型一致性、局部熵/TTR、风格计量、语义平滑、语意困惑度、叙事动力、内容完整性和分片代理。叙事动力重点检查对白传送带、动作开场标签同构、对白长度过齐、POV 主观体验薄、流程语汇过密和情绪范围过平。约 3000 字章节可能被当作整章单段判分；小说 `human_anchor` 只软校准，不得作为固定低分放行理由。
 - **整章三曲线共振**：若概率曲率、弱模型一致性和局部熵三条原始曲线同时过平，即使正文有人物、对白和现场物件，也按整章高风险返工。不能靠“人工锚点”把这类正文压到 4.8%；要重新分配段落功能，让争执、误判、行动兑现、关系停顿、生活打岔和结算后果真正换挡。
 - **AI率目标边界**：本地与外部目标都必须严格 `<4%`，`4%` 也失败，不要求追到 0。红旗要用更好的情绪因果、人物选择、对白参与者取舍、事实回收或规则后果解决；`dialogue_conveyor_overuse`、`pov_interiority_thin` 与其他结构性 warning 都不是可选项。禁止为了过审加入注水、乱码、OCR 脏码、随机汉字、冷僻词堆砌、无信息清单、拟声长串或刻意错别字。

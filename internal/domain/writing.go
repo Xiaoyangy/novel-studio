@@ -1,5 +1,10 @@
 package domain
 
+import (
+	"fmt"
+	"strings"
+)
+
 // ChapterPlan 章节写作构思，Writer 自主生成。
 // 不再强制场景拆分，Agent 自己决定如何组织内容。
 type ChapterPlan struct {
@@ -91,6 +96,7 @@ type ChapterCausalSimulation struct {
 	InitialState        []CharacterSimulationState   `json:"initial_state,omitempty"`               // 关键角色开章时的欲望、压力、边界
 	VoiceLogic          []CharacterVoiceLogic        `json:"voice_logic,omitempty"`                 // 关键角色的说话逻辑和声口自检
 	DialogueBlueprints  []DialogueSceneBlueprint     `json:"dialogue_scene_blueprints,omitempty"`   // 关键对白场景的模式、开场策略、角色策略链、潜台词和权力转移设计
+	LiteraryRendering   *LiteraryRenderingPlan       `json:"literary_rendering_plan,omitempty"`     // 可选：既定因果事件如何受限于焦点、叙事距离和文学化渲染进入正文
 	CrowdRoles          []CrowdRoleDesign            `json:"crowd_roles,omitempty"`                 // 捧场/凑数/群体角色的场景功能与退出边界
 	ReviewRefinement    ReviewRefinementLoop         `json:"review_refinement,omitempty"`           // 审核失败后的重推演闭环
 	EnvironmentState    []EnvironmentSignal          `json:"environment_state,omitempty"`           // 环境如何承载信息、规则压力和状态变化
@@ -100,6 +106,163 @@ type ChapterCausalSimulation struct {
 	DecisionPoints      []string                     `json:"decision_points,omitempty"`             // 必须落成选择的节点
 	OutcomeShift        []string                     `json:"outcome_shift,omitempty"`               // 章末相较开章必须改变的状态
 	SceneConstraints    []string                     `json:"scene_constraints,omitempty"`           // 写作限制：视角、证据边界、不能提前解释的内容
+}
+
+// LiteraryRenderingPlan 约束既定事件如何进入主视角正文，而不追加剧情义务。
+// 它保持开放式 lens 分类；source_refs 只承担来源追踪，不作为风格数量配额。
+type LiteraryRenderingPlan struct {
+	Focalizer             string                       `json:"focalizer,omitempty"`
+	NarrativeAccess       LiteraryNarrativeAccess      `json:"narrative_access,omitempty"`
+	KnowledgeBoundary     string                       `json:"knowledge_boundary,omitempty"`
+	PerceptualBias        string                       `json:"perceptual_bias,omitempty"`
+	SceneModes            []LiterarySceneRenderingMode `json:"scene_modes,omitempty"`
+	ActiveLenses          []LiteraryRenderingLens      `json:"active_lenses,omitempty"`
+	SummaryOmissionPolicy string                       `json:"summary_omission_policy,omitempty"`
+	Afterimage            string                       `json:"afterimage,omitempty"`
+	SourceRefs            []string                     `json:"source_refs,omitempty"`
+}
+
+type LiteraryNarrativeAccess string
+
+const (
+	LiteraryNarrativeAccessInternal LiteraryNarrativeAccess = "internal"
+	LiteraryNarrativeAccessExternal LiteraryNarrativeAccess = "external"
+	LiteraryNarrativeAccessMixed    LiteraryNarrativeAccess = "mixed"
+)
+
+type LiterarySceneModeKind string
+
+const (
+	LiterarySceneModeScene    LiterarySceneModeKind = "scene"
+	LiterarySceneModeSummary  LiterarySceneModeKind = "summary"
+	LiterarySceneModeOmission LiterarySceneModeKind = "omission"
+	LiterarySceneModePause    LiterarySceneModeKind = "pause"
+)
+
+type LiteraryNarrativeDistance string
+
+const (
+	LiteraryNarrativeDistanceClose  LiteraryNarrativeDistance = "close"
+	LiteraryNarrativeDistanceMedium LiteraryNarrativeDistance = "medium"
+	LiteraryNarrativeDistanceFar    LiteraryNarrativeDistance = "far"
+)
+
+type LiterarySceneRenderingMode struct {
+	Target      string                    `json:"target,omitempty"`
+	Mode        LiterarySceneModeKind     `json:"mode,omitempty"`
+	Distance    LiteraryNarrativeDistance `json:"distance,omitempty"`
+	StateChange string                    `json:"state_change,omitempty"`
+	RenderMove  string                    `json:"render_move,omitempty"`
+}
+
+// LiteraryRenderingLens.Kind 有意保持开放字符串，避免把文学技法冻结为固定分类表。
+type LiteraryRenderingLens struct {
+	Kind       string   `json:"kind,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Move       string   `json:"move,omitempty"`
+	Why        string   `json:"why,omitempty"`
+	Avoid      string   `json:"avoid,omitempty"`
+	SourceRefs []string `json:"source_refs,omitempty"`
+}
+
+// Validate 只在 literary_rendering_plan 实际存在时调用。
+// scene_modes/active_lenses 不设数量下限；一旦出现条目，则校验完整性和枚举。
+func (p *LiteraryRenderingPlan) Validate() error {
+	if p == nil {
+		return nil
+	}
+
+	var problems []string
+	requireText := func(value, path string) {
+		if strings.TrimSpace(value) == "" {
+			problems = append(problems, path+" is required")
+		}
+	}
+
+	requireText(p.Focalizer, "focalizer")
+	if !p.NarrativeAccess.valid() {
+		problems = append(problems, "narrative_access must be one of internal, external, mixed")
+	}
+	requireText(p.KnowledgeBoundary, "knowledge_boundary")
+	requireText(p.PerceptualBias, "perceptual_bias")
+	requireText(p.SummaryOmissionPolicy, "summary_omission_policy")
+	requireText(p.Afterimage, "afterimage")
+	validateLiterarySourceRefs("source_refs", p.SourceRefs, &problems)
+
+	for i, item := range p.SceneModes {
+		prefix := fmt.Sprintf("scene_modes[%d]", i)
+		requireText(item.Target, prefix+".target")
+		if !item.Mode.valid() {
+			problems = append(problems, prefix+".mode must be one of scene, summary, omission, pause")
+		}
+		if !item.Distance.valid() {
+			problems = append(problems, prefix+".distance must be one of close, medium, far")
+		}
+		requireText(item.StateChange, prefix+".state_change")
+		requireText(item.RenderMove, prefix+".render_move")
+	}
+
+	for i, item := range p.ActiveLenses {
+		prefix := fmt.Sprintf("active_lenses[%d]", i)
+		requireText(item.Kind, prefix+".kind")
+		requireText(item.Target, prefix+".target")
+		requireText(item.Move, prefix+".move")
+		requireText(item.Why, prefix+".why")
+		requireText(item.Avoid, prefix+".avoid")
+		validateLiterarySourceRefs(prefix+".source_refs", item.SourceRefs, &problems)
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func (v LiteraryNarrativeAccess) valid() bool {
+	switch v {
+	case LiteraryNarrativeAccessInternal, LiteraryNarrativeAccessExternal, LiteraryNarrativeAccessMixed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (v LiterarySceneModeKind) valid() bool {
+	switch v {
+	case LiterarySceneModeScene, LiterarySceneModeSummary, LiterarySceneModeOmission, LiterarySceneModePause:
+		return true
+	default:
+		return false
+	}
+}
+
+func (v LiteraryNarrativeDistance) valid() bool {
+	switch v {
+	case LiteraryNarrativeDistanceClose, LiteraryNarrativeDistanceMedium, LiteraryNarrativeDistanceFar:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateLiterarySourceRefs(path string, refs []string, problems *[]string) {
+	if len(refs) == 0 {
+		*problems = append(*problems, path+" must contain at least one stable card ID, URL, or RAG trace ID")
+		return
+	}
+	seen := make(map[string]struct{}, len(refs))
+	for i, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			*problems = append(*problems, fmt.Sprintf("%s[%d] must be nonempty", path, i))
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			*problems = append(*problems, fmt.Sprintf("%s[%d] duplicates %q", path, i, ref))
+			continue
+		}
+		seen[ref] = struct{}{}
+	}
 }
 
 type WritingNormApplication struct {

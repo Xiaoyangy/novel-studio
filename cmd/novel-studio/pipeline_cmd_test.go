@@ -1014,6 +1014,21 @@ func TestPipelineRequestFullRerenderInvalidatesExistingDraftWithoutChangingPlan(
 	}
 }
 
+func TestPipelineForceRerenderTargetsCompletedRangeWithoutPendingQueue(t *testing.T) {
+	progress := &domain.Progress{CompletedChapters: []int{1, 2, 3, 4}}
+	targets, err := pipelineForceRerenderTargets(progress, 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(targets, []int{1, 2, 3}) {
+		t.Fatalf("targets = %v", targets)
+	}
+
+	if _, err := pipelineForceRerenderTargets(progress, 7, 8); err == nil {
+		t.Fatal("missing completed range must fail instead of reporting a successful no-op")
+	}
+}
+
 func TestPipelineArchitectRefreshPromptLocksGoldenThreeAndStageBoundary(t *testing.T) {
 	prompt, err := pipelineArchitectRefreshPrompt(t.TempDir(), "整章朱雀分数过高，重做黄金三章")
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 type DraftExternalRerenderRequirement struct {
 	Chapter              int      `json:"chapter"`
 	EvaluatedBodySHA256  string   `json:"evaluated_body_sha256"`
+	Source               string   `json:"source,omitempty"`
 	AIProbabilityPercent int      `json:"ai_probability_percent"`
 	PassExclusivePercent int      `json:"pass_exclusive_percent"`
 	Summary              string   `json:"summary,omitempty"`
@@ -195,8 +196,12 @@ func draftExternalRerenderInstruction(requirement *DraftExternalRerenderRequirem
 	if requirement == nil {
 		return ""
 	}
+	source := "草稿外审"
+	if requirement.Source == "local_mechanical_gate" {
+		source = "本地整章机械门禁"
+	}
 	return fmt.Sprintf(
-		"第 %d 章草稿外审为 %d%%（要求 <%d%%），且判定需要结构级重渲染。禁止继续 edit_chapter 局部贴补；请保留批准 plan 与事实，用 draft_chapter(mode=write) 整章覆盖，落实 draft_external_ai_review 后再检查",
-		requirement.Chapter, requirement.AIProbabilityPercent, requirement.PassExclusivePercent,
+		"第 %d 章%s为 %d%%（要求 <%d%%），且判定需要结构级重渲染。禁止继续 edit_chapter 局部贴补；请保留批准 plan 与事实，用 draft_chapter(mode=write) 整章覆盖，落实 draft_external_ai_review 与 rewrite_brief 后再检查",
+		requirement.Chapter, source, requirement.AIProbabilityPercent, requirement.PassExclusivePercent,
 	)
 }

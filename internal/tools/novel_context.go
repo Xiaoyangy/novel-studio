@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/stylestat"
@@ -45,6 +46,10 @@ type References struct {
 	RAGWritingGuidelines    string // RAG 召回在小说写作中的使用边界与 trace 判读
 	WebReferenceGuidelines  string // 网络参考、最新资料和热梗进入正文的边界
 	LongformAIDetector      string // 3000 字整章 AI 检测与交付门禁口径
+	LiteraryRendering       string // 权威叙事学转化的文学渲染协议与适用边界
+	LiteraryRenderingCards  string // 结构化文学渲染卡目录；完整 references 被预算裁剪时仍保留
+	GenreStyleCraft         string // 题材专项写法总则；只在 user_rules/style 命中 profile 时注入
+	GenreStyleProfiles      string // 可确定性匹配的题材专项 profile 目录
 }
 
 // ContextTool 组装当前章节所需上下文。
@@ -121,7 +126,10 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	}
 	if a.Chapter > 0 {
 		if staged, ok, err := t.stagedPlanRepairContext(a.Chapter, requestedChapter, hasRewriteTarget); ok || err != nil {
-			return staged, err
+			if err != nil {
+				return nil, err
+			}
+			return finalizeContextResult(staged, a.Chapter, a.Profile)
 		}
 	}
 
@@ -187,37 +195,86 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	}
 
 	t.buildUserRules(result)
-	applyChapterContextProfile(result, a.Profile)
 
 	if len(warnings) > 0 {
 		result["_warnings"] = warnings
 	}
+	return finalizeContextResult(result, a.Chapter, a.Profile)
+}
 
-	// 优先级预算：章节推演会携带较丰富的 causal plan，允许约 192KB；但必须
-	// 真正收敛到预算内，避免一次 novel_context 把长上下文窗口顶满并触发反复压缩。
-	if a.Chapter > 0 {
-		budget := 188 * 1024
-		switch a.Profile {
-		case "planning":
-			budget = 64 * 1024
-		case "world_simulation":
-			budget = 96 * 1024
-		case "draft":
-			budget = 64 * 1024
-		}
-		trimByBudget(result, budget)
-		if a.Profile != "" && a.Profile != "full" {
-			result["_context_profile"] = a.Profile
-		}
-	} else {
-		trimByBudget(result, 60*1024) // Coordinator/Architect: 60KB
+func contextBudget(chapter int, profile string) int {
+	if chapter <= 0 {
+		return 60 * 1024
 	}
+	switch profile {
+	case "planning", "draft":
+		return 64 * 1024
+	case "world_simulation":
+		return 96 * 1024
+	default:
+		return 188 * 1024
+	}
+}
 
-	result["_loading_summary"] = buildLoadingSummary(result, a.Chapter)
-	if a.Chapter > 0 {
+func finalizeContextResult(result map[string]any, chapter int, profile string) (json.RawMessage, error) {
+	applyChapterContextProfile(result, profile)
+	if chapter > 0 && profile != "" && profile != "full" {
+		result["_context_profile"] = profile
+	}
+	result["_loading_summary"] = buildLoadingSummary(result, chapter)
+	if chapter > 0 {
 		result["_reading_guide"] = contextReadingGuide
 	}
-	return marshalOrderedContext(result)
+
+	budget := contextBudget(chapter, profile)
+	if !trimByBudget(result, budget, chapter) {
+		data, _ := json.Marshal(result)
+		return nil, fmt.Errorf("novel_context profile=%q 的关键上下文无法安全收敛：budget=%d actual=%d critical=%s；请使用更大 profile 或压缩上游 plan，不会静默删除当前任务: %w", profile, budget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
+	}
+	raw, err := marshalOrderedContext(result)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > budget {
+		return nil, fmt.Errorf("novel_context 最终序列化结果超过预算：profile=%q budget=%d actual=%d: %w", profile, budget, len(raw), errs.ErrToolPrecondition)
+	}
+	return raw, nil
+}
+
+func largestContextKeySizes(result map[string]any, limit int) string {
+	type sizedKey struct {
+		key  string
+		size int
+	}
+	items := make([]sizedKey, 0, len(result))
+	for key, value := range result {
+		data, err := json.Marshal(value)
+		if err == nil {
+			items = append(items, sizedKey{key: key, size: len(data)})
+		}
+		if section, ok := value.(map[string]any); ok {
+			for childKey, childValue := range section {
+				childData, childErr := json.Marshal(childValue)
+				if childErr == nil {
+					items = append(items, sizedKey{key: key + "." + childKey, size: len(childData)})
+				}
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].size == items[j].size {
+			return items[i].key < items[j].key
+		}
+		return items[i].size > items[j].size
+	})
+	if limit > len(items) {
+		limit = len(items)
+	}
+	parts := make([]string, 0, limit)
+	for _, item := range items[:limit] {
+		parts = append(parts, fmt.Sprintf("%s=%d", item.key, item.size))
+	}
+	return strings.Join(parts, ",")
 }
 
 // ProbeRAGRecall runs the chapter retrieval path without building and trimming
@@ -303,7 +360,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 	}
 }
 
-func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rewrite bool) (json.RawMessage, bool, error) {
+func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rewrite bool) (map[string]any, bool, error) {
 	partial, err := t.store.Drafts.LoadChapterPlanPartial(chapter)
 	if err != nil || partial == nil {
 		return nil, false, err
@@ -405,6 +462,11 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 		"next_step":        nextStep,
 		"_loading_summary": fmt.Sprintf("ch=%d | staged_plan_repair | fields=%d", chapter, len(fields)),
 	}
+	if cards, decodeErr := decodeLiteraryRenderingCards(t.refs.LiteraryRenderingCards); decodeErr != nil {
+		result["_warnings"] = []string{fmt.Sprintf("literary_rendering_cards 读取失败: %v", decodeErr)}
+	} else if cards != nil {
+		result["reference_pack"] = map[string]any{"literary_rendering_cards": cards}
+	}
 	if simulationStage != nil {
 		result["chapter_world_simulation"] = simulationStage
 	}
@@ -432,8 +494,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	if issues := ChapterPlanIdentityIssues(t.store, chapter, partial); len(issues) > 0 {
 		result["scope_warnings"] = issues
 	}
-	raw, err := marshalOrderedContext(result)
-	return raw, true, err
+	return result, true, nil
 }
 
 // buildLoadingSummary 从已组装的 result 中统计各项数据量，生成一行可读摘要。
@@ -814,6 +875,7 @@ func (t *ContextTool) writerReferences(chapter int) map[string]string {
 	add("rag_writing_guidelines", t.refs.RAGWritingGuidelines)
 	add("web_reference_guidelines", t.refs.WebReferenceGuidelines)
 	add("longform_ai_detector", t.refs.LongformAIDetector)
+	add("literary_rendering", t.refs.LiteraryRendering)
 	if chapter <= 3 {
 		add("chapter_guide", t.refs.ChapterGuide)
 		add("dialogue_writing", t.refs.DialogueWriting)
@@ -890,15 +952,44 @@ func (t *ContextTool) ContextSummary() string {
 //
 //	< recent_state_changes < foreshadow_ledger < relationship_state < 其余（不裁剪）
 //
-// 裁剪的 key 会记录到 result["_trimmed"] 供日志排查。
-func trimByBudget(result map[string]any, budget int) {
-	// 先测量当前大小
-	data, err := json.Marshal(result)
-	if err != nil || len(data) <= budget {
-		return
-	}
-
+// 裁剪的 key 会记录到 result["_trimmed"] 供日志排查。返回值只在包含
+// `_trimmed` 后的最终 JSON 已不超过 budget 时为 true；关键上下文不会被静默删除。
+func trimByBudget(result map[string]any, budget int, chapter ...int) bool {
 	var trimmed []string
+	seenTrimmed := make(map[string]struct{})
+	if existing, ok := result["_trimmed"].([]string); ok {
+		for _, key := range existing {
+			if _, seen := seenTrimmed[key]; seen {
+				continue
+			}
+			seenTrimmed[key] = struct{}{}
+			trimmed = append(trimmed, key)
+		}
+	}
+	recordTrimmed := func(key string) {
+		if _, seen := seenTrimmed[key]; seen {
+			return
+		}
+		seenTrimmed[key] = struct{}{}
+		trimmed = append(trimmed, key)
+	}
+	fits := func() bool {
+		if len(trimmed) > 0 {
+			result["_trimmed"] = append([]string(nil), trimmed...)
+		} else {
+			delete(result, "_trimmed")
+		}
+		if len(chapter) > 0 {
+			if _, hasSummary := result["_loading_summary"]; hasSummary {
+				result["_loading_summary"] = buildLoadingSummary(result, chapter[0])
+			}
+		}
+		data, err := json.Marshal(result)
+		return err == nil && len(data) <= budget
+	}
+	if fits() {
+		return true
+	}
 
 	// chapterContextEnvelope 同时保留 canonical 容器与旧版顶层镜像。上下文较大时
 	// 先删镜像，模型仍可从 working_memory/episodic_memory/reference_pack/
@@ -913,7 +1004,7 @@ func trimByBudget(result map[string]any, budget int) {
 				continue
 			}
 			delete(result, key)
-			trimmed = append(trimmed, "mirror:"+key)
+			recordTrimmed("mirror:" + key)
 		}
 	}
 
@@ -922,17 +1013,13 @@ func trimByBudget(result map[string]any, budget int) {
 	if working, ok := result["working_memory"].(map[string]any); ok {
 		if _, hasCausal := working["causal_simulation"]; hasCausal {
 			if stripChapterPlanCausalDuplicate(working) {
-				trimmed = append(trimmed, "chapter_plan.causal_simulation")
+				recordTrimmed("chapter_plan.causal_simulation")
 			}
 		}
 	}
 
-	data, err = json.Marshal(result)
-	if err != nil || len(data) <= budget {
-		if len(trimmed) > 0 {
-			result["_trimmed"] = trimmed
-		}
-		return
+	if fits() {
+		return true
 	}
 
 	// 按优先级从低到高列出可裁剪的 key。后半段是大项目的阶段性历史快照：
@@ -971,15 +1058,12 @@ func trimByBudget(result map[string]any, budget int) {
 			continue
 		}
 		deleteContextKey(result, key)
-		trimmed = append(trimmed, key)
-		data, err = json.Marshal(result)
-		if err != nil || len(data) <= budget {
-			break
+		recordTrimmed(key)
+		if fits() {
+			return true
 		}
 	}
-	if len(trimmed) > 0 {
-		result["_trimmed"] = trimmed
-	}
+	return fits()
 }
 
 func hasContextKey(result map[string]any, key string) bool {

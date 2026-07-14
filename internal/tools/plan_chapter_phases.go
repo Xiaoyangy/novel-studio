@@ -563,7 +563,7 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 func planDetailsRecommendedBatches() []string {
 	return []string{
 		"batch1_pov_projection: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state(max 2) + causal_beats(max 4) + decision_points(max 4) + outcome_shift(max 4)",
-		"batch2_voice_and_rewrite: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker)；返工章同时补 review_refinement。dialogue/emotional/anti_ai/reader_reward/retention/ending/entertainment/longform/trend 均为可选，默认不要重复生成",
+		"batch2_voice_and_rendering: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker) + literary_rendering_plan(可选：只选本章有功能的镜头并保留 source_refs，不做九项清单)；返工章同时补 review_refinement。dialogue/emotional/anti_ai/reader_reward/retention/ending/entertainment/longform/trend 均为可选，默认不要重复生成",
 	}
 }
 

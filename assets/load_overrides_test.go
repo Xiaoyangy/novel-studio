@@ -22,6 +22,9 @@ func TestLoadWithOverridesPrecedence(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "editor.md"), []byte("项目版 editor prompt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(project, "drafter.md"), []byte("项目版 drafter prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// 空文件应回退内置。
 	if err := os.WriteFile(filepath.Join(project, "coordinator.md"), []byte("   \n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -37,6 +40,9 @@ func TestLoadWithOverridesPrecedence(t *testing.T) {
 	}
 	if !strings.HasPrefix(bundle.Prompts.Editor, "项目版 editor prompt") {
 		t.Fatal("editor 项目级覆盖未生效")
+	}
+	if !strings.HasPrefix(bundle.Prompts.Drafter, "项目版 drafter prompt") || !strings.Contains(bundle.Prompts.Drafter, "仿写画像") {
+		t.Fatal("drafter 项目级覆盖未生效或未走统一包装")
 	}
 
 	baseline := Load("default")
@@ -55,6 +61,9 @@ func TestLoadWithOverridesPrecedence(t *testing.T) {
 	}
 	if bySource["writer.md"] != "override:"+project {
 		t.Fatalf("writer 来源应为项目级覆盖: %s", bySource["writer.md"])
+	}
+	if bySource["drafter.md"] != "override:"+project {
+		t.Fatalf("drafter 来源应为项目级覆盖: %s", bySource["drafter.md"])
 	}
 	if bySource["coordinator.md"] != "builtin" {
 		t.Fatalf("coordinator 来源应回退 builtin: %s", bySource["coordinator.md"])
@@ -87,7 +96,16 @@ func TestWritePromptManifest(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("manifest 非法 JSON: %v", err)
 	}
-	if len(back) != 6 {
-		t.Fatalf("manifest 应含 6 个核心 prompt，实际 %d", len(back))
+	if len(back) != 7 {
+		t.Fatalf("manifest 应含 7 个核心 prompt，实际 %d", len(back))
+	}
+	foundDrafter := false
+	for _, item := range back {
+		if item.Name == "drafter.md" && item.Source == "builtin" && len(item.Fingerprint) == 12 {
+			foundDrafter = true
+		}
+	}
+	if !foundDrafter {
+		t.Fatalf("manifest 必须记录 drafter 版本: %+v", back)
 	}
 }

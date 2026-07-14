@@ -431,6 +431,28 @@ func TestLint_CadenceSignalsAllowLightUse(t *testing.T) {
 	}
 }
 
+func TestLint_ObjectResponseAbsenceDoesNotCountAsResponse(t *testing.T) {
+	text := `# 第一章
+
+林澈腿边的手机亮了一下。
+
+付款页面一直转圈，手机却迟迟没有动静。
+
+过了几秒，手机才跳出电子票。
+
+四盏灯一齐亮了。
+
+最远那盏灯只能灭掉。`
+
+	vs := Lint(text)
+	if v := findRule(vs, "object_response_overuse"); v != nil {
+		t.Fatalf("absence beat must not inflate object response count: %+v", v)
+	}
+	if v := findRule(vs, "object_response_rhythm_flat"); v != nil {
+		t.Fatalf("explicit delay and absence should satisfy rhythm guard: %+v", v)
+	}
+}
+
 func TestLint_IsolatedSentenceIgnoresPlainTitleAndPureDialogue(t *testing.T) {
 	text := `第一章 讲稿第一句
 
@@ -658,6 +680,63 @@ func TestLint_AphoristicNarrativeSummary(t *testing.T) {
 	}
 }
 
+func TestLint_AuthorialAbstractSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "abstract goal inversion",
+			text: "他关掉付款页。今天真正要解的，从来不是先把一辆车变成自己的。",
+		},
+		{
+			name: "retrospective payoff conclusion",
+			text: "电子票终于跳了出来。这才让他确定，刚才停电返工的那几分钟全都没有白费。",
+		},
+		{
+			name: "named protagonist variant",
+			text: "最远那盏灯灭了。那才让林澈意识到，前面几趟折腾都没白费。",
+		},
+		{
+			name: "expanded goal verb variant",
+			text: "他关掉付款页。此刻他真正要面对的，根本不是买不买车。",
+		},
+		{
+			name: "abstract present problem inversion",
+			text: "他把扳手放回箱里。眼前的不是麻烦，是结果。",
+		},
+		{
+			name: "optional payoff quantifier",
+			text: "灯终于亮了。这总算让他知道，刚才的返工没白费。",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := findRule(Lint(tt.text), "authorial_abstract_summary")
+			if v == nil {
+				t.Fatalf("expected authorial_abstract_summary, got %+v", Lint(tt.text))
+			}
+			if v.Severity != SeverityError {
+				t.Fatalf("authorial abstract summary must be an error: %+v", v)
+			}
+		})
+	}
+}
+
+func TestLint_AuthorialAbstractSummaryAllowsConcreteCorrections(t *testing.T) {
+	tests := []string{
+		"孩子不是乱蹦，是跨过去。",
+		"最难装的不是牌，是旧桌子。",
+		"他说：“眼前的不是麻烦，是结果。”",
+		"【真正要解决的不是余额，是今晚的任务。】",
+	}
+	for _, text := range tests {
+		if v := findRule(Lint(text), "authorial_abstract_summary"); v != nil {
+			t.Fatalf("concrete factual correction must pass: text=%q violation=%+v", text, v)
+		}
+	}
+}
+
 func TestLint_OpaqueProcedureJargon(t *testing.T) {
 	bad := `沈知遥说：“补上再测。”
 
@@ -793,6 +872,68 @@ func TestLint_DialogueConveyorOveruse(t *testing.T) {
 贺骁已经抱住桌腿，嘴上还不肯饶人：“你想明白归想明白，手倒是伸快点。”`
 	if v := findRule(Lint(clean), "dialogue_conveyor_overuse"); v != nil {
 		t.Fatalf("mixed subjective scene should pass: %+v", v)
+	}
+}
+
+func TestLint_DialogueMicroPeriodChain(t *testing.T) {
+	bad := `沈知遥说：“断电。先把线断了。”
+
+老丁还在看线，她又指向翘边：“这里。护套没盖住线头。”
+
+马玉芬问完，她只回了一句：“都挪。推车会慢，孩子不会。”`
+	violation := findRule(Lint(bad), "dialogue_micro_period_chain")
+	if violation == nil {
+		t.Fatalf("expected dialogue_micro_period_chain, got %+v", Lint(bad))
+	}
+	if violation.Severity != SeverityWarning || violation.Actual != 3 {
+		t.Fatalf("unexpected micro-period violation: %+v", violation)
+	}
+	for _, evidence := range []string{"断电。先把线断了", "这里。护套没盖住线头", "都挪。推车会慢"} {
+		if !strings.Contains(violation.Target, evidence) {
+			t.Fatalf("missing evidence %q in %+v", evidence, violation)
+		}
+	}
+}
+
+func TestLint_DialogueMicroPeriodChainRequiresThreeDistinctTurns(t *testing.T) {
+	text := `“断电。先把线断了。”
+
+“这里。护套没盖住线头。”
+
+第三个人没有再开口。`
+	if violation := findRule(Lint(text), "dialogue_micro_period_chain"); violation != nil {
+		t.Fatalf("two qualifying turns must remain below the chapter threshold: %+v", violation)
+	}
+}
+
+func TestLint_DialogueMicroPeriodChainExclusions(t *testing.T) {
+	exempt := []string{
+		"好", "好的", "好吧", "行", "行吧", "可以", "知道", "知道了", "明白", "明白了",
+		"是", "是的", "是啊", "对", "对的", "对啊", "没错", "不是", "不是的", "不用", "不用了",
+		"没事", "没事了", "谢谢", "谢了", "抱歉", "对不起", "嗯", "嗯嗯", "嗯哼", "哦", "噢", "啊", "哎", "唉", "喂",
+	}
+	if len(dialogueMicroPeriodExempt) != len(exempt) {
+		t.Fatalf("dialogue short-answer allowlist size=%d, want %d", len(dialogueMicroPeriodExempt), len(exempt))
+	}
+	for _, answer := range exempt {
+		if !dialogueMicroPeriodExempt[answer] {
+			t.Fatalf("short-answer allowlist missing %q", answer)
+		}
+		turn := "“" + answer + "。后面这句话正常说完。”\n"
+		if violation := findRule(Lint(strings.Repeat(turn, 3)), "dialogue_micro_period_chain"); violation != nil {
+			t.Fatalf("short answer %q must be exempt: %+v", answer, violation)
+		}
+	}
+
+	prosodicAndSystem := `“断哪根？这根新线？”
+
+“老丁，晃眼！锅都看不清了。”
+
+“我……再想想。”
+
+【“断电。先把线断了。”“这里。护套没盖住线头。”“都挪。推车会慢。”】`
+	if violation := findRule(Lint(prosodicAndSystem), "dialogue_micro_period_chain"); violation != nil {
+		t.Fatalf("questions, exclamations, ellipses and system text must be excluded: %+v", violation)
 	}
 }
 

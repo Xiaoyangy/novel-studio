@@ -127,7 +127,8 @@ func TestRoute_ExistingDraftUsesRestrictedFinalizer(t *testing.T) {
 	p.PendingRewrites = []int{2}
 	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
 	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") ||
-		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") || !strings.Contains(got.Task, "人工验收补充属于确定性约束") {
+		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") || !strings.Contains(got.Task, "人工验收补充属于确定性约束") ||
+		!strings.Contains(got.Task, "任何 commit_chapter 失败后必须立即结束") {
 		t.Fatalf("existing draft should use restricted finalizer, got %+v", got)
 	}
 }
@@ -163,7 +164,8 @@ func TestRoute_BlockingExternalDraftReviewUsesDrafterForWholeChapter(t *testing.
 		Progress: p, NextActionPlanReady: true, NextActionDraftReady: true,
 		NextActionDraftExternalRerenderRequired: true,
 	})
-	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止 edit_chapter") || !strings.Contains(got.Task, "写入成功后立即结束") {
+	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止 edit_chapter") ||
+		!strings.Contains(got.Task, "rewrite_brief") || !strings.Contains(got.Task, "profile=draft") || !strings.Contains(got.Task, "写入成功后立即结束") {
 		t.Fatalf("blocking external review must route to full drafter, got %+v", got)
 	}
 }

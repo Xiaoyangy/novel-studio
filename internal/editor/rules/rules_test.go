@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -167,6 +168,16 @@ func TestEndingHookUsedAllowsActionAftermath(t *testing.T) {
 	}
 }
 
+func TestEndingHookUsedRecognizesConcretePendingArrival(t *testing.T) {
+	paragraphs := []string{
+		"林澈脚边堆着五只空纸箱。",
+		"第六张桌子已经停在眼前。",
+	}
+	if !endingHookUsed(paragraphs) {
+		t.Fatal("a concrete next-batch arrival should be recognized as an ending hook")
+	}
+}
+
 func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	longChapter := domain.ChapterAIVoiceMetrics{
 		DialogueRatio:  0.103,
@@ -211,6 +222,70 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	}
 	if flags := redFlags(shortChapterNearLimit, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
 		t.Fatalf("near-limit short chapter should not be flagged: %+v", flags)
+	}
+}
+
+func TestChapterFunctionRepetitionIsNextChapterAdviceOnly(t *testing.T) {
+	current := domain.ChapterAIVoiceMetrics{
+		Chapter: 3, ChapterFunction: "互动", DialogueRatio: 0.20, ProtagonistWaver: true,
+	}
+	history := []domain.ChapterAIVoiceMetrics{
+		{Chapter: 1, ChapterFunction: "互动"},
+		{Chapter: 2, ChapterFunction: "互动"},
+	}
+
+	baselineScore := aiVoiceScore(current, nil)
+	if got := aiVoiceScore(current, history); got != baselineScore {
+		t.Fatalf("cross-chapter planning advice changed current score: got %.4f, baseline %.4f", got, baselineScore)
+	}
+	current.AIVoiceScore = baselineScore
+	flags := redFlags(current, history)
+	for _, flag := range flags {
+		if flag.Rule != "chapter_function_repetition" {
+			continue
+		}
+		if flag.Severity != "info" {
+			t.Fatalf("chapter function repetition severity = %q, want info", flag.Severity)
+		}
+		for _, want := range []string{"下一章换型建议", "不返工本章", "当前章原文证据"} {
+			if !strings.Contains(flag.Suggestion, want) {
+				t.Fatalf("chapter function suggestion missing %q: %s", want, flag.Suggestion)
+			}
+		}
+		if got := labelFor(current, flags); got != "✅ 可通过" {
+			t.Fatalf("planning advice changed current label to %q", got)
+		}
+		if got := summaryFor(current, flags); !strings.Contains(got, "非阻断跨章规划建议") {
+			t.Fatalf("summary did not preserve advisory boundary: %q", got)
+		}
+		return
+	}
+	t.Fatalf("expected chapter_function_repetition flag, got %+v", flags)
+}
+
+func TestCrossChapterHookHistoryDeduplicatesReviewRevisions(t *testing.T) {
+	current := domain.ChapterAIVoiceMetrics{Chapter: 2, EndingHookUsed: true, ChapterFunction: "互动"}
+	history := []domain.ChapterAIVoiceMetrics{
+		{Chapter: 1, EndingHookUsed: true, ChapterFunction: "互动", RevisionRound: 1},
+		{Chapter: 1, EndingHookUsed: true, ChapterFunction: "互动", RevisionRound: 2},
+		{Chapter: 1, EndingHookUsed: true, ChapterFunction: "互动", RevisionRound: 3},
+		{Chapter: 2, EndingHookUsed: true, ChapterFunction: "互动", RevisionRound: 1},
+		{Chapter: 3, EndingHookUsed: true, ChapterFunction: "互动", RevisionRound: 1},
+	}
+	flags := redFlags(current, history)
+	if hasRedFlag(flags, "ending_hook_uniformity") || hasRedFlag(flags, "chapter_function_repetition") {
+		t.Fatalf("duplicate/current/future review metrics must not simulate repeated prior chapters: %+v", flags)
+	}
+
+	chapter4 := domain.ChapterAIVoiceMetrics{Chapter: 4, EndingHookUsed: true, ChapterFunction: "互动"}
+	threeDistinct := []domain.ChapterAIVoiceMetrics{
+		{Chapter: 1, EndingHookUsed: true, ChapterFunction: "互动"},
+		{Chapter: 2, EndingHookUsed: true, ChapterFunction: "互动"},
+		{Chapter: 3, EndingHookUsed: true, ChapterFunction: "互动"},
+	}
+	flags = redFlags(chapter4, threeDistinct)
+	if !hasRedFlag(flags, "ending_hook_uniformity") || !hasRedFlag(flags, "chapter_function_repetition") {
+		t.Fatalf("three distinct prior chapters should still trigger repetition advice: %+v", flags)
 	}
 }
 

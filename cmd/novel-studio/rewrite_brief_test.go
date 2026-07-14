@@ -38,6 +38,31 @@ func TestMechanicalViolationBriefLabelFormatsNumericLimits(t *testing.T) {
 	}
 }
 
+func TestChapterFunctionAdviceDoesNotEnterCurrentChapterRewritePlan(t *testing.T) {
+	for _, severity := range []string{"info", "warning"} {
+		t.Run(severity, func(t *testing.T) {
+			analysis := domain.AIVoiceAnalysis{RedFlags: []domain.AIVoiceRedFlag{{
+				Rule:       "chapter_function_repetition",
+				Severity:   severity,
+				Suggestion: "下一章换型，不返工本章。",
+			}}}
+			var red, yellow, suggestions []string
+			addAIVoiceAnalysisToPlan(
+				analysis,
+				func(value string) { red = append(red, value) },
+				func(value string) { yellow = append(yellow, value) },
+				func(value string) { suggestions = append(suggestions, value) },
+			)
+			if len(red) != 0 || len(yellow) != 0 {
+				t.Fatalf("future-facing advice became a current-chapter gate: red=%v yellow=%v", red, yellow)
+			}
+			if len(suggestions) != 0 {
+				t.Fatalf("future-facing advice leaked into current-chapter rewrite suggestions: %v", suggestions)
+			}
+		})
+	}
+}
+
 func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01.md"), `# ch01 评审

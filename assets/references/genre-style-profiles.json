@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "policy": "先由项目 style 与 user_rules 确定性选中一个 profile，再把紧凑合同投影进 render_packet；不命中时不注入题材假设。",
+  "profiles": [
+    {
+      "id": "county-light-comedy-system-single-romance",
+      "name": "轻松县城经营·系统·单女主",
+      "match": {
+        "require_any": ["县城", "返乡", "种田", "乡村", "经营"],
+        "score_any": ["轻松", "搞笑", "欢快", "系统", "单女主", "事业搭档", "神豪", "创业", "民生"],
+        "minimum_score": 2
+      },
+      "tone": "明亮、松弛、有人情账；麻烦真实但不过度沉重，爽点落在普通人可见的变化和主角被需要。",
+      "dialogue_breath_policy": "普通平静口述以完整气口承载一小段意思；禁止把同一判断切成连续2—4汉字句号短句。短答可短，连续碎断只允许抢险、打断、惊吓或刻意拒绝且现场有证据。",
+      "scene_flow_policy": "required beats 只作结果合同；每场保留一次关键阻力、一次人物选择和一个可见后果，读者看懂后压缩报价、付款、取货、安装、登记、测试与验收。",
+      "humor_policy": "笑点来自熟人社会的面子账、身份错位、具体物件反噬和各人自利反应；一场一两个有效笑点，不做全员吐槽接龙。",
+      "growth_policy": "用一个受益者、一个物件前后变化和一个新选择表现经营成长；不以票据或后台播报替代爽感。",
+      "romance_policy": "唯一恋爱线服从项目指定CP；用共同做事、专业边界、选择性偏心和承担小责任推进，其他异性角色不使用暧昧镜头语法。",
+      "system_policy": "系统一次回应一个眼前刺激；不复述已见结果，不用客服安慰，不把规则、任务、吐槽和奖励塞成一条。",
+      "source_refs": [
+        "genre-style-craft#spoken-breath-group",
+        "genre-style-craft#county-life-comedy",
+        "genre-style-craft#visible-growth-without-ledger",
+        "genre-style-craft#single-heroine-partnership",
+        "genre-style-craft#system-sparring-voice",
+        "genre-style-craft#local-life-texture",
+        "genre-style-craft#warm-setback-recovery",
+        "genre-style-craft#scene-flow-over-checklist"
+      ],
+      "cards": [
+        {"id": "spoken-breath-group", "move": "把平静口述写成可一口气说完的完整气口，允许自然回指或改口。", "avoid": "同一引号内连续2—4汉字句号碎断；工单口令腔。"},
+        {"id": "county-life-comedy", "move": "让面子账、熟人关系和物件后果自然制造一两个笑点。", "avoid": "全员轮流抖机灵或每句必有包袱。"},
+        {"id": "visible-growth-without-ledger", "move": "以受益者、物件变化和新选择兑现经营爽感。", "avoid": "逐项跟拍报价、付款、安装、测试、验收。"},
+        {"id": "single-heroine-partnership", "move": "用共同做事、边界和选择性偏心推进唯一CP。", "avoid": "旁白宣布发糖、强行互撩、多女暧昧候选。"},
+        {"id": "system-sparring-voice", "move": "系统只接眼前具体刺激，一次说一件事。", "avoid": "客服安慰、后台播报、规则任务奖励同条打包。"},
+        {"id": "local-life-texture", "move": "让称呼、饭点、路程、摊位、旧店和人情影响行动。", "avoid": "方言贴纸、地方名词堆砌、背景人物讲教程。"},
+        {"id": "warm-setback-recovery", "move": "短暂受挫后由符合关系与资源的小动作托住。", "avoid": "系统奖励立刻抹平或旁白宣布重燃希望。"},
+        {"id": "scene-flow-over-checklist", "move": "跟着注意力、愿望和后果换挡，允许闲话与没接住的话。", "avoid": "required beats逐条摄影、时间戳报站、段段都有功能。"}
+      ]
+    }
+  ]
+}

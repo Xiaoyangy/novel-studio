@@ -57,6 +57,16 @@ var blockingAIVoiceWarningRules = map[string]bool{
 	"supporting_dialogue_ratio":           true,
 }
 
+var structuralProseWarningRules = map[string]bool{
+	"dialogue_conveyor_overuse":   true,
+	"dialogue_micro_period_chain": true,
+	"pov_interiority_thin":        true,
+	"state_clause_pile":           true,
+	"procedure_stage_pile":        true,
+	"not_but_overuse":             true,
+	"object_response_rhythm_flat": true,
+}
+
 // deterministicMechanicalRules describe concrete readability, factual or
 // project-contract failures. Statistical style signals are intentionally not
 // included: a current-hash external pass and an accepting Editor may demote
@@ -98,11 +108,160 @@ func IsBlockingMechanicalViolation(v rules.Violation) bool {
 	return blockingMechanicalRules[strings.TrimSpace(v.Rule)]
 }
 
+func IsStructuralProseViolation(v rules.Violation) bool {
+	return structuralProseWarningRules[strings.TrimSpace(v.Rule)]
+}
+
+var editorReviewDimensionNames = map[string]bool{
+	"consistency":        true,
+	"character":          true,
+	"pacing":             true,
+	"continuity":         true,
+	"foreshadow":         true,
+	"hook":               true,
+	"aesthetic":          true,
+	"ai_voice_detection": true,
+}
+
+// EditorExplicitlySupportsStructuralProseWarningClearance recognizes the
+// narrow pre-reconciliation case where a statistical structural warning was
+// inspected against this exact chapter body and the Editor recorded, in one
+// clause, the rule name plus concrete evidence that the prose already contains
+// an effective break. It intentionally does not require verdict=accept because
+// it is used to reconcile a contradictory rewrite verdict after all eight
+// dimensions passed. Errors and unmentioned/ambiguous warnings remain blocking.
+func EditorExplicitlySupportsStructuralProseWarningClearance(editor *domain.ReviewEntry, mechanical *MechanicalGatePayload, violation rules.Violation) bool {
+	if editor == nil || mechanical == nil || violation.Severity != rules.SeverityWarning || !IsStructuralProseViolation(violation) ||
+		editor.Chapter <= 0 || editor.Chapter != mechanical.Chapter ||
+		strings.TrimSpace(editor.BodySHA256) == "" || strings.TrimSpace(editor.BodySHA256) != strings.TrimSpace(mechanical.BodySHA256) ||
+		strings.TrimSpace(editor.ContractStatus) != "met" || len(editor.ContractMisses) > 0 ||
+		len(editor.Dimensions) != len(editorReviewDimensionNames) {
+		return false
+	}
+	seenDimensions := make(map[string]bool, len(editorReviewDimensionNames))
+	for _, dimension := range editor.Dimensions {
+		name := strings.TrimSpace(dimension.Dimension)
+		if !editorReviewDimensionNames[name] || seenDimensions[name] {
+			return false
+		}
+		minimumScore := 80
+		allowedVerdict := strings.TrimSpace(dimension.Verdict) == "pass"
+		// 预协调时，第八维可能因为同时记录多个 statistical warning 被
+		// Editor 记为 3/5（结构化后 70/warning），即使每条 warning 都在
+		// comment 中明确写了正文证据和“无需改写”。允许这一维进入窄
+		// clearance 路径；其余七维仍必须通过。真正放行还要经过同哈希
+		// external <4%、机械门禁和 AI voice 的后续三方校准。
+		if name == "ai_voice_detection" {
+			minimumScore = 70
+			allowedVerdict = allowedVerdict || strings.TrimSpace(dimension.Verdict) == "warning"
+		}
+		if dimension.Score < minimumScore || !allowedVerdict {
+			return false
+		}
+		seenDimensions[name] = true
+	}
+	rule := strings.ToLower(strings.TrimSpace(violation.Rule))
+	if rule == "" {
+		return false
+	}
+	comments := make([]string, 0, len(editor.Dimensions))
+	for _, dimension := range editor.Dimensions {
+		comments = append(comments, dimension.Comment)
+	}
+	for _, comment := range comments {
+		for _, clause := range strings.FieldsFunc(comment, func(r rune) bool {
+			// 中文编辑常用分号串联“rule ID → 多处正文证据 → 无需改写”。
+			// 分号仍属于同一句证据链；在这里切开会让 rule ID 留在前半句、
+			// clearance 留在后半句，制造假阻断。真正的否定/返工词仍会在
+			// 整句 blocked markers 中被优先识别。
+			return r == '。' || r == '\n' || r == '\r'
+		}) {
+			normalized := strings.ToLower(strings.Join(strings.Fields(clause), ""))
+			if !editorClauseMentionsStructuralRule(normalized, rule) ||
+				(!strings.Contains(normalized, "warning") && !strings.Contains(normalized, "警示级") && !strings.Contains(normalized, "警告级")) {
+				continue
+			}
+			blocked := false
+			for _, marker := range []string{
+				"未有效打断", "尚未有效打断", "并未有效打断", "没有有效打断", "没能有效打断",
+				"无法有效打断", "不能有效打断", "不算有效打断", "不足以有效打断",
+				"仍需修改", "需要修改", "必须修改", "建议修改", "应修改", "待修改",
+				"仍需改写", "需要改写", "必须改写", "建议改写",
+				"仍需返工", "需要返工", "必须返工", "建议返工", "不能放行", "不应放行",
+			} {
+				if strings.Contains(normalized, marker) {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			evidence := false
+			for _, marker := range []string{
+				"有效打断", "动作打断", "非对白动作", "动作与沉默", "沉默换挡", "后果换挡",
+				"主视角停顿", "主视角停留", "主视角体验", "人物反应", "关系动作", "场景合理",
+				"延迟出现", "延迟回应", "延迟与缺席", "延迟和缺席", "先行后开口",
+			} {
+				if strings.Contains(normalized, marker) {
+					evidence = true
+					break
+				}
+			}
+			if !evidence {
+				continue
+			}
+			for _, marker := range []string{
+				"不构成改写门槛", "不触发返工", "仅记录不返工",
+				"非阻断", "不损害阅读体验", "不伤害阅读体验", "不影响本单章阅读",
+				"无需改写", "无需返工", "不构成强制改写", "仅作后续章优化",
+			} {
+				if strings.Contains(normalized, marker) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func editorClauseMentionsStructuralRule(normalized, rule string) bool {
+	if strings.Contains(normalized, rule) {
+		return true
+	}
+	aliases := map[string][]string{
+		"dialogue_conveyor_overuse":   {"对白传送带", "对话传送带"},
+		"dialogue_micro_period_chain": {"微句号", "句号碎句", "短句号链"},
+		"pov_interiority_thin":        {"主视角主观体验", "主视角内心", "pov内省", "pov主观"},
+		"state_clause_pile":           {"状态从句堆叠", "状态分句堆叠"},
+		"procedure_stage_pile":        {"流程阶段堆叠", "程序阶段堆叠"},
+		"not_but_overuse":             {"不是而是句式", "不是a而是b"},
+		"object_response_rhythm_flat": {"物件回应延迟", "物件回应节奏", "物件响应节奏"},
+	}
+	for _, alias := range aliases[rule] {
+		if strings.Contains(normalized, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// EditorExplicitlyClearsStructuralProseWarning is the persisted/shared-gate
+// form: the same strict evidence is required after reconciliation has produced
+// an accepting Editor verdict.
+func EditorExplicitlyClearsStructuralProseWarning(editor *domain.ReviewEntry, mechanical *MechanicalGatePayload, violation rules.Violation) bool {
+	return editor != nil && strings.TrimSpace(editor.Verdict) == "accept" &&
+		EditorExplicitlySupportsStructuralProseWarningClearance(editor, mechanical, violation)
+}
+
 func IsAIMechanicalViolation(v rules.Violation) bool {
 	return blockingMechanicalRules[strings.TrimSpace(v.Rule)]
 }
 
 func IsBlockingAIVoiceFlag(flag domain.AIVoiceRedFlag) bool {
+	if domain.IsAdvisoryAIVoiceFlag(flag) {
+		return false
+	}
 	rule := strings.TrimSpace(flag.Rule)
 	if rule == "" {
 		return false
@@ -145,7 +304,7 @@ func HasBlockingMechanicalGate(payload *MechanicalGatePayload) bool {
 		return false
 	}
 	for _, v := range payload.RuleViolations {
-		if IsBlockingMechanicalViolation(v) {
+		if IsBlockingMechanicalViolation(v) || IsStructuralProseViolation(v) {
 			return true
 		}
 	}
@@ -157,7 +316,7 @@ func HasBlockingAIMechanicalGate(payload *MechanicalGatePayload) bool {
 		return false
 	}
 	for _, v := range payload.RuleViolations {
-		if IsBlockingMechanicalViolation(v) && IsAIMechanicalViolation(v) {
+		if (IsBlockingMechanicalViolation(v) && IsAIMechanicalViolation(v)) || IsStructuralProseViolation(v) {
 			return true
 		}
 	}
@@ -221,7 +380,8 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 	// 风格统计 warning 只作为下一章观察项。只有 error 级机械事实仍能推翻 accept；
 	// 否则 isolated_sentence 等启发式指标会让同一章在不同建议间无限返工。
 	for _, violation := range mechanical.RuleViolations {
-		if IsDeterministicMechanicalViolation(violation) {
+		if IsDeterministicMechanicalViolation(violation) ||
+			(IsStructuralProseViolation(violation) && !EditorExplicitlyClearsStructuralProseWarning(editor, mechanical, violation)) {
 			return false
 		}
 	}
@@ -241,8 +401,28 @@ func AcceptedWarningOnlyGate(mechanical *MechanicalGatePayload, aiVoice *domain.
 // no independent segment, integrity or deterministic prose blocker. The raw
 // local score and every warning remain in the artifact for diagnosis.
 func ApplyExternalCorroboration(payload *MechanicalGatePayload, external *ExternalAIJudge) bool {
+	return applyExternalCorroboration(payload, external, nil)
+}
+
+// ApplyExternalCorroborationWithEditor permits one additional calibration path:
+// an accepting, exact-body Editor review may clear an explicitly inspected
+// statistical structural warning. Whole-text risk, integrity failures,
+// deterministic violations and every unreviewed structural warning still block.
+func ApplyExternalCorroborationWithEditor(payload *MechanicalGatePayload, external *ExternalAIJudge, editor *domain.ReviewEntry) bool {
+	if payload == nil {
+		return false
+	}
+	// Exact-body Editor evidence may clear only explicitly inspected statistical
+	// warnings. Segment floors, integrity failures, deterministic violations and
+	// every unreviewed warning remain blockers inside applyExternalCorroboration.
+	return applyExternalCorroboration(payload, external, editor)
+}
+
+func applyExternalCorroboration(payload *MechanicalGatePayload, external *ExternalAIJudge, editor *domain.ReviewEntry) bool {
 	if payload == nil || external == nil || external.Blocking || !external.AdviceComplete ||
-		external.AIProbabilityPercent <= 0 || float64(external.AIProbabilityPercent) >= aigc.PassExclusivePercent {
+		external.AIProbabilityPercent <= 0 || float64(external.AIProbabilityPercent) >= aigc.PassExclusivePercent ||
+		!strings.Contains(strings.ToLower(strings.TrimSpace(external.Verdict)), "human") ||
+		(strings.TrimSpace(strings.ToLower(external.RiskLevel)) != "low" && strings.TrimSpace(external.RiskLevel) != "低") {
 		return false
 	}
 	if strings.TrimSpace(payload.BodySHA256) == "" || strings.TrimSpace(external.BodySHA256) == "" ||
@@ -253,7 +433,7 @@ func ApplyExternalCorroboration(payload *MechanicalGatePayload, external *Extern
 	if !strongNarrativeHumanAnchor(report) {
 		return false
 	}
-	blockers := externalCorroborationBlockers(payload)
+	blockers := externalCorroborationBlockers(payload, editor)
 	payload.CorroborationBlockedBy = blockers
 	if len(blockers) > 0 {
 		return false
@@ -291,7 +471,7 @@ func strongNarrativeHumanAnchor(report aigc.Report) bool {
 	}
 }
 
-func externalCorroborationBlockers(payload *MechanicalGatePayload) []string {
+func externalCorroborationBlockers(payload *MechanicalGatePayload, editor *domain.ReviewEntry) []string {
 	report := payload.AIGCReport
 	var blockers []string
 	if report.ContentIntegrityFloor > 0 {
@@ -304,7 +484,10 @@ func externalCorroborationBlockers(payload *MechanicalGatePayload) []string {
 		blockers = append(blockers, "legacy_consensus_high")
 	}
 	for _, violation := range payload.RuleViolations {
-		if IsDeterministicMechanicalViolation(violation) {
+		editorCleared := EditorExplicitlyClearsStructuralProseWarning(editor, payload, violation) ||
+			EditorExplicitlySupportsStructuralProseWarningClearance(editor, payload, violation)
+		if IsDeterministicMechanicalViolation(violation) ||
+			(IsStructuralProseViolation(violation) && !editorCleared) {
 			blockers = append(blockers, strings.TrimSpace(violation.Rule))
 		}
 	}

@@ -72,9 +72,10 @@ func LoadWithOverrides(style string, overrideDirs ...string) (Bundle, []PromptPr
 		"architect-long.md":  mustRead(promptsFS, "prompts/architect-long.md"),
 		"planner.md":         mustRead(promptsFS, "prompts/planner.md"),
 		"writer.md":          mustRead(promptsFS, "prompts/writer.md"),
+		"drafter.md":         mustRead(promptsFS, "prompts/drafter.md"),
 		"editor.md":          mustRead(promptsFS, "prompts/editor.md"),
 	}
-	names := []string{"coordinator.md", "architect-short.md", "architect-long.md", "planner.md", "writer.md", "editor.md"}
+	names := []string{"coordinator.md", "architect-short.md", "architect-long.md", "planner.md", "writer.md", "drafter.md", "editor.md"}
 
 	provenance := make([]PromptProvenance, 0, len(names))
 	for _, name := range names {
@@ -172,6 +173,10 @@ func loadReferences(style string) tools.References {
 		RAGWritingGuidelines:    mustRead(referencesFS, "references/rag-writing-guidelines.md"),
 		WebReferenceGuidelines:  mustRead(referencesFS, "references/web-reference-guidelines.md"),
 		LongformAIDetector:      mustRead(referencesFS, "references/longform-ai-detector.md"),
+		LiteraryRendering:       mustRead(referencesFS, "references/literary-rendering.md"),
+		LiteraryRenderingCards:  mustRead(referencesFS, "references/literary-rendering-cards.json"),
+		GenreStyleCraft:         mustRead(referencesFS, "references/genre-style-craft.md"),
+		GenreStyleProfiles:      mustRead(referencesFS, "references/genre-style-profiles.json"),
 	}
 	if style != "" && style != "default" {
 		genreDir := "references/genres/" + style + "/"
@@ -224,6 +229,8 @@ func (b *Bundle) OverridePrompt(file, raw string) error {
 		b.Prompts.ArchitectLong = wrapped
 	case "writer.md":
 		b.Prompts.Writer = wrapped
+	case "drafter.md":
+		b.Prompts.Drafter = wrapped
 	case "planner.md":
 		b.Prompts.Planner = wrapped
 	case "editor.md":
@@ -239,6 +246,7 @@ var promptRole = map[string]string{
 	"architect-long.md":  "architect",
 	"planner.md":         "writer",
 	"writer.md":          "writer",
+	"drafter.md":         "writer",
 	"editor.md":          "editor",
 }
 

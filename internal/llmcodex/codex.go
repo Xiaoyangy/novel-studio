@@ -39,6 +39,12 @@ const (
 	codexToolArgsRuneBudget        = 18_000
 	codexProsePromptRuneBudget     = 48_000
 	codexProsePerMessageRuneBudget = 24_000
+	codexProsePinnedRuneBudget     = 20_000
+	codexProseDialogReserve        = 12_000
+	codexProseCraftCardLimit       = 8
+	codexProseSourceRefLimit       = 16
+	codexProseCraftFieldRuneBudget = 1_200
+	codexProseSourceRefRuneBudget  = 512
 	codexExecHardTimeout           = 15 * time.Minute
 	proseCacheProtocol             = "codex-prose-cache/v2"
 )
@@ -295,51 +301,76 @@ func saveCachedProse(prompt, model, reasoning, prose string) error {
 // prose 上下文，模型很容易把正文写成逐项交付的计划清单。
 func buildProsePrompt(messages []agentcore.Message) string {
 	var dialog strings.Builder
+	pinned := make(map[string]any)
 	for _, msg := range messages {
 		role := msg.GetRole()
 		if role != agentcore.RoleUser && role != agentcore.RoleTool {
 			continue
 		}
-		if text := strings.TrimSpace(compactProseMessageText(msg, msg.TextContent())); text != "" {
+		text := ""
+		if role == agentcore.RoleTool {
+			if selected, ok := selectProseToolContext(msg.TextContent()); ok {
+				priority, supplemental := splitProseContextPriority(selected)
+				mergeProsePriorityContext(pinned, priority)
+				text = marshalProseSupplementalWithin(supplemental, codexProsePerMessageRuneBudget)
+			} else {
+				text = compactProseMessageText(msg, msg.TextContent())
+			}
+		} else {
+			text = compactProseMessageText(msg, msg.TextContent())
+		}
+		if text = strings.TrimSpace(text); text != "" {
 			fmt.Fprintf(&dialog, "[%s]\n%s\n\n", string(role), text)
 		}
 	}
 	suffix := `## 现在写正文
-你面对的是连载读者，不是计划审核人。只使用上下文中的 render_packet、人物关系、前章尾声和经净化的外审证据；不要猜测或还原已隐藏的完整章纲、世界推演、旧稿和流程清单。
+你面对的是连载读者，不是计划审核人。只使用上下文中的 render_packet、style_contract、literary_render_contract、人物关系、前章尾声和经净化的外审证据；不要猜测或还原已隐藏的完整章纲、世界推演、旧稿和流程清单。
 
-先找准主角这一章最想要什么、最担心什么，让这个念头贯穿全章。通常只写 2-4 个页面场景；mandatory_beats 是章末必须成立的结果，可以几项合在同一场里，不得一项建一场、一人说一句。无戏的办事过程一句带过，转场可以直接跳时间或地点，不要专写一段因果桥。
+style_contract 是本项目已命中的题材专项合同，负责语域、口述气口、喜剧、成长兑现、关系边界和非人物媒介声口；用户最新规则优先于它。它不追加剧情义务，也不要求逐卡打勾。literary_render_contract 决定视角、信息权限和本章选中的渲染手法；两者冲突时，先服从用户硬规则和人物/世界事实，再服从题材边界，最后选择具体文学手法。
 
-群体决定留在模拟层。正文最多完整写一个真正改变主角选择的摊主或申请者，其余只写总结果；禁止用“第一个、另一家、旁边那家、最后一家”给多人逐个分配动机，也不要让每个人各提一个条件。现实项目可以跨半天，但全章最多保留两个具体钟点，中间用午饭、日光、库存或手头工作的变化自然跳过，禁止按八点、九点、十点连续报站。成果兑现只跟一组普通顾客完成看价、付款、拿走东西，其他摊位留在背景里。
+literary_render_contract 是本章唯一的文学渲染合同：只取其已选中的主观欲望与误判、情绪因果、关系位移、声口、现场锚点、信息预算和章末后果。craft_cards 只是已筛选的候选手法，符合当前人物和场景才使用；source_refs 只用于追溯，不得把路径、ID或资料原句写进正文。它们不得覆盖 render_packet 的范围和禁区。
 
-自然网文允许平实叙述、普通连接句和一个人连续说完一段话。对白只顺着人物当时最急的事说，可以直白、完整、简短，也可以没有动作标签。不要为了“像人”强加抢话、误会、迟疑、乱码、无用微动作或随机生活事故。多人同场只留真正有话要说的人，完全可以由一人主说、其他人做事。
+mandatory_beats 只是写完后必须成立的事实，不是必须逐项拍出来的镜头。先找这一章真正有意思的两三处：主角最难堪、最想要、最意外或最舍不得略过的时刻。没有人物意义的程序、核对和重复证明可以离屏完成，也可以一句话跳过；不要给每个结果单独建场，更不要按 required_beats 的顺序逐条证明。
+
+先写人，再写事。旁白要贴着当前视角人物的注意力、偏见和小心思，允许人物在一个感受上多停一会儿，也允许某个瞬间暂时没有结论。不要在每个动作后解释动机，不要每隔一段总结一次人物“真正想要什么”。一章里可以有不直接推进外部目标、但能让读者认识人物的闲话、尴尬和关系余波；它们必须生在现场，不能是随机注水。
+
+群体决定留在模拟层。群像现场可以乱一点：有人等、有人插嘴、有人只顾自己手头的事，也可以没人出来代表全体。只有真与视角人物发生关系的人才值得展开，不给“第一个、另一个、最后一个”逐个分配功能。现实耗时要可信，用饭点、天光、疲劳和手头工作的变化自然表现时间过去，避免按钟点报站。
+
+不要把结果写成验收录像。规则或事实已经成立、读者已经看懂时，不必再依次安排检查、确认、留痕和旁人复述。优先写哪个瞬间真正改变了人物的处境、判断、代价或关系；同一类证明链在读者已理解后就压缩或省略。
+
+自然网文允许平实叙述、普通连接句和一个人连续说完一段话。普通平静口述通常以一个完整气口承载一小段意思：对象、原因、条件和补充能一口气说完，就用自然复句，不要切成“两个字。两个字。再解释”的电报码。短答可以只有两三个字；连续碎断只允许真实抢险、被打断、惊吓、喘不上气或刻意拒绝，而且现场必须给出原因。不要靠机械填“那个、就是、然后”伪造口语。
+
+对白只顺着人物当时最急的事说，可以答非所问，可以只说半截，也可以没有动作标签；但不要为了“像人”强加抢话、误会、迟疑、无用微动作或随机事故。朗读时若像主持人串场、工作汇报、合同口述或作者借角色讲道理，整轮推倒重写。多人同场不必人人发言，也不要让最理性的人总能一次说服全场。
 
 写每句对白前先确认说话人。称谓、人称和信息必须对得上：人物没有明确表演目的时，不会拿自己的姓名或职务当第三人称说自己。普通词组要能顺口读出来，不造“接骨碟”一类错词，不用看似精确却没人这么搭配的句子。问答若不相接、动作找不到对象、上一句身份与下一句称呼冲突，直接重写，不靠后文解释。
 
-render_packet.visible_characters 是本章唯一可在现场行动、发言或发消息的实名角色。excluded_named_characters 即使出现在角色资料里也不得进入正文；无名摊主继续写“摊主”或职业称呼，绝不能借用亲戚、朋友或离屏角色的名字补位，也不能给已命名人物临时换职业。
+render_packet.visible_characters 是本章唯一可在现场行动、发言或发消息的实名角色。excluded_named_characters 即使出现在角色资料里也不得进入正文；无名功能角色继续使用现场身份或职业称呼，不得借用亲属、熟人或离屏角色的名字补位，也不得给已命名人物临时更换身份。
 
-人物本章第一次行使职务权力、叫停别人或改变现场时，先给读者一个最省字的身份锚点，例如工作证、熟人称呼或主角认出她；不能因为计划知道她是谁，就让正文里的读者也凭空知道。
+人物本章第一次行使特定权力、叫停别人或改变现场时，先给读者一个最省字的身份锚点，例如身份物件、熟人称呼或视角人物的认出；不能因为计划知道该角色是谁，就让正文里的读者也凭空知道。
 
-叙述和县城普通人对白都用日常话。禁止把计划词泄漏进正文，例如“真实交付、参与范围、统一条件、承载上限、阶段结算、可核查、口径、边界”。不要说“付款与交付形成闭环”，直接让顾客付钱后拎着吃的离开；不要说“按统一条件执行”，可以说“今晚就这五家，明天再排”。让读者看见结果，不让人物解释项目。
+叙述和日常对白优先使用人物真会说的话。禁止把计划、审核和流程术语泄漏进正文。没有术语也可能像报告：若连续几段都在写“发现问题、判断原因、作出调整、验证结果”，同样要删掉步骤，把镜头还给人物当下的偏见、欲望、不舍、窘迫或高兴。角色不负责替作者做复盘，旁白也不负责证明方案正确。
 
-重要刺激要留在主视角身上一会儿，并改变他紧接着的选择、说法或对某人的判断。男女主同场时，事业与关系可以是同一条线，但必须服从当前熟悉程度：刚重逢或刚合作，只需让她的一次帮忙、提醒或留步改变他的判断；不要为了“发糖”临时递湿巾、碰手、说机巧对句或硬凑暧昧。真正熟悉后，私下对话才可以自然慢下来。
+重要刺激要留在当前视角人物身上一会儿，不要求立刻变成决策或总结。关系核心人物同场时，互动必须服从当前的熟悉程度、权力差和边界；不要为了制造亲密、对抗或和解，临时追加与当前关系不相符的机巧话、身体接触或态度跳变。
 
 不要在一段关系对白后补“这句话很重”“话不甜，却让他踏实”“她没问，所以更……”之类判词。若感情真的往前走了，让下一句、下一次站位或主角随后的选择自然证明；没有可见后果就不要替读者宣布。
 
-系统的完整话放在一对【】内，独占一个自然段。它要像支持主角的熟人，接住主角刚才具体的误判或问题，一次只说一件事；一条提示最多两句，不能同时解释拒绝理由、规则和替代方案。直接指出眼前的人或东西，不把忙中疏漏说成主角在“钻空子”；禁止“钱没跑”“陪你换条路”“这笔不行”这类不带具体对象的客服话，也不改成纯数据面板。结算可以报金额或奖励，再带一句短回应，但读者刚看见的因果不要由系统重讲一遍。关系戏里不写“这个好比所有解释都重”“话不甜却让他踏实”这类替读者标注情感重量的旁白。
+任何非人物媒介、界面或传话声音，只在 render_packet 或 literary_render_contract 明确存在时使用，格式、声口与信息上限完全服从合同；没有这类契约时不得擅自引入。媒介只承担当下必需的一件事，不重讲读者已看见的因果，不替人物完成情绪反应。
 
-若 draft_external_ai_review 为 blocking，只吸收其经项目净化后的可读性证据；不沿用旧稿段落顺序做同义改写，不为追分制造缺口。世界模拟中 visible_to_pov=false 的实名角色或具名身份不得出场、发言或发消息；群体结果可写纸上多了名字，不得临时造一个“申请加入的摊主”开口补说明。
+若 draft_external_ai_review 为 blocking，只吸收其经项目净化后的可读性证据；不沿用旧稿段落顺序做同义改写，不为追分制造缺口。世界模拟中 visible_to_pov=false 的实名角色或具名身份不得出场、发言或发消息；群体结果可用不具名的现场变化呈现，不得临时造一个可发言的功能角色补说明。
 
 正常小说排版：首行必须写成“第N章 标题”，N 使用 render_packet.chapter，标题必须逐字使用 render_packet.title；段落间空一行。只输出完整正文，不要 JSON、Markdown、解释、自检报告或运行环境诊断。外层会负责落盘。`
 	if contract := inferProseWordContract(messages); contract.configured() {
 		suffix += contract.prompt()
 	}
-	return assembleBudgetedPromptWithLimit("", dialog.String(), suffix, codexProsePromptRuneBudget)
+	prefix := buildProsePinnedPrefix(pinned, suffix)
+	return assembleBudgetedPromptWithLimit(prefix, dialog.String(), suffix, codexProsePromptRuneBudget)
 }
 
 var proseContextKeys = []string{
 	"chapter", "title", "premise", "render_packet", "draft_external_ai_review",
 	"draft_external_ai_review_policy", "user_rules", "chapter_participants", "relationship_state",
 	"character_snapshots", "previous_tail", "rag_recall", "rewrite_brief",
+	"literary_render_contract", "craft_cards", "source_refs",
 }
 
 func compactProseMessageText(msg agentcore.Message, text string) string {
@@ -350,9 +381,27 @@ func compactProseMessageText(msg agentcore.Message, text string) string {
 	if string(msg.GetRole()) != string(agentcore.RoleTool) {
 		return compactCodexText(text, codexProsePerMessageRuneBudget)
 	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(text), &payload) != nil {
+	selected, ok := selectProseToolContext(text)
+	if !ok {
 		return compactCodexText(text, codexProsePerMessageRuneBudget)
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(selected)
+	if err != nil {
+		return compactCodexText(text, codexProsePerMessageRuneBudget)
+	}
+	if utf8.RuneCount(raw) <= codexProsePerMessageRuneBudget {
+		return string(raw)
+	}
+	return marshalBudgetedProseContext(selected, codexProsePerMessageRuneBudget)
+}
+
+func selectProseToolContext(text string) (map[string]any, bool) {
+	var payload map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &payload) != nil {
+		return nil, false
 	}
 	selected := make(map[string]any)
 	copyProseContextKeys(selected, payload)
@@ -367,14 +416,8 @@ func compactProseMessageText(msg agentcore.Message, text string) string {
 			selected[section] = kept
 		}
 	}
-	if len(selected) == 0 {
-		return ""
-	}
-	raw, err := json.Marshal(selected)
-	if err != nil {
-		return compactCodexText(text, codexProsePerMessageRuneBudget)
-	}
-	return compactCodexText(string(raw), codexProsePerMessageRuneBudget)
+	dedupeProseContext(selected)
+	return selected, true
 }
 
 func copyProseContextKeys(dst, src map[string]any) {
@@ -383,21 +426,423 @@ func copyProseContextKeys(dst, src map[string]any) {
 		if !ok {
 			continue
 		}
-		if key == "draft_external_ai_review" {
+		switch key {
+		case "draft_external_ai_review":
 			review, keep := proseBlockingReview(value)
 			if !keep {
 				continue
 			}
 			value = review
-		} else if key == "rewrite_brief" {
+		case "rewrite_brief":
 			brief, keep := proseRewriteBrief(value)
 			if !keep {
 				continue
 			}
 			value = brief
+		case "render_packet", "literary_render_contract":
+			value = compactProseBridgeFields(value)
+		case "craft_cards":
+			cards, keep := compactProseCraftCards(value)
+			if !keep {
+				continue
+			}
+			value = cards
+		case "source_refs":
+			refs, keep := compactProseSourceRefs(value)
+			if !keep {
+				continue
+			}
+			value = refs
 		}
 		dst[key] = value
 	}
+}
+
+func dedupeProseContext(selected map[string]any) {
+	sectionNames := []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"}
+	sections := make([]map[string]any, 0, len(sectionNames))
+	for _, name := range sectionNames {
+		if section, ok := selected[name].(map[string]any); ok {
+			sections = append(sections, section)
+		}
+	}
+
+	primaryPacket, hasPrimaryPacket := selected["render_packet"].(map[string]any)
+	if hasPrimaryPacket {
+		for _, section := range sections {
+			delete(section, "render_packet")
+		}
+	} else {
+		for _, section := range sections {
+			packet, ok := section["render_packet"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if !hasPrimaryPacket {
+				primaryPacket = packet
+				hasPrimaryPacket = true
+				continue
+			}
+			delete(section, "render_packet")
+		}
+	}
+
+	for _, key := range []string{"literary_render_contract", "craft_cards", "source_refs"} {
+		if hasPrimaryPacket {
+			if _, inPacket := primaryPacket[key]; inPacket {
+				delete(selected, key)
+				for _, section := range sections {
+					delete(section, key)
+				}
+				continue
+			}
+		}
+		if _, atRoot := selected[key]; atRoot {
+			for _, section := range sections {
+				delete(section, key)
+			}
+			continue
+		}
+		kept := false
+		for _, section := range sections {
+			if _, exists := section[key]; !exists {
+				continue
+			}
+			if kept {
+				delete(section, key)
+				continue
+			}
+			kept = true
+		}
+	}
+
+	for _, name := range sectionNames {
+		if section, ok := selected[name].(map[string]any); ok && len(section) == 0 {
+			delete(selected, name)
+		}
+	}
+}
+
+func marshalBudgetedProseContext(selected map[string]any, limit int) string {
+	priority, supplemental := splitProseContextPriority(selected)
+	const priorityHeader = "[prose_priority_context]\n"
+	const supplementalHeader = "\n[prose_supplemental_context]\n"
+
+	priorityBudget := limit - utf8.RuneCountInString(priorityHeader)
+	priorityText := marshalProsePriorityWithin(priority, priorityBudget)
+	out := priorityHeader + priorityText
+
+	if len(supplemental) > 0 {
+		remaining := limit - utf8.RuneCountInString(out) - utf8.RuneCountInString(supplementalHeader)
+		if remaining >= 128 {
+			if raw, err := json.Marshal(supplemental); err == nil {
+				out += supplementalHeader + compactCodexText(string(raw), remaining)
+			}
+		}
+	}
+	if runes := []rune(out); len(runes) > limit {
+		// priorityText has already been fitted to its own budget, so any rounding
+		// excess can only be supplemental tail. Prefix clipping preserves every
+		// priority key and keeps the per-message hard cap exact.
+		return string(runes[:limit])
+	}
+	return out
+}
+
+func splitProseContextPriority(selected map[string]any) (priority, supplemental map[string]any) {
+	priority = make(map[string]any)
+	supplemental = make(map[string]any)
+	for key, value := range selected {
+		if prosePriorityContextKey(key) {
+			priority[key] = value
+			continue
+		}
+		if proseContextSectionKey(key) {
+			section, ok := value.(map[string]any)
+			if !ok {
+				supplemental[key] = value
+				continue
+			}
+			sectionPriority := make(map[string]any)
+			sectionSupplemental := make(map[string]any)
+			for sectionKey, sectionValue := range section {
+				if prosePriorityContextKey(sectionKey) {
+					sectionPriority[sectionKey] = sectionValue
+				} else {
+					sectionSupplemental[sectionKey] = sectionValue
+				}
+			}
+			if len(sectionPriority) > 0 {
+				priority[key] = sectionPriority
+			}
+			if len(sectionSupplemental) > 0 {
+				supplemental[key] = sectionSupplemental
+			}
+			continue
+		}
+		supplemental[key] = value
+	}
+	return priority, supplemental
+}
+
+func mergeProsePriorityContext(dst, src map[string]any) {
+	updates := make(map[string]any)
+	for key, value := range src {
+		if prosePriorityContextKey(key) {
+			updates[key] = value
+			continue
+		}
+		if !proseContextSectionKey(key) {
+			continue
+		}
+		section, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		for sectionKey, sectionValue := range section {
+			if prosePriorityContextKey(sectionKey) {
+				updates[sectionKey] = sectionValue
+			}
+		}
+	}
+	clearPriorityKey := func(key string) {
+		delete(dst, key)
+		for _, sectionName := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
+			if section, ok := dst[sectionName].(map[string]any); ok {
+				delete(section, key)
+				if len(section) == 0 {
+					delete(dst, sectionName)
+				}
+			}
+		}
+	}
+
+	// A render_packet is a complete versioned snapshot. Replacing it wholesale
+	// prevents optional fields omitted by the newer packet from surviving via a
+	// recursive merge with stale scene lenses, visibility bans or craft choices.
+	if packet, ok := updates["render_packet"]; ok {
+		for _, key := range []string{"render_packet", "literary_render_contract", "craft_cards", "source_refs"} {
+			clearPriorityKey(key)
+		}
+		dst["render_packet"] = packet
+		delete(updates, "render_packet")
+	}
+	for key, value := range updates {
+		if packet, ok := dst["render_packet"].(map[string]any); ok {
+			packet[key] = value
+			clearPriorityKey(key)
+			continue
+		}
+		clearPriorityKey(key)
+		dst[key] = value
+	}
+}
+
+func marshalProseSupplementalWithin(supplemental map[string]any, limit int) string {
+	if len(supplemental) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(supplemental)
+	if err != nil {
+		return ""
+	}
+	return compactCodexText(string(raw), limit)
+}
+
+func buildProsePinnedPrefix(pinned map[string]any, suffix string) string {
+	if len(pinned) == 0 {
+		return ""
+	}
+	dedupeProseContext(pinned)
+	const header = "## 正文必保留结构化合同\n[prose_priority_context]\n"
+	maxPrefix := codexProsePromptRuneBudget - utf8.RuneCountInString(suffix) - codexProseDialogReserve
+	if maxPrefix > codexProsePinnedRuneBudget {
+		maxPrefix = codexProsePinnedRuneBudget
+	}
+	payloadBudget := maxPrefix - utf8.RuneCountInString(header) - 2
+	if payloadBudget < 128 {
+		payloadBudget = 128
+	}
+	return header + marshalProsePriorityWithin(pinned, payloadBudget) + "\n\n"
+}
+
+func prosePriorityContextKey(key string) bool {
+	switch key {
+	case "render_packet", "literary_render_contract", "craft_cards", "source_refs":
+		return true
+	default:
+		return false
+	}
+}
+
+func proseContextSectionKey(key string) bool {
+	switch key {
+	case "working_memory", "episodic_memory", "reference_pack", "selected_memory":
+		return true
+	default:
+		return false
+	}
+}
+
+func marshalProsePriorityWithin(priority map[string]any, limit int) string {
+	if raw, err := json.Marshal(priority); err == nil && utf8.RuneCount(raw) <= limit {
+		return string(raw)
+	}
+	for _, bounds := range []struct {
+		textRunes int
+		items     int
+	}{
+		{textRunes: 1200, items: 16},
+		{textRunes: 600, items: 8},
+		{textRunes: 240, items: 4},
+		{textRunes: 128, items: 1},
+	} {
+		compact := compactProsePriorityValue(priority, bounds.textRunes, bounds.items)
+		raw, err := json.Marshal(compact)
+		if err == nil && utf8.RuneCount(raw) <= limit {
+			return string(raw)
+		}
+	}
+	// The literary bridge uses a fixed-schema packet, so the 128-rune/one-item
+	// projection above is normally far below 24K. Keep a defensive fallback for
+	// malformed extension maps while retaining the priority object's outer keys.
+	skeleton := make(map[string]any, len(priority))
+	for key := range priority {
+		skeleton[key] = map[string]any{"_truncated": true}
+	}
+	raw, _ := json.Marshal(skeleton)
+	return compactCodexText(string(raw), limit)
+}
+
+func compactProsePriorityValue(value any, textRunes, itemLimit int) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		compact := make(map[string]any, len(typed))
+		for key, item := range typed {
+			compact[key] = compactProsePriorityValue(item, textRunes, itemLimit)
+		}
+		return compact
+	case []any:
+		if len(typed) > itemLimit {
+			typed = typed[:itemLimit]
+		}
+		compact := make([]any, 0, len(typed))
+		for _, item := range typed {
+			compact = append(compact, compactProsePriorityValue(item, textRunes, itemLimit))
+		}
+		return compact
+	case string:
+		return compactCodexText(typed, textRunes)
+	default:
+		return value
+	}
+}
+
+func compactProseBridgeFields(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		compact := make(map[string]any, len(typed))
+		for key, item := range typed {
+			switch key {
+			case "craft_cards":
+				if cards, keep := compactProseCraftCards(item); keep {
+					compact[key] = cards
+				}
+			case "source_refs":
+				if refs, keep := compactProseSourceRefs(item); keep {
+					compact[key] = refs
+				}
+			default:
+				compact[key] = compactProseBridgeFields(item)
+			}
+		}
+		return compact
+	case []any:
+		compact := make([]any, 0, len(typed))
+		for _, item := range typed {
+			compact = append(compact, compactProseBridgeFields(item))
+		}
+		return compact
+	default:
+		return value
+	}
+}
+
+func compactProseCraftCards(value any) ([]any, bool) {
+	rawCards, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	compact := make([]any, 0, min(len(rawCards), codexProseCraftCardLimit))
+	for _, rawCard := range rawCards {
+		if len(compact) >= codexProseCraftCardLimit {
+			break
+		}
+		switch card := rawCard.(type) {
+		case string:
+			if card = strings.TrimSpace(card); card != "" {
+				compact = append(compact, compactCodexText(card, codexProseCraftFieldRuneBudget))
+			}
+		case map[string]any:
+			lean := make(map[string]any)
+			for _, key := range []string{
+				"card_id", "id", "kind", "title", "target", "move", "render_move",
+				"why", "avoid", "application", "usage_policy", "source_refs",
+			} {
+				item, exists := card[key]
+				if !exists {
+					continue
+				}
+				if key == "source_refs" {
+					if refs, keep := compactProseSourceRefs(item); keep {
+						lean[key] = refs
+					}
+					continue
+				}
+				if text, isText := item.(string); isText {
+					text = strings.TrimSpace(text)
+					if text == "" {
+						continue
+					}
+					lean[key] = compactCodexText(text, codexProseCraftFieldRuneBudget)
+					continue
+				}
+				lean[key] = item
+			}
+			if len(lean) > 0 {
+				compact = append(compact, lean)
+			}
+		}
+	}
+	return compact, len(compact) > 0
+}
+
+func compactProseSourceRefs(value any) ([]string, bool) {
+	rawRefs, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	refs := make([]string, 0, min(len(rawRefs), codexProseSourceRefLimit))
+	seen := make(map[string]struct{}, len(rawRefs))
+	for _, rawRef := range rawRefs {
+		if len(refs) >= codexProseSourceRefLimit {
+			break
+		}
+		ref, ok := rawRef.(string)
+		if !ok {
+			continue
+		}
+		ref = strings.TrimSpace(ref)
+		if ref == "" || utf8.RuneCountInString(ref) > codexProseSourceRefRuneBudget {
+			continue
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs, len(refs) > 0
 }
 
 func proseRewriteBrief(value any) (map[string]any, bool) {

@@ -7,6 +7,7 @@
 package aigc
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -112,6 +113,7 @@ type ZhuqueSegment struct {
 	AIGCPercent         float64  `json:"aigc_percent"`
 	Category            string   `json:"category"`
 	Evidence            []string `json:"evidence"`
+	WholeTextHardGate   bool     `json:"whole_text_hard_gate,omitempty"`
 	LocalAIGCPercent    float64  `json:"local_aigc_percent"`
 	WeakLMScore         float64  `json:"weak_lm_score"`
 	ConcreteDensityPerK float64  `json:"concrete_density_per_k"`
@@ -158,15 +160,28 @@ var cliches = map[string][]string{
 }
 
 var (
-	sentenceSplitRe        = regexp.MustCompile(`[。！？!?；;\n]+`)
-	paragraphSplitRe       = regexp.MustCompile(`\n\s*\n+`)
-	orderedMarkerRe        = regexp.MustCompile(`(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])`)
-	nonCJKRe               = regexp.MustCompile(`[^一-龥]`)
-	soundNoiseRe           = regexp.MustCompile(`(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}`)
-	cjkRunRe               = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
-	rareTermSoupRe         = regexp.MustCompile(`(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}`)
-	dialogueQuoteRe        = regexp.MustCompile(`[“「]([^”」\n]{1,240})[”」]`)
-	dialogueActionLeadRe   = regexp.MustCompile(`^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]`)
+	sentenceSplitRe           = regexp.MustCompile(`[。！？!?；;\n]+`)
+	paragraphSplitRe          = regexp.MustCompile(`\n\s*\n+`)
+	orderedMarkerRe           = regexp.MustCompile(`(?:首先|其次|再次|总之|综上|换句话说|最后[，、,:：]|第一[，、点:：]|第二[，、点:：]|第三[，、点:：])`)
+	nonCJKRe                  = regexp.MustCompile(`[^一-龥]`)
+	soundNoiseRe              = regexp.MustCompile(`(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，、,。；;]?){6,}`)
+	cjkRunRe                  = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
+	rareTermSoupRe            = regexp.MustCompile(`(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}`)
+	dialogueQuoteRe           = regexp.MustCompile(`[“「]([^”」\n]{1,240})[”」]`)
+	dialogueActionLeadRe      = regexp.MustCompile(`^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]`)
+	dialogueMicroPeriodExempt = map[string]bool{
+		"好": true, "好的": true, "好吧": true,
+		"行": true, "行吧": true, "可以": true,
+		"知道": true, "知道了": true, "明白": true, "明白了": true,
+		"是": true, "是的": true, "是啊": true,
+		"对": true, "对的": true, "对啊": true, "没错": true,
+		"不是": true, "不是的": true,
+		"不用": true, "不用了": true,
+		"没事": true, "没事了": true,
+		"谢谢": true, "谢了": true, "抱歉": true, "对不起": true,
+		"嗯": true, "嗯嗯": true, "嗯哼": true,
+		"哦": true, "噢": true, "啊": true, "哎": true, "唉": true, "喂": true,
+	}
 	asciiWordRe            = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{1,}`)
 	transitionMarkers      = []string{"然而", "与此同时", "随后", "紧接着", "片刻后", "很快", "没过多久", "于是", "因此"}
 	summaryMarkers         = []string{"这让他意识到", "这让她意识到", "终于明白", "不仅仅是", "更是", "这意味着"}
@@ -175,7 +190,7 @@ var (
 	sensoryMarkers         = []string{"冷", "热", "烫", "疼", "痒", "酸", "涩", "苦", "甜", "腥", "臭", "响", "哑", "湿", "黏", "硬", "软", "亮", "暗", "刺", "闷", "吵"}
 	emotionMarkers         = []string{"紧张", "愤怒", "悲伤", "难过", "委屈", "害怕", "恐惧", "震惊", "惊讶", "复杂", "痛苦", "绝望", "崩溃", "开心", "喜悦", "温柔", "释然", "怅然", "茫然"}
 	abstractMarkers        = []string{"意义", "命运", "人生", "灵魂", "内心", "情绪", "感觉", "关系", "成长", "救赎", "羁绊", "真相", "现实", "未来", "过去", "世界", "规则", "答案"}
-	interiorityMarkers     = []string{"心里", "心口", "胸口", "脑子里", "他以为", "她以为", "他觉得", "她觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来"}
+	interiorityMarkers     = []string{"心里", "心口", "胸口", "脑子里", "以为", "觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "第一反应", "第二反应", "拿不准", "不准备", "不打算", "打定主意", "宁愿", "巴不得", "恨不得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来"}
 	logisticsMarkers       = []string{"付款", "收款", "订单", "票据", "材料", "安装", "通道", "位置", "摊位", "试用", "额度", "规则", "核对", "记录", "交付", "扩摊", "运力"}
 	emotionCategoryMarkers = map[string][]string{
 		"joy":       {"开心", "高兴", "痛快", "兴奋", "期待", "乐了", "笑开", "松了口气"},
@@ -202,8 +217,8 @@ const SingleDetectionSegmentMaxHanzi = 5000
 
 // EffectiveGatePercent 返回用于门禁判定的 AIGC 百分比：
 //   - 内容完整性风险（脏码/绕检噪声）在场 → 直接用 AIGCPercent。
-//   - 短章被朱雀式代理判为整章单段高风险 → 按 segment_risk_floor 判定；
-//     这模拟读者把整章合成一段提交检测的场景，human anchor 不能覆盖它。
+//   - 短章的整章单段同时满足三条原始曲线与独立叙事/结构证据 → 按
+//     segment_risk_floor 判定；未经独立证据确认的 segment max 仅作软诊断。
 //   - 强人工叙事锚点已触发 final cap → 使用 human_anchor_final_cap_percent 对应的
 //     AIGCPercent；报告仍保留原始 segment_risk_floor 供复核。
 //   - 短章（≤5000 字，单检测片段）默认用 AIGCPercent（含 segment_risk_floor 真高），
@@ -215,6 +230,12 @@ const SingleDetectionSegmentMaxHanzi = 5000
 func EffectiveGatePercent(report Report) float64 {
 	if report.ContentIntegrityFloor > 0 {
 		return report.AIGCPercent
+	}
+	// WholeTextSegmentGate is persisted independently from the verbose segment
+	// report.  Honour it before any human-anchor cap so a serialized/reloaded
+	// report cannot lose an already-established whole-chapter risk floor.
+	if report.WholeTextSegmentGate >= PassExclusivePercent {
+		return math.Max(report.AIGCPercent, report.WholeTextSegmentGate)
 	}
 	if risk, ok := wholeTextSingleSegmentRisk(report); ok {
 		return math.Max(report.AIGCPercent, risk)
@@ -243,6 +264,9 @@ func wholeTextSingleSegmentRisk(report Report) (float64, bool) {
 		return 0, false
 	}
 	segment := proxy.Segments[0]
+	if !segment.WholeTextHardGate {
+		return 0, false
+	}
 	if segment.Proportion >= 0.95 && proxy.RiskFloorPercent >= 50 {
 		return proxy.RiskFloorPercent, true
 	}
@@ -253,7 +277,10 @@ func wholeTextSingleSegmentRisk(report Report) (float64, bool) {
 }
 
 func HumanAnchorFinalCap(report Report) (float64, bool) {
-	if report.ContentIntegrityFloor > 0 || report.HumanAnchorFinalCap == nil {
+	if report.ContentIntegrityFloor > 0 || report.WholeTextSegmentGate >= PassExclusivePercent || report.HumanAnchorFinalCap == nil {
+		return 0, false
+	}
+	if _, ok := wholeTextSingleSegmentRisk(report); ok {
 		return 0, false
 	}
 	capValue := *report.HumanAnchorFinalCap
@@ -671,7 +698,7 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 		chunk := zhuqueSegmentChunk(body, visible, bounds, index)
 		report := analyze(chunk, false)
 		proportion := ratio(end-start, len(visible))
-		score, evidence := segmentAIGCProxy(report, end-start, proportion)
+		score, evidence, wholeTextHardGate := segmentAIGCProxy(report, end-start, proportion)
 		category := "人工特征"
 		if score >= 99 {
 			category = "AI特征"
@@ -697,6 +724,7 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 			AIGCPercent:         score,
 			Category:            category,
 			Evidence:            evidence,
+			WholeTextHardGate:   wholeTextHardGate,
 			LocalAIGCPercent:    report.AIGCPercent,
 			WeakLMScore:         weakScore,
 			ConcreteDensityPerK: report.Stats.ConcreteDensityPerK,
@@ -707,14 +735,25 @@ func zhuqueSegmentProxy(raw string) ZhuqueSegmentProxy {
 	proxy.AIFeatureRatioPercent = round2(float64(aiChars) / float64(maxInt(total, 1)) * 100)
 	proxy.HumanRatioPercent = round2(100 - proxy.SuspectedAIRatioPercent - proxy.AIFeatureRatioPercent)
 	riskRatio := round2(proxy.SuspectedAIRatioPercent + proxy.AIFeatureRatioPercent)
-	if len(proxy.Segments) == 1 && riskRatio >= 99 && proxy.MaxSegmentPercent >= 50 {
-		proxy.RiskFloorPercent = proxy.MaxSegmentPercent
-	} else if proxy.MaxSegmentPercent >= 80 && riskRatio >= 60 {
-		proxy.RiskFloorPercent = round2(riskRatio * 0.90)
-	} else if proxy.MaxSegmentPercent >= 60 && riskRatio >= 35 {
-		proxy.RiskFloorPercent = round2(riskRatio * 0.70)
-	}
+	proxy.RiskFloorPercent = zhuqueSegmentRiskFloor(proxy, riskRatio)
 	return proxy
+}
+
+func zhuqueSegmentRiskFloor(proxy ZhuqueSegmentProxy, riskRatio float64) float64 {
+	if len(proxy.Segments) == 1 {
+		segment := proxy.Segments[0]
+		if segment.WholeTextHardGate && riskRatio >= 99 && proxy.MaxSegmentPercent >= 50 {
+			return proxy.MaxSegmentPercent
+		}
+		return 0
+	}
+	if proxy.MaxSegmentPercent >= 80 && riskRatio >= 60 {
+		return round2(riskRatio * 0.90)
+	}
+	if proxy.MaxSegmentPercent >= 60 && riskRatio >= 35 {
+		return round2(riskRatio * 0.70)
+	}
+	return 0
 }
 
 func zhuqueSegmentChunk(body string, visible []rune, bounds [][2]int, index int) string {
@@ -739,7 +778,30 @@ func rawDetectorScore(item Dimension) float64 {
 	return raw
 }
 
-func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64, []string) {
+// wholeTextRawCurveConsensusFloor computes the candidate floor for three high
+// raw curve views. The views share surprisal/entropy inputs, so consensus is
+// necessary but not sufficient: segmentAIGCProxy also requires independent
+// narrative or structural evidence before this becomes a hard floor.
+func wholeTextRawCurveConsensusFloor(probabilityCurve, weakLM, entropy float64) (float64, bool) {
+	if probabilityCurve < 90 || weakLM < 90 || entropy < 90 {
+		return 0, false
+	}
+	consensusMean := (probabilityCurve + weakLM + entropy) / 3
+	floor := math.Min(86, math.Max(76, 60+consensusMean*0.20))
+	return round2(floor), true
+}
+
+func wholeTextIndependentRiskSupport(narrativeDynamics, structure, burstiness, crossParagraph float64) bool {
+	// A lone borderline POV/interiority heuristic scores 46. That signal is useful
+	// rewrite advice, but it is not independent enough to override a strong scene
+	// anchor and turn three correlated probability curves into a 76%+ hard floor.
+	// Conveyor/micro-period/POV-thin compounds score at least 55 and still block.
+	return narrativeDynamics >= 55 ||
+		structure >= 65 ||
+		(burstiness >= 35 && (structure >= 45 || crossParagraph >= 45))
+}
+
+func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64, []string, bool) {
 	latest := report.LatestDetectorProxy.Components
 	weak := latest["weak_lm_uniformity"].Score
 	probabilityCurve := latest["probability_curvature_proxy"].Score
@@ -784,7 +846,8 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 	anchorType := stringFromAny(anchor["anchor_type"])
 	blockers := stringSliceFromAny(anchor["blockers"])
 	narrativeLike := anchorType == "narrative_scene" || report.Stats.DialogueRatio >= 0.10 || report.Stats.ActionDensityPerK+report.Stats.SensoryDensityPerK >= 15
-	if charCount >= 1800 && proportion >= 0.95 && narrativeLike && anchorType != "technical_expository" {
+	wholeTextHardGate := false
+	if charCount >= 1800 && charCount <= 3600 && proportion >= 0.95 && narrativeLike && anchorType != "technical_expository" {
 		rawCurve := math.Max(math.Max(rawProbabilityCurve, rawEntropy), rawWeak)
 		currentCurve := math.Max(math.Max(probabilityCurve, entropy), weak)
 		dimScore := func(key string) float64 {
@@ -800,7 +863,8 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 		strongAnchor := boolFromAny(anchor["eligible"]) &&
 			stringFromAny(anchor["strength"]) == "strong" &&
 			len(blockers) == 0
-		rawCurveConsensus := rawProbabilityCurve >= 90 && rawWeak >= 75 && rawEntropy >= 60
+		consensusFloor, rawCurveConsensus := wholeTextRawCurveConsensusFloor(rawProbabilityCurve, rawWeak, rawEntropy)
+		independentHardSupport := wholeTextIndependentRiskSupport(narrativeDynamics, structure, burstiness, crossParagraph)
 		independentSupport := 0
 		if currentCurve >= 60 {
 			independentSupport++
@@ -808,7 +872,7 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 		if report.ZhuqueCompositePercent >= 50 {
 			independentSupport++
 		}
-		if burstiness >= 35 && (structure >= 45 || crossParagraph >= 30) {
+		if burstiness >= 35 && (structure >= 45 || crossParagraph >= 45) {
 			independentSupport++
 		}
 		if structure >= 65 && concrete < 18 && report.Stats.DialogueRatio < 0.35 {
@@ -818,18 +882,22 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 			independentSupport++
 		}
 		multiSignalSupport := independentSupport >= 2 || (!strongAnchor && (independentSupport >= 1 || rawCurve >= 90))
-		if rawCurve >= 80 && multiSignalSupport {
+		if rawCurveConsensus && independentHardSupport {
+			wholeTextHardGate = true
+			if consensusFloor > score {
+				score = consensusFloor
+			}
+			evidence = append(evidence, "整章单段三条原始曲线同时高危，且存在独立叙事或结构风险，形成复合风险下限")
+		} else if rawCurveConsensus {
+			evidence = append(evidence, "整章单段三条原始曲线同时偏高，但缺少独立叙事或结构风险，不形成硬门禁")
+		} else if rawCurve >= 80 && multiSignalSupport {
 			externalLikeScore := math.Min(86, math.Max(76, 62+rawCurve*0.20))
 			if externalLikeScore > score {
 				score = externalLikeScore
 				evidence = append(evidence, "整章单段疑似朱雀形态：曲线原始高值偏高且存在当前曲线/结构节奏复合支撑")
 			}
 		} else if rawCurve >= 80 {
-			if rawCurveConsensus {
-				evidence = append(evidence, "整章单段三条原始曲线同时过平，但当前曲线、人味锚点和结构节奏未形成独立复合高风险")
-			} else {
-				evidence = append(evidence, "整章单段原始曲线偏高，但当前曲线、人味锚点和结构节奏未形成复合高风险")
-			}
+			evidence = append(evidence, "整章单段仅有部分原始曲线偏高，未形成三曲线复合风险")
 		}
 	}
 	lengthOnlyBlocker := len(blockers) > 0
@@ -841,7 +909,7 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 	}
 	anchorScore := floatFromAny(anchor["score"])
 	segmentAnchorEligible := boolFromAny(anchor["eligible"]) || (lengthOnlyBlocker && charCount >= 420 && anchorScore >= 52)
-	if segmentAnchorEligible {
+	if segmentAnchorEligible && !wholeTextHardGate {
 		capScore := 100.0
 		if boolFromAny(anchor["eligible"]) {
 			capScore = floatFromAny(anchor["segment_cap"])
@@ -858,7 +926,7 @@ func segmentAIGCProxy(report Report, charCount int, proportion float64) (float64
 			evidence = append(evidence, "片段具备高质人工锚点，按正样本校准降权")
 		}
 	}
-	return round2(score), evidence
+	return round2(score), evidence, wholeTextHardGate
 }
 
 func scoreZhuqueSegmentProxy(proxy ZhuqueSegmentProxy) Dimension {
@@ -1101,6 +1169,80 @@ func scoreSemanticPerplexity(body string, stats Stats) Dimension {
 	return dim("语意困惑度", "semantic_perplexity", stat, signals)
 }
 
+type dialogueMicroPeriodStats struct {
+	HitTurns int
+	Examples []string
+}
+
+// dialogueMicroPeriodChain mirrors the deterministic prose lint for a narrow
+// dialogue-only signal: a non-final full stop follows only two to four Hanzi,
+// then the same quoted speech turn continues. Each dialogue paragraph
+// contributes at most one hit. Short answers/particles, question or
+// exclamation cadence, ellipses, and system-message text are excluded.
+func dialogueMicroPeriodChain(body string) dialogueMicroPeriodStats {
+	clean := stripSystemMessageText(body)
+	stats := dialogueMicroPeriodStats{}
+	for _, paragraph := range paragraphs(clean) {
+		for _, match := range dialogueQuoteRe.FindAllStringSubmatch(paragraph, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			message := strings.TrimSpace(match[1])
+			if !dialogueTurnHasMicroPeriodLead(message) {
+				continue
+			}
+			stats.HitTurns++
+			if len(stats.Examples) < 4 {
+				stats.Examples = append(stats.Examples, truncateRunes(message, 48))
+			}
+			// A dialogue tag can split one speaker turn into multiple quote
+			// spans inside one paragraph. Count the turn once.
+			break
+		}
+	}
+	return stats
+}
+
+func dialogueTurnHasMicroPeriodLead(message string) bool {
+	runes := []rune(message)
+	start := 0
+	for i, r := range runes {
+		switch r {
+		case '。':
+			if len(hanzi(string(runes[i+1:]))) == 0 {
+				start = i + 1
+				continue
+			}
+			candidate := string(hanzi(string(runes[start:i])))
+			if n := len([]rune(candidate)); n >= 2 && n <= 4 && !dialogueMicroPeriodExempt[candidate] {
+				return true
+			}
+			start = i + 1
+		case '！', '!', '？', '?', '；', ';', '…':
+			start = i + 1
+		}
+	}
+	return false
+}
+
+func stripSystemMessageText(text string) string {
+	var b strings.Builder
+	inSystemMessage := false
+	for _, r := range text {
+		switch r {
+		case '【':
+			inSystemMessage = true
+		case '】':
+			inSystemMessage = false
+		default:
+			if !inSystemMessage {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+
 func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 	paras := paragraphs(body)
 	dialogueParas := 0
@@ -1168,8 +1310,16 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 		conveyorEvidenceCount++
 	}
 	conveyorEvidence := conveyorEvidenceCount >= 2 || actionLeadRatio >= 0.50 || logisticsDensity >= 5.0
+	microPeriod := dialogueMicroPeriodChain(body)
 
 	signals := []Signal{}
+	if microPeriod.HitTurns >= 3 {
+		signals = append(signals, sig(
+			"dialogue_micro_period_chain",
+			64,
+			fmt.Sprintf("%d 个不同对白话轮在同一引号内用二至四字句号短句切开后续表达", microPeriod.HitTurns),
+		))
+	}
 	if denseDialogueWindows >= 2 && conveyorEvidence {
 		signals = append(signals, sig("dialogue_conveyor_windows", 70, "多个八段窗口由角色轮流发言推进，主视角体验和非功能性反应不足"))
 	} else if denseDialogueWindows == 1 && conveyorEvidence {
@@ -1197,20 +1347,22 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 		signals = append(signals, sig("emotion_range_thin", 30, "情绪类别和主观余波都偏少"))
 	}
 	return dim("小说叙事动力/人物体验", "narrative_dynamics", map[string]any{
-		"paragraph_count":            len(paras),
-		"dialogue_paragraph_count":   dialogueParas,
-		"dialogue_paragraph_ratio":   dialogueParaRatio,
-		"max_dialogue_paragraph_run": maxDialogueRun,
-		"dense_dialogue_windows":     denseDialogueWindows,
-		"action_dialogue_lead_count": actionLeadParas,
-		"action_dialogue_lead_ratio": actionLeadRatio,
-		"dialogue_turn_count":        len(quoteLens),
-		"dialogue_turn_length_cv":    quoteLenCV,
-		"conveyor_compound_evidence": conveyorEvidence,
-		"conveyor_evidence_count":    conveyorEvidenceCount,
-		"interiority_density_per_k":  interiorityDensity,
-		"logistics_density_per_k":    logisticsDensity,
-		"emotion_category_count":     emotionCategories,
+		"paragraph_count":                      len(paras),
+		"dialogue_paragraph_count":             dialogueParas,
+		"dialogue_paragraph_ratio":             dialogueParaRatio,
+		"max_dialogue_paragraph_run":           maxDialogueRun,
+		"dense_dialogue_windows":               denseDialogueWindows,
+		"action_dialogue_lead_count":           actionLeadParas,
+		"action_dialogue_lead_ratio":           actionLeadRatio,
+		"dialogue_turn_count":                  len(quoteLens),
+		"dialogue_turn_length_cv":              quoteLenCV,
+		"conveyor_compound_evidence":           conveyorEvidence,
+		"conveyor_evidence_count":              conveyorEvidenceCount,
+		"interiority_density_per_k":            interiorityDensity,
+		"logistics_density_per_k":              logisticsDensity,
+		"emotion_category_count":               emotionCategories,
+		"dialogue_micro_period_chain_turns":    microPeriod.HitTurns,
+		"dialogue_micro_period_chain_examples": microPeriod.Examples,
 	}, signals)
 }
 
@@ -1355,6 +1507,7 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	short12 := round3(ratio(countWhere(sentLens, func(v float64) bool { return v <= 12 }), len(sentLens)))
 	quoteDensity := density(countAll(body, []string{"“", "”", "「", "」", "『", "』"}), stats.Hanzi)
 	punctKinds := punctuationKindCount(body)
+	microPeriod := dialogueMicroPeriodChain(body)
 	blockers := []string{}
 	if stats.Hanzi < 800 {
 		blockers = append(blockers, "文本长度不足 800 汉字，人工锚点置信度低")
@@ -1382,6 +1535,9 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	}
 	if stats.DialogueRatio >= 0.50 && quoteDensity < 8 {
 		blockers = append(blockers, "高对白统计缺少足量引号轮次承载，疑似短促问答堆砌")
+	}
+	if microPeriod.HitTurns >= 3 {
+		blockers = append(blockers, "至少三个对白话轮用二至四字句号短句切开后续表达，不能作为自然声口锚点")
 	}
 
 	score := 0
@@ -1500,18 +1656,20 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 		"style_cap":         styleCap,
 		"segment_cap":       segmentCap,
 		"metrics": map[string]any{
-			"sentence_cv":             stats.SentenceCV,
-			"paragraph_cv":            stats.ParagraphCV,
-			"short_sentence_ratio_12": short12,
-			"dialogue_ratio":          stats.DialogueRatio,
-			"quote_density_per_k":     quoteDensity,
-			"punctuation_kinds":       punctKinds,
-			"concrete_density_per_k":  stats.ConcreteDensityPerK,
-			"action_density_per_k":    stats.ActionDensityPerK,
-			"sensory_density_per_k":   stats.SensoryDensityPerK,
-			"emotion_density_per_k":   stats.EmotionDensityPerK,
-			"abstract_density_per_k":  stats.AbstractDensityPerK,
-			"scene_density_per_k":     sceneDensity,
+			"sentence_cv":                          stats.SentenceCV,
+			"paragraph_cv":                         stats.ParagraphCV,
+			"short_sentence_ratio_12":              short12,
+			"dialogue_ratio":                       stats.DialogueRatio,
+			"quote_density_per_k":                  quoteDensity,
+			"punctuation_kinds":                    punctKinds,
+			"concrete_density_per_k":               stats.ConcreteDensityPerK,
+			"action_density_per_k":                 stats.ActionDensityPerK,
+			"sensory_density_per_k":                stats.SensoryDensityPerK,
+			"emotion_density_per_k":                stats.EmotionDensityPerK,
+			"abstract_density_per_k":               stats.AbstractDensityPerK,
+			"scene_density_per_k":                  sceneDensity,
+			"dialogue_micro_period_chain_turns":    microPeriod.HitTurns,
+			"dialogue_micro_period_chain_examples": microPeriod.Examples,
 		},
 	}
 }

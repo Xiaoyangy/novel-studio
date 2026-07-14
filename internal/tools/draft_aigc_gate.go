@@ -181,6 +181,9 @@ func requireDraftAIGCGate(st *store.Store, chapter int, content string) error {
 	if gate.Passed {
 		return nil
 	}
+	if err := persistDraftAIGCRerenderRequirement(st, chapter, content, gate); err != nil {
+		return fmt.Errorf("第 %d 章 AIGC 阻断已确认，但整章重渲染标记写入失败: %v: %w", chapter, err, errs.ErrStoreWrite)
+	}
 	focus := strings.Join(gate.RewriteFocus, "；")
 	external := "none"
 	if gate.ExternalAIProbabilityPercent != nil {
@@ -191,6 +194,32 @@ func requireDraftAIGCGate(st *store.Store, chapter int, content string) error {
 		chapter, gate.EffectiveGatePercent, gate.PassExclusivePercent, gate.RawLocalGatePercent, external,
 		gate.CorroborationBlockedBy, gate.Calibration, focus, errs.ErrToolPrecondition,
 	)
+}
+
+func persistDraftAIGCRerenderRequirement(st *store.Store, chapter int, content string, gate draftAIGCGateResult) error {
+	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" || len(gate.RewriteFocus) == 0 {
+		return nil
+	}
+	evidence := []string{
+		fmt.Sprintf("raw_local=%.2f%% effective=%.2f%%", gate.RawLocalGatePercent, gate.EffectiveGatePercent),
+	}
+	if len(gate.CorroborationBlockedBy) > 0 {
+		evidence = append(evidence, "corroboration_blockers="+strings.Join(gate.CorroborationBlockedBy, ","))
+	}
+	if gate.ExternalAIProbabilityPercent != nil {
+		evidence = append(evidence, fmt.Sprintf("current_hash_external=%.2f%%，但整章或确定性结构证据仍阻断校准", *gate.ExternalAIProbabilityPercent))
+	}
+	return SetDraftExternalRerenderRequirement(st.Dir(), DraftExternalRerenderRequirement{
+		Chapter:              chapter,
+		EvaluatedBodySHA256:  reviewreport.BodySHA256(content),
+		Source:               "local_mechanical_gate",
+		AIProbabilityPercent: int(math.Round(gate.EffectiveGatePercent)),
+		PassExclusivePercent: int(gate.PassExclusivePercent),
+		Summary:              "当前草稿的整章单段或确定性结构风险未被同哈希外审消解，必须复用既有世界模拟与 plan 做完整重渲染，不能对原哈希重复提交。",
+		Evidence:             evidence,
+		RevisionPlan:         append([]string(nil), gate.RewriteFocus...),
+		AdviceComplete:       true,
+	})
 }
 
 func draftQualityGateNextStep(wordContract chapterWordContractResult, gate draftAIGCGateResult) string {

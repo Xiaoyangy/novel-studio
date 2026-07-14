@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "source": "assets/references/literary-rendering.md",
+  "policy": "按本章功能选择，不做九项清单，不设次数、比例或句长配额；信息权限与无因果转折可作硬边界，其余只作有证据的软诊断。",
+  "cards": [
+    {
+      "id": "focalization-boundary",
+      "decision": "谁在感知、知道和评价，哪些信息可由他合理获得？",
+      "move": "限定亲历、记忆、当下感官和有依据推断；切换焦点时给位置或语篇信号。",
+      "avoid": "未声明的跨脑读取、人物尚未知晓的幕后事实。",
+      "hard_boundary": true
+    },
+    {
+      "id": "psychic-distance",
+      "decision": "哪个时刻需要贴近人物经验，哪个跨度需要拉远？",
+      "move": "在决定、误判、受伤或发现处拉近；跨越重复过程时拉远。",
+      "avoid": "全章固定一个距离，或把有意跳变机械判错。",
+      "hard_boundary": false
+    },
+    {
+      "id": "scene-summary",
+      "decision": "这一刻为何值得实时篇幅，哪些过程只需概述或省略？",
+      "move": "把重要互动、决定、揭示和不可逆后果留在 scene；压缩重复日常与手续。",
+      "avoid": "把 show-dont-tell 绝对化，或按 scene/summary 比例评分。",
+      "hard_boundary": false
+    },
+    {
+      "id": "goal-causality",
+      "decision": "人物此刻要什么，策略结果怎样逼出下一步压力？",
+      "move": "目标变化时留下触发或重新评价的证据，让转折从行动、信息或关系中生出。",
+      "avoid": "只因时间先后就发生的随机转折；强迫每个抒情段都有任务句。",
+      "hard_boundary": true
+    },
+    {
+      "id": "emotion-appraisal",
+      "decision": "事件对这个人物意味着什么，它怎样改变注意、判断或行动？",
+      "move": "用触发、人物评价、身体或注意偏向、选择与余波组成可省略但可推断的链。",
+      "avoid": "悬空情绪标签、固定成功喜悦失败悲伤、动作后再解释一遍。",
+      "hard_boundary": false
+    },
+    {
+      "id": "motif-return",
+      "decision": "旧物、声音或动作此次在新压力下多了什么意义？",
+      "move": "先承担字面场景功能，再借位置、人物反应或后果改变前次联想。",
+      "avoid": "复制原句充当回扣、锁死唯一象征、规定每章出现次数。",
+      "hard_boundary": false
+    },
+    {
+      "id": "syntax-rhythm",
+      "decision": "当前认知负荷和信息重量需要怎样的从句、停顿与落点？",
+      "move": "让追逐或惊慌缩短感知动作单位，让犹疑、回忆或推理允许延迟落点。",
+      "avoid": "随机轮换长短句、把英文词数换算为中文字符阈值、用碎句扰动检测。",
+      "hard_boundary": false
+    },
+    {
+      "id": "free-indirect-discourse",
+      "decision": "叙述何时需要暂时染上当前人物的称呼、评价和句法？",
+      "move": "先建立焦点与语境，再省略思想标签，让思想归属仍可辨。",
+      "avoid": "把它等同内焦点化、用正则或出现率判定、误写成全知旁白。",
+      "hard_boundary": false
+    },
+    {
+      "id": "dialogue-subtext",
+      "decision": "表层话题与说话者真实目的、隐瞒和社会风险之间有什么压力差？",
+      "move": "用试探、转移、停顿、答非所问和措辞留下可推断线索，必要信息仍可直说。",
+      "avoid": "对白后由旁白逐句解释潜台词，或让所有人物普遍闪避制造假深沉。",
+      "hard_boundary": false
+    }
+  ]
+}
