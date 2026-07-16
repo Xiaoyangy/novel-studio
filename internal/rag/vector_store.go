@@ -116,12 +116,20 @@ type VectorSearchHit struct {
 }
 
 func SearchVectorStore(store *domain.RAGVectorStore, query []float32, maxResults int) []VectorSearchHit {
+	return SearchVectorStoreWithOptions(store, query, maxResults, VectorSearchOptions{})
+}
+
+// SearchVectorStoreWithOptions applies corpus isolation while scanning points,
+// before sorting and truncating the result window.
+func SearchVectorStoreWithOptions(store *domain.RAGVectorStore, query []float32, maxResults int, options VectorSearchOptions) []VectorSearchHit {
 	if store == nil || len(query) == 0 || maxResults <= 0 {
 		return nil
 	}
 	var hits []VectorSearchHit
 	for _, point := range store.Points {
-		if IsForbiddenChunk(point.Chunk) || len(point.Vector) != len(query) {
+		if IsForbiddenChunk(point.Chunk) ||
+			(options.ExcludeDesignOnly && IsDesignOnlySourceKind(point.Chunk.SourceKind)) ||
+			len(point.Vector) != len(query) {
 			continue
 		}
 		score := cosineFloat32(query, point.Vector)

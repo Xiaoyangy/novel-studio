@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/assets"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
@@ -57,6 +58,9 @@ func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
 
 	var snapshots []pipelineDeliverySnapshot
 	for _, ch := range chapters {
+		if issues := currentRegisteredExternalDeliveryIssues(outputDir, ch); len(issues) > 0 {
+			return fmt.Errorf("第 %d 章不能交付：%s", ch, strings.Join(issues, ", "))
+		}
 		currentReview := inspectCurrentChapterReview(outputDir, ch)
 		if len(currentReview.Issues) > 0 {
 			return fmt.Errorf("第 %d 章不能交付：审核产物不是当前正文版本：%s", ch, strings.Join(currentReview.Issues, ", "))
@@ -1016,10 +1020,10 @@ func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
 	var b strings.Builder
 	b.WriteString("[Pipeline Architect 开篇刷新阶段]\n")
 	b.WriteString("这是已有长篇项目的开篇重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation，再通过 save_foundation 同步更新 layered_outline 与 outline。\n")
-	b.WriteString("只重做前三章的结果级结构和必要标题，保留书名、总题材、人物关系、系统保密规则、长期卷弧和已经确认的世界设定；不得借机重写整本书。\n")
-	b.WriteString("前三章必须形成番茄免费阅读留存闭环：第一章首屏冲突、能力出现且本章首次兑现；第二章承接新债、男女主同场行动、限制升级并有小胜；第三章完成首个目标结算、出现普通人可见结果和外界态度变化，再打开更大项目。禁止三章连续解释规则、列检查表或准备开工。\n")
-	b.WriteString("系统提示在结构设计中按一问一答安排，每条【系统消息】独立成段；系统是支持男主的吐槽搭子，不是任务播报器。前三章整体轻松欢快，笑点来自人物误判、熟人社会和结果反差，经营信息只保留普通读者看得懂的现场后果。\n")
-	b.WriteString("第一章既有关键事实可压缩重排但不得丢失：失业返乡压力、系统绑定、第一笔真实县内支出、普通顾客受益、沈知遥当晚出现。第二章不要把买车失败写成核心流程，只能作为极短边界笑点。第三章必须兑现夜市第一轮目标，并允许按既有法典落地个人奖励或下一档项目额度。\n")
+	b.WriteString("只重做前三章的结果级结构和必要标题，保留书名、总题材、人物关系、能力与秘密边界、长期卷弧和已经确认的世界设定；不得借机重写整本书。\n")
+	b.WriteString("前三章必须形成移动阅读留存闭环：第一章首屏冲突、核心能力或故事发动机出现且本章首次兑现；第二章承接新债、核心关系角色同场行动或产生可见影响、限制升级并有小胜；第三章完成首个目标结算、让结果被故事世界中的普通人感知，再打开更大目标。禁止三章连续解释规则、列检查表或只做准备。\n")
+	b.WriteString("若当前项目已有系统/能力界面，按既定人格和格式设计一问一答，每条【系统消息】独立成段；没有此类设定时严禁凭空新增。前三章的情绪、笑点或压力来源只服从当前 premise、user_rules 与人物关系，专业/经营信息只保留目标读者看得懂的现场后果。\n")
+	b.WriteString("从当前 foundation、outline、已提交正文与用户本轮要求提取前三章不可漂移的角色、金额、时点、知识边界、因果结果和章末后果；允许压缩、并场和换序，但不得把任何一本示例书的人名、地点、职业、系统规则或项目流程注入当前项目。\n")
 	b.WriteString("保存后立即停止；严禁 plan_chapter、draft_chapter、commit_chapter，严禁派 writer/drafter/editor。\n\n")
 	b.WriteString("[本次用户与市场校准要求]\n")
 	b.WriteString(prompt)
@@ -1286,8 +1290,13 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 			return requestErr
 		}
 		if len(requested) > 0 {
+			// --from/--to only scopes the chapters whose draft is superseded in
+			// this invocation. It must not silently erase an already queued rewrite
+			// outside that range; those chapters still carry independent review and
+			// external-detector failures bound to their own body hashes.
+			queued := mergePendingRewriteChapters(progress.PendingRewrites, requested)
 			if err := st.Progress.SetPendingRewritesAndFlow(
-				requested,
+				queued,
 				"用户显式要求整章重渲染；复用既有世界推演与 POV plan",
 				domain.FlowRewriting,
 			); err != nil {
@@ -1381,15 +1390,26 @@ func pipelineForceRerenderTargets(progress *domain.Progress, start, end int) ([]
 	return selected, nil
 }
 
-type pipelineRerenderRequest struct {
-	Version               int    `json:"version"`
-	Chapter               int    `json:"chapter"`
-	PlanSHA256            string `json:"plan_sha256"`
-	SupersededDraftSHA256 string `json:"superseded_draft_sha256"`
-	InstructionSHA256     string `json:"instruction_sha256,omitempty"`
-	Reason                string `json:"reason"`
-	RequestedAt           string `json:"requested_at"`
+func mergePendingRewriteChapters(existing, requested []int) []int {
+	seen := make(map[int]struct{}, len(existing)+len(requested))
+	merged := make([]int, 0, len(existing)+len(requested))
+	for _, chapters := range [][]int{existing, requested} {
+		for _, chapter := range chapters {
+			if chapter <= 0 {
+				continue
+			}
+			if _, ok := seen[chapter]; ok {
+				continue
+			}
+			seen[chapter] = struct{}{}
+			merged = append(merged, chapter)
+		}
+	}
+	sort.Ints(merged)
+	return merged
 }
+
+type pipelineRerenderRequest = domain.ChapterRerenderRequest
 
 func pipelineRequestFullRerender(st *store.Store, chapters []int, instruction string) ([]int, error) {
 	if st == nil || len(chapters) == 0 {
@@ -1399,6 +1419,9 @@ func pipelineRequestFullRerender(st *store.Store, chapters []int, instruction st
 	for _, chapter := range chapters {
 		if chapter <= 0 {
 			continue
+		}
+		if escalation := tools.InspectRenderOnlyReplanEscalation(st, chapter); escalation.Required {
+			return nil, fmt.Errorf("第 %d 章不能再次 --force-rerender：%s；必须先重做 chapter_world_simulation/plan", chapter, escalation.Reason)
 		}
 		if err := tools.ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
 			return nil, fmt.Errorf("第 %d 章不能只重渲染，必须先修复推演/plan: %w", chapter, err)
@@ -1425,6 +1448,7 @@ func pipelineRequestFullRerender(st *store.Store, chapters []int, instruction st
 			RequestedAt:           time.Now().Format(time.RFC3339),
 		}
 		if strings.TrimSpace(instruction) != "" {
+			request.Instruction = strings.TrimSpace(instruction)
 			request.InstructionSHA256 = hex.EncodeToString(instructionSum[:])
 		}
 		raw, err := json.MarshalIndent(request, "", "  ")
@@ -1650,7 +1674,36 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
 }
 
+type pipelineDraftAIJudgeFunc func(cliOptions, []string) error
+
+type pipelineCausalQuarantineEntry struct {
+	Source     string `json:"source"`
+	Quarantine string `json:"quarantine"`
+	SHA256     string `json:"sha256,omitempty"`
+}
+
+type pipelineCausalQuarantineManifest struct {
+	Version          int                             `json:"version"`
+	Chapter          int                             `json:"chapter"`
+	DraftBodySHA256  string                          `json:"draft_body_sha256"`
+	Reason           string                          `json:"reason"`
+	PlanInvalidated  bool                            `json:"plan_invalidated"`
+	WorldInvalidated bool                            `json:"world_simulation_invalidated"`
+	CreatedAt        string                          `json:"created_at"`
+	Entries          []pipelineCausalQuarantineEntry `json:"entries"`
+}
+
+type pipelinePendingDraftPreflight struct {
+	HasDraft    bool
+	Invalidated bool
+	ManifestRel string
+}
+
 func pipelineJudgePendingDraftHash(opts cliOptions, outputDir string, progress *domain.Progress) (bool, error) {
+	return pipelineJudgePendingDraftHashWithJudge(opts, outputDir, progress, draftAIJudgePipeline)
+}
+
+func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, progress *domain.Progress, judge pipelineDraftAIJudgeFunc) (bool, error) {
 	if progress == nil {
 		return false, nil
 	}
@@ -1663,22 +1716,78 @@ func pipelineJudgePendingDraftHash(opts cliOptions, outputDir string, progress *
 	if chapter <= 0 {
 		return false, nil
 	}
-	inspection, err := tools.InspectDraftExternalGate(outputDir, chapter)
+	st := store.NewStore(outputDir)
+	isRewrite := len(progress.PendingRewrites) > 0
+	// Every pipeline-managed retained draft, including an ordinary next chapter,
+	// must prove that its exact body checkpoint belongs to the current plan
+	// epoch before any provider-backed or named-platform judgment. Rewrites add
+	// the stronger source/brief/canonical-state/instruction freshness proof.
+	// Keep this causal check ahead of the explicit-rerender shortcut: an active
+	// request may coexist with an even older plan/simulation that must be
+	// quarantined losslessly before the Host repairs the causal inputs.
+	preflight, preflightErr := pipelinePreflightManagedDraftCausal(st, chapter, isRewrite)
+	if preflightErr != nil {
+		return false, fmt.Errorf("第 %d 章候选因果新鲜度预检失败: %w", chapter, preflightErr)
+	}
+	if !preflight.HasDraft {
+		return false, nil
+	}
+	if preflight.Invalidated {
+		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章旧草稿未绑定当前 plan/body epoch或 rewrite 因果输入，已隔离到 %s；跳过外判并回到推演/规划/渲染\n", chapter, preflight.ManifestRel)
+		return false, nil
+	}
+	// An explicit rerender request supersedes the current draft hash. Do this
+	// after causal freshness but before exact-body delivery gates and every
+	// external-gate inspection: a named detector obligation is
+	// retained in the durable requirement for the replacement candidate, but it
+	// must not force a pointless retest of bytes the Host is about to replace.
+	if tools.ExplicitRerenderRequestActive(st, chapter) {
+		return false, nil
+	}
+	staticPreflight, staticErr := pipelinePreflightManagedDraftStatic(st, chapter)
+	if staticErr != nil {
+		return false, fmt.Errorf("第 %d 章候选零成本正文预检失败: %w", chapter, staticErr)
+	}
+	if staticPreflight.Invalidated {
+		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章候选未通过 hard-fact/title/word 零成本正文门，已隔离到 %s；跳过外判并回到 Drafter\n", chapter, staticPreflight.ManifestRel)
+		return false, nil
+	}
+	inspection, err := tools.InspectDraftExternalGateWithStore(st, chapter)
 	if err != nil {
 		return false, fmt.Errorf("检查第 %d 章草稿外部门禁: %w", chapter, err)
 	}
-	if !pipelineDraftNeedsExternalJudgeForChapter(outputDir, chapter, inspection) {
+	if inspection.LocalSoftEditPending {
+		// The exact current hash already passed the provider-backed judge. Let the
+		// Host dispatch the one permitted deterministic local repair; the edit tool
+		// will invalidate this hash and return control here before any second edit.
+		return false, nil
+	}
+	if inspection.RequiresRegisteredRetest && inspection.Requirement != nil {
+		return true, fmt.Errorf("第 %d 章新草稿必须先用 %s 对精确 payload 做同哈希复测；DeepSeek 不能代替这些外部平台结果",
+			chapter, strings.Join(tools.RegisteredExternalRetestLabels(inspection.Requirement), ", "))
+	}
+	if !pipelineDraftNeedsExternalJudgeForChapterWithStore(st, chapter, inspection) {
 		return false, nil
 	}
 	fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章当前草稿尚无完整外判，先暂停 Writer 并获取修改建议\n", chapter)
 	judgeOpts := opts
 	judgeOpts.Dir = outputDir
-	if err := draftAIJudgePipeline(judgeOpts, []string{"--chapter", strconv.Itoa(chapter), "--budget", "5m"}); err != nil {
+	if judge == nil {
+		return true, fmt.Errorf("第 %d 章草稿外判执行器未配置，已保持复判锁", chapter)
+	}
+	if err := judge(judgeOpts, []string{"--chapter", strconv.Itoa(chapter), "--budget", "5m"}); err != nil {
 		return true, fmt.Errorf("第 %d 章草稿外判失败，已保持复判锁，未继续生成: %w", chapter, err)
 	}
-	after, err := tools.InspectDraftExternalGate(outputDir, chapter)
+	after, err := tools.InspectDraftExternalGateWithStore(st, chapter)
 	if err != nil {
 		return true, fmt.Errorf("复核第 %d 章草稿外部门禁: %w", chapter, err)
+	}
+	if after.LocalSoftEditPending {
+		return true, nil
+	}
+	if after.RequiresRegisteredRetest && after.Requirement != nil {
+		return true, fmt.Errorf("第 %d 章已通过本地门禁与 DeepSeek，必须再用 %s 对精确 payload 做同哈希复测；未登记结果前流水线保持 fail-closed",
+			chapter, strings.Join(tools.RegisteredExternalRetestLabels(after.Requirement), ", "))
 	}
 	if after.Status == tools.DraftExternalGateRejudgePending || after.Status == tools.DraftExternalGateAdviceIncomplete {
 		return true, fmt.Errorf("第 %d 章外判未形成完整的新哈希结论，已停止流水线", chapter)
@@ -1686,14 +1795,302 @@ func pipelineJudgePendingDraftHash(opts cliOptions, outputDir string, progress *
 	return true, nil
 }
 
+// pipelinePreflightManagedDraftCausal invalidates stale prose before any
+// external-review code can inspect it. The body/plan epoch proof applies to
+// both ordinary next chapters and rewrites; rewrites additionally prove their
+// mutable causal inputs. The quarantine is lossless and deliberately keeps
+// reviews/drafts/NN_full_rerender_required.json in place, so registered
+// detector/mode obligations survive and attach to the eventual replacement.
+func pipelinePreflightManagedDraftCausal(st *store.Store, chapter int, isRewrite bool) (pipelinePendingDraftPreflight, error) {
+	result := pipelinePendingDraftPreflight{}
+	if st == nil || chapter <= 0 {
+		return result, fmt.Errorf("invalid chapter %d", chapter)
+	}
+	draftRel := filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", chapter)))
+	draftRaw, err := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(draftRel)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return result, err
+	}
+	result.HasDraft = true
+
+	var causalReasons []string
+	if len(bytes.TrimSpace(draftRaw)) == 0 {
+		// An empty file is not a judgeable candidate either. Quarantine it through
+		// the same fail-closed path instead of letting Inspector fall back to the
+		// committed final body.
+		causalReasons = append(causalReasons, "current draft is empty")
+	}
+	invalidatePlan := false
+	invalidateWorld := false
+	if escalation := tools.InspectRenderOnlyReplanEscalation(st, chapter); escalation.Required {
+		invalidatePlan = true
+		invalidateWorld = true
+		causalReasons = append(causalReasons, escalation.Reason)
+	}
+	if isRewrite {
+		if err := tools.ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
+			invalidatePlan = true
+			causalReasons = append(causalReasons, err.Error())
+			worldRequired, worldReady, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+			if worldRequired && !worldReady {
+				invalidateWorld = true
+				if len(gaps) > 0 {
+					causalReasons = append(causalReasons, "world simulation gaps: "+strings.Join(gaps, "；"))
+				}
+			}
+		}
+	}
+
+	// A current causal-plan checkpoint is mandatory for every managed draft.
+	// This also detects a newer finalized world-simulation epoch that the plan
+	// has not consumed yet, including ordinary next-chapter recovery.
+	if _, err := tools.CurrentChapterPlanCausalCheckpoint(st, chapter); err != nil {
+		invalidatePlan = true
+		causalReasons = append(causalReasons, "current causal plan checkpoint invalid: "+err.Error())
+		worldRequired, worldReady, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+		if worldRequired && !worldReady {
+			invalidateWorld = true
+			if len(gaps) > 0 {
+				causalReasons = append(causalReasons, "world simulation gaps: "+strings.Join(gaps, "；"))
+			}
+		}
+	}
+
+	// Pipeline-authored prose must be newer than the finalized plan and any
+	// explicit rerender request. Exact bytes plus a draft checkpoint are not
+	// enough when those bytes were produced in an older causal epoch.
+	bodyCheckpoint, bodyErr := tools.CurrentChapterBodyCheckpoint(st, chapter)
+	planCheckpoint, planErr := tools.CurrentChapterPlanCausalCheckpoint(st, chapter)
+	if bodyErr != nil {
+		causalReasons = append(causalReasons, "current draft checkpoint invalid: "+bodyErr.Error())
+	}
+	if planErr != nil {
+		invalidatePlan = true
+		causalReasons = append(causalReasons, "current plan checkpoint invalid: "+planErr.Error())
+	}
+	if bodyErr == nil && planErr == nil {
+		boundary := planCheckpoint.Seq
+		if request := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "rerender-request"); request != nil && request.Seq > boundary {
+			boundary = request.Seq
+		}
+		if bodyCheckpoint.Seq <= boundary {
+			causalReasons = append(causalReasons, fmt.Sprintf("draft checkpoint seq=%d is not newer than causal boundary seq=%d", bodyCheckpoint.Seq, boundary))
+		}
+	}
+	if len(causalReasons) == 0 {
+		return result, nil
+	}
+
+	manifestRel, err := pipelineQuarantineStaleCausalCandidate(
+		st,
+		chapter,
+		draftRaw,
+		strings.Join(causalReasons, "；"),
+		invalidatePlan,
+		invalidateWorld,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.Invalidated = true
+	result.ManifestRel = manifestRel
+	return result, nil
+}
+
+// pipelinePreflightManagedDraftStatic runs deterministic checks over the exact
+// retained payload before DeepSeek or a named-platform handoff. A body failure
+// quarantines only prose/parts so the current plan remains reusable by Drafter;
+// named detector obligations live under reviews/ and are never moved.
+func pipelinePreflightManagedDraftStatic(st *store.Store, chapter int) (pipelinePendingDraftPreflight, error) {
+	result := pipelinePendingDraftPreflight{HasDraft: true}
+	if st == nil || chapter <= 0 {
+		return result, fmt.Errorf("invalid chapter %d", chapter)
+	}
+	draftRel := filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", chapter)))
+	draftRaw, err := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(draftRel)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			result.HasDraft = false
+			return result, nil
+		}
+		return result, err
+	}
+	content := string(draftRaw)
+
+	var reasons []string
+	anchors, err := tools.InspectDraftHardFactAnchors(st, chapter, content)
+	if err != nil {
+		return result, err
+	}
+	if !anchors.Passed {
+		missing, marshalErr := json.Marshal(anchors.Missing)
+		if marshalErr != nil {
+			return result, marshalErr
+		}
+		reasons = append(reasons, "missing current hard-fact anchors: "+string(missing))
+	}
+
+	plan, err := st.Drafts.LoadChapterPlan(chapter)
+	if err != nil {
+		return result, err
+	}
+	if plan == nil || strings.TrimSpace(plan.Title) == "" {
+		return result, fmt.Errorf("第 %d 章缺少当前正式 plan/title", chapter)
+	}
+	heading := pipelineFirstChapterHeading(content)
+	if heading == "" || pipelineNormalizeChapterTitle(heading) != pipelineNormalizeChapterTitle(plan.Title) {
+		reasons = append(reasons, fmt.Sprintf("chapter title mismatch: body=%q plan=%q", heading, plan.Title))
+	}
+
+	snapshot, err := st.UserRules.Load()
+	if err != nil {
+		return result, err
+	}
+	actualWords := utf8.RuneCountInString(content)
+	if snapshot != nil && snapshot.Structured.ChapterWords != nil {
+		rule := snapshot.Structured.ChapterWords
+		if (rule.Min > 0 && actualWords < rule.Min) || (rule.Max > 0 && actualWords > rule.Max) {
+			reasons = append(reasons, fmt.Sprintf("chapter word count out of range: actual=%d required=%d-%d", actualWords, rule.Min, rule.Max))
+		}
+	}
+	if len(reasons) == 0 {
+		return result, nil
+	}
+
+	manifestRel, err := pipelineQuarantineStaleCausalCandidate(st, chapter, draftRaw, strings.Join(reasons, "；"), false, false)
+	if err != nil {
+		return result, err
+	}
+	result.Invalidated = true
+	result.ManifestRel = manifestRel
+	return result, nil
+}
+
+func pipelineFirstChapterHeading(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return strings.TrimSpace(strings.TrimLeft(line, "#"))
+		}
+	}
+	return ""
+}
+
+func pipelineNormalizeChapterTitle(title string) string {
+	title = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(title), "#"))
+	if strings.HasPrefix(title, "第") {
+		if index := strings.Index(title, "章"); index >= 0 {
+			title = strings.TrimSpace(title[index+len("章"):])
+		}
+	}
+	title = strings.TrimLeft(title, " ：:.-")
+	return strings.ToLower(strings.Join(strings.Fields(title), ""))
+}
+
+func pipelineQuarantineStaleCausalCandidate(st *store.Store, chapter int, draftRaw []byte, reason string, invalidatePlan, invalidateWorld bool) (string, error) {
+	if st == nil || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter %d", chapter)
+	}
+	bodySHA := reviewreport.BodySHA256(string(draftRaw))
+	shortSHA := bodySHA
+	if len(shortSHA) > 12 {
+		shortSHA = shortSHA[:12]
+	}
+	epoch := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405.000000000Z"), shortSHA)
+	quarantineRootRel := filepath.ToSlash(filepath.Join("meta", "quarantine", "causal_preflight", fmt.Sprintf("ch%03d", chapter), epoch))
+	quarantineRoot := filepath.Join(st.Dir(), filepath.FromSlash(quarantineRootRel))
+
+	rels := []string{
+		filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.draft.md", chapter))),
+		filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.parts", chapter))),
+	}
+	if invalidatePlan {
+		rels = append(rels,
+			filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.plan.json", chapter))),
+			filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.plan.partial.json", chapter))),
+			filepath.ToSlash(filepath.Join("drafts", fmt.Sprintf("%02d.plan_consistency.json", chapter))),
+		)
+	}
+	if invalidateWorld {
+		rels = append(rels,
+			filepath.ToSlash(filepath.Join("meta", "chapter_simulations", fmt.Sprintf("%03d.json", chapter))),
+			filepath.ToSlash(filepath.Join("meta", "chapter_simulations", fmt.Sprintf("%03d.md", chapter))),
+			filepath.ToSlash(filepath.Join("meta", "chapter_simulations", fmt.Sprintf("%03d.partial.json", chapter))),
+		)
+	}
+
+	manifest := pipelineCausalQuarantineManifest{
+		Version:          1,
+		Chapter:          chapter,
+		DraftBodySHA256:  bodySHA,
+		Reason:           strings.TrimSpace(reason),
+		PlanInvalidated:  invalidatePlan,
+		WorldInvalidated: invalidateWorld,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	for _, rel := range rels {
+		source := filepath.Join(st.Dir(), filepath.FromSlash(rel))
+		info, statErr := os.Stat(source)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return "", fmt.Errorf("检查待隔离 artifact %s: %w", rel, statErr)
+		}
+		targetRel := filepath.ToSlash(filepath.Join(quarantineRootRel, rel))
+		target := filepath.Join(st.Dir(), filepath.FromSlash(targetRel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return "", err
+		}
+		entry := pipelineCausalQuarantineEntry{Source: rel, Quarantine: targetRel}
+		if !info.IsDir() {
+			raw, readErr := os.ReadFile(source)
+			if readErr != nil {
+				return "", readErr
+			}
+			sum := sha256.Sum256(raw)
+			entry.SHA256 = hex.EncodeToString(sum[:])
+		}
+		if err := os.Rename(source, target); err != nil {
+			return "", fmt.Errorf("隔离 stale artifact %s: %w", rel, err)
+		}
+		manifest.Entries = append(manifest.Entries, entry)
+	}
+	if err := os.MkdirAll(quarantineRoot, 0o755); err != nil {
+		return "", err
+	}
+	manifestRaw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	manifestRel := filepath.ToSlash(filepath.Join(quarantineRootRel, "manifest.json"))
+	if err := os.WriteFile(filepath.Join(st.Dir(), filepath.FromSlash(manifestRel)), manifestRaw, 0o644); err != nil {
+		return "", err
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(chapter), "causal-candidate-quarantined", manifestRel); err != nil {
+		return "", fmt.Errorf("记录 stale causal candidate quarantine: %w", err)
+	}
+	return manifestRel, nil
+}
+
 func pipelineDraftNeedsExternalJudgeForChapter(outputDir string, chapter int, inspection tools.DraftExternalGateInspection) bool {
-	if tools.ExplicitRerenderRequestActive(store.NewStore(outputDir), chapter) {
+	return pipelineDraftNeedsExternalJudgeForChapterWithStore(store.NewStore(outputDir), chapter, inspection)
+}
+
+func pipelineDraftNeedsExternalJudgeForChapterWithStore(st *store.Store, chapter int, inspection tools.DraftExternalGateInspection) bool {
+	if tools.ExplicitRerenderRequestActive(st, chapter) {
 		return false
 	}
 	return pipelineDraftNeedsExternalJudge(inspection)
 }
 
 func pipelineDraftNeedsExternalJudge(inspection tools.DraftExternalGateInspection) bool {
+	if inspection.LocalSoftEditPending || inspection.RequiresRegisteredRetest {
+		return false
+	}
 	if inspection.Status == tools.DraftExternalGateRejudgePending || inspection.Status == tools.DraftExternalGateAdviceIncomplete {
 		return true
 	}

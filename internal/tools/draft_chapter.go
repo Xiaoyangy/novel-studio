@@ -29,7 +29,7 @@ func NewDraftChapterTool(store *store.Store) *DraftChapterTool {
 
 func (t *DraftChapterTool) Name() string { return "draft_chapter" }
 func (t *DraftChapterTool) Description() string {
-	return "写入章节正文。mode=write 覆盖写入整章，mode=append 追加到现有草稿（续写/修改）"
+	return "写入章节正文。mode=write 覆盖写入整章，mode=append 追加到现有草稿（续写/修改）。当前精确哈希通过全部注册 detector/mode 后正文冻结；只有更新的整章重渲染授权或新的阻断要求可允许换稿。"
 }
 func (t *DraftChapterTool) Label() string { return "写入章节" }
 
@@ -74,23 +74,32 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if err := validateDraftProsePayload(a.Content); err != nil {
 		return nil, fmt.Errorf("draft content is not chapter prose: %w: %w", err, errs.ErrToolPrecondition)
 	}
+	if err := t.recoverDraftWriteIntent(a.Chapter); err != nil {
+		return nil, fmt.Errorf("recover interrupted draft write: %w: %w", err, errs.ErrStoreWrite)
+	}
 	explicitRerender := ExplicitRerenderRequestActive(t.store, a.Chapter)
-	externalGate, requirementErr := InspectDraftExternalGate(t.store.Dir(), a.Chapter)
+	externalGate, requirementErr := InspectDraftExternalGateWithStore(t.store, a.Chapter)
 	if requirementErr != nil {
 		return nil, fmt.Errorf("读取草稿外审门禁: %w: %w", requirementErr, errs.ErrStoreRead)
 	}
 	requirement := externalGate.Requirement
+	candidateSHA := reviewreport.BodySHA256(a.Content)
+	if draftCurrentHashNamedPassFrozen(externalGate) && !explicitRerender {
+		return nil, fmt.Errorf("第 %d 章当前草稿精确哈希已通过全部注册 detector/mode 的严格 <4%% 复测，正文已冻结；普通 draft_chapter 不得改变送检载荷，只允许继续 check_consistency/commit_chapter。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
 	if externalGate.Status == DraftExternalGateRejudgePending && !explicitRerender {
 		return nil, fmt.Errorf("第 %d 章上一轮整章重渲染已产生新哈希，必须先运行外部草稿复判；复判前禁止再次 draft_chapter: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if externalGate.Status == DraftExternalGateAdviceIncomplete && !explicitRerender {
 		return nil, fmt.Errorf("第 %d 章外判阻断但修改建议不完整，必须先重新外判；禁止盲目重渲染: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
-	if requirement != nil && a.Mode == "append" {
-		return nil, fmt.Errorf("%s；append 不能解除该要求: %w", draftExternalRerenderInstruction(requirement), errs.ErrToolPrecondition)
+	if a.Mode == "append" && (requirement != nil || explicitRerender) {
+		if requirement != nil {
+			return nil, fmt.Errorf("%s；append 不能解除该要求: %w", draftExternalRerenderInstruction(requirement), errs.ErrToolPrecondition)
+		}
+		return nil, fmt.Errorf("第 %d 章已有显式整章重渲染授权；append 不能消费该授权，必须用 mode=write 提交完整新稿: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if requirement != nil {
-		candidateSHA := reviewreport.BodySHA256(a.Content)
 		if candidateSHA == requirement.EvaluatedBodySHA256 {
 			return nil, fmt.Errorf("第 %d 章整章重渲染结果与外判阻断版本哈希相同，未产生有效新稿: %w", a.Chapter, errs.ErrToolPrecondition)
 		}
@@ -101,6 +110,17 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 				a.Chapter, wordContract.Actual, wordContract.Min, wordContract.Max, errs.ErrToolPrecondition,
 			)
 		}
+		// A current-hash registered platform result can synthesize its marker at
+		// inspection time. Persist it before replacing the judged bytes so the
+		// new hash cannot later be approved by the independent model alone.
+		if RequiresRegisteredExternalRetest(requirement) {
+			if err := SetDraftExternalRerenderRequirement(t.store.Dir(), *requirement); err != nil {
+				return nil, fmt.Errorf("persist registered external retest requirement: %w: %w", err, errs.ErrStoreWrite)
+			}
+		}
+	}
+	if currentSHA := strings.TrimSpace(externalGate.CurrentBodySHA256); (requirement != nil || explicitRerender) && currentSHA != "" && candidateSHA == currentSHA {
+		return nil, fmt.Errorf("第 %d 章整章重渲染结果与当前草稿哈希相同，单次授权尚未被有效消费: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if err := t.store.Progress.ValidateChapterWork(a.Chapter); err != nil {
 		return nil, err
@@ -126,33 +146,59 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if isRewrite && BlockingReviewRejectsBody(t.store, a.Chapter, a.Content) {
 		return nil, fmt.Errorf("第 %d 章候选正文与正式 review=%q 拒绝的正文哈希完全相同，未产生有效新稿；必须按当前 rewrite_brief 重新渲染不同正文: %w", a.Chapter, "rewrite", errs.ErrToolPrecondition)
 	}
-	renderOnlyRerender := isRewrite && RenderOnlyRerenderReady(t.store, a.Chapter)
-	// 真实流水线中计划存在时，写正文前重新执行完整门禁。这样旧 plan 即使文件仍在，
-	// 只要缺少当前项目要求的首屏抓力、喜剧节拍、热梗落点或长篇开局设计，也不能旁路写作。
-	if plan, err := t.store.Drafts.LoadChapterPlan(a.Chapter); err != nil {
-		return nil, fmt.Errorf("load chapter plan: %w: %w", errs.ErrStoreRead, err)
-	} else if plan != nil {
+	if escalation := InspectRenderOnlyReplanEscalation(t.store, a.Chapter); escalation.Required {
+		return nil, fmt.Errorf("第 %d 章 render-only 已连续结构失败，禁止继续沿旧 plan 生成：%s；必须先重新完成 chapter_world_simulation 与 POV plan: %w", a.Chapter, escalation.Reason, errs.ErrToolPrecondition)
+	}
+	planGuard, err := validateCurrentChapterRenderPlan(t.store, a.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	renderOnlyRerender := planGuard.RenderOnly
+	if a.Mode == "append" && renderOnlyRerender {
+		return nil, fmt.Errorf("第 %d 章当前只允许复用既有 plan 做一次整章重渲染；append 不能消费该授权，必须用 mode=write 提交完整新稿: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if currentSHA := strings.TrimSpace(externalGate.CurrentBodySHA256); renderOnlyRerender && currentSHA != "" && candidateSHA == currentSHA {
+		return nil, fmt.Errorf("第 %d 章 render-only 重渲染结果与当前草稿哈希相同，未产生有效新稿: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if plan := planGuard.Plan; plan != nil {
 		if err := validateDraftChapterHeading(*plan, a.Content); err != nil {
 			return nil, err
 		}
 		if err := validateDraftWorldVisibility(t.store, a.Chapter, a.Content); err != nil {
 			return nil, err
 		}
-		if renderOnlyRerender {
-			if err := ValidateReusableCausalPlanForRerender(t.store, a.Chapter); err != nil {
-				return nil, fmt.Errorf("第 %d 章显式 render-only 复用门禁失败: %w", a.Chapter, err)
-			}
-		} else {
-			if err := validateChapterPrewriteSimulation(t.store, *plan, isRewrite); err != nil {
-				return nil, err
-			}
+	}
+	if a.Mode == "append" {
+		if err := validateAppendBaseCurrentPlanEpoch(t.store, a.Chapter); err != nil {
+			return nil, err
 		}
 	}
-	if latest := t.store.Checkpoints.Latest(domain.ChapterScope(a.Chapter)); latest != nil && latest.Step == "draft" && requirement == nil {
+	if draftNeedsConsistencyCheck(t.store, a.Chapter) && requirement == nil {
 		return nil, fmt.Errorf(
 			"第 %d 章已有草稿且尚未执行 check_consistency，禁止连续 draft_chapter；请先 read_chapter(source=draft)，再调用 check_consistency，若无硬伤直接 commit_chapter: %w",
 			a.Chapter, errs.ErrToolPrecondition,
 		)
+	}
+	hardFactCandidate := a.Content
+	if a.Mode == "append" {
+		existing, loadErr := t.store.Drafts.LoadDraft(a.Chapter)
+		if loadErr != nil {
+			return nil, fmt.Errorf("load draft before append hard-fact gate: %w: %w", errs.ErrStoreRead, loadErr)
+		}
+		hardFactCandidate = existing
+		if hardFactCandidate != "" && a.Content != "" {
+			hardFactCandidate += "\n\n"
+		}
+		hardFactCandidate += a.Content
+	}
+	if err := requireDraftHardFactAnchors(t.store, a.Chapter, hardFactCandidate); err != nil {
+		return nil, fmt.Errorf("第 %d 章 draft_chapter 候选未通过 hard-fact anchor 门禁，真实草稿与 checkpoint 均未改变: %w", a.Chapter, err)
+	}
+	if requirement == nil && (explicitRerender || renderOnlyRerender) {
+		requirement, err = SetRenderOnlyRejudgeRequirement(t.store, a.Chapter, strings.TrimSpace(externalGate.CurrentBodySHA256))
+		if err != nil {
+			return nil, fmt.Errorf("persist render-only rejudge contract before draft write: %w: %w", err, errs.ErrStoreWrite)
+		}
 	}
 	if err := t.store.Progress.StartChapter(a.Chapter); err != nil {
 		return nil, fmt.Errorf("mark chapter in progress: %w", err)
@@ -169,6 +215,9 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		if err := validateProjectContaminationFinal(t.store, "draft_chapter", combined); err != nil {
 			return nil, err
 		}
+		if err := beginDraftWriteIntent(t.store, a.Chapter, existing, combined, a.Mode, a.Sampling); err != nil {
+			return nil, fmt.Errorf("begin draft write: %w", err)
+		}
 		if err := t.store.Drafts.AppendDraft(a.Chapter, a.Content); err != nil {
 			return nil, fmt.Errorf("append draft: %w", err)
 		}
@@ -176,9 +225,10 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		if err != nil {
 			return nil, fmt.Errorf("load draft after append: %w", err)
 		}
-		if _, err := t.store.Checkpoints.AppendArtifact(
+		if _, err := t.store.Checkpoints.AppendArtifactLatestAcross(
 			domain.ChapterScope(a.Chapter), "draft",
 			fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
+			"plan", "rerender-request", "draft", "edit",
 		); err != nil {
 			return nil, fmt.Errorf("checkpoint draft: %w", err)
 		}
@@ -187,30 +237,62 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 			return nil, err
 		}
 		wordContract := inspectChapterWordContract(t.store, full)
-		_, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, full)
+		aigcReport, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, full)
+		rawAIGCGate := draftAIGCRawLocalGateResult(aigcReport, aigcGate)
+		if err := checkpointDraftStructuralBlock(t.store, a.Chapter, full, aigcReport, aigcGate); err != nil {
+			return nil, fmt.Errorf("checkpoint draft structural block: %w", err)
+		}
+		if !rawAIGCGate.Passed {
+			if err := persistDraftAIGCRerenderRequirement(t.store, a.Chapter, full, aigcReport, aigcGate); err != nil {
+				return nil, fmt.Errorf("persist draft AIGC rerender requirement: %w", err)
+			}
+		}
+		nextStep := draftQualityGateNextStep(wordContract, aigcGate)
+		hardGatePassed := wordContract.Passed && rawAIGCGate.Passed
+		localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(full, aigcReport, aigcGate)
+		if localStructuralRerender {
+			nextStep = "停止本次正文修改；append 后的精确整章哈希触发本地 whole-text/segment 结构阻断。append 不能继续叠加修补，立即把控制权交还外层 pipeline 做有界整章重渲染或重规划。"
+			hardGatePassed = false
+		}
+		if err := clearDraftWriteIntent(t.store.Dir(), a.Chapter); err != nil {
+			return nil, fmt.Errorf("complete draft write: %w", err)
+		}
 		return json.Marshal(map[string]any{
-			"written":            true,
-			"chapter":            a.Chapter,
-			"mode":               "append",
-			"word_count":         utf8.RuneCountInString(full),
-			"word_contract":      wordContract,
-			"aigc_gate":          aigcGate,
-			"hard_gate_passed":   wordContract.Passed && aigcGate.Passed,
-			"ai_voice_score":     analysis.Metrics.AIVoiceScore,
-			"figurative_density": analysis.Metrics.FigurativeDensity,
-			"dialogue_ratio":     analysis.Metrics.DialogueRatio,
-			"next_step":          draftQualityGateNextStep(wordContract, aigcGate),
+			"written":                            true,
+			"chapter":                            a.Chapter,
+			"mode":                               "append",
+			"word_count":                         utf8.RuneCountInString(full),
+			"word_contract":                      wordContract,
+			"aigc_gate":                          aigcGate,
+			"aigc_raw_local_gate":                rawAIGCGate,
+			"hard_gate_passed":                   hardGatePassed,
+			"external_rejudge_required":          localStructuralRerender,
+			"external_rejudge_required_now":      false,
+			"local_structural_rerender_required": localStructuralRerender,
+			"stop_prose_modification":            localStructuralRerender,
+			"ai_voice_score":                     analysis.Metrics.AIVoiceScore,
+			"figurative_density":                 analysis.Metrics.FigurativeDensity,
+			"dialogue_ratio":                     analysis.Metrics.DialogueRatio,
+			"next_step":                          nextStep,
 		})
 	default: // write
 		if err := validateProjectContaminationFinal(t.store, "draft_chapter", a.Content); err != nil {
 			return nil, err
 		}
+		prior, err := t.store.Drafts.LoadDraft(a.Chapter)
+		if err != nil {
+			return nil, fmt.Errorf("load prior draft: %w", err)
+		}
+		if err := beginDraftWriteIntent(t.store, a.Chapter, prior, a.Content, a.Mode, a.Sampling); err != nil {
+			return nil, fmt.Errorf("begin draft write: %w", err)
+		}
 		if err := t.store.Drafts.SaveDraft(a.Chapter, a.Content); err != nil {
 			return nil, fmt.Errorf("save draft: %w", err)
 		}
-		if _, err := t.store.Checkpoints.AppendArtifact(
+		if _, err := t.store.Checkpoints.AppendArtifactLatestAcross(
 			domain.ChapterScope(a.Chapter), "draft",
 			fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
+			"plan", "rerender-request", "draft", "edit",
 		); err != nil {
 			return nil, fmt.Errorf("checkpoint draft: %w", err)
 		}
@@ -219,28 +301,88 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 			return nil, err
 		}
 		wordContract := inspectChapterWordContract(t.store, a.Content)
-		_, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, a.Content)
+		aigcReport, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, a.Content)
+		rawAIGCGate := draftAIGCRawLocalGateResult(aigcReport, aigcGate)
+		if err := checkpointDraftStructuralBlock(t.store, a.Chapter, a.Content, aigcReport, aigcGate); err != nil {
+			return nil, fmt.Errorf("checkpoint draft structural block: %w", err)
+		}
+		if !rawAIGCGate.Passed {
+			if err := persistDraftAIGCRerenderRequirement(t.store, a.Chapter, a.Content, aigcReport, aigcGate); err != nil {
+				return nil, fmt.Errorf("persist draft AIGC rerender requirement: %w", err)
+			}
+		}
 		nextStep := draftQualityGateNextStep(wordContract, aigcGate)
-		hardGatePassed := wordContract.Passed && aigcGate.Passed
-		if requirement != nil || renderOnlyRerender {
+		hardGatePassed := wordContract.Passed && rawAIGCGate.Passed
+		localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(a.Content, aigcReport, aigcGate)
+		if err := clearDraftWriteIntent(t.store.Dir(), a.Chapter); err != nil {
+			return nil, fmt.Errorf("complete draft write: %w", err)
+		}
+		managedJudgePending, err := pipelineManagedCurrentDraftNeedsDeepSeekJudge(t.store, a.Chapter, candidateSHA)
+		if err != nil {
+			return nil, fmt.Errorf("inspect current-hash DeepSeek gate after draft write: %w: %w", err, errs.ErrStoreRead)
+		}
+		eventualExternalRejudge := requirement != nil || renderOnlyRerender || managedJudgePending
+		externalRejudgeRequired := eventualExternalRejudge && !localStructuralRerender
+		registeredRetestDeferred := RequiresRegisteredExternalRetest(requirement)
+		if localStructuralRerender {
+			nextStep = "停止本次正文修改；当前哈希仍触发本地 whole-text/segment 结构阻断，外层 pipeline 将在有界次数内先整章重渲染或重做因果计划。"
+			if labels := RegisteredExternalRetestLabels(requirement); len(labels) > 0 {
+				nextStep += strings.Join(labels, ", ") + " 的同哈希复测义务保留到本地结构门禁与 DeepSeek 当前哈希判断均通过的候选稿"
+			}
+			hardGatePassed = false
+		} else if managedJudgePending {
+			nextStep = fmt.Sprintf("停止正文修改；当前 pipeline 新稿 drafts/%02d.draft.md 尚无可批准当前哈希的 DeepSeek 裸正文结论，立即把控制权交还外层 pipeline 复判；复判前禁止 check_consistency、edit 或 commit", a.Chapter)
+			if labels := RegisteredExternalRetestLabels(requirement); len(labels) > 0 {
+				nextStep += "；" + strings.Join(labels, ", ") + " 的注册平台同哈希复测暂缓，只有本地门禁与 DeepSeek 都通过后才可执行"
+			}
+			hardGatePassed = false
+		} else if externalRejudgeRequired {
 			nextStep = fmt.Sprintf("停止正文修改；先对 drafts/%02d.draft.md 的新哈希运行外部草稿复判，只有结果严格低于 %.0f%% 才能检查并提交", a.Chapter, aigcGate.PassExclusivePercent)
 			hardGatePassed = false
 		}
 		return json.Marshal(map[string]any{
-			"written":                   true,
-			"chapter":                   a.Chapter,
-			"mode":                      "write",
-			"word_count":                utf8.RuneCountInString(a.Content),
-			"word_contract":             wordContract,
-			"aigc_gate":                 aigcGate,
-			"hard_gate_passed":          hardGatePassed,
-			"external_rejudge_required": requirement != nil || renderOnlyRerender,
-			"ai_voice_score":            analysis.Metrics.AIVoiceScore,
-			"figurative_density":        analysis.Metrics.FigurativeDensity,
-			"dialogue_ratio":            analysis.Metrics.DialogueRatio,
-			"next_step":                 nextStep,
+			"written":                             true,
+			"chapter":                             a.Chapter,
+			"mode":                                "write",
+			"word_count":                          utf8.RuneCountInString(a.Content),
+			"word_contract":                       wordContract,
+			"aigc_gate":                           aigcGate,
+			"aigc_raw_local_gate":                 rawAIGCGate,
+			"hard_gate_passed":                    hardGatePassed,
+			"external_rejudge_required":           eventualExternalRejudge,
+			"external_rejudge_required_now":       externalRejudgeRequired,
+			"local_structural_rerender_required":  localStructuralRerender,
+			"registered_external_retest_deferred": registeredRetestDeferred,
+			"stop_prose_modification":             eventualExternalRejudge || localStructuralRerender,
+			"ai_voice_score":                      analysis.Metrics.AIVoiceScore,
+			"figurative_density":                  analysis.Metrics.FigurativeDensity,
+			"dialogue_ratio":                      analysis.Metrics.DialogueRatio,
+			"next_step":                           nextStep,
 		})
 	}
+}
+
+func draftNeedsConsistencyCheck(st *store.Store, chapter int) bool {
+	if st == nil || chapter <= 0 {
+		return false
+	}
+	scope := domain.ChapterScope(chapter)
+	var latestBodyEvent int64
+	for _, step := range []string{"draft", "edit", "draft-structural-block"} {
+		if cp := st.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > latestBodyEvent {
+			latestBodyEvent = cp.Seq
+		}
+	}
+	if latestBodyEvent == 0 {
+		return false
+	}
+	var clearedThrough int64
+	for _, step := range []string{"consistency_check", "consistency_check_failed", "rerender-request", "plan", "chapter_world_simulation", "commit"} {
+		if cp := st.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > clearedThrough {
+			clearedThrough = cp.Seq
+		}
+	}
+	return latestBodyEvent > clearedThrough
 }
 
 func validateDraftChapterHeading(plan domain.ChapterPlan, content string) error {
@@ -285,6 +427,12 @@ func validateDraftWorldVisibility(s *store.Store, chapter int, content string) e
 
 func validateDraftProsePayload(content string) error {
 	trimmed := strings.TrimSpace(content)
+	if err := validateFictionProseMetadataFree(trimmed); err != nil {
+		return err
+	}
+	if err := validateFictionProseTypography(trimmed); err != nil {
+		return err
+	}
 	for _, marker := range []string{
 		"当前工作区为只读", "operation not permitted", "Qdrant", "未挂载 draft_chapter",
 		"未挂载 `draft_chapter", "本会话未挂载", "流水线写入", "门禁均无法重跑",

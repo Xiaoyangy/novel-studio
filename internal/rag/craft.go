@@ -185,10 +185,12 @@ func CraftRecipeDescription(field CraftDesignField) string {
 // 或排序后无有效材料——这是一个可审计事件，调用方必须把它写进产物
 // （material_source: no_material），不允许静默让 LLM 自行编造。
 type CraftRecallResult struct {
-	Field      CraftDesignField
-	Filter     craftFieldRecipe
-	Hits       []BM25Hit
-	NoMaterial bool
+	Field          CraftDesignField
+	Filter         craftFieldRecipe
+	Hits           []BM25Hit
+	NoMaterial     bool
+	FilteredCount  int
+	FilteredReason map[string]int
 }
 
 // CraftCatalog caches the deterministic field filter and BM25 corpus lazily.
@@ -197,19 +199,29 @@ type CraftRecallResult struct {
 type CraftCatalog struct {
 	chunks  []domain.RAGChunk
 	mu      sync.Mutex
-	corpora map[CraftDesignField]*craftCorpus
+	corpora map[string]*craftCorpus
 }
 
 type craftCorpus struct {
-	subset []domain.RAGChunk
-	index  *BM25Index
+	subset         []domain.RAGChunk
+	index          *BM25Index
+	filteredCount  int
+	filteredReason map[string]int
 }
 
 func NewCraftCatalog(chunks []domain.RAGChunk) *CraftCatalog {
 	return &CraftCatalog{
 		chunks:  append([]domain.RAGChunk(nil), chunks...),
-		corpora: make(map[CraftDesignField]*craftCorpus),
+		corpora: make(map[string]*craftCorpus),
 	}
+}
+
+// CraftRecallOptions narrows automatic rewrite retrieval without changing the
+// broad, explicit design-time tool contract used by Architect.
+type CraftRecallOptions struct {
+	Stage           string
+	RequireRelevant bool
+	SafeRewrite     bool
 }
 
 // CraftRecall 对 chunk 集执行「字段绑定 filter → 子集内 BM25 排序」的设计检索。
@@ -219,14 +231,24 @@ func CraftRecall(chunks []domain.RAGChunk, field CraftDesignField, topic string,
 }
 
 func (c *CraftCatalog) Recall(field CraftDesignField, topic string, limit int) CraftRecallResult {
+	return c.RecallWithOptions(field, topic, limit, CraftRecallOptions{})
+}
+
+func (c *CraftCatalog) RecallWithOptions(field CraftDesignField, topic string, limit int, options CraftRecallOptions) CraftRecallResult {
 	recipe, ok := craftFieldRecipes[field]
 	result := CraftRecallResult{Field: field, Filter: recipe}
 	if c == nil || !ok || limit <= 0 {
 		result.NoMaterial = true
 		return result
 	}
-	corpus := c.corpus(field, recipe)
+	if options.SafeRewrite && !safeRewriteCraftField(field) {
+		result.NoMaterial = true
+		return result
+	}
+	corpus := c.corpus(field, recipe, options)
 	subset := corpus.subset
+	result.FilteredCount = corpus.filteredCount
+	result.FilteredReason = cloneCraftFilterReasons(corpus.filteredReason)
 	if len(subset) == 0 {
 		result.NoMaterial = true
 		return result
@@ -236,7 +258,30 @@ func (c *CraftCatalog) Recall(field CraftDesignField, topic string, limit int) C
 		query = recipe.Description
 	}
 	hits := corpus.index.Search(query, limit)
-	if len(hits) == 0 {
+	if options.SafeRewrite {
+		hits = searchSafeRewriteMethodCards(subset, query, limit, field)
+	}
+	if options.RequireRelevant {
+		minimumOverlap := minimumCraftQueryOverlap(query)
+		relevant := make([]domain.RAGChunk, 0, len(subset))
+		for _, chunk := range subset {
+			searchText := SearchText(chunk)
+			if options.SafeRewrite {
+				searchText = safeRewriteMethodSearchText(chunk)
+			}
+			if craftQueryTermOverlap(query, searchText) < minimumOverlap {
+				result.FilteredCount++
+				incrementCraftFilterReason(result.FilteredReason, "low_query_overlap")
+				continue
+			}
+			relevant = append(relevant, chunk)
+		}
+		if options.SafeRewrite {
+			hits = searchSafeRewriteMethodCards(relevant, query, limit, field)
+		} else {
+			hits = BuildBM25Index(relevant).Search(query, limit)
+		}
+	} else if len(hits) == 0 {
 		// filter 命中但词法排序无得分：退化为子集头部，保证"命中即有料"。
 		for i, chunk := range subset {
 			if i >= limit {
@@ -250,21 +295,158 @@ func (c *CraftCatalog) Recall(field CraftDesignField, topic string, limit int) C
 	return result
 }
 
-func (c *CraftCatalog) corpus(field CraftDesignField, recipe craftFieldRecipe) *craftCorpus {
+func safeRewriteMethodSearchText(chunk domain.RAGChunk) string {
+	category, _ := chunkCraftCategory(chunk)
+	return strings.Join([]string{
+		strings.TrimSpace(chunk.Summary),
+		strings.TrimSpace(category),
+		string(chunkCraftFacet(chunk)),
+	}, " ")
+}
+
+func searchSafeRewriteMethodCards(chunks []domain.RAGChunk, query string, limit int, field CraftDesignField) []BM25Hit {
+	if len(chunks) == 0 || limit <= 0 {
+		return nil
+	}
+	originals := make(map[string]domain.RAGChunk, len(chunks))
+	sanitized := make([]domain.RAGChunk, 0, len(chunks))
+	seenMethods := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		if !safeRewritePrimaryMethodSupportsField(chunk.Summary, field) {
+			continue
+		}
+		// Rebuilt indexes can contain many source chunks that resolve to the same
+		// closed-vocabulary operation. Deduplicate by the primary mechanism/action,
+		// not only by the whole string: secondary tags must not let three variants
+		// of the same operation occupy every Top-N slot.
+		methodKey := safeRewriteMethodDedupKey(chunk.Summary)
+		if methodKey == "" {
+			continue
+		}
+		if _, exists := seenMethods[methodKey]; exists {
+			continue
+		}
+		seenMethods[methodKey] = struct{}{}
+		originals[chunk.ID] = chunk
+		clone := chunk
+		clone.SourcePath = ""
+		clone.SourceKind = ""
+		clone.ParentID = ""
+		clone.Context = ""
+		clone.Keywords = nil
+		clone.Text = ""
+		clone.Metadata = nil
+		clone.Summary = safeRewriteMethodSearchText(chunk)
+		sanitized = append(sanitized, clone)
+	}
+	hits := BuildBM25Index(sanitized).Search(query, limit)
+	for i := range hits {
+		if original, ok := originals[hits[i].Chunk.ID]; ok {
+			hits[i].Chunk = original
+		}
+	}
+	return hits
+}
+
+func safeRewritePrimaryMethodSupportsField(summary string, field CraftDesignField) bool {
+	if field == CraftFieldMethodology {
+		return true
+	}
+	primary := safeRewritePrimaryMethodTag(summary)
+	if primary == "" {
+		// Hand-curated cards may predate the structured tag field. Relevance and
+		// the existing category/facet filter still apply to those summaries.
+		return true
+	}
+	switch field {
+	case CraftFieldDialogue:
+		switch primary {
+		case "漏答", "打断", "潜台词", "声口差异", "权力位移", "信息延迟", "信息释放", "行动反应", "关系位移":
+			return true
+		}
+	case CraftFieldSceneCraft:
+		switch primary {
+		case "场景目标", "阻力对抗", "选择取舍", "行动反应", "场景后果", "证据物件", "转折改道", "冲突升级", "节奏张弛", "空间调度", "感官锚点", "关系位移", "情绪转向", "过场压缩":
+			return true
+		}
+	default:
+		return true
+	}
+	return false
+}
+
+func safeRewritePrimaryMethodTag(summary string) string {
+	for _, field := range strings.Split(summary, "；") {
+		field = strings.TrimSpace(field)
+		if !strings.HasPrefix(field, "技法标签=") {
+			continue
+		}
+		labels := strings.Split(strings.TrimPrefix(field, "技法标签="), "、")
+		if len(labels) > 0 {
+			return strings.TrimSpace(labels[0])
+		}
+	}
+	return ""
+}
+
+func safeRewriteMethodDedupKey(summary string) string {
+	normalized := strings.ToLower(strings.Join(strings.Fields(summary), " "))
+	if normalized == "" {
+		return ""
+	}
+	var mechanism, action string
+	for _, field := range strings.Split(normalized, "；") {
+		field = strings.TrimSpace(field)
+		switch {
+		case strings.HasPrefix(field, "机制="):
+			mechanism = strings.TrimSpace(strings.TrimPrefix(field, "机制="))
+		case strings.HasPrefix(field, "动作="):
+			action = strings.TrimSpace(strings.TrimPrefix(field, "动作="))
+		}
+	}
+	if mechanism != "" || action != "" {
+		return "operation:" + mechanism + "\x00" + action
+	}
+	if primaryTag := safeRewritePrimaryMethodTag(summary); primaryTag != "" {
+		return "primary-tag:" + strings.ToLower(primaryTag)
+	}
+	return "summary:" + normalized
+}
+
+func (c *CraftCatalog) corpus(field CraftDesignField, recipe craftFieldRecipe, options CraftRecallOptions) *craftCorpus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing := c.corpora[field]; existing != nil {
+	key := strings.Join([]string{string(field), strings.ToLower(strings.TrimSpace(options.Stage)), fmtBool(options.SafeRewrite)}, "|")
+	if existing := c.corpora[key]; existing != nil {
 		return existing
 	}
-	allowedKinds := recipe.SourceKinds
+	allowedKinds := append([]string(nil), recipe.SourceKinds...)
 	if len(allowedKinds) == 0 {
 		allowedKinds = []string{CraftSourceKind}
 	}
+	if options.SafeRewrite && !containsFold(allowedKinds, CalibrationSourceKind) {
+		allowedKinds = append(allowedKinds, CalibrationSourceKind)
+	}
 	// 1) 确定性 filter：source_kind + craft_category 集合运算
 	var subset []domain.RAGChunk
+	filteredReason := map[string]int{}
+	filteredCount := 0
+	filter := func(reason string) {
+		filteredCount++
+		incrementCraftFilterReason(filteredReason, reason)
+	}
 	for _, chunk := range c.chunks {
 		chunk = NormalizeChunk(chunk)
 		if !containsFold(allowedKinds, strings.TrimSpace(chunk.SourceKind)) {
+			filter("source_kind")
+			continue
+		}
+		if !validCraftKindPath(chunk) {
+			filter("kind_path_mismatch")
+			continue
+		}
+		if !craftChunkSupportsStage(chunk, options.Stage) {
+			filter("usage_stage")
 			continue
 		}
 		category, subcategory := chunkCraftCategory(chunk)
@@ -272,18 +454,177 @@ func (c *CraftCatalog) corpus(field CraftDesignField, recipe craftFieldRecipe) *
 		// 这类混合目录里被内容判为 dialogue/appearance/scene 的文件也能被对应字段取到）。
 		categoryHit := containsFold(recipe.Categories, category)
 		facetHit := len(recipe.Facets) > 0 && containsCraftFacet(recipe.Facets, chunkCraftFacet(chunk))
-		if !categoryHit && !facetHit {
+		// The curated automatic-rewrite corpus is deliberately stored as
+		// methodology cards.  A card can carry dialogue/scene techniques in its
+		// controlled summary while its single persisted craft_facet remains
+		// "methodology".  For safe automatic recalls, let dialogue and scene
+		// needs search that method-card category as well; RequireRelevant still
+		// demands real query overlap before a hit is returned.  This bridge is
+		// intentionally unavailable to broad/explicit craft recall, so it cannot
+		// turn an unrelated query into the historical zero-score fallback.
+		safeMethodCardHit := options.SafeRewrite &&
+			(field == CraftFieldDialogue || field == CraftFieldSceneCraft) &&
+			strings.EqualFold(category, "novel-craft-methodology")
+		if !categoryHit && !facetHit && !safeMethodCardHit {
+			filter("category_or_facet")
 			continue
 		}
 		// 子类目过滤仅在靠目录类目命中时生效（facet 命中的跨目录文件不受子类目约束）。
 		if categoryHit && len(recipe.Subcategories) > 0 && !containsFold(recipe.Subcategories, subcategory) {
+			filter("subcategory")
+			continue
+		}
+		if options.SafeRewrite && strings.TrimSpace(chunk.Summary) == "" {
+			filter("missing_summary")
+			continue
+		}
+		if options.SafeRewrite && !safeRewriteSummaryProvenance(chunk) {
+			filter("unsafe_summary_origin")
+			continue
+		}
+		if options.SafeRewrite && !safeRewriteCraftChunk(chunk) {
+			filter("unsafe_rewrite_category")
 			continue
 		}
 		subset = append(subset, chunk)
 	}
-	corpus := &craftCorpus{subset: subset, index: BuildBM25Index(subset)}
-	c.corpora[field] = corpus
+	corpus := &craftCorpus{
+		subset:         subset,
+		index:          BuildBM25Index(subset),
+		filteredCount:  filteredCount,
+		filteredReason: filteredReason,
+	}
+	c.corpora[key] = corpus
 	return corpus
+}
+
+func cloneCraftFilterReasons(source map[string]int) map[string]int {
+	clone := make(map[string]int, len(source))
+	for reason, count := range source {
+		clone[reason] = count
+	}
+	return clone
+}
+
+func incrementCraftFilterReason(reasons map[string]int, reason string) {
+	if strings.TrimSpace(reason) == "" {
+		return
+	}
+	reasons[reason]++
+}
+
+func fmtBool(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func safeRewriteCraftField(field CraftDesignField) bool {
+	return field == CraftFieldDialogue || field == CraftFieldMethodology || field == CraftFieldSceneCraft
+}
+
+// validCraftKindPath prevents a stale/manually edited index from turning an
+// active-project fact chunk into design material merely by spoofing source_kind.
+func validCraftKindPath(chunk domain.RAGChunk) bool {
+	switch strings.ToLower(strings.TrimSpace(chunk.SourceKind)) {
+	case CraftSourceKind:
+		return IsCraftTechniquePath(chunk.SourcePath)
+	case BenchmarkSourceKind:
+		return IsBenchmarkLibraryPath(chunk.SourcePath)
+	case CalibrationSourceKind:
+		return IsCalibrationPath(chunk.SourcePath)
+	default:
+		return false
+	}
+}
+
+func safeRewriteCraftChunk(chunk domain.RAGChunk) bool {
+	if strings.EqualFold(chunk.SourceKind, CraftSourceKind) {
+		category, _ := CraftCategory(chunk.SourcePath)
+		return strings.EqualFold(category, "novel-craft-methodology")
+	}
+	if strings.EqualFold(chunk.SourceKind, CalibrationSourceKind) {
+		return isCuratedRewriteMethodPath(chunk.SourcePath)
+	}
+	// Benchmark and broad writing-techniques libraries contain story excerpts,
+	// names, settings and even instruction-like strings. Automatic prose repair
+	// does not consume them until they have been curated into the dedicated
+	// method path. Explicit Architect craft_recall remains unchanged.
+	return false
+}
+
+// IsSafeRewriteMethodChunk reports whether a chunk is allowed into the
+// automatic prose-repair corpus.  Keep this predicate shared with receipt
+// identity calculation: a receipt must be invalidated by changes to the exact
+// corpus that can affect automatic recall, rather than by a cached index-level
+// sanitization marker.
+func IsSafeRewriteMethodChunk(chunk domain.RAGChunk) bool {
+	return strings.TrimSpace(chunk.Summary) != "" &&
+		safeRewriteSummaryProvenance(chunk) &&
+		IsSafeRewriteMethodSource(chunk)
+}
+
+// IsSafeRewriteMethodSource reports whether a source is eligible for the
+// automatic rewrite method corpus before summary provenance is established.
+// Schema migration uses this narrower predicate so upgrading structured cards
+// does not rewrite or re-embed the much larger benchmark/reference libraries.
+func IsSafeRewriteMethodSource(chunk domain.RAGChunk) bool {
+	return validCraftKindPath(chunk) &&
+		safeRewriteCraftChunk(chunk) &&
+		craftChunkSupportsStage(chunk, StagePlan)
+}
+
+func isCuratedRewriteMethodPath(path string) bool {
+	clean := strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
+	return strings.Contains(clean, "/review-calibration/novel-craft-methodology/") ||
+		strings.HasPrefix(clean, "deconstruction-library/review-calibration/novel-craft-methodology/")
+}
+
+func craftChunkSupportsStage(chunk domain.RAGChunk, stage string) bool {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	if stage == "" {
+		return true
+	}
+	var stages []string
+	if chunk.Metadata != nil {
+		if raw, ok := chunk.Metadata["usage_stage"].(string); ok {
+			for _, item := range strings.Split(raw, ",") {
+				if item = strings.ToLower(strings.TrimSpace(item)); item != "" {
+					stages = append(stages, item)
+				}
+			}
+		}
+	}
+	if len(stages) == 0 {
+		stages = UsageStagesForFacet(chunkCraftFacet(chunk))
+	}
+	return containsFold(stages, stage)
+}
+
+func craftQueryTermOverlap(query, text string) int {
+	wanted := map[string]struct{}{}
+	for _, token := range TokenizeForBM25(query) {
+		wanted[token] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	for _, token := range TokenizeForBM25(text) {
+		if _, ok := wanted[token]; ok {
+			seen[token] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func minimumCraftQueryOverlap(query string) int {
+	unique := map[string]struct{}{}
+	for _, token := range TokenizeForBM25(query) {
+		unique[token] = struct{}{}
+	}
+	if len(unique) <= 1 {
+		return len(unique)
+	}
+	return 2
 }
 
 func chunkCraftCategory(chunk domain.RAGChunk) (category, subcategory string) {
@@ -300,6 +641,9 @@ func chunkCraftCategory(chunk domain.RAGChunk) (category, subcategory string) {
 	}
 	if category == "" {
 		category = BenchmarkCategory(chunk.SourcePath)
+	}
+	if category == "" && isCuratedRewriteMethodPath(chunk.SourcePath) {
+		category = "novel-craft-methodology"
 	}
 	return category, subcategory
 }

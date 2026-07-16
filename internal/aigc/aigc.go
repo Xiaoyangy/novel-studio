@@ -168,7 +168,9 @@ var (
 	cjkRunRe                  = regexp.MustCompile(`[\x{4e00}-\x{9fff}]{24,}`)
 	rareTermSoupRe            = regexp.MustCompile(`(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}`)
 	dialogueQuoteRe           = regexp.MustCompile(`[“「]([^”」\n]{1,240})[”」]`)
+	asciiQuoteRe              = regexp.MustCompile(`"([^"\n]{1,240})"`)
 	dialogueActionLeadRe      = regexp.MustCompile(`^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]`)
+	asciiDialogueContextRe    = regexp.MustCompile(`(?:说|问|答|喊|回|念|骂|嘀咕|提醒|解释|开口|接道|笑道|答道|问道|说道)[^一-龥\n]{0,4}[：:]?\s*$`)
 	dialogueMicroPeriodExempt = map[string]bool{
 		"好": true, "好的": true, "好吧": true,
 		"行": true, "行吧": true, "可以": true,
@@ -1174,6 +1176,94 @@ type dialogueMicroPeriodStats struct {
 	Examples []string
 }
 
+type dialogueQuoteSpan struct {
+	Start int
+	End   int
+	Text  string
+}
+
+// dialogueQuoteSpans accepts the native Chinese quote pairs unconditionally,
+// and accepts straight ASCII quotes only when they carry Chinese prose and
+// look like an actual speech turn. The narrower ASCII rule keeps English
+// citations, config attributes and embedded quoted labels from inflating the
+// novel-dialogue metrics.
+func dialogueQuoteSpans(text string) []dialogueQuoteSpan {
+	spans := make([]dialogueQuoteSpan, 0)
+	for _, loc := range dialogueQuoteRe.FindAllStringSubmatchIndex(text, -1) {
+		if len(loc) < 4 {
+			continue
+		}
+		spans = append(spans, dialogueQuoteSpan{
+			Start: loc[0],
+			End:   loc[1],
+			Text:  text[loc[2]:loc[3]],
+		})
+	}
+	for _, loc := range asciiQuoteRe.FindAllStringSubmatchIndex(text, -1) {
+		if len(loc) < 4 {
+			continue
+		}
+		message := text[loc[2]:loc[3]]
+		if !asciiQuoteLooksLikeDialogue(text, loc[0], loc[1], message) {
+			continue
+		}
+		spans = append(spans, dialogueQuoteSpan{
+			Start: loc[0],
+			End:   loc[1],
+			Text:  message,
+		})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].Start < spans[j].Start })
+	filtered := spans[:0]
+	lastEnd := -1
+	for _, span := range spans {
+		if span.Start < lastEnd {
+			continue
+		}
+		filtered = append(filtered, span)
+		lastEnd = span.End
+	}
+	return filtered
+}
+
+func asciiQuoteLooksLikeDialogue(text string, start, end int, message string) bool {
+	if len(hanzi(message)) == 0 {
+		return false
+	}
+	// Properly punctuated Chinese speech is the strongest format-independent
+	// signal. Commas and colons alone are intentionally insufficient because
+	// they are common inside quoted product names and configuration examples.
+	if strings.ContainsAny(message, "。！？!?；;…—") {
+		return true
+	}
+	lineStart := strings.LastIndex(text[:start], "\n") + 1
+	lineEnd := len(text)
+	if offset := strings.Index(text[end:], "\n"); offset >= 0 {
+		lineEnd = end + offset
+	}
+	prefix := strings.TrimSpace(text[lineStart:start])
+	suffix := strings.TrimSpace(text[end:lineEnd])
+	if prefix == "" && suffix == "" {
+		return true
+	}
+	return asciiDialogueContextRe.MatchString(prefix)
+}
+
+func hasDialogueQuote(text string) bool {
+	return len(dialogueQuoteSpans(text)) > 0
+}
+
+func dialogueHasActionLead(paragraph string) bool {
+	spans := dialogueQuoteSpans(paragraph)
+	if len(spans) == 0 {
+		return false
+	}
+	// Reuse the established bounded action-tag rule, replacing only the first
+	// validated quote opener so straight and typographic quotes behave alike.
+	prefix := paragraph[:spans[0].Start] + "“"
+	return dialogueActionLeadRe.MatchString(prefix)
+}
+
 // dialogueMicroPeriodChain mirrors the deterministic prose lint for a narrow
 // dialogue-only signal: a non-final full stop follows only two to four Hanzi,
 // then the same quoted speech turn continues. Each dialogue paragraph
@@ -1183,11 +1273,8 @@ func dialogueMicroPeriodChain(body string) dialogueMicroPeriodStats {
 	clean := stripSystemMessageText(body)
 	stats := dialogueMicroPeriodStats{}
 	for _, paragraph := range paragraphs(clean) {
-		for _, match := range dialogueQuoteRe.FindAllStringSubmatch(paragraph, -1) {
-			if len(match) < 2 {
-				continue
-			}
-			message := strings.TrimSpace(match[1])
+		for _, span := range dialogueQuoteSpans(paragraph) {
+			message := strings.TrimSpace(span.Text)
 			if !dialogueTurnHasMicroPeriodLead(message) {
 				continue
 			}
@@ -1251,7 +1338,7 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 	currentRun := 0
 	for _, para := range paras {
 		trimmed := strings.TrimSpace(para)
-		if !strings.ContainsAny(trimmed, "“「") {
+		if !hasDialogueQuote(trimmed) {
 			currentRun = 0
 			continue
 		}
@@ -1260,17 +1347,14 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 		if currentRun > maxDialogueRun {
 			maxDialogueRun = currentRun
 		}
-		if dialogueActionLeadRe.MatchString(trimmed) {
+		if dialogueHasActionLead(trimmed) {
 			actionLeadParas++
 		}
 	}
 
 	quoteLens := []float64{}
-	for _, match := range dialogueQuoteRe.FindAllStringSubmatch(body, -1) {
-		if len(match) < 2 {
-			continue
-		}
-		if n := len(hanzi(match[1])); n > 0 {
+	for _, span := range dialogueQuoteSpans(body) {
+		if n := len(hanzi(span.Text)); n > 0 {
 			quoteLens = append(quoteLens, float64(n))
 		}
 	}
@@ -1279,7 +1363,7 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 		window := paras[start : start+8]
 		dialogueCount := 0
 		for _, para := range window {
-			if strings.ContainsAny(para, "“「") {
+			if hasDialogueQuote(para) {
 				dialogueCount++
 			}
 		}
@@ -1505,7 +1589,7 @@ func humanAnchorStats(body string, stats Stats, sentLens []float64, perK map[str
 	groundingDensity := round2(stats.ConcreteDensityPerK + stats.SensoryDensityPerK)
 	sceneDensity := round2(groundingDensity + stats.ActionDensityPerK)
 	short12 := round3(ratio(countWhere(sentLens, func(v float64) bool { return v <= 12 }), len(sentLens)))
-	quoteDensity := density(countAll(body, []string{"“", "”", "「", "」", "『", "』"}), stats.Hanzi)
+	quoteDensity := density(len(dialogueQuoteSpans(body))*2, stats.Hanzi)
 	punctKinds := punctuationKindCount(body)
 	microPeriod := dialogueMicroPeriodChain(body)
 	blockers := []string{}
@@ -2164,7 +2248,7 @@ func semanticSentenceProfileFor(sent string) semanticSentenceProfile {
 	hasObject := concreteCount(sent) > 0
 	hasAction := countAll(sent, semanticActionMarks) > 0
 	hasSensory := countAll(sent, sensoryMarkers) > 0
-	hasDialogue := strings.ContainsAny(sent, "“”「」") || countAll(sent, []string{"说", "问", "回答", "答道", "喊", "骂"}) > 0
+	hasDialogue := hasDialogueQuote(sent) || countAll(sent, []string{"说", "问", "回答", "答道", "喊", "骂"}) > 0
 	hasRule := countAll(sent, semanticRuleMarkers) > 0
 	hasAbstract := countAll(sent, abstractMarkers) > 0 || countAll(sent, summaryMarkers) > 0
 	hasEmotion := countAll(sent, emotionMarkers) > 0
@@ -2334,7 +2418,7 @@ func paragraphRows(paras []string) []map[string]float64 {
 			"avg_sentence_len":   mean(lens),
 			"sentence_cv":        cv(lens),
 			"comma_period_ratio": float64(strings.Count(para, "，")) / math.Max(1, float64(strings.Count(para, "。"))),
-			"dialogue":           boolFloat(strings.Contains(para, "“") || strings.Contains(para, "\"")),
+			"dialogue":           boolFloat(hasDialogueQuote(para)),
 			"cliche_total_per_k": density(countAll(para, flattenCliches()), len(pChars)),
 			"concrete_density":   density(concreteCount(para), len(pChars)),
 			"action_density":     density(countAll(para, actionMarkers), len(pChars)),
@@ -2507,7 +2591,7 @@ func dialogueRatio(text string) float64 {
 	}
 	dialogue := 0
 	for _, line := range lines {
-		if strings.Contains(line, "“") || strings.Contains(line, "\"") {
+		if hasDialogueQuote(line) {
 			dialogue++
 		}
 	}
@@ -2528,22 +2612,8 @@ func quotedHanziRatio(text string) float64 {
 		return 0
 	}
 	quoted := 0
-	inQuote := false
-	for _, r := range text {
-		switch r {
-		case '“', '「', '『':
-			inQuote = true
-			continue
-		case '"':
-			inQuote = !inQuote
-			continue
-		case '”', '」', '』':
-			inQuote = false
-			continue
-		}
-		if inQuote && r >= '\u4e00' && r <= '\u9fff' {
-			quoted++
-		}
+	for _, span := range dialogueQuoteSpans(text) {
+		quoted += len(hanzi(span.Text))
 	}
 	return math.Min(1, float64(quoted)/float64(total))
 }

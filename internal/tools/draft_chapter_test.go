@@ -54,6 +54,97 @@ func TestDraftChapterRejectsUnfinishedPendingRewrite(t *testing.T) {
 	}
 }
 
+func TestDraftChapterRejectsPendingRewriteWithoutPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatalf("Progress.Init: %v", err)
+	}
+	oldBody := "第一章\n\n旧正文。"
+	if err := s.Drafts.SaveFinalChapter(1, oldBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(oldBody)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetPendingRewritesAndFlow([]int{1}, "必须重做推演和计划", domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "pipeline.json"), []byte(`{"stages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := json.Marshal(map[string]any{
+		"chapter": 1,
+		"content": "第一章\n\n试图绕过计划直接覆盖的新正文。",
+		"mode":    "write",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "缺少计划") {
+		t.Fatalf("pending rewrite without plan bypassed prewrite gates: %v", err)
+	}
+	if draft, err := s.Drafts.LoadDraft(1); err != nil || strings.TrimSpace(draft) != "" {
+		t.Fatalf("rejected no-plan rewrite wrote a draft: draft=%q err=%v", draft, err)
+	}
+}
+
+func TestDraftNeedsConsistencyCheckAfterEdit(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, "第一章\n\n初稿。"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "consistency_check", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if draftNeedsConsistencyCheck(st, 1) {
+		t.Fatal("fresh consistency checkpoint did not clear the draft event")
+	}
+	if err := st.Drafts.SaveDraft(1, "第一章\n\n编辑后的正文。"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "edit", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !draftNeedsConsistencyCheck(st, 1) {
+		t.Fatal("edit after consistency was ignored as a new body event")
+	}
+}
+
+func TestDraftChapterRejectsPipelineWritingWithoutPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "pipeline.json"), []byte(`{"stages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "content": "第一章\n\n试图跳过计划直接写正文。", "mode": "write",
+	})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "缺少计划") {
+		t.Fatalf("pipeline writing without plan bypassed prewrite gates: %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); strings.TrimSpace(draft) != "" {
+		t.Fatalf("rejected no-plan pipeline write produced draft=%q", draft)
+	}
+}
+
 func TestDraftChapterRejectsUnexpandedLayeredChapter(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
@@ -201,6 +292,110 @@ func TestDraftChapterExplicitRerenderSupersedesPendingJudgeHash(t *testing.T) {
 	if _, err := NewDraftChapterTool(s).Execute(context.Background(), second); err != nil {
 		t.Fatalf("newer explicit rerender request should allow replacing unjudged old draft: %v", err)
 	}
+	inspection, err := InspectDraftExternalGateWithStore(s, 1)
+	if err != nil || inspection.Status != DraftExternalGateRejudgePending {
+		t.Fatalf("clean explicit replacement lost its durable pending-judge boundary: inspection=%+v err=%v", inspection, err)
+	}
+	if err := RequireDraftExternalApprovalWithStore(s, 1); err == nil || !strings.Contains(err.Error(), "尚未完成该哈希") {
+		t.Fatalf("clean explicit replacement became committable before whole-draft rejudge: %v", err)
+	}
+}
+
+func TestDraftChapterExplicitRerenderRejectsUnchangedCurrentHash(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章\n\n人工明确要求重渲染前保留的完整候选正文。"
+	if err := s.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(s.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"chapter": 1, "content": body, "mode": "write"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "当前草稿哈希相同") {
+		t.Fatalf("explicit rerender accepted unchanged current bytes: %v", err)
+	}
+}
+
+func TestDraftChapterExplicitRerenderRejectsAppend(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, "第一章\n\n旧候选正文。"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(s.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"chapter": 1, "content": "只追加一小段。", "mode": "append"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "append 不能消费") {
+		t.Fatalf("explicit full rerender was consumed by append: %v", err)
+	}
+}
+
+func TestDraftLocalStructuralBlockAuthorizesOnlyBoundedFullRerenders(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	firstBody := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	first, _ := json.Marshal(map[string]any{"chapter": 1, "content": firstBody, "mode": "write"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if !draftNeedsConsistencyCheck(s, 1) {
+		t.Fatal("new structural draft must still require consistency check")
+	}
+	secondBody := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到第二家。", 100)
+	second, _ := json.Marshal(map[string]any{"chapter": 1, "content": secondBody, "mode": "write"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), second); err != nil {
+		t.Fatalf("fresh local whole-text evidence should authorize the second full render: %v", err)
+	}
+	thirdBody := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到第三家。", 100)
+	third, _ := json.Marshal(map[string]any{"chapter": 1, "content": thirdBody, "mode": "write"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), third); err != nil {
+		t.Fatalf("current causal budget should allow its final bounded full render: %v", err)
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(s, 1); !escalation.Required {
+		t.Fatalf("three distinct local structural failures must exhaust the causal render budget: %+v", escalation)
+	}
+	fourthBody := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到第四家。", 100)
+	fourth, _ := json.Marshal(map[string]any{"chapter": 1, "content": fourthBody, "mode": "write"})
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), fourth); err == nil || !strings.Contains(err.Error(), "render-only") {
+		t.Fatalf("exhausted local render budget must force causal replanning: %v", err)
+	}
+	structuralAttempts := 0
+	for _, cp := range s.Checkpoints.All() {
+		if cp.Scope.Matches(domain.ChapterScope(1)) && cp.Step == "draft-structural-block" {
+			structuralAttempts++
+		}
+	}
+	if structuralAttempts != 3 {
+		t.Fatalf("distinct blocked bodies should consume exactly three attempts, got %d", structuralAttempts)
+	}
 }
 
 func TestDraftChapterAppendCannotClearExternalRerenderRequirement(t *testing.T) {
@@ -249,6 +444,31 @@ func TestDraftChapterRejectsOperationalErrorReportAsProse(t *testing.T) {
 	}
 	if draft, _ := s.Drafts.LoadDraft(1); draft != "" {
 		t.Fatalf("operational report persisted: %q", draft)
+	}
+}
+
+func TestDraftChapterRejectsASCIIChineseDialogueQuoteBeforeWrite(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1,
+		"content": "第一章\n\n江烬问：\"明早八点还来吗？\"",
+		"mode":    "write",
+	})
+	_, err := NewDraftChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), rules.ASCIIChineseDialogueQuoteRule) {
+		t.Fatalf("expected ASCII Chinese dialogue quote rejection, got %v", err)
+	}
+	if draft, _ := s.Drafts.LoadDraft(1); draft != "" {
+		t.Fatalf("rejected ASCII-quoted dialogue persisted: %q", draft)
+	}
+	if err := validateDraftProsePayload("第一章\n\n所谓\"只能花在青山县\"的规则，还要结合受益对象理解。"); err != nil {
+		t.Fatalf("ordinary quoted concept should not be rejected: %v", err)
 	}
 }
 

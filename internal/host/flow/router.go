@@ -52,6 +52,12 @@ type State struct {
 	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
 	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
 	NextActionPlanReady bool
+	// 同一 plan 下多个不同整章哈希反复触发 whole-text/segment 阻断时，
+	// render-only 已耗尽，必须优先重做世界推演与 POV plan。
+	NextActionStructuralReplanRequired bool
+	NextActionStructuralReplanAttempts int
+	NextActionStructuralReplanLimit    int
+	NextActionStructuralReplanReason   string
 	// 单世界全角色推演先于 POV plan。需要且未完成时，Host 派受限的
 	// world_simulator；完成后才派 writer 规划主视角。
 	NextActionWorldSimulationRequired bool
@@ -70,6 +76,16 @@ type State struct {
 	// A full rerender has consumed the blocking judgment's one-use hash token.
 	// Host must stop prose dispatch until the outer pipeline judges the new hash.
 	NextActionDraftExternalRejudgePending bool
+	// DeepSeek passed the exact hash, but the effective local gate still has a
+	// non-structural failure. Host may dispatch one targeted edit; that edit must
+	// stop immediately so the changed hash returns to DeepSeek before commit or a
+	// named-platform retest.
+	NextActionDraftLocalSoftEditPending bool
+	// Every named detector/mode required for the exact current draft hash has
+	// passed the strict <4% gate. The submitted payload is immutable: finalizer
+	// may inspect and commit it, but must not edit or regenerate prose unless a
+	// later explicit rerender/blocking event changes routing first.
+	NextActionDraftNamedPassFrozen bool
 
 	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
 	// 避免大上下文裁剪把当前章标题/核心事件挤掉。
@@ -116,11 +132,14 @@ func Route(s State) *Instruction {
 	//    阶段拆分：计划未按审阅结论重推演 → planner 先重做计划；已就绪 → drafter 渲染。
 	if len(p.PendingRewrites) > 0 {
 		ch := p.PendingRewrites[0]
-		if s.NextActionDraftExternalRejudgePending && !s.NextActionExplicitRerender {
+		if s.NextActionDraftExternalRejudgePending && s.NextActionPlanReady && s.NextActionDraftReady && !s.NextActionExplicitRerender && !s.NextActionStructuralReplanRequired {
 			// The outer pipeline owns provider-backed draft judgment. Returning nil
 			// lets the current headless run finish instead of dispatching another
-			// prose agent against an unreviewed hash. A newer explicit rerender
-			// request has already superseded that hash and may proceed directly.
+			// prose agent against an unreviewed hash. A stale causal plan must take
+			// the simulation/planning branch below first: its retained platform
+			// obligation applies to the eventual replacement, not obsolete bytes.
+			// A newer explicit rerender request has already superseded that hash and
+			// may proceed directly.
 			return nil
 		}
 		verb := "重写"
@@ -128,9 +147,14 @@ func Route(s State) *Instruction {
 			verb = "打磨"
 		}
 		if !s.NextActionPlanReady {
-			if s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady {
+			if s.NextActionStructuralReplanRequired || (s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady) {
 				task := worldSimulationTask(ch, s.NextActionWorldSimulationGaps)
-				return &Instruction{Agent: "world_simulator", Task: task, Reason: fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", ch), Chapter: ch}
+				reason := fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", ch)
+				if s.NextActionStructuralReplanRequired {
+					task += "。render-only 已连续结构失败，禁止沿用旧推演和旧 plan；新推演必须保留事实结果但重组场景因果。"
+					reason = s.NextActionStructuralReplanReason
+				}
+				return &Instruction{Agent: "world_simulator", Task: task, Reason: reason, Chapter: ch}
 			}
 			if s.NextActionPlanPartial {
 				task := s.NextActionPlanRepairTask
@@ -158,6 +182,9 @@ func Route(s State) *Instruction {
 				"返工目标锁定第 %d 章：按本章 rewrite_brief 重做写前推演计划（%s前）。该章已在 completed_chapters、进度游标指向下一章都属于正常返工状态；严禁规划第 %d 章或任何未来章节。read_chapter(第%d章) 是读取待返工原文，不是把它当上一章续写；所有 planning 工具必须提交 chapter=%d",
 				ch, verb, ch+1, ch, ch,
 			)
+			if s.NextActionStructuralReplanRequired {
+				task += fmt.Sprintf("。render-only 已有 %d 个不同整章哈希连续触发结构阻断（上限 %d）；必须废弃旧场景/对白投影，保留事实结果后重组因果场景，禁止再次只换措辞", s.NextActionStructuralReplanAttempts, s.NextActionStructuralReplanLimit)
+			}
 			if s.NextActionTitle != "" {
 				task += fmt.Sprintf("。当前大纲标题必须原样使用《%s》", s.NextActionTitle)
 			}
@@ -167,18 +194,28 @@ func Route(s State) *Instruction {
 			if s.NextActionHook != "" {
 				task += "；章末钩子：" + s.NextActionHook
 			}
+			reason := fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划需先纳入 rewrite_brief 重推演", len(p.PendingRewrites))
+			if s.NextActionStructuralReplanRequired {
+				reason = s.NextActionStructuralReplanReason
+			}
 			return &Instruction{
 				Agent:   "writer",
 				Task:    task,
-				Reason:  fmt.Sprintf("PendingRewrites 队列剩余 %d 章，计划需先纳入 rewrite_brief 重推演", len(p.PendingRewrites)),
+				Reason:  reason,
 				Chapter: ch,
 			}
 		}
 		if s.NextActionDraftReady {
+			if s.NextActionDraftLocalSoftEditPending {
+				return draftLocalSoftEditInstruction(ch)
+			}
+			if s.NextActionDraftNamedPassFrozen {
+				return draftNamedPassCommitInstruction(ch)
+			}
 			if s.NextActionDraftExternalRerenderRequired {
 				return &Instruction{
 					Agent:   "drafter",
-					Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d, profile=draft)，共同落实 draft_external_ai_review 的旧稿失败证据与 rewrite_brief 的 mechanical_gate/rewrite_focus；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
+					Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
 					Reason:  fmt.Sprintf("第 %d 章外部草稿审核要求结构级重渲染", ch),
 					Chapter: ch,
 				}
@@ -194,7 +231,7 @@ func Route(s State) *Instruction {
 			return &Instruction{
 				Agent: "drafter",
 				Task: fmt.Sprintf(
-					"正式复审要求第 %d 章产生新稿：只调用一次 novel_context(chapter=%d, profile=draft)，复用已批准的 world simulation 与 POV plan，逐条落实当前 rewrite_brief。随后调用 draft_chapter(mode=write) 一次整章覆盖；禁止 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。写入新哈希后立即结束，交外层 pipeline 做完整裸正文外判",
+					"正式复审要求第 %d 章产生新稿：只调用一次 novel_context(chapter=%d, profile=draft)，复用已批准的 world simulation 与 POV plan，逐条落实当前 rewrite_brief；不得读取旧 draft/final 或复用旧稿表面。随后调用 draft_chapter(mode=write) 一次整章覆盖；禁止 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。写入新哈希后立即结束，交外层 pipeline 做完整裸正文外判",
 					ch, ch,
 				),
 				Reason:  fmt.Sprintf("第 %d 章正式 rewrite 结论仍对应当前终稿，必须先生成不同哈希的新草稿", ch),
@@ -205,7 +242,7 @@ func Route(s State) *Instruction {
 			return &Instruction{
 				Agent: "drafter",
 				Task: fmt.Sprintf(
-					"显式整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，复用已经批准的 world simulation 与 POV plan；忽略其中已声明为 source-version-only 的旧正文/brief 哈希差。随后必须调用 draft_chapter(mode=write) 一次覆盖旧草稿，禁止调用 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。新草稿写入后立即结束，交由外层 pipeline 做同哈希外判",
+					"显式整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，复用已经批准的 world simulation 与 POV plan；忽略其中已声明为 source-version-only 的旧正文/brief 哈希差，不得读取旧 draft/final 或复用旧稿表面。随后必须调用 draft_chapter(mode=write) 一次覆盖旧草稿，禁止调用 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。新草稿写入后立即结束，交由外层 pipeline 做同哈希外判",
 					ch, ch,
 				),
 				Reason:  fmt.Sprintf("第 %d 章收到显式 render-only 请求，旧草稿已失效", ch),
@@ -294,14 +331,19 @@ func Route(s State) *Instruction {
 	if next <= 0 {
 		return nil
 	}
-	if s.NextActionDraftExternalRejudgePending {
+	if s.NextActionDraftExternalRejudgePending && s.NextActionPlanReady && s.NextActionDraftReady && !s.NextActionStructuralReplanRequired {
 		return nil
 	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
-		if s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady {
+		if s.NextActionStructuralReplanRequired || (s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady) {
 			task := worldSimulationTask(next, s.NextActionWorldSimulationGaps)
-			return &Instruction{Agent: "world_simulator", Task: task, Reason: fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", next), Chapter: next}
+			reason := fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", next)
+			if s.NextActionStructuralReplanRequired {
+				task += "。render-only 已连续结构失败，禁止沿用旧推演和旧 plan；新推演必须保留事实结果但重组场景因果。"
+				reason = s.NextActionStructuralReplanReason
+			}
+			return &Instruction{Agent: "world_simulator", Task: task, Reason: reason, Chapter: next}
 		}
 		if s.NextActionPlanPartial {
 			task := s.NextActionPlanRepairTask
@@ -311,6 +353,9 @@ func Route(s State) *Instruction {
 			return &Instruction{Agent: "writer", Task: task, Reason: "下一章 staged plan 只需最小补丁修复", Chapter: next}
 		}
 		task := fmt.Sprintf("为第 %d 章做写前推演，落盘完整章节计划", next)
+		if s.NextActionStructuralReplanRequired {
+			task += fmt.Sprintf("；render-only 已有 %d 个不同整章哈希连续触发结构阻断（上限 %d），必须废弃旧场景/对白投影，保留事实结果后重组因果场景", s.NextActionStructuralReplanAttempts, s.NextActionStructuralReplanLimit)
+		}
 		if s.NextActionTitle != "" {
 			task += fmt.Sprintf("；计划标题必须原样使用《%s》", s.NextActionTitle)
 		}
@@ -328,10 +373,16 @@ func Route(s State) *Instruction {
 		}
 	}
 	if s.NextActionDraftReady {
+		if s.NextActionDraftLocalSoftEditPending {
+			return draftLocalSoftEditInstruction(next)
+		}
+		if s.NextActionDraftNamedPassFrozen {
+			return draftNamedPassCommitInstruction(next)
+		}
 		if s.NextActionDraftExternalRerenderRequired {
 			return &Instruction{
 				Agent:   "drafter",
-				Task:    fmt.Sprintf("整章重渲染第 %d 章：先 read_chapter(source=draft) 和 novel_context(chapter=%d)，只修正 draft_external_ai_review 的旧稿失败证据；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", next, next),
+				Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", next, next),
 				Reason:  "外部草稿审核要求结构级重渲染",
 				Chapter: next,
 			}
@@ -348,6 +399,30 @@ func Route(s State) *Instruction {
 		Task:    fmt.Sprintf("写第 %d 章", next),
 		Reason:  "下一章计划已就绪，渲染正文",
 		Chapter: next,
+	}
+}
+
+func draftLocalSoftEditInstruction(chapter int) *Instruction {
+	return &Instruction{
+		Agent: "draft_finalizer",
+		Task: fmt.Sprintf(
+			"第 %d 章当前精确哈希已通过 DeepSeek，但本地有效 AIGC 门禁仍有非结构性失败：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 并运行 check_consistency，严格依据 aigc_gate_check.rewrite_focus 只选择一处可验证的局部硬伤。最多调用一次 edit_chapter；不得整章重写、不得调用 commit_chapter。edit 一旦落盘必须立即结束子任务，禁止再次 read/check/edit；外层 pipeline 将先对新哈希重跑 DeepSeek，已有注册 detector/mode 复测义务继续暂缓到本地门禁与 DeepSeek 均通过后",
+			chapter, chapter,
+		),
+		Reason:  fmt.Sprintf("第 %d 章 DeepSeek 已通过，允许消费一次本地软门禁编辑", chapter),
+		Chapter: chapter,
+	}
+}
+
+func draftNamedPassCommitInstruction(chapter int) *Instruction {
+	return &Instruction{
+		Agent: "draft_finalizer",
+		Task: fmt.Sprintf(
+			"第 %d 章当前精确哈希已通过 requirement 的全部注册 detector/mode 严格 <4%% 复测，送检正文已经冻结。只可 read_chapter(source=draft)、novel_context(chapter=%d, profile=draft) 与 check_consistency 核验同一载荷；全部门禁通过后最多调用一次 commit_chapter。禁止 edit_chapter、draft_chapter 或任何正文改写。若 consistency/commit 暴露新的确定性阻断，立即结束子任务并交外层产生新的显式整章重渲染授权；不得在已通过的 named payload 上就地修补",
+			chapter, chapter,
+		),
+		Reason:  fmt.Sprintf("第 %d 章当前送检哈希已通过全部注册平台门禁，只允许原样提交", chapter),
+		Chapter: chapter,
 	}
 }
 

@@ -68,6 +68,100 @@ func TestCheckpointStore_Idempotent(t *testing.T) {
 	}
 }
 
+func TestCheckpointStore_AppendArtifactLatestCreatesABAPlanEpochs(t *testing.T) {
+	cs, dir := newTestCheckpointStore(t)
+	artifact := "drafts/01.plan.json"
+	path := filepath.Join(dir, filepath.FromSlash(artifact))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`{"chapter":1,"title":"A"}`)
+	cpA1, err := cs.AppendArtifactLatest(domain.ChapterScope(1), "plan", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpA1Retry, err := cs.AppendArtifactLatest(domain.ChapterScope(1), "plan", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cpA1Retry.Seq != cpA1.Seq {
+		t.Fatalf("immediate retry of current A should be idempotent: first=%d retry=%d", cpA1.Seq, cpA1Retry.Seq)
+	}
+
+	write(`{"chapter":1,"title":"B"}`)
+	cpB, err := cs.AppendArtifactLatest(domain.ChapterScope(1), "plan", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(`{"chapter":1,"title":"A"}`)
+	cpA2, err := cs.AppendArtifactLatest(domain.ChapterScope(1), "plan", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cpA2.Seq <= cpB.Seq || cpA2.Seq == cpA1.Seq {
+		t.Fatalf("A after B must start a fresh plan epoch: A1=%d B=%d A2=%d", cpA1.Seq, cpB.Seq, cpA2.Seq)
+	}
+	cpA2Retry, err := cs.AppendArtifactLatest(domain.ChapterScope(1), "plan", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cpA2Retry.Seq != cpA2.Seq {
+		t.Fatalf("immediate retry of current A2 should be idempotent: A2=%d retry=%d", cpA2.Seq, cpA2Retry.Seq)
+	}
+	if got := len(cs.All()); got != 3 {
+		t.Fatalf("A -> B -> A should persist exactly three epochs, got %d", got)
+	}
+}
+
+func TestCheckpointStore_AppendArtifactLatestAcrossCreatesCrossStepABAEpoch(t *testing.T) {
+	cs, dir := newTestCheckpointStore(t)
+	artifact := "drafts/01.draft.md"
+	path := filepath.Join(dir, filepath.FromSlash(artifact))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	steps := []string{"plan", "rerender-request", "draft", "edit"}
+
+	write("A")
+	draftA1, err := cs.AppendArtifactLatestAcross(domain.ChapterScope(1), "draft", artifact, steps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("B")
+	editB, err := cs.AppendArtifactLatestAcross(domain.ChapterScope(1), "edit", artifact, steps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("A")
+	draftA2, err := cs.AppendArtifactLatestAcross(domain.ChapterScope(1), "draft", artifact, steps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(draftA1.Seq < editB.Seq && editB.Seq < draftA2.Seq) {
+		t.Fatalf("draft A -> edit B -> draft A must produce three ordered prose epochs: A1=%d B=%d A2=%d", draftA1.Seq, editB.Seq, draftA2.Seq)
+	}
+	retry, err := cs.AppendArtifactLatestAcross(domain.ChapterScope(1), "draft", artifact, steps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Seq != draftA2.Seq {
+		t.Fatalf("immediate current-body retry should remain idempotent: current=%d retry=%d", draftA2.Seq, retry.Seq)
+	}
+}
+
 func TestCheckpointStore_EmptyDigestNotIdempotent(t *testing.T) {
 	cs, _ := newTestCheckpointStore(t)
 

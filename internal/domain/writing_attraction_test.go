@@ -9,11 +9,20 @@ func TestProjectStyleRequests(t *testing.T) {
 	if TrendLanguageRequested("禁止使用热梗") {
 		t.Fatal("forbidden trend language must win")
 	}
+	if TrendLanguageRequested("标题允许口语，但不堆网络梗、不连续套同一句型") {
+		t.Fatal("an anti-stacking ceiling must not become a mandatory trend-language request")
+	}
+	if !TrendLanguageRequested("每章最多用一个热梗，但不堆网络梗") {
+		t.Fatal("an anti-stacking ceiling must not cancel a separate explicit trend-language request")
+	}
 	if !ReaderEntertainmentRequested("男频轻松搞笑爽文，强情绪兑现") {
 		t.Fatal("expected entertainment request")
 	}
 	if !SystemCompanionVoiceRequested("系统会和男主交流解闷，不是一个纯下达任务的机器人，且始终支持主角") {
 		t.Fatal("expected companion-system request")
+	}
+	if !SystemCompanionVoiceForbidden("本书系统不能聊天，纯任务机器人即可。") {
+		t.Fatal("expected explicit companion-system prohibition")
 	}
 }
 

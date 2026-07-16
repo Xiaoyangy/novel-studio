@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1146,6 +1148,31 @@ func TestTrimByBudgetPreservesCompactLiteraryCardsAtPlanningBudget(t *testing.T)
 	}
 }
 
+func TestTrimByBudgetPreservesStrongestRAGFactInsteadOfReportingPhantomRecall(t *testing.T) {
+	items := []domain.RecallItem{
+		{Kind: "rag", Key: "rank-1", Reason: "当前章直接相关", Summary: strings.Repeat("最强连续性事实。", 500)},
+		{Kind: "rag", Key: "rank-2", Reason: "次相关", Summary: strings.Repeat("次级事实。", 500)},
+		{Kind: "rag", Key: "rank-3", Reason: "弱相关", Summary: strings.Repeat("弱事实。", 500)},
+	}
+	result := map[string]any{
+		"selected_memory":     map[string]any{"rag_recall": items},
+		"book_world_context":  strings.Repeat("可从当前 plan 重建的宽世界快照。", 900),
+		"active_chapter_task": map[string]any{"chapter": 1, "goal": "保留当前任务"},
+	}
+	if !trimByBudget(result, 20000, 1) {
+		t.Fatal("one strongest RAG fact plus critical task should fit after trimming broad snapshots")
+	}
+	selected := result["selected_memory"].(map[string]any)
+	kept, ok := selected["rag_recall"].([]domain.RecallItem)
+	if !ok || len(kept) != 1 || kept[0].Key != "rank-1" {
+		t.Fatalf("budget trim did not preserve exactly the strongest RAG fact: %#v", selected["rag_recall"])
+	}
+	trimmed, _ := result["_trimmed"].([]string)
+	if !slices.Contains(trimmed, "rag_recall:top1_preserved") {
+		t.Fatalf("RAG delivery compaction was not observable: %#v", trimmed)
+	}
+}
+
 func TestContextToolPlanningProfileFinalPayloadFitsBudgetAndKeepsCards(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -1204,6 +1231,1245 @@ func TestFinalizeContextResultRejectsOversizedCriticalPayload(t *testing.T) {
 	if _, ok := result["active_chapter_task"]; !ok {
 		t.Fatal("budget failure must not delete the active chapter task")
 	}
+}
+
+func TestFinalizeContextResultAllowsOnlyBoundedRewritePlanningOverflow(t *testing.T) {
+	t.Run("rewrite planning keeps protected source after preferred trimming", func(t *testing.T) {
+		working := map[string]any{
+			"rewrite_source": map[string]any{
+				"current_body": strings.Repeat("b", 42*1024),
+			},
+			"rewrite_brief": map[string]any{
+				"brief_markdown": strings.Repeat("r", 26*1024),
+			},
+			"current_chapter_outline": map[string]any{"chapter": 1, "goal": "保留当前章任务"},
+		}
+		result := map[string]any{
+			"working_memory": working,
+			"references":     strings.Repeat("低优先级资料", 12000),
+		}
+
+		raw, err := finalizeContextResult(result, 1, "planning")
+		if err != nil {
+			t.Fatalf("bounded rewrite planning payload should fit the hard ceiling: %v", err)
+		}
+		if len(raw) <= contextBudget(1, "planning") {
+			t.Fatalf("fixture did not exercise preferred-budget overflow: got=%d preferred=%d", len(raw), contextBudget(1, "planning"))
+		}
+		if len(raw) > contextHardBudget(1, "planning") {
+			t.Fatalf("rewrite planning payload exceeded hard ceiling: got=%d hard=%d", len(raw), contextHardBudget(1, "planning"))
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := payload["references"]; ok {
+			t.Fatal("bounded overflow must not restore low-priority references")
+		}
+		budget, ok := payload["_context_budget"].(map[string]any)
+		if !ok || budget["mode"] != "rewrite_critical_overflow" {
+			t.Fatalf("bounded overflow must be observable: %#v", payload["_context_budget"])
+		}
+		kept := payload["working_memory"].(map[string]any)
+		if _, ok := kept["rewrite_source"]; !ok {
+			t.Fatal("rewrite source was silently removed")
+		}
+		if _, ok := kept["rewrite_brief"]; !ok {
+			t.Fatal("rewrite brief was silently removed")
+		}
+	})
+
+	t.Run("ordinary planning cannot consume the overflow reserve", func(t *testing.T) {
+		result := map[string]any{
+			"active_chapter_task": map[string]any{
+				"mode":   "new_chapter",
+				"policy": strings.Repeat("x", 70*1024),
+			},
+		}
+		if raw, err := finalizeContextResult(result, 1, "planning"); err == nil || raw != nil {
+			t.Fatalf("ordinary planning must remain capped at the preferred budget, raw=%d err=%v", len(raw), err)
+		}
+	})
+
+	t.Run("rewrite planning still fails above the hard ceiling", func(t *testing.T) {
+		result := map[string]any{
+			"working_memory": map[string]any{
+				"rewrite_source": map[string]any{
+					"current_body": strings.Repeat("x", 100*1024),
+				},
+			},
+		}
+		raw, err := finalizeContextResult(result, 1, "planning")
+		if err == nil || raw != nil {
+			t.Fatalf("rewrite planning above the hard ceiling must fail, raw=%d err=%v", len(raw), err)
+		}
+		if !errors.Is(err, errs.ErrToolPrecondition) {
+			t.Fatalf("expected fail-closed ErrToolPrecondition, got %v", err)
+		}
+	})
+}
+
+func TestWorldSimulationContextCompactsSupersededCausalPayloadAfterStructuralEscalation(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1, Title: "旧因果耗尽后重推", CoreEvent: "保留事实结果，重组场景因果",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	source := prepareRewriteSourceTest(t, st,
+		"第一章\n\n林澈保住既定结果，但旧场景结构已经耗尽。",
+		"# 返工\n\n## 保留事实\n\n- 林澈保住既定结果。\n\n## 必须修正\n\n- 废弃旧场景因果。\n",
+	)
+	oldAction := strings.Repeat("旧场景动作链只用于预算回归。", 5000)
+	lin := simulatedDecision("林澈", "沿用旧选择", true)
+	lin.Action = oldAction
+	shen := simulatedDecision("沈知遥", "继续旧安排", false)
+	shen.Action = oldAction
+	old := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "旧推演时段", RewriteSource: source,
+		Sources:            []string{rewriteSourceToken(source), rewriteBriefToken(source)},
+		CharacterDecisions: []domain.CharacterWorldDecision{lin, shen},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"既定结果"}, HiddenPressures: []string{"旧离屏压力"},
+			AvailableOptions: []string{"沿用", "改写"}, ChosenDecision: "沿用旧选择", DecisionReason: "旧证据链",
+			PlanConstraints: []string{"旧限制"}, CausalChain: []string{"旧场景", "旧选择"},
+		},
+		RewriteFactCoverage: []domain.ChapterRewriteFactCoverage{{
+			Fact: "林澈保住既定结果。", SimulationEvidence: []string{"旧选择承接结果"},
+		}},
+	}
+	old.SimulationID = chapterWorldSimulationID(old)
+	if err := st.SaveChapterWorldSimulation(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "旧计划"}
+	plan.CausalSimulation.WorldSimulationID = old.SimulationID
+	plan.CausalSimulation.ReviewRefinement.IterationLimit = 2
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, digest := range []string{"sha256:blocked-a", "sha256:blocked-b"} {
+		if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "draft-structural-block", "drafts/01.draft.md", digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); !escalation.Required {
+		t.Fatalf("test did not establish structural escalation: %+v", escalation)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"world_simulation"}`),
+	)
+	if err != nil {
+		t.Fatalf("focused world simulation context must fit without full-profile fallback: %v", err)
+	}
+	if len(raw) > contextBudget(1, "world_simulation") {
+		t.Fatalf("world simulation context exceeded focused budget: got=%d budget=%d", len(raw), contextBudget(1, "world_simulation"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	world, ok := payload["chapter_world_simulation"].(map[string]any)
+	if !ok || world["status"] != "superseded_for_structural_replan" || world["previous_simulation_id"] != old.SimulationID {
+		t.Fatalf("old simulation was not compactly marked superseded: %#v", payload["chapter_world_simulation"])
+	}
+	for _, leaked := range []string{"character_decisions", "protagonist_projection", "rewrite_fact_coverage"} {
+		if _, exists := world[leaked]; exists {
+			t.Fatalf("superseded causal surface leaked %s: %#v", leaked, world[leaked])
+		}
+	}
+	working := payload["working_memory"].(map[string]any)
+	if _, ok := working["rewrite_source"]; !ok {
+		t.Fatal("canonical rewrite source was lost while superseding old simulation")
+	}
+	if _, ok := working["current_chapter_outline"]; !ok {
+		t.Fatal("current chapter outline was lost while superseding old simulation")
+	}
+	saved, err := st.LoadChapterWorldSimulation(1)
+	if err != nil || saved == nil || saved.CharacterDecisions[0].Action != oldAction {
+		t.Fatalf("read-only context compaction mutated the formal simulation: saved=%+v err=%v", saved, err)
+	}
+
+	// A leftover POV plan partial must not bypass the same structural escalation
+	// through the staged-repair fast path.
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{
+		"structure":         map[string]any{"chapter": 1, "title": "旧骨架"},
+		"causal_simulation": map[string]any{"world_simulation_id": old.SimulationID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stagedRaw, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"world_simulation"}`),
+	)
+	if err != nil {
+		t.Fatalf("staged repair path must also fit the focused world budget: %v", err)
+	}
+	var staged map[string]any
+	if err := json.Unmarshal(stagedRaw, &staged); err != nil {
+		t.Fatal(err)
+	}
+	stagedWorld, _ := staged["chapter_world_simulation"].(map[string]any)
+	if stagedWorld["status"] != "superseded_for_structural_replan" {
+		t.Fatalf("staged repair replayed the exhausted simulation: %#v", stagedWorld)
+	}
+	if _, leaked := stagedWorld["protagonist_projection"]; leaked {
+		t.Fatalf("staged repair leaked the exhausted protagonist projection: %#v", stagedWorld)
+	}
+}
+
+func TestPartialWorldSimulationContextReturnsLockedDecisionsNeededForProjection(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	lin := simulatedDecision("林澈", "先叫停并让老丁退线", true)
+	shen := simulatedDecision("沈知遥", "只检查已完成的自纠", true)
+	he := simulatedDecision("贺骁", "只接通电话，尚未答复", true)
+	other := simulatedDecision("旁支角色", "保持背景", false)
+	partial := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "当晚",
+		CharacterDecisions: []domain.CharacterWorldDecision{lin, shen, he, other},
+		RewriteSource: &domain.ChapterRewriteSource{PreserveFacts: []string{
+			"林澈先叫停，沈知遥后检查；贺骁尚未答复。",
+		}},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ChosenDecision: lin.Decision,
+		},
+	}
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{}
+	NewContextTool(st, References{}, "default").buildChapterWorldSimulationContext(result, 1, func(string, error) {})
+	world, ok := result["chapter_world_simulation"].(map[string]any)
+	if !ok || world["status"] != "partial" {
+		t.Fatalf("unexpected partial context: %#v", result["chapter_world_simulation"])
+	}
+	locked, ok := world["locked_character_decisions"].([]domain.CharacterWorldDecision)
+	if !ok {
+		t.Fatalf("locked decisions missing from partial context: %#v", world)
+	}
+	if got := characterDecisionNames(locked); !slices.Equal(got, []string{"林澈", "沈知遥", "贺骁"}) {
+		t.Fatalf("preserve-fact decisions were not returned exactly: %v", got)
+	}
+	if !strings.Contains(world["projection_policy"].(string), "不得用旧稿覆盖") {
+		t.Fatalf("projection authority policy missing: %#v", world)
+	}
+}
+
+func TestCompletePartialWorldSimulationContextIsReadyToFinalizeWithoutResubmission(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	lin := simulatedDecision("林澈", "承认失业", true)
+	shen := simulatedDecision("沈知遥", "继续例行工作", false)
+	partial := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "同一天晚饭前后两小时",
+		CharacterDecisions: []domain.CharacterWorldDecision{lin, shen},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"追问落到饭桌"}, HiddenPressures: []string{"场外安排尚未传回"},
+			AvailableOptions: []string{"继续隐瞒", "承认失业"}, ChosenDecision: lin.Decision,
+			DecisionReason: "继续隐瞒会扩大误解", PlanConstraints: []string{"只写亲见信息"},
+			CausalChain: []string{"亲戚追问", "父母护短", "林澈承认失业"},
+		},
+	}
+	if gaps := chapterWorldSimulationGaps(st, partial); len(gaps) != 0 {
+		t.Fatalf("test fixture must be complete before context status check: %v", gaps)
+	}
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{}
+	NewContextTool(st, References{}, "default").buildChapterWorldSimulationContext(result, 1, func(string, error) {})
+	world := result["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "ready_to_finalize" || !strings.Contains(world["policy"].(string), "不得重发") {
+		t.Fatalf("complete partial did not receive finalize-only state: %#v", world)
+	}
+	if _, leaked := result["simulation_character_authority"]; leaked {
+		t.Fatal("gap-free partial must not build/replay authority when only finalize=true is legal")
+	}
+}
+
+func TestStagedPlanRepairGapFreeWorldSimulationIsFinalizeOnly(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{
+		"structure":         map[string]any{"chapter": 1, "title": "旧骨架"},
+		"causal_simulation": map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lin := simulatedDecision("林澈", "承认失业", true)
+	shen := simulatedDecision("沈知遥", "继续例行工作", false)
+	partial := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "同一天晚饭前后两小时",
+		CharacterDecisions: []domain.CharacterWorldDecision{lin, shen},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"追问落到饭桌"}, HiddenPressures: []string{"场外安排尚未传回"},
+			AvailableOptions: []string{"继续隐瞒", "承认失业"}, ChosenDecision: lin.Decision,
+			DecisionReason: "继续隐瞒会扩大误解", PlanConstraints: []string{"只写亲见信息"},
+			CausalChain: []string{"亲戚追问", "父母护短", "林澈承认失业"},
+		},
+	}
+	if gaps := chapterWorldSimulationGaps(st, partial); len(gaps) != 0 {
+		t.Fatalf("fixture must be gap-free: %v", gaps)
+	}
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+
+	result, ok, err := NewContextTool(st, References{}, "default").stagedPlanRepairContext(1, 1, false)
+	if err != nil || !ok {
+		t.Fatalf("stagedPlanRepairContext: ok=%v err=%v", ok, err)
+	}
+	world, _ := result["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "ready_to_finalize" || !strings.Contains(world["policy"].(string), "不得重发") {
+		t.Fatalf("gap-free partial was not finalize-only: %#v", world)
+	}
+	if !strings.Contains(result["next_step"].(string), "finalize=true") || !strings.Contains(result["next_step"].(string), "不得重发") {
+		t.Fatalf("staged next step did not force finalize-only: %#v", result["next_step"])
+	}
+	working := result["working_memory"].(map[string]any)
+	stage := working["chapter_plan_stage"].(map[string]any)
+	if !strings.Contains(stage["policy"].(string), "只允许 finalize=true") {
+		t.Fatalf("staged policy did not preserve finalize-only state: %#v", stage)
+	}
+	if _, leaked := result["simulation_character_authority"]; leaked {
+		t.Fatal("gap-free finalize-only context must not replay the full authority packet")
+	}
+}
+
+func TestPlanningProfileCompactsReadySimulationAndKeepsBoundEvidence(t *testing.T) {
+	result, exactFact, exactDecision := heavyReadyPlanningContextFixture()
+	raw, err := finalizeContextResult(result, 1, "planning")
+	if err != nil {
+		t.Fatalf("ready rewrite planning context must converge: %v", err)
+	}
+	if len(raw) > contextBudget(1, "planning") {
+		t.Fatalf("ready planning context should fit preferred budget after deterministic compaction: got=%d budget=%d", len(raw), contextBudget(1, "planning"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"simulation_character_authority", "simulation_character_authority_policy", "simulation_characters"} {
+		if _, exists := payload[removed]; exists {
+			t.Fatalf("ready planning payload replayed %s", removed)
+		}
+	}
+	receipt, _ := payload["simulation_authority_receipt"].(map[string]any)
+	if receipt["validation"] != "finalized_and_source_bound" || receipt["required_count"] != float64(19) {
+		t.Fatalf("authority receipt lost validation/count: %#v", receipt)
+	}
+	world, _ := payload["chapter_world_simulation"].(map[string]any)
+	if _, leaked := world["character_decisions"]; leaked {
+		t.Fatal("planning payload replayed full off-screen character decisions")
+	}
+	projection, _ := world["protagonist_projection"].(map[string]any)
+	if projection["chosen_decision"] != exactDecision {
+		t.Fatalf("protagonist decision drifted: %#v", projection)
+	}
+	coverage, _ := world["rewrite_fact_coverage"].([]any)
+	if len(coverage) != 2 {
+		t.Fatalf("coverage receipt missing facts: %#v", world["rewrite_fact_coverage"])
+	}
+	first, _ := coverage[0].(map[string]any)
+	if first["fact"] != exactFact || first["evidence_count"] != float64(2) || len(first["evidence_sha256"].(string)) != 64 {
+		t.Fatalf("coverage fact/receipt drifted: %#v", first)
+	}
+	if _, leaked := first["simulation_evidence"]; leaked {
+		t.Fatal("verbose simulation evidence was not folded into an auditable digest")
+	}
+	working, _ := payload["working_memory"].(map[string]any)
+	source, _ := working["rewrite_source"].(map[string]any)
+	if _, leaked := source["current_body"]; leaked {
+		t.Fatal("ready planning payload retained the full old body")
+	}
+	if _, leaked := source["brief_markdown"]; leaked {
+		t.Fatal("ready planning payload retained duplicate full brief markdown")
+	}
+	chapter, _ := source["chapter"].(map[string]any)
+	preserve, _ := chapter["preserve_facts"].([]any)
+	if len(preserve) != 2 || preserve[0] != exactFact {
+		t.Fatalf("exact preserve facts were lost: %#v", chapter)
+	}
+	brief, _ := working["rewrite_brief"].(map[string]any)
+	for _, key := range []string{"user_requirements", "required_corrections", "whole_text_single_segment_gates", "acceptance_conditions"} {
+		if values, _ := brief[key].([]any); len(values) == 0 {
+			t.Fatalf("structured rewrite brief lost %s: %#v", key, brief)
+		}
+	}
+	craft, _ := payload["rewrite_craft_pack"].(map[string]any)
+	if craft["receipt_id"] != "receipt-current" || craft["source_token"] != "craft_recall:receipt-current" {
+		t.Fatalf("RAG craft receipt was lost or changed: %#v", craft)
+	}
+}
+
+func TestWorldSimulationProfileCompactsAlreadyReadySimulation(t *testing.T) {
+	result, _, _ := heavyReadyPlanningContextFixture()
+	raw, err := finalizeContextResult(result, 1, "world_simulation")
+	if err != nil {
+		t.Fatalf("terminal world-simulation view must converge instead of replaying authority: %v", err)
+	}
+	if len(raw) > contextBudget(1, "world_simulation") {
+		t.Fatalf("terminal world-simulation payload exceeded focused budget: %d", len(raw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["simulation_character_authority"]; exists {
+		t.Fatal("already-ready simulator view replayed the full authority packet")
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "ready" {
+		t.Fatalf("ready status changed during compaction: %#v", world)
+	}
+	if _, exists := world["character_decisions"]; exists {
+		t.Fatal("already-ready simulator view replayed full decisions")
+	}
+}
+
+func TestWorldSimulationProfileLayersInvalidNineteenCharacterAuthority(t *testing.T) {
+	result := heavyInvalidWorldSimulationContextFixture()
+	before, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) <= contextBudget(1, "world_simulation") {
+		t.Fatalf("fixture must reproduce a pre-compaction overflow: got=%d", len(before))
+	}
+	raw, err := finalizeContextResult(result, 1, "world_simulation")
+	if err != nil {
+		t.Fatalf("invalid simulation repair context must converge without dropping authority: %v", err)
+	}
+	if len(raw) > contextBudget(1, "world_simulation") {
+		t.Fatalf("layered repair context exceeded world budget: got=%d", len(raw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "invalid" || len(world["gaps"].([]any)) == 0 {
+		t.Fatalf("invalid simulation gaps were lost: %#v", world)
+	}
+	packet, _ := payload["simulation_character_authority"].(map[string]any)
+	if packet["format"] != "layered_v1" {
+		t.Fatalf("authority was not delivered as layered packet: %#v", packet)
+	}
+	entries, _ := packet["entries"].([]any)
+	if len(entries) != 19 {
+		t.Fatalf("authority roster was capped or dropped: %d", len(entries))
+	}
+	hold := entries[10].(map[string]any)
+	holdContract := hold["hold_baseline_contract"].(map[string]any)
+	if hold["authority_mode"] != simulationAuthorityHoldBaseline || holdContract["decision_reason"] != simulationAuthorityMissing || holdContract["character"] != "角色11" {
+		t.Fatalf("hold-baseline exact contract drifted: %#v", hold)
+	}
+	rewriteOnly := entries[18].(map[string]any)
+	rewriteContract := rewriteOnly["rewrite_source_only_contract"].(map[string]any)
+	if rewriteOnly["authority_mode"] != "rewrite_source_only" || rewriteContract["action"] != "赵航低头回复了一条消息。" {
+		t.Fatalf("rewrite-source-only exact action drifted: %#v", rewriteOnly)
+	}
+	authoritative := entries[0].(map[string]any)
+	if authoritative["knowledge_boundary"] != "只知道亲见和合法通信" || authoritative["current_location"] != "林家饭桌" {
+		t.Fatalf("authoritative current facts were lost: %#v", authoritative)
+	}
+	working := payload["working_memory"].(map[string]any)
+	source := working["rewrite_source"].(map[string]any)
+	if _, leaked := source["current_body"]; leaked {
+		t.Fatal("world repair payload retained duplicate old body despite exact blocking contracts")
+	}
+	brief := working["rewrite_brief"].(map[string]any)
+	if gates, _ := brief["whole_text_single_segment_gates"].([]any); len(gates) == 0 {
+		t.Fatalf("world repair lost exact whole-text gate: %#v", brief)
+	}
+}
+
+func TestRestartedWorldSimulationProfileFitsWithoutDroppingAuthorityOrFactGaps(t *testing.T) {
+	result, preserveFacts, corrections, instructionToken := heavyRestartedWorldSimulationContextFixture()
+	before, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) <= contextBudget(1, "world_simulation") {
+		t.Fatalf("fixture must reproduce restarted-world overflow: got=%d", len(before))
+	}
+	raw, err := finalizeContextResult(result, 1, "world_simulation")
+	if err != nil {
+		t.Fatalf("restarted world context must converge without raising 96 KiB: %v", err)
+	}
+	if len(raw) > contextBudget(1, "world_simulation") {
+		t.Fatalf("restarted world context exceeded 96 KiB: got=%d budget=%d", len(raw), contextBudget(1, "world_simulation"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	characters := stringSliceFromAny(payload["simulation_characters"])
+	if len(characters) != 19 {
+		t.Fatalf("full simulation roster was capped: %d %#v", len(characters), characters)
+	}
+	authority := payload["simulation_character_authority"].(map[string]any)
+	entries := authority["entries"].([]any)
+	if len(entries) != 19 {
+		t.Fatalf("authority entries were capped: %d", len(entries))
+	}
+	blocking := 0
+	for _, rawEntry := range entries {
+		entry := rawEntry.(map[string]any)
+		isBlocking, _ := entry["blocking"].(bool)
+		if !isBlocking {
+			if entry["authority_mode"] == "authoritative" && strings.TrimSpace(fmt.Sprint(entry["knowledge_boundary"])) == "" {
+				t.Fatalf("authoritative knowledge boundary was lost: %#v", entry)
+			}
+			continue
+		}
+		blocking++
+		switch entry["authority_mode"] {
+		case simulationAuthorityHoldBaseline:
+			if _, ok := entry["hold_baseline_contract"].(map[string]any); !ok {
+				t.Fatalf("blocking hold contract was lost: %#v", entry)
+			}
+		case "rewrite_source_only":
+			if _, ok := entry["rewrite_source_only_contract"].(map[string]any); !ok {
+				t.Fatalf("blocking rewrite-source contract was lost: %#v", entry)
+			}
+		default:
+			t.Fatalf("unknown blocking authority mode lost exact contract: %#v", entry)
+		}
+	}
+	if blocking != 9 {
+		t.Fatalf("blocking roster changed: got=%d want=9", blocking)
+	}
+	working := payload["working_memory"].(map[string]any)
+	source := working["rewrite_source"].(map[string]any)
+	if _, leaked := source["current_body"]; leaked {
+		t.Fatal("restarted world context retained the old chapter body")
+	}
+	if _, leaked := source["brief_markdown"]; leaked {
+		t.Fatal("restarted world context retained full brief markdown")
+	}
+	chapter := source["chapter"].(map[string]any)
+	gotFacts := stringSliceFromAny(chapter["preserve_facts"])
+	if !slices.Equal(gotFacts, preserveFacts) {
+		t.Fatalf("preserve facts changed or were truncated:\nwant=%#v\ngot=%#v", preserveFacts, gotFacts)
+	}
+	brief := working["rewrite_brief"].(map[string]any)
+	gotCorrections := stringSliceFromAny(brief["required_corrections"])
+	if !slices.Equal(gotCorrections, corrections) {
+		t.Fatalf("current required corrections changed or were truncated:\nwant=%#v\ngot=%#v", corrections, gotCorrections)
+	}
+	if _, leaked := brief["ai_voice_redflags"]; leaked {
+		t.Fatal("AI voice prose leaked into restarted world context")
+	}
+	if _, ok := brief["mechanical_gate_receipt"].(map[string]any); !ok {
+		t.Fatalf("mechanical dossier was not folded to a receipt: %#v", brief)
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	gaps := stringSliceFromAny(world["gaps"])
+	for _, fact := range preserveFacts {
+		want := "rewrite_fact_coverage missing: " + fact
+		if !slices.Contains(gaps, want) {
+			t.Fatalf("exact fact gap was replaced by an index/pointer: %q in %#v", want, gaps)
+		}
+	}
+	if !slices.Contains(gaps, "chapter_pipeline_instruction source missing: "+instructionToken) {
+		t.Fatalf("instruction-token gap was lost: %#v", gaps)
+	}
+	instruction := payload["chapter_pipeline_instruction"].(map[string]any)
+	if instruction["source_token"] != instructionToken || !strings.Contains(instruction["instruction"].(string), "完整用户硬合同") {
+		t.Fatalf("full instruction/token was changed: %#v", instruction)
+	}
+}
+
+func TestPlanningProfileWithInvalidSimulationKeepsGapsButDefersFullAuthority(t *testing.T) {
+	result := heavyInvalidWorldSimulationContextFixture()
+	raw, err := finalizeContextResult(result, 1, "planning")
+	if err != nil {
+		t.Fatalf("planning view of invalid simulation must converge: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["simulation_character_authority"]; exists {
+		t.Fatal("planning must defer full authority to profile=world_simulation")
+	}
+	receipt := payload["simulation_authority_receipt"].(map[string]any)
+	if receipt["validation"] != "not_ready_plan_blocked" || receipt["required_count"] != float64(19) {
+		t.Fatalf("planning authority deferral was not auditable: %#v", receipt)
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	if world["status"] != "invalid" || len(world["gaps"].([]any)) == 0 {
+		t.Fatalf("planning lost the reason plan_structure is blocked: %#v", world)
+	}
+	working := payload["working_memory"].(map[string]any)
+	if _, leaked := working["rewrite_source"].(map[string]any)["current_body"]; leaked {
+		t.Fatal("blocked planning view retained a large old-body blob")
+	}
+}
+
+func TestStagedPlanningProfileReplaysCurrentRAGCraftReceipt(t *testing.T) {
+	st := newRewriteCraftTestStore(t, true)
+	structureRaw, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var structureResult map[string]any
+	if err := json.Unmarshal(structureRaw, &structureResult); err != nil {
+		t.Fatal(err)
+	}
+	issued, _ := structureResult["rewrite_craft_pack"].(map[string]any)
+	if strings.TrimSpace(fmt.Sprint(issued["receipt_id"])) == "" {
+		t.Fatalf("plan_structure did not issue the deterministic craft receipt: %s", structureRaw)
+	}
+	raw, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	replayed, _ := payload["rewrite_craft_pack"].(map[string]any)
+	if replayed["receipt_id"] != issued["receipt_id"] || replayed["source_token"] != issued["source_token"] {
+		t.Fatalf("planning profile lost or changed its bound craft receipt: issued=%#v replayed=%#v", issued, replayed)
+	}
+	if attempts, _ := replayed["attempts"].([]any); len(attempts) == 0 {
+		t.Fatalf("planning profile kept only a receipt label but lost its method attempts: %#v", replayed)
+	}
+}
+
+func heavyInvalidWorldSimulationContextFixture() map[string]any {
+	authority := make([]simulationCharacterAuthority, 0, 19)
+	characters := make([]string, 0, 19)
+	for i := 0; i < 19; i++ {
+		name := fmt.Sprintf("角色%02d", i+1)
+		characters = append(characters, name)
+		entry := simulationCharacterAuthority{
+			Character: name, Role: "配角", Tier: "important", VisibleInCurrentChapter: i < 8,
+			SimulationStatus: "required_missing", AuthoritySources: []string{"meta/characters/" + name + "/dossier.json"},
+			DecisionPolicy: strings.Repeat("重复的逐角色政策应提升到共享层。", 180),
+		}
+		switch {
+		case i < 10:
+			entry.AuthorityMode = "authoritative"
+			entry.Description = "当前人物事实"
+			entry.Traits = []string{"谨慎", "行动派"}
+			entry.Desires = []string{"完成眼前目标"}
+			entry.Boundaries = []string{"不知道场外秘密"}
+			entry.Arc = strings.Repeat("未来弧线不是当前事实。", 220)
+			entry.CurrentLocation = "林家饭桌"
+			entry.CurrentStatus = "清醒"
+			entry.CurrentAction = "应付眼前事务"
+			entry.CurrentPressure = "时间和关系施压"
+			entry.NextIndependentMove = "按证据做可逆选择"
+			entry.Resources = []string{"手机（available）"}
+			entry.Relationships = []string{"与林澈：熟人"}
+			entry.KnowledgeBoundary = "只知道亲见和合法通信"
+			entry.DecisionModel = "先确认现场证据"
+		case i < 18:
+			entry.AuthorityMode = simulationAuthorityHoldBaseline
+			entry.Blocking = true
+			entry.MissingAuthority = []string{"current_location", "knowledge_boundary"}
+			entry.HoldBaselineContract = holdBaselineContractPayload(name, 1)
+			entry.Description = strings.Repeat("冻结角色不应携带无用档案表面。", 120)
+		default:
+			entry.AuthorityMode = "rewrite_source_only"
+			entry.Blocking = true
+			entry.MissingAuthority = []string{"dossier"}
+			entry.RewriteSourceEvidence = []string{"赵航低头回复了一条消息。"}
+			entry.RewriteSourceOnlyContract = rewriteSourceOnlyContractPayload(name, 1, entry.RewriteSourceEvidence)
+		}
+		authority = append(authority, entry)
+	}
+	source := &domain.ChapterRewriteSource{
+		BodyPath: "chapters/01.md", BodySHA256: strings.Repeat("a", 64), WordCount: 2800,
+		BriefPath: "reviews/01_rewrite_brief.md", BriefSHA256: strings.Repeat("b", 64),
+		PreserveFacts: []string{"林澈先叫停，沈知遥只检查已完成的退线。", "皮卡保持待确认。"},
+	}
+	markdown := "# brief\n\n## 保留事实\n\n- 林澈先叫停，沈知遥只检查已完成的退线。\n- 皮卡保持待确认。\n\n## 必须修正\n\n- 修正知识边界冲突。\n\n## 最新整篇单段门禁（2026-07-16）\n\n- external/whole_text_single_segment 必须严格低于 4%。\n\n## 验收条件\n\n- gaps 清零后才允许 finalize。\n"
+	return map[string]any{
+		"simulation_characters":                 characters,
+		"simulation_character_authority":        authority,
+		"simulation_character_authority_policy": map[string]any{"required_count": 19, "blocking_count": 9},
+		"chapter_world_simulation": map[string]any{
+			"status": "invalid", "simulation_id": "old-invalid", "gaps": []string{"贺骁 knowledge_boundary 冲突", "沈知遥 correction 顺序冲突"},
+		},
+		"working_memory": map[string]any{
+			"current_chapter_outline": map[string]any{"chapter": 1, "core_event": "修正世界推演"},
+			"rewrite_source": map[string]any{
+				"chapter": source, "current_body": strings.Repeat("待返工旧正文。", 2500), "brief_markdown": markdown,
+				"required_sources": []string{rewriteSourceToken(source), rewriteBriefToken(source)}, "preservation_policy": "保留事实。",
+			},
+			"rewrite_brief": map[string]any{"reason": "世界推演失效", "review_summary": "知识边界冲突", "issues": []domain.ConsistencyIssue{{Type: "canon", Severity: "error", Description: "修正角色知识边界"}}},
+			"user_rules":    map[string]any{"pov": "第三人称限知", "hard": strings.Repeat("不可跨脑。", 800)},
+		},
+		"premise": strings.Repeat("基础世界事实。", 900),
+	}
+}
+
+func heavyRestartedWorldSimulationContextFixture() (map[string]any, []string, []string, string) {
+	result := heavyInvalidWorldSimulationContextFixture()
+	preserveFacts := []string{
+		"母子返回点两碗豆腐脑，其中一碗少糖，合计12元；真实付款先于风险发现。",
+		"林澈先独立发现风险并叫停，老丁完成断电退线后沈知遥才到场复核。",
+		"4280元电子票只证明县内真实经营交易；沈知遥不得推理系统存在。",
+		"贺骁只问“什么货”；借车、明早到场和执行时间保持未知。",
+		"电话只传来贺骁一侧扳手落入铁盘声；贺骁不知道林澈的位置。",
+		"系统绑定只回应一次；旧债拒付有等待；首次结算由林澈在复核后主动查看。",
+		"正文建立两条分处不同场景的完整主观因果链。",
+		"已提交状态结果：林澈.resource = 一百万元青山县专项经营额度，非个人存款",
+		"已提交状态结果：林澈.knowledge = 额度不能转入个人账户或偿还旧债",
+		"已提交状态结果：马玉芬摊位试点.status = 最外侧灯断电，次日八点待复看",
+		"已提交状态结果：马玉芬.resource = 两碗豆腐脑共12元真实营业收入",
+		"已提交状态结果：林澈与沈知遥.relationship = 形成次日复看的协作约定",
+		"已提交状态结果：贺骁皮卡借用请求.status = pending",
+		"已提交资源结果：专项额度status=booked；不得私人偿债、炫富、县外使用。",
+		"已提交资源结果：摊位设施status=booked；仅有限授权，不代表整片夜市获准扩铺。",
+		"已提交资源结果：皮卡请求status=pending；不得视为车辆已经取得。",
+	}
+	corrections := []string{
+		"保留母子12元消费、自纠、复核的严格先后顺序。",
+		"沈知遥和贺骁的知识边界不得扩大。",
+		"19名实名角色都按独立目标提交决定或精确 blocking contract。",
+		"逐条覆盖全部 preserve facts，不得概括或改写。",
+		"主角投影只能包含可观察后果和合法获得的信息。",
+		"不得把待确认皮卡写成已同意或即将到位。",
+	}
+	working := result["working_memory"].(map[string]any)
+	source := working["rewrite_source"].(map[string]any)
+	chapter := source["chapter"].(*domain.ChapterRewriteSource)
+	chapter.PreserveFacts = append([]string(nil), preserveFacts...)
+	source["current_body"] = strings.Repeat("旧正文表面与示例对白不得锚定新世界推演。", 1800)
+	source["brief_markdown"] = strings.Join([]string{
+		"# rewrite brief", "", "## 当前结论", "", "- 开启新的世界模拟 epoch。", "",
+		"## 保留事实", "", "- " + strings.Join(preserveFacts, "\n- "), "",
+		"## 必须修正", "", "- " + strings.Join(corrections, "\n- "), "",
+		"## 最新整篇单段门禁（2026-07-16）", "", "- 新哈希必须重新完成整篇单段检测。", "",
+		"## 验收条件", "", "- 全角色、事实覆盖、主角投影和来源 token 全部通过。",
+	}, "\n")
+	working["rewrite_brief"] = map[string]any{
+		"reason":         "连续两次整章结构失败，开启新因果 epoch",
+		"review_summary": "旧模拟让关键时序和知识边界回流。",
+		"issues": []domain.ConsistencyIssue{
+			{Type: "continuity", Severity: "error", Description: "老丁必须在沈知遥到场前完成断电退线。", Evidence: strings.Repeat("旧稿示例证据。", 400), Suggestion: strings.Repeat("示例修法。", 300)},
+			{Type: "knowledge", Severity: "error", Description: "沈知遥不得从票据或支付渠道推理系统。", Evidence: strings.Repeat("旧稿引文。", 350), Suggestion: strings.Repeat("替换场景。", 260)},
+		},
+		"required_corrections":  corrections,
+		"current_conclusion":    []string{"开启新的世界模拟 epoch。"},
+		"acceptance_conditions": []string{"全角色、事实覆盖、主角投影和来源 token 全部通过。"},
+		"mechanical_gate": map[string]any{
+			"json_path": "reviews/01_ai_gate.json", "markdown_path": "reviews/01.md", "engine": "codex-local-aigc-v4",
+			"detector_dossier": strings.Repeat("概率曲线和示例只供审核，不进入世界模拟。", 650),
+			"rule_violations":  []map[string]any{{"rule": "external_aigc_ratio", "severity": "error", "target": strings.Repeat("旧稿送检证据。", 180), "limit": "<4%"}},
+		},
+		"ai_voice_redflags": map[string]any{"prose": strings.Repeat("AI voice 示例与指标。", 500)},
+	}
+	working["draft_external_ai_review"] = map[string]any{
+		"blocking": true, "summary": "旧稿整篇失败", "reasons": []string{"结构与人物体验同时失控"},
+		"evidence": strings.Repeat("旧稿证据引文。", 400), "revision_plan": strings.Repeat("示例场景和示例台词。", 550),
+	}
+	working["draft_external_ai_review_policy"] = "旧审查完整包"
+
+	world := result["chapter_world_simulation"].(map[string]any)
+	world["status"] = "restartable_shell"
+	delete(world, "simulation_id")
+	gaps := []string{"missing time_window"}
+	characters := result["simulation_characters"].([]string)
+	for _, name := range characters {
+		gaps = append(gaps, "missing character decision: "+name)
+	}
+	for _, fact := range preserveFacts {
+		gaps = append(gaps, "rewrite_fact_coverage missing: "+fact)
+	}
+	for _, name := range characters[:8] {
+		gaps = append(gaps, "rewrite-visible character must remain visible_to_pov: "+name)
+	}
+	gaps = append(gaps, "incomplete protagonist_projection")
+	const instructionToken = "chapter_pipeline_instruction:sha256:restart-heavy"
+	gaps = append(gaps, "chapter_pipeline_instruction source missing: "+instructionToken)
+	world["gaps"] = gaps
+	world["policy"] = "empty restart shell; rebuild all decisions and coverage"
+	result["chapter_pipeline_instruction"] = map[string]any{
+		"chapter": 1, "instruction": strings.Repeat("完整用户硬合同：金额、数量、知识边界、资源状态和先后顺序不得漂移。", 180),
+		"sha256": "restart-heavy", "source": "meta/pipeline.json#prompt", "scope_source": "drafts/01.rerender_request.json",
+		"source_token": instructionToken,
+		"policy":       "全文和 token 必须保留。",
+	}
+	return result, preserveFacts, corrections, instructionToken
+}
+
+func heavyReadyPlanningContextFixture() (map[string]any, string, string) {
+	exactFact := "线缆风险必须由林澈先发现并叫停；老丁在沈知遥到场前完成断电退线。"
+	secondFact := "贺骁只接通电话，皮卡和次日运力保持未知、待确认。"
+	exactDecision := "先做可撤回的夜市试点，再争取尚未确认的运力"
+	briefMarkdown := strings.Join([]string{
+		"# ch01 rewrite brief", "", "## 当前结论", "", "- 整章重渲染。", "",
+		"## 用户本轮要求", "", "- 整篇作为单段复测，结果严格低于 4%。", "",
+		"## 保留事实", "", "- " + exactFact, "- " + secondFact, "",
+		"## 必须修正", "", "- 两条主观因果链必须分处不同场景并产生现实余波。", "",
+		"## 最新整篇单段门禁（2026-07-16）", "", "- external/whole_text_single_segment 当前为 86%，新 SHA 必须复测。", "",
+		"## 验收条件", "", "- 金额、秘密边界、选择结果和章末未知状态不得漂移。",
+	}, "\n")
+	authority := make([]map[string]any, 0, 19)
+	characters := make([]string, 0, 19)
+	decisions := make([]map[string]any, 0, 19)
+	for i := 0; i < 19; i++ {
+		name := fmt.Sprintf("角色%02d", i+1)
+		characters = append(characters, name)
+		authority = append(authority, map[string]any{
+			"character": name, "authority_mode": "authoritative",
+			"description": strings.Repeat("完整档案字段只用于预算回归。", 180),
+		})
+		decisions = append(decisions, map[string]any{
+			"character": name, "decision": strings.Repeat("离屏决定已正式落盘。", 100),
+		})
+	}
+	projection := domain.ProtagonistDecisionProjection{
+		Protagonist: "林澈", ObservableEffects: []string{"孩子跨线时顿步", "林澈叫停", "老丁先完成退线"},
+		HiddenPressures: []string{"贺骁尚未答复"}, AvailableOptions: []string{"继续争取皮卡", "先守住试点"},
+		ChosenDecision: exactDecision, DecisionReason: "眼前证据只支持小步验证",
+		PlanConstraints: []string{exactFact, secondFact}, CausalChain: []string{"饭桌压力→守密", "夜市风险→自纠→信任"},
+	}
+	source := &domain.ChapterRewriteSource{
+		BodyPath: "chapters/01.md", BodySHA256: strings.Repeat("a", 64), WordCount: 2800,
+		BriefPath: "reviews/01_rewrite_brief.md", BriefSHA256: strings.Repeat("b", 64), PreserveFacts: []string{exactFact, secondFact},
+	}
+	coverage := []domain.ChapterRewriteFactCoverage{
+		{Fact: exactFact, SimulationEvidence: []string{strings.Repeat("林澈决定证据。", 650), strings.Repeat("老丁时序证据。", 650)}},
+		{Fact: secondFact, SimulationEvidence: []string{strings.Repeat("贺骁未知状态证据。", 650)}},
+	}
+	working := map[string]any{
+		"current_chapter_outline": map[string]any{"chapter": 1, "title": "试钱", "core_event": "完成一次可撤回验证"},
+		"rewrite_source": map[string]any{
+			"chapter": source, "current_body": strings.Repeat("旧正文表面不应锚定新计划。", 1400), "brief_markdown": briefMarkdown,
+			"required_sources":    []string{rewriteSourceToken(source), rewriteBriefToken(source)},
+			"preservation_policy": "保留事实但允许删场、并场和换序。",
+		},
+		"rewrite_brief": map[string]any{
+			"reason": "整篇单段门禁失败", "review_summary": "表面过于模板化。",
+			"issues": []domain.ConsistencyIssue{{Type: "aigc", Severity: "error", Description: "主观体验需要改变后续选择。"}},
+		},
+		"user_rules": map[string]any{"pov": "第三人称限知", "hard_rules": strings.Repeat("硬规则。", 1000)},
+	}
+	return map[string]any{
+		"simulation_characters":                 characters,
+		"simulation_character_authority":        authority,
+		"simulation_character_authority_policy": map[string]any{"required_count": 19, "blocking_count": 0},
+		"chapter_world_simulation": map[string]any{
+			"status": "ready", "simulation_id": "ch001-current", "character_count": 19,
+			"character_decisions": decisions, "protagonist_projection": projection,
+			"rewrite_source": source, "rewrite_fact_coverage": coverage,
+		},
+		"working_memory": working,
+		"rewrite_craft_pack": map[string]any{
+			"receipt_id": "receipt-current", "source_token": "craft_recall:receipt-current",
+			"binding":  map[string]any{"chapter": 1, "rewrite_body_sha256": source.BodySHA256, "rewrite_brief_sha256": source.BriefSHA256},
+			"attempts": []any{map[string]any{"need": "主观因果链", "hits": []any{map[string]any{"ref": "hit-1", "summary": strings.Repeat("只迁移写法。", 450)}}}},
+		},
+	}, exactFact, exactDecision
+}
+
+func TestFinalizedChapterOneRealShapeProfilesFitPreferredBudgetAndKeepAuthority(t *testing.T) {
+	for _, profile := range []string{"draft", "planning"} {
+		t.Run(profile, func(t *testing.T) {
+			result, exactFact, knowledgeFact, instructionText := finalizedChapterOneRealShapeFixture()
+			working := result["working_memory"].(map[string]any)
+			plan := working["chapter_plan"].(*domain.ChapterPlan)
+			causalRaw, err := json.Marshal(plan.CausalSimulation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(causalRaw) < 60*1024 {
+				t.Fatalf("fixture no longer models the 63 KiB formal causal simulation: %d", len(causalRaw))
+			}
+
+			raw, err := finalizeContextResult(result, 1, profile)
+			if err != nil {
+				t.Fatalf("finalized real-shape %s context overflowed: %v", profile, err)
+			}
+			if len(raw) > contextBudget(1, profile) {
+				t.Fatalf("%s context used overflow reserve: got=%d preferred=%d", profile, len(raw), contextBudget(1, profile))
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, overflow := payload["_context_budget"]; overflow {
+				t.Fatalf("%s context must not use rewrite critical overflow: %#v", profile, payload["_context_budget"])
+			}
+			if hasContextKey(payload, "causal_simulation") || hasContextKey(payload, "chapter_contract") {
+				t.Fatalf("%s context replayed formal planning dossiers", profile)
+			}
+
+			instruction := payload["chapter_pipeline_instruction"].(map[string]any)
+			if instruction["instruction"] != instructionText || !strings.HasPrefix(instruction["source_token"].(string), chapterPipelineInstructionTokenPrefix) {
+				t.Fatalf("%s context changed the full chapter instruction or token: %#v", profile, instruction)
+			}
+			keptWorking := payload["working_memory"].(map[string]any)
+			packet := keptWorking["render_packet"].(map[string]any)
+			packetJSON, _ := json.Marshal(packet)
+			for _, want := range []string{exactFact, "不得泄露系统秘密", "receipt-current", "candidate_moves", "knowledge_boundary"} {
+				if !strings.Contains(string(packetJSON), want) {
+					t.Fatalf("%s render packet lost hard/RAG/POV authority %q: %s", profile, want, packetJSON)
+				}
+			}
+			if got := len(packet["forbidden_moves"].([]any)); got != 8 {
+				t.Fatalf("%s render packet lost full forbidden contract: %d", profile, got)
+			}
+
+			receipt := payload["formal_plan_receipt"].(map[string]any)
+			if receipt["status"] != "finalized_source_bound" || len(receipt["canonical_content_sha256"].(string)) != 64 {
+				t.Fatalf("%s formal plan receipt is not source-bound: %#v", profile, receipt)
+			}
+			renderReceipt := receipt["render_contract"].(map[string]any)
+			if renderReceipt["authority_path"] != "working_memory.render_packet" || renderReceipt["preserve_fact_count"] == nil || len(renderReceipt["preserve_facts_sha256"].(string)) != 64 {
+				t.Fatalf("%s render contract receipt is not canonical: %#v", profile, renderReceipt)
+			}
+			sources := stringSliceFromAny(receipt["context_sources"])
+			for _, source := range []string{"chapter_pipeline_instruction:sha256:instruction-current", "craft_recall_receipt:receipt-current"} {
+				if !slices.Contains(sources, source) {
+					t.Fatalf("%s formal plan receipt lost source %q: %#v", profile, source, sources)
+				}
+			}
+
+			source := keptWorking["rewrite_source"].(map[string]any)
+			if source["authority_receipt"] != "formal_plan_receipt.rewrite_source" || source["preserve_facts_authority"] != "working_memory.render_packet.preserve_facts" {
+				t.Fatalf("%s rewrite source was not folded to the canonical receipt: %#v", profile, source)
+			}
+			sourceReceipt := receipt["rewrite_source"].(map[string]any)
+			if sourceReceipt["brief_path"] != "reviews/01_rewrite_brief.md" || sourceReceipt["preserve_fact_count"] == nil || len(sourceReceipt["preserve_facts_sha256"].(string)) != 64 {
+				t.Fatalf("%s rewrite source receipt lost binding/count/digest: %#v", profile, sourceReceipt)
+			}
+			sourceJSON, _ := json.Marshal(source)
+			if strings.Contains(string(sourceJSON), exactFact) {
+				t.Fatalf("%s rewrite source repeated canonical fact text: %s", profile, sourceJSON)
+			}
+			brief := keptWorking["rewrite_brief"].(map[string]any)
+			if len(stringSliceFromAny(brief["required_corrections"])) == 0 || len(stringSliceFromAny(brief["whole_text_single_segment_gates"])) == 0 {
+				t.Fatalf("%s latest actionable rewrite brief was lost: %#v", profile, brief)
+			}
+
+			world := payload["chapter_world_simulation"].(map[string]any)
+			if world["rewrite_fact_coverage_receipt"] != "formal_plan_receipt.rewrite_fact_coverage" {
+				t.Fatalf("%s world coverage was not folded to the canonical receipt: %#v", profile, world)
+			}
+			coverageReceipt := receipt["rewrite_fact_coverage"].(map[string]any)
+			if coverageReceipt["artifact"] != "meta/chapter_simulations/001.json" || coverageReceipt["fact_count"] == nil || len(coverageReceipt["facts_sha256"].(string)) != 64 {
+				t.Fatalf("%s coverage receipt lost artifact/count/digest: %#v", profile, coverageReceipt)
+			}
+			if _, duplicated := world["protagonist_projection"]; duplicated {
+				t.Fatalf("%s world simulation duplicated the packet projection: %#v", profile, world)
+			}
+			projectionJSON, _ := json.Marshal(packet["protagonist_projection"])
+			if !strings.Contains(string(projectionJSON), knowledgeFact) {
+				t.Fatalf("%s render packet projection lost the knowledge bound: %s", profile, projectionJSON)
+			}
+			if hasContextKey(payload, "simulation_restart_policy") || hasContextKey(payload, "premise_sections") {
+				t.Fatalf("%s context retained already-consumed broad planning background", profile)
+			}
+		})
+	}
+}
+
+func TestFinalizedDraftContextCompactsRepeatedPreserveAuthoritiesUnder64KiB(t *testing.T) {
+	quoteFact := "章末贺骁只问“什么货”；借车、到场时间与运力保持未知、待确认。"
+	moneyFact := "4280元电子票只证明青山县真实经营交易；沈知遥不得据此推理系统存在。"
+	orderFact := "母子两碗豆腐脑（一碗少糖）合计12元真实付款，必须先于林澈发现走线风险。"
+	knowledgeFact := "沈知遥不知道系统存在，也不知道林澈的支付渠道与专项额度来源。"
+	ledgerFact := "已提交资源结果：贺骁皮卡借用请求；status=pending；不得视为车辆已经取得。"
+	canonicalFacts := []string{quoteFact, moneyFact, orderFact, knowledgeFact, ledgerFact}
+
+	// Model a long-running rewrite in which the same immutable facts have been
+	// copied into source, coverage and later quote-glyph repair rounds hundreds
+	// of times. Only quote typography is equivalent; the overlapping money,
+	// order, knowledge and ledger constraints must remain separate.
+	var sourceFacts []string
+	var coverage []domain.ChapterRewriteFactCoverage
+	for i := 0; i < 80; i++ {
+		for _, fact := range canonicalFacts {
+			sourceFacts = append(sourceFacts, fact)
+			coverage = append(coverage, domain.ChapterRewriteFactCoverage{
+				Fact:               fact,
+				SimulationEvidence: []string{strings.Repeat("已由正式世界推演逐字段验证。", 24)},
+			})
+		}
+	}
+	plannedFacts := []string{
+		`章末贺骁只问"什么货"；借车、到场时间与运力保持未知、待确认。`,
+		"章末贺骁只问「什么货」；借车、到场时间与运力保持未知、待确认。",
+		moneyFact, orderFact, knowledgeFact, ledgerFact,
+		"4280元电子票只证明青山县真实经营交易；沈知遥不得据此推理系统存在。",
+	}
+	for i := 0; i < 40; i++ {
+		plannedFacts = append(plannedFacts, canonicalFacts...)
+	}
+
+	const receiptID = "receipt-budget-regression"
+	plan := &domain.ChapterPlan{
+		Chapter:  1,
+		Title:    "先把线退回来",
+		Goal:     "守住一次可撤回试点",
+		Conflict: "眼前收益与安全边界同时施压",
+		Hook:     "电话接通，但运力仍未确认",
+		Contract: domain.ChapterContract{
+			RequiredBeats: []string{
+				"母子完成两碗豆腐脑合计12元真实付款",
+				"林澈独立发现风险并叫停，老丁完成断电退线后沈知遥才到场",
+				"林澈主动查看首次结算后再拨通贺骁",
+				"电话截在贺骁问“什么货”且尚未同意借车",
+			},
+			ForbiddenMoves:   []string{"不得漂移4280元或12元", "不得让沈知遥推理系统", "不得倒置断电退线与沈知遥到场"},
+			ContinuityChecks: []string{moneyFact, orderFact, knowledgeFact},
+		},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			WorldSimulationID:   "ch001-budget-regression",
+			ProtagonistDecision: "先停扩并完成退线",
+			ContextSources: []string{
+				"chapter_pipeline_instruction:sha256:instruction-budget",
+				"rewrite_source:chapters/01.md#sha256=body-budget",
+				"craft_recall_receipt:" + receiptID,
+			},
+			ReviewRefinement: domain.ReviewRefinementLoop{PreserveConstraints: plannedFacts},
+			SceneConstraints: []string{knowledgeFact, "贺骁不知道林澈的位置、项目与执行时间"},
+			ExternalRefs: []domain.ExternalReferencePlan{
+				{
+					QueryOrNeed: "rewrite-methodology", SourceType: craftSourceType,
+					SourceRefs:         []string{"craft_recall_receipt:" + receiptID + "#chunk=method#hash=aaa"},
+					UsableDetails:      []string{"让人物选择承担转场，把手续压成可见后果。"},
+					TransformationRule: "只迁移节奏与信息延迟，不迁移事实。",
+					DoNotUse:           []string{"不得照抄资料。"},
+				},
+				{
+					QueryOrNeed: "rewrite-dialogue", SourceType: craftSourceType,
+					SourceRefs:         []string{"craft_recall_receipt:" + receiptID + "#chunk=dialogue#hash=bbb"},
+					UsableDetails:      []string{"让拒绝、沉默和改口改变关系权力。"},
+					TransformationRule: "对白只承担当下意图，不补作者说明。",
+					DoNotUse:           []string{"不得轮流念规则。"},
+				},
+			},
+			AntiAIPlan: domain.AntiAIExecutionPlan{
+				RiskSignals:          []string{"句长CV过低；饭桌对白压住人物犹疑", "对白传送带让人物替作者念流程"},
+				CounterMoves:         []string{"每三句插动作；让林澈先误判，再因安全后果改口", "让父亲护场改变林澈随后守密的选择"},
+				SentenceRhythmPolicy: "句长CV低于0.62；饭桌保留长问短答，风险发现处自然收短",
+				ObjectResponseBudget: "绑定、拒付和主动结算之间必须有不等空白。",
+				DialogueFunctionPlan: "饭桌对白只制造关系压力，不轮流说明规则。",
+				ReviewChecks:         []string{"检测概率低于4%；风险发现是否改变人物选择", "父亲护场是否留下关系余波"},
+			},
+			EndingContract: domain.EndingConsequenceContract{
+				Consequence:      "请求已经提出但仍未获答复",
+				NextChapterPull:  "贺骁听完真实用途后才作有限同意",
+				ForbiddenEndings: []string{"不得写贺骁已同意", "不得确认明早到场"},
+			},
+		},
+	}
+	source := &domain.ChapterRewriteSource{
+		BodyPath: "chapters/01.md", BodySHA256: strings.Repeat("a", 64), WordCount: 2688,
+		BriefPath: "reviews/01_rewrite_brief.md", BriefSHA256: strings.Repeat("b", 64),
+		CanonicalStatePath: "meta/chapter_progress.json", CanonicalStateSHA256: strings.Repeat("c", 64),
+		PreserveFacts: sourceFacts,
+	}
+	rewriteSource := map[string]any{
+		"chapter": source, "current_body": strings.Repeat("旧正文不进入 draft profile。", 900),
+		"brief_markdown":      strings.Repeat("完整评审不进入 draft profile。", 500),
+		"required_sources":    []string{rewriteSourceToken(source), rewriteBriefToken(source)},
+		"preservation_policy": "金额、数量、知识边界、资源状态和因果顺序不可漂移。",
+	}
+	working := map[string]any{
+		"chapter_plan":   plan,
+		"rewrite_source": rewriteSource,
+		"rewrite_brief": map[string]any{
+			"reason": "整篇单段失败", "required_corrections": canonicalFacts,
+			"whole_text_single_segment_gates": []string{"整章按单段送检"},
+		},
+		"current_chapter_outline": map[string]any{"chapter": 1, "title": plan.Title, "detail": strings.Repeat("已由正式计划消费。", 180)},
+		"user_rules": map[string]any{
+			"structured":  map[string]any{"chapter_words": map[string]any{"min": 2100, "max": 3000}},
+			"preferences": strings.Repeat("定性写法偏好。", 480),
+		},
+	}
+	result := map[string]any{
+		"working_memory": working,
+		"chapter_plan":   plan,
+		"rewrite_source": rewriteSource,
+		"chapter_world_simulation": map[string]any{
+			"status": "ready", "simulation_id": "ch001-budget-regression", "character_count": 8,
+			"rewrite_source": source, "rewrite_fact_coverage": coverage,
+			"protagonist_projection": domain.ProtagonistDecisionProjection{
+				Protagonist: "林澈", ChosenDecision: "先停扩并完成退线", DecisionReason: "眼前证据只支持可撤回试点",
+				ObservableEffects: []string{"老丁先断电退线", "沈知遥后到场复核"}, PlanConstraints: []string{knowledgeFact, orderFact},
+			},
+		},
+		"chapter_pipeline_instruction": map[string]any{
+			"chapter": 1, "instruction": strings.Repeat("当前用户合同已经由正式计划逐项消费；不得绕过来源哈希。", 170),
+			"sha256": "instruction-budget", "source": "meta/pipeline.json#prompt",
+			"source_token": "chapter_pipeline_instruction:sha256:instruction-budget",
+		},
+		"episodic_memory": map[string]any{
+			"resource_audit":     strings.Repeat("历史资源审计只作衔接。", 260),
+			"relationship_state": strings.Repeat("历史关系状态只作衔接。", 120),
+		},
+	}
+
+	raw, err := finalizeContextResult(result, 1, "draft")
+	if err != nil {
+		t.Fatalf("repeated preserve authorities overflowed draft context: %v", err)
+	}
+	if len(raw) > contextBudget(1, "draft") {
+		t.Fatalf("draft context exceeded 64 KiB: got=%d budget=%d", len(raw), contextBudget(1, "draft"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	keptWorking := payload["working_memory"].(map[string]any)
+	packet := keptWorking["render_packet"].(map[string]any)
+	gotFacts := stringSliceFromAny(packet["preserve_facts"])
+	if !slices.Equal(gotFacts, canonicalFacts) {
+		t.Fatalf("source-first exact facts changed or semantically collapsed:\nwant=%#v\ngot=%#v", canonicalFacts, gotFacts)
+	}
+	seen := map[string]bool{}
+	for _, fact := range gotFacts {
+		identity := rewriteFactIdentity(fact)
+		if seen[identity] {
+			t.Fatalf("quote-only duplicate survived in render packet: %q", fact)
+		}
+		seen[identity] = true
+	}
+	if got := len(stringSliceFromAny(packet["mandatory_beats"])); got != len(plan.Contract.RequiredBeats) {
+		t.Fatalf("hard outcomes were sampled: got=%d want=%d", got, len(plan.Contract.RequiredBeats))
+	}
+	craft, _ := packet["craft_methods"].([]any)
+	if len(craft) != 2 {
+		t.Fatalf("complete selected craft methods were lost: %#v", packet["craft_methods"])
+	}
+	craftJSON, _ := json.Marshal(craft)
+	for _, want := range []string{"rewrite-methodology", "rewrite-dialogue", "让人物选择承担转场", "让拒绝、沉默和改口"} {
+		if !strings.Contains(string(craftJSON), want) {
+			t.Fatalf("craft method %q missing: %s", want, craftJSON)
+		}
+	}
+	antiAIJSON, _ := json.Marshal(packet["anti_ai_execution_plan"])
+	for _, want := range []string{"饭桌对白压住人物犹疑", "让林澈先误判", "绑定、拒付和主动结算", "饭桌对白只制造关系压力"} {
+		if !strings.Contains(string(antiAIJSON), want) {
+			t.Fatalf("qualitative anti-AI contract %q missing: %s", want, antiAIJSON)
+		}
+	}
+	for _, forbidden := range []string{"CV", "0.62", "每三句", "检测概率", "4%"} {
+		if strings.Contains(string(antiAIJSON), forbidden) {
+			t.Fatalf("metric recipe %q leaked into prose contract: %s", forbidden, antiAIJSON)
+		}
+	}
+	receipt := payload["formal_plan_receipt"].(map[string]any)
+	for _, name := range []string{"render_contract", "rewrite_source", "rewrite_fact_coverage"} {
+		if _, ok := receipt[name].(map[string]any); !ok {
+			t.Fatalf("authority receipt %s missing: %#v", name, receipt)
+		}
+	}
+	if sourceReceipt := receipt["rewrite_source"].(map[string]any); sourceReceipt["word_count"] != float64(2688) || sourceReceipt["preserve_fact_count"] != float64(len(canonicalFacts)) {
+		t.Fatalf("rewrite source receipt lost identity/count: %#v", sourceReceipt)
+	}
+	if coverageReceipt := receipt["rewrite_fact_coverage"].(map[string]any); coverageReceipt["fact_count"] != float64(len(canonicalFacts)) || len(coverageReceipt["facts_sha256"].(string)) != 64 {
+		t.Fatalf("coverage receipt lost validation count/hash: %#v", coverageReceipt)
+	}
+	world := payload["chapter_world_simulation"].(map[string]any)
+	if _, duplicated := world["protagonist_projection"]; duplicated || world["rewrite_fact_coverage_receipt"] != "formal_plan_receipt.rewrite_fact_coverage" {
+		t.Fatalf("world simulation still duplicated packet authority: %#v", world)
+	}
+	for _, duplicateContainer := range []any{keptWorking["rewrite_source"], world} {
+		encoded, _ := json.Marshal(duplicateContainer)
+		for _, fact := range canonicalFacts {
+			if strings.Contains(string(encoded), fact) {
+				t.Fatalf("fact text repeated outside render packet: %q in %s", fact, encoded)
+			}
+		}
+	}
+}
+
+func finalizedChapterOneRealShapeFixture() (map[string]any, string, string, string) {
+	result, exactFact, _ := heavyReadyPlanningContextFixture()
+	knowledgeFact := "贺骁只接通电话，皮卡和次日运力保持未知、待确认。"
+	causal := domain.ChapterCausalSimulation{
+		WorldSimulationID:   "ch001-current",
+		ProtagonistDecision: "先做可撤回试点",
+		ProjectPromise:      strings.Repeat("百万字项目承诺只作正式规划证据，不得在正文逐条复述。", 1000),
+		ChapterFunction:     strings.Repeat("正式计划已经完成因果推演与审查闭环。", 400),
+		ContextSources: []string{
+			"rewrite_source:chapters/01.md#sha256=body-current",
+			"rewrite_brief:reviews/01_rewrite_brief.md#sha256=brief-current",
+			"chapter_pipeline_instruction:sha256:instruction-current",
+			"world_simulation:ch001-current",
+			"chapter_world_simulation:ch001-current",
+			"craft_recall_receipt:receipt-current",
+		},
+		ExternalRefs: []domain.ExternalReferencePlan{
+			{
+				QueryOrNeed: "rewrite-methodology", SourceType: "craft_recall",
+				SourceRefs:         []string{"craft_recall_receipt:receipt-current#chunk=method-1#hash=method-hash-1"},
+				UsableDetails:      []string{"饭桌、走线和章末电话使用不同的段落功能与信息释放方式。"},
+				TransformationRule: "把方法转换成饭桌打断、走线自纠与电话截断三个场景动作。",
+				DoNotUse:           []string{"不得照搬参考文本。"},
+			},
+			{
+				QueryOrNeed: "rewrite-dialogue", SourceType: "craft_recall",
+				SourceRefs:         []string{"craft_recall_receipt:receipt-current#chunk=dialogue-1#hash=dialogue-hash-1"},
+				UsableDetails:      []string{"梁广财密集追问，林建国用动作打断，沈知遥只确认已完成的自纠。"},
+				TransformationRule: "用权力转移组织话轮，不让旁白替人物总结。",
+				DoNotUse:           []string{"不得给角色统一口头禅。"},
+			},
+		},
+		LiteraryRendering: &domain.LiteraryRenderingPlan{
+			Focalizer: "林澈", NarrativeAccess: domain.LiteraryNarrativeAccessInternal,
+			KnowledgeBoundary:     "第三人称限知；沈知遥不知道系统，贺骁的答复保持未知。",
+			PerceptualBias:        "先注意现场风险，再意识到自己的小胜可能伤人。",
+			SummaryOmissionPolicy: "安装流程压缩，保留选择后果。", Afterimage: "电话另一端的扳手声。",
+			SourceRefs: []string{"craft_recall_receipt:receipt-current"},
+		},
+		ReviewRefinement: domain.ReviewRefinementLoop{
+			FailureModes:        []string{strings.Repeat("整篇单段门禁失败证据仅供正式 plan 消费。", 240)},
+			PreserveConstraints: []string{exactFact, knowledgeFact},
+			AcceptanceChecks:    []string{"新正文 SHA 必须重新接受整篇单段检测。"},
+			StopCondition:       "正式 plan 已通过，下一步只允许渲染正文。",
+		},
+		SceneConstraints: []string{"第三人称限知", knowledgeFact, "沈知遥不知道系统秘密"},
+	}
+	plan := &domain.ChapterPlan{
+		Chapter: 1, Title: "刚被催着找工作，一百万到账了", Goal: "完成一次可撤回试点",
+		Conflict: "面子、秘密和安全在同一选择点对撞", Hook: "电话接通，但借车与到场仍未确认",
+		Contract: domain.ChapterContract{
+			RequiredBeats: []string{exactFact, "首次真实交易成立", "林澈主动叫停风险", "章末拨通贺骁"},
+			ForbiddenMoves: []string{
+				"不得泄露系统秘密", "不得把额度写成存款", "不得让沈知遥先纠偏", "不得确认皮卡借出",
+				"不得确认次日到场", "不得跨脑读取", "不得照搬 RAG 文本", "不得改写 preserve facts",
+			},
+			ContinuityChecks: []string{exactFact, knowledgeFact, "沈知遥不知道系统", "4280元为真实交易", "旧债测试被拒", "首次结算后查看", "系统短回应", "电话位置未知", "主观因果链分处不同场景"},
+		},
+		CausalSimulation: causal,
+	}
+	working := result["working_memory"].(map[string]any)
+	working["chapter_plan"] = plan
+	working["chapter_contract"] = plan.Contract
+	working["causal_simulation"] = causal
+	working["simulation_restart_policy"] = map[string]any{"active": true, "generation_id": "generation-current", "detail": strings.Repeat("正式计划已经消费。", 400)}
+	result["chapter_plan"] = plan
+	result["chapter_contract"] = plan.Contract
+	result["causal_simulation"] = causal
+	result["premise_sections"] = strings.Repeat("已经被正式计划消费的全书前提。", 700)
+	result["reference_pack"] = map[string]any{"references": strings.Repeat("已消费的完整写作参考。", 1800)}
+	instructionText := strings.Repeat("整章必须保留先后顺序、资源状态、知识边界和整篇单段检测硬约束。", 90)
+	result["chapter_pipeline_instruction"] = map[string]any{
+		"chapter": 1, "instruction": instructionText, "sha256": "instruction-current",
+		"source": "meta/chapter_pipeline_instruction.md", "scope_source": "checkpoints.jsonl",
+		"source_token": chapterPipelineInstructionTokenPrefix + "instruction-current",
+		"policy":       "当前章节用户硬合同必须完整保留。",
+	}
+	return result, exactFact, knowledgeFact, instructionText
 }
 
 func TestTrimByBudgetPreservesCanonicalChapterTaskAndDeduplicatesPlan(t *testing.T) {
@@ -1324,6 +2590,15 @@ func TestContextToolPartialPlanHidesStaleFormalPlan(t *testing.T) {
 	if payload["_context_profile"] != "planning" || payload["_reading_guide"] == "" {
 		t.Fatalf("staged plan repair must use the common finalizer: %#v", payload)
 	}
+	if payload["structure_source_status"] != "ready" {
+		t.Fatalf("optional world simulation must not leave staged structure waiting: %#v", payload["structure_source_status"])
+	}
+	if next, _ := payload["next_step"].(string); !strings.Contains(next, "直接调用 plan_details") || strings.Contains(next, "simulate_chapter_world") {
+		t.Fatalf("optional world simulation produced contradictory recovery guidance: %q", next)
+	}
+	if policy, _ := stage["policy"].(string); strings.Contains(policy, "world simulation") || strings.Contains(policy, "模拟") {
+		t.Fatalf("optional world simulation incorrectly rewrote staged policy: %q", policy)
+	}
 }
 
 func TestContextToolHidesStaleRewritePlanAndDraft(t *testing.T) {
@@ -1388,6 +2663,72 @@ func TestContextToolHidesStaleRewritePlanAndDraft(t *testing.T) {
 	}
 }
 
+func TestPlanningContextHidesPlanSupersededByCurrentWorldSimulationCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "目标章", CoreEvent: "扩到十摊"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{
+		NovelName: "test", TotalChapters: 3, CompletedChapters: []int{1}, PendingRewrites: []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "# 第1章 旧终稿\n\n待返工内容"); err != nil {
+		t.Fatal(err)
+	}
+	oldPlan := domain.ChapterPlan{Chapter: 1, Title: "旧计划", Goal: "维持五摊"}
+	oldPlan.CausalSimulation.ProjectPromise = strings.Repeat("这是已被新世界推演越过的旧因果计划。", 5000)
+	if err := st.Drafts.SaveChapterPlan(oldPlan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	sim := domain.ChapterWorldSimulation{
+		Version: 1, SimulationID: "sim-current", Chapter: 1, TimeWindow: "当晚",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"新增五摊"}, HiddenPressures: []string{"第十一家申请"},
+			AvailableOptions: []string{"维持五摊", "扩到十摊"}, ChosenDecision: "扩到十摊", DecisionReason: "真实交易成立",
+			PlanConstraints: []string{"不得沿用五摊封顶"}, CausalChain: []string{"新增五摊 -> 十摊营业"},
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`),
+	)
+	if err != nil {
+		t.Fatalf("superseded oversized plan must be hidden before budget finalization: %v", err)
+	}
+	if len(raw) > contextBudget(1, "planning") {
+		t.Fatalf("planning context exceeds budget after stale-plan removal: %d", len(raw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	working := payload["working_memory"].(map[string]any)
+	if _, ok := working["chapter_plan"]; ok {
+		t.Fatal("world-simulation-superseded plan leaked into planning context")
+	}
+	if _, ok := working["causal_simulation"]; ok {
+		t.Fatal("superseded causal simulation leaked into planning context")
+	}
+	stage, _ := working["chapter_plan_stage"].(map[string]any)
+	if stage["status"] != "stale_for_rewrite" || !strings.Contains(stage["reason"].(string), "chapter_world_simulation") {
+		t.Fatalf("stale plan cause is not auditable: %#v", stage)
+	}
+}
+
 func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "夜市试点", CoreEvent: "完成首轮试点"}}); err != nil {
@@ -1406,6 +2747,10 @@ func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T
 	if err := st.Drafts.SaveRewriteBrief(1, "# 返工\n\n只改善正文朗读感，保留既定事实。"); err != nil {
 		t.Fatal(err)
 	}
+	rewriteSource, _, _, err := loadChapterRewriteSource(st, 1)
+	if err != nil || rewriteSource == nil {
+		t.Fatalf("load rewrite source: source=%+v err=%v", rewriteSource, err)
+	}
 	decision := "继续完成首轮试点"
 	sim := domain.ChapterWorldSimulation{
 		Version: 1, SimulationID: "sim-force-1", Chapter: 1, TimeWindow: "当晚两小时",
@@ -1418,9 +2763,7 @@ func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T
 			AvailableOptions: []string{"继续", "停止"}, ChosenDecision: decision, DecisionReason: "结果可核验",
 			PlanConstraints: []string{"只写主视角可见事实"}, CausalChain: []string{"试点完成 -> 申请增加"},
 		},
-		RewriteSource: &domain.ChapterRewriteSource{
-			BodyPath: "chapters/01.md", BodySHA256: "old-body", BriefPath: "reviews/01_rewrite_brief.md", BriefSHA256: "old-brief",
-		},
+		RewriteSource: rewriteSource,
 	}
 	if err := st.SaveChapterWorldSimulation(sim); err != nil {
 		t.Fatal(err)
@@ -1436,6 +2779,12 @@ func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T
 		},
 	}
 	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	// Rendering/review may replace only the committed prose surface after the
+	// simulation and plan were finalized. The rewrite brief and preserve-fact
+	// inputs stay unchanged, so this remains a legitimate render-only reuse.
+	if err := st.Drafts.SaveFinalChapter(1, "# 第1章 夜市试点\n\n林澈先收好线盘，沈知遥让开通道，两人才重新点亮摊位。 "); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
@@ -1454,7 +2803,6 @@ func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T
 	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
 		t.Fatal(err)
 	}
-
 	raw, err := NewContextTool(st, References{}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"draft"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -1732,6 +3080,76 @@ type contextTestSearcher struct {
 
 func (s contextTestSearcher) Search(_ context.Context, _ []float32, _ int) ([]rag.VectorSearchHit, error) {
 	return s.hits, nil
+}
+
+type contextFactPrefilterSearcher struct {
+	ranked  []rag.VectorSearchHit
+	options *rag.VectorSearchOptions
+}
+
+func (s *contextFactPrefilterSearcher) Search(_ context.Context, _ []float32, limit int) ([]rag.VectorSearchHit, error) {
+	return append([]rag.VectorSearchHit(nil), s.ranked[:min(limit, len(s.ranked))]...), nil
+}
+
+func (s *contextFactPrefilterSearcher) SearchWithOptions(_ context.Context, _ []float32, limit int, options rag.VectorSearchOptions) ([]rag.VectorSearchHit, error) {
+	s.options = &options
+	filtered := make([]rag.VectorSearchHit, 0, len(s.ranked))
+	for _, hit := range s.ranked {
+		if options.ExcludeDesignOnly && rag.IsDesignOnlySourceKind(hit.Point.Chunk.SourceKind) {
+			continue
+		}
+		filtered = append(filtered, hit)
+	}
+	return append([]rag.VectorSearchHit(nil), filtered[:min(limit, len(filtered))]...), nil
+}
+
+func TestContextToolVectorRecallPrefiltersDesignOnlyBeforeTopK(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	ranked := make([]rag.VectorSearchHit, 0, 19)
+	for i := range 18 {
+		chunk := rag.NormalizeChunk(domain.RAGChunk{
+			SourcePath: "deconstruction-library/writing-techniques/craft.md",
+			SourceKind: rag.CraftSourceKind,
+			Text:       "高相似度写作手法",
+		})
+		chunk.ID += string(rune('a' + i))
+		ranked = append(ranked, rag.VectorSearchHit{
+			Point: domain.RAGVectorPoint{ID: chunk.ID, Chunk: chunk},
+			Score: 1 - float64(i)/100,
+		})
+	}
+	fact := rag.NormalizeChunk(domain.RAGChunk{
+		SourcePath: "meta/chapter_facts.md",
+		SourceKind: "chapter_summary_facts",
+		Text:       "青山县第一批摊主已经完成签约。",
+	})
+	ranked = append(ranked, rag.VectorSearchHit{
+		Point: domain.RAGVectorPoint{ID: fact.ID, Chunk: fact},
+		Score: 0.7,
+	})
+	searcher := &contextFactPrefilterSearcher{ranked: ranked}
+	tool := NewContextTool(s, References{}, "default").
+		WithRAGEmbedder(contextTestEmbedder{}).
+		WithRAGVectorSearcher(searcher)
+	items, trace := tool.selectRAGRecallFresh(context.Background(), contextBuildState{
+		chapter: 1,
+		currentEntry: &domain.OutlineEntry{
+			Chapter: 1, Title: "青山县签约", CoreEvent: "核对第一批摊主签约",
+		},
+	})
+	if searcher.options == nil || !searcher.options.ExcludeDesignOnly {
+		t.Fatal("novel_context did not request pre-truncation fact filtering")
+	}
+	if len(items) != 1 || items[0].Key != fact.ID {
+		t.Fatalf("rank-19 fact should be recalled after design-only prefilter: %+v", items)
+	}
+	if trace == nil || trace.Strategy != "qdrant_vector_engine_v2" {
+		t.Fatalf("unexpected retrieval trace: %+v", trace)
+	}
 }
 
 func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {

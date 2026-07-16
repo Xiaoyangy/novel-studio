@@ -3,9 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -124,6 +128,101 @@ func TestMergeChapterPartsRejectsRepeatMergeBeforeConsistency(t *testing.T) {
 	}
 	if _, err := mergeTool.Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "尚未执行 check_consistency") {
 		t.Fatalf("expected repeat merge rejection, got %v", err)
+	}
+}
+
+func TestDraftChapterPartRejectsPipelineWritingWithoutPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "pipeline.json"), []byte(`{"stages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := mustJSON(t, map[string]any{
+		"chapter": 1, "part": 1, "total_parts": 2,
+		"title": "开场", "focus": "冲突", "content": "第一章\n\n试图跳过正式计划。",
+	})
+	if _, err := NewDraftChapterPartTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "缺少计划") {
+		t.Fatalf("pipeline part write without plan bypassed prewrite gates: %v", err)
+	}
+	if index, _ := s.Drafts.LoadDraftPartIndex(1); index != nil {
+		t.Fatalf("rejected no-plan part write created index: %+v", index)
+	}
+}
+
+func TestDraftChapterPartsCannotBypassWholeDraftExternalState(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章\n\n当前整章草稿。"
+	if err := s.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(body),
+		AIProbabilityPercent: 79, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"整章重排"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := mustJSON(t, map[string]any{
+		"chapter": 1, "part": 1, "total_parts": 2,
+		"title": "旁路", "focus": "不应写入", "content": "试图用分片替代整章重渲染。",
+	})
+	if _, err := NewDraftChapterPartTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "分片不能替代") {
+		t.Fatalf("draft parts bypassed whole-draft external state: %v", err)
+	}
+	if index, _ := s.Drafts.LoadDraftPartIndex(1); index != nil {
+		t.Fatalf("rejected external-state part write created index: %+v", index)
+	}
+}
+
+func TestMergeChapterPartsRunsWholeTextStructuralGate(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	partArgs := mustJSON(t, map[string]any{
+		"chapter": 1, "part": 1, "total_parts": 1,
+		"title": "整章", "focus": "结构门禁", "content": content,
+	})
+	if _, err := NewDraftChapterPartTool(s).Execute(context.Background(), partArgs); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewMergeChapterPartsTool(s).Execute(context.Background(), mustJSON(t, map[string]any{
+		"chapter": 1, "expected_parts": 1,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["local_structural_rerender_required"] != true || payload["stop_prose_modification"] != true || payload["hard_gate_passed"] != false {
+		t.Fatalf("merged whole-text block was not surfaced as a stop boundary: %#v", payload)
+	}
+	inspection, err := InspectDraftExternalGate(s.Dir(), 1)
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || inspection.Requirement == nil || inspection.Requirement.Source != "local_mechanical_gate" {
+		t.Fatalf("merged structural failure did not persist a full-rerender marker: inspection=%+v err=%v", inspection, err)
+	}
+	if _, err := NewDraftChapterPartTool(s).Execute(context.Background(), partArgs); err == nil || !strings.Contains(err.Error(), "分片不能替代") {
+		t.Fatalf("post-merge local blocker remained writable through parts: %v", err)
 	}
 }
 

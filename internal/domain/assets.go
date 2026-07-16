@@ -216,7 +216,7 @@ type FactionRelation struct {
 	ConflictState string `json:"conflict_state,omitempty"` // open_war / cold_war / truce / hidden_hostility / alliance
 }
 
-const CurrentRAGIndexSchemaVersion = 2
+const CurrentRAGIndexSchemaVersion = 4
 
 // RAGIndexState 记录本地/RAG 后端索引状态。Embedding 与 Qdrant 写入并发由 Config 控制。
 type RAGIndexState struct {
@@ -226,6 +226,61 @@ type RAGIndexState struct {
 	ChunkHashes     []string       `json:"chunk_hashes,omitempty"`
 	SanitizedDigest string         `json:"sanitized_digest,omitempty"`
 	UpdatedAt       string         `json:"updated_at,omitempty"`
+}
+
+// CraftRecallNeed is a deterministic, review-derived request for reusable prose
+// technique. Topic is deliberately engine-authored rather than copied from the
+// rewrite brief so project names and negative examples cannot steer retrieval.
+type CraftRecallNeed struct {
+	ID          string   `json:"id"`
+	Field       string   `json:"field"`
+	Topic       string   `json:"topic"`
+	TriggerRefs []string `json:"trigger_refs,omitempty"`
+}
+
+// CraftRecallReceiptHit is the auditable, method-only view of one selected RAG
+// chunk. Text is intentionally absent: plans and drafts receive only a compact
+// summary plus an immutable source reference, never raw benchmark prose.
+type CraftRecallReceiptHit struct {
+	Ref         string   `json:"ref"`
+	ChunkID     string   `json:"chunk_id"`
+	ChunkHash   string   `json:"chunk_hash"`
+	SourcePath  string   `json:"source_path"`
+	SourceKind  string   `json:"source_kind"`
+	Facet       string   `json:"facet,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
+	Score       float64  `json:"score"`
+	UsageStages []string `json:"usage_stages,omitempty"`
+}
+
+type CraftRecallReceiptAttempt struct {
+	Need           CraftRecallNeed         `json:"need"`
+	Hits           []CraftRecallReceiptHit `json:"hits,omitempty"`
+	NoMaterial     bool                    `json:"no_material"`
+	FilteredCount  int                     `json:"filtered_count,omitempty"`
+	FilteredReason map[string]int          `json:"filtered_reason,omitempty"`
+}
+
+// CraftRecallReceipt binds a rewrite-time technique recall to the exact canon
+// generation, committed body, rewrite brief and RAG snapshot that produced it.
+// Enforcement is set only by the new automatic preflight; historical plans that
+// have no matching receipt remain valid.
+type CraftRecallReceipt struct {
+	Version            int                         `json:"version"`
+	ID                 string                      `json:"id"`
+	Chapter            int                         `json:"chapter"`
+	Stage              string                      `json:"stage"`
+	GenerationID       string                      `json:"generation_id,omitempty"`
+	RewriteBodyPath    string                      `json:"rewrite_body_path"`
+	RewriteBodySHA256  string                      `json:"rewrite_body_sha256"`
+	RewriteBriefPath   string                      `json:"rewrite_brief_path"`
+	RewriteBriefSHA256 string                      `json:"rewrite_brief_sha256"`
+	IndexIdentity      string                      `json:"index_identity"`
+	IndexUpdatedAt     string                      `json:"index_updated_at,omitempty"`
+	PayloadSHA256      string                      `json:"payload_sha256"`
+	Enforcement        bool                        `json:"enforcement"`
+	CreatedAt          string                      `json:"created_at"`
+	Attempts           []CraftRecallReceiptAttempt `json:"attempts,omitempty"`
 }
 
 type RAGPendingUpserts struct {

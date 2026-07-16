@@ -68,3 +68,19 @@ func TestResolveRoleContextWindowUsesRoleSelectionBeforeWrappedModelFallback(t *
 		t.Fatalf("model = %q, want gpt-5.6-sol", model)
 	}
 }
+
+func TestAgentToRoleSplitsDrafterFromWriter(t *testing.T) {
+	cases := map[string]string{
+		"writer":          "writer",
+		"world_simulator": "writer",
+		"drafter":         "drafter",
+		"draft_finalizer": "drafter",
+		"architect_short": "architect",
+		"architect_long":  "architect",
+	}
+	for agent, want := range cases {
+		if got := agentToRole(agent); got != want {
+			t.Errorf("agentToRole(%q) = %q, want %q", agent, got, want)
+		}
+	}
+}

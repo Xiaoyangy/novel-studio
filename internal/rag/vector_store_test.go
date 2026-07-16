@@ -2,6 +2,7 @@ package rag
 
 import (
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -19,6 +20,43 @@ func TestSearchVectorStoreSkipsDimensionDriftAndNonFiniteVectors(t *testing.T) {
 	hits := SearchVectorStore(store, []float32{1, 0}, 10)
 	if len(hits) != 1 || hits[0].Point.ID != valid.ID {
 		t.Fatalf("unexpected hits: %+v", hits)
+	}
+}
+
+func TestSearchVectorStoreFiltersDesignOnlyBeforeTopK(t *testing.T) {
+	store := &domain.RAGVectorStore{}
+	for i := range 18 {
+		chunk := NormalizeChunk(domain.RAGChunk{
+			SourcePath: "deconstruction-library/writing-techniques/craft-" + strconv.Itoa(i) + ".md",
+			SourceKind: CraftSourceKind,
+			Text:       "高相似度写作手法",
+		})
+		store.Points = append(store.Points, domain.RAGVectorPoint{
+			ID: chunk.ID, Vector: []float32{1, 0}, Chunk: chunk,
+		})
+	}
+	fact := NormalizeChunk(domain.RAGChunk{
+		SourcePath: "meta/chapter_facts.md",
+		SourceKind: "chapter_summary_facts",
+		Text:       "本书已发生的经营事实",
+	})
+	store.Points = append(store.Points, domain.RAGVectorPoint{
+		ID: fact.ID, Vector: []float32{0.8, 0.6}, Chunk: fact,
+	})
+
+	unfiltered := SearchVectorStore(store, []float32{1, 0}, 18)
+	if len(unfiltered) != 18 {
+		t.Fatalf("unfiltered hits = %d, want 18", len(unfiltered))
+	}
+	for _, hit := range unfiltered {
+		if hit.Point.ID == fact.ID {
+			t.Fatal("test fixture invalid: rank-19 fact unexpectedly entered unfiltered top 18")
+		}
+	}
+
+	filtered := SearchVectorStoreWithOptions(store, []float32{1, 0}, 18, VectorSearchOptions{ExcludeDesignOnly: true})
+	if len(filtered) != 1 || filtered[0].Point.ID != fact.ID {
+		t.Fatalf("fact should survive filtering before top-k truncation: %+v", filtered)
 	}
 }
 

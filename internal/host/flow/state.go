@@ -20,38 +20,50 @@ import (
 //   - 返工章：计划还必须已纳入 rewrite_brief（context_sources 含 rewrite_brief），
 //     否则说明尚未按审阅结论重推演，应先派 planner 重做计划。
 func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool) bool {
+	if partial, err := store.Drafts.LoadChapterPlanPartial(chapter); err != nil || partial != nil {
+		return false
+	}
+	if partial, err := store.LoadChapterWorldSimulationPartial(chapter); err != nil || partial != nil {
+		return false
+	}
 	plan, err := store.Drafts.LoadChapterPlan(chapter)
 	if err != nil || plan == nil {
 		return false
 	}
-	if simulation, simErr := store.LoadChapterWorldSimulation(chapter); simErr != nil ||
-		(simulation != nil && strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID)) {
+	scope := domain.ChapterScope(chapter)
+	_, pipelineErr := os.Stat(filepath.Join(store.Dir(), "meta", "pipeline.json"))
+	checkpointStrict := pipelineErr == nil ||
+		store.Checkpoints.LatestByStep(scope, "plan") != nil ||
+		store.Checkpoints.LatestByStep(scope, "chapter_world_simulation") != nil
+	if checkpointStrict {
+		if _, err := toolspkg.CurrentChapterPlanCausalCheckpoint(store, chapter); err != nil {
+			return false
+		}
+	}
+	worldRequired, worldReady, _ := toolspkg.ChapterWorldSimulationStatus(store, chapter)
+	if worldRequired && !worldReady {
 		return false
 	}
-	var preferenceText string
-	if snapshot, loadErr := store.UserRules.Load(); loadErr == nil && snapshot != nil {
-		preferenceText = snapshot.Structured.Genre + "\n" + snapshot.Preferences
-	}
-	requireLongform := false
-	if chapter == 1 {
-		if progress, loadErr := store.Progress.Load(); loadErr == nil && progress != nil && progress.TotalChapters >= 50 {
-			requireLongform = true
-		}
-		if strings.Contains(preferenceText, "长篇") || strings.Contains(preferenceText, "万字") {
-			requireLongform = true
+	if worldRequired {
+		if simulation, simErr := store.LoadChapterWorldSimulation(chapter); simErr != nil || simulation == nil ||
+			strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID) {
+			return false
 		}
 	}
-	if !domain.ChapterAttractionPlanReady(
-		*plan,
-		domain.TrendLanguageRequested(preferenceText),
-		domain.ReaderEntertainmentRequested(preferenceText),
-		requireLongform,
-		domain.SystemCompanionVoiceRequested(preferenceText),
-	) {
+	if toolspkg.ValidateChapterQuantityResultContract(store, *plan) != nil {
+		return false
+	}
+	if toolspkg.ValidateChapterAntiAIExecutionPlanForCurrentRepair(store, *plan, isRewrite) != nil {
+		return false
+	}
+	if !toolspkg.ChapterAttractionPlanReadyForProject(store, *plan) {
 		return false
 	}
 	if !isRewrite {
 		return true
+	}
+	if toolspkg.ValidateRewriteCraftPlanCurrent(store, *plan) != nil {
+		return false
 	}
 	if renderOnlyReviewAllowsPlanReuse(store, chapter) {
 		return true
@@ -169,22 +181,48 @@ func LoadState(store *storepkg.Store) State {
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
+		escalation := toolspkg.InspectRenderOnlyReplanEscalation(store, target)
+		s.NextActionStructuralReplanRequired = escalation.Required
+		s.NextActionStructuralReplanAttempts = escalation.Attempts
+		s.NextActionStructuralReplanLimit = escalation.Limit
+		s.NextActionStructuralReplanReason = escalation.Reason
+		if escalation.Required {
+			s.NextActionPlanReady = false
+		}
 		s.NextActionExplicitRerender = toolspkg.ExplicitRerenderRequestActive(store, target)
 		s.NextActionReviewRerenderRequired = toolspkg.ReviewRequiresFreshDraft(store, target)
-		loadDraftExternalGateState(store.Dir(), target, &s)
+		loadDraftExternalGateState(store, target, &s)
 		rerenderReplacementApproved := toolspkg.ExplicitRerenderReplacementApproved(store, target)
-		if !s.NextActionPlanReady && (s.NextActionExplicitRerender || s.NextActionDraftExternalRerenderRequired || rerenderReplacementApproved) && toolspkg.ValidateReusableCausalPlanForRerender(store, target) == nil {
+		if !escalation.Required && !s.NextActionPlanReady && (s.NextActionExplicitRerender || s.NextActionDraftExternalRerenderRequired || rerenderReplacementApproved) && toolspkg.ValidateReusableCausalPlanForRerender(store, target) == nil {
 			s.NextActionPlanReady = true
 		}
 		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, target)
+		if escalation.Required {
+			s.NextActionWorldSimulationRequired = true
+			s.NextActionWorldSimulationReady = false
+			s.NextActionWorldSimulationGaps = append([]string{"render-only 结构失败已耗尽当前因果预算，必须建立新的 world simulation epoch"}, s.NextActionWorldSimulationGaps...)
+		}
 		s.NextActionDraftReady = s.NextActionPlanReady && !s.NextActionReviewRerenderRequired && chapterDraftReadyForFinalize(store, target)
 		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
+		escalation := toolspkg.InspectRenderOnlyReplanEscalation(store, next)
+		s.NextActionStructuralReplanRequired = escalation.Required
+		s.NextActionStructuralReplanAttempts = escalation.Attempts
+		s.NextActionStructuralReplanLimit = escalation.Limit
+		s.NextActionStructuralReplanReason = escalation.Reason
+		if escalation.Required {
+			s.NextActionPlanReady = false
+		}
 		s.NextActionWorldSimulationRequired, s.NextActionWorldSimulationReady, s.NextActionWorldSimulationGaps = toolspkg.ChapterWorldSimulationStatus(store, next)
+		if escalation.Required {
+			s.NextActionWorldSimulationRequired = true
+			s.NextActionWorldSimulationReady = false
+			s.NextActionWorldSimulationGaps = append([]string{"render-only 结构失败已耗尽当前因果预算，必须建立新的 world simulation epoch"}, s.NextActionWorldSimulationGaps...)
+		}
 		s.NextActionDraftReady = s.NextActionPlanReady && chapterDraftReadyForFinalize(store, next)
-		loadDraftExternalGateState(store.Dir(), next, &s)
+		loadDraftExternalGateState(store, next, &s)
 		loadNextActionPlanStage(store, next, &s)
 		loadNextActionOutline(store, next, &s)
 	}
@@ -213,15 +251,18 @@ func LoadState(store *storepkg.Store) State {
 	return s
 }
 
-func loadDraftExternalGateState(projectDir string, chapter int, state *State) {
-	inspection, err := toolspkg.InspectDraftExternalGate(projectDir, chapter)
+func loadDraftExternalGateState(st *storepkg.Store, chapter int, state *State) {
+	inspection, err := toolspkg.InspectDraftExternalGateWithStore(st, chapter)
 	if err != nil {
 		state.NextActionDraftExternalRejudgePending = true
 		return
 	}
 	state.NextActionDraftExternalRerenderRequired = inspection.Status == toolspkg.DraftExternalGateRerenderAuthorized
-	state.NextActionDraftExternalRejudgePending = inspection.Status == toolspkg.DraftExternalGateRejudgePending ||
-		inspection.Status == toolspkg.DraftExternalGateAdviceIncomplete
+	state.NextActionDraftLocalSoftEditPending = inspection.LocalSoftEditPending
+	state.NextActionDraftNamedPassFrozen = inspection.Status == toolspkg.DraftExternalGateApproved && inspection.CurrentHashNamedRetestsPassed
+	state.NextActionDraftExternalRejudgePending = !inspection.LocalSoftEditPending &&
+		(inspection.Status == toolspkg.DraftExternalGateRejudgePending ||
+			inspection.Status == toolspkg.DraftExternalGateAdviceIncomplete)
 }
 
 func chapterDraftReadyForFinalize(store *storepkg.Store, chapter int) bool {
@@ -232,22 +273,20 @@ func chapterDraftReadyForFinalize(store *storepkg.Store, chapter int) bool {
 	if err != nil || strings.TrimSpace(draft) == "" {
 		return false
 	}
-	scope := domain.ChapterScope(chapter)
-	plan := store.Checkpoints.LatestByStep(scope, "plan")
-	if plan == nil {
+	plan, err := toolspkg.CurrentChapterPlanCausalCheckpoint(store, chapter)
+	if err != nil {
 		return false
 	}
+	scope := domain.ChapterScope(chapter)
 	latestPlanSeq := plan.Seq
 	if request := store.Checkpoints.LatestByStep(scope, "rerender-request"); request != nil && request.Seq > latestPlanSeq {
 		latestPlanSeq = request.Seq
 	}
-	latestDraftSeq := int64(0)
-	for _, step := range []string{"draft", "edit"} {
-		if cp := store.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > latestDraftSeq {
-			latestDraftSeq = cp.Seq
-		}
+	body, err := toolspkg.CurrentChapterBodyCheckpoint(store, chapter)
+	if err != nil {
+		return false
 	}
-	return latestDraftSeq > latestPlanSeq
+	return body.Seq > latestPlanSeq
 }
 
 func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {

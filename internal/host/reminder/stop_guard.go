@@ -27,6 +27,7 @@ const maxConsecutiveBlocks = 5
 // onBlock 可选，非 nil 时每次阻拦调一次，用于审计。
 // HARNESS-METADATA: name=coordinator_stop_guard class=business_logic note=全书未完不许收工的业务不变量
 func NewStopGuard(st *store.Store, onBlock func(reason string, consecutive int32)) agentcore.StopGuard {
+	structuralBaseline := latestCheckpointSeq(st)
 	var consecutive atomic.Int32
 	var lastBlockTurn atomic.Int64 // 上次 block 的 TurnIndex；-1 表示尚未 block 过
 	lastBlockTurn.Store(-1)
@@ -40,8 +41,8 @@ func NewStopGuard(st *store.Store, onBlock func(reason string, consecutive int32
 		// A full draft rerender intentionally pauses before consistency/commit so
 		// the outer pipeline can judge the new body hash. Treat this as a normal
 		// host boundary, not an unfinished-book failure loop.
-		if awaitingDraftExternalRejudge(st) {
-			slog.Info("stop_guard 放行 end_turn：等待草稿新哈希外判",
+		if draftPauseBoundaryReached(st, structuralBaseline) {
+			slog.Info("stop_guard 放行 end_turn：等待草稿新哈希外判或外层结构重渲染",
 				"module", "host.reminder", "turn", info.TurnIndex)
 			consecutive.Store(0)
 			lastBlockTurn.Store(-1)

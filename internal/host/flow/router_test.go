@@ -140,7 +140,8 @@ func TestRoute_ExplicitRerenderUsesDrafterWithoutReplanning(t *testing.T) {
 		Progress: p, NextActionPlanReady: true, NextActionExplicitRerender: true,
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "profile=draft") ||
-		!strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止调用 simulate_chapter_world") {
+		!strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止调用 simulate_chapter_world") ||
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
 		t.Fatalf("explicit rerender must bypass replanning and force one full draft, got %+v", got)
 	}
 }
@@ -152,7 +153,8 @@ func TestRoute_BlockingFormalReviewRequiresFreshWholeDraft(t *testing.T) {
 		Progress: p, NextActionPlanReady: true, NextActionReviewRerenderRequired: true,
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") ||
-		!strings.Contains(got.Task, "正式复审要求") || !strings.Contains(got.Task, "禁止 simulate_chapter_world") {
+		!strings.Contains(got.Task, "正式复审要求") || !strings.Contains(got.Task, "禁止 simulate_chapter_world") ||
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
 		t.Fatalf("same-hash blocking formal review must create a fresh whole draft, got %+v", got)
 	}
 }
@@ -165,7 +167,8 @@ func TestRoute_BlockingExternalDraftReviewUsesDrafterForWholeChapter(t *testing.
 		NextActionDraftExternalRerenderRequired: true,
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止 edit_chapter") ||
-		!strings.Contains(got.Task, "rewrite_brief") || !strings.Contains(got.Task, "profile=draft") || !strings.Contains(got.Task, "写入成功后立即结束") {
+		!strings.Contains(got.Task, "rewrite_brief") || !strings.Contains(got.Task, "profile=draft") || !strings.Contains(got.Task, "写入成功后立即结束") ||
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
 		t.Fatalf("blocking external review must route to full drafter, got %+v", got)
 	}
 }
@@ -179,6 +182,174 @@ func TestRoute_ExternalRejudgePendingStopsProseDispatch(t *testing.T) {
 	})
 	if got != nil {
 		t.Fatalf("pending external rejudge must pause host routing, got %+v", got)
+	}
+}
+
+func TestRoute_LocalSoftGateDispatchesExactlyOneEdit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		progress *domain.Progress
+		chapter  int
+	}{
+		{
+			name: "pending rewrite",
+			progress: func() *domain.Progress {
+				p := writingProgress([]int{1}, domain.FlowRewriting)
+				p.PendingRewrites = []int{2}
+				return p
+			}(),
+			chapter: 2,
+		},
+		{
+			name:     "new chapter",
+			progress: writingProgress([]int{1}, domain.FlowWriting),
+			chapter:  2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Route(State{
+				Progress:                            test.progress,
+				NextActionPlanReady:                 true,
+				NextActionDraftReady:                true,
+				NextActionDraftLocalSoftEditPending: true,
+			})
+			if got == nil || got.Agent != "draft_finalizer" || got.Chapter != test.chapter ||
+				!strings.Contains(got.Task, "最多调用一次 edit_chapter") ||
+				!strings.Contains(got.Task, "不得调用 commit_chapter") ||
+				!strings.Contains(got.Task, "外层 pipeline 将先对新哈希重跑 DeepSeek") ||
+				!strings.Contains(got.Task, "注册 detector/mode 复测义务继续暂缓") {
+				t.Fatalf("local soft route must permit one edit and then stop fail-closed, got %+v", got)
+			}
+		})
+	}
+}
+
+func TestRoute_NamedPassFrozenDispatchesCommitOnlyFinalizer(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		progress *domain.Progress
+		chapter  int
+	}{
+		{
+			name: "pending rewrite",
+			progress: func() *domain.Progress {
+				p := writingProgress([]int{1}, domain.FlowRewriting)
+				p.PendingRewrites = []int{2}
+				return p
+			}(),
+			chapter: 2,
+		},
+		{
+			name:     "new chapter",
+			progress: writingProgress([]int{1}, domain.FlowWriting),
+			chapter:  2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Route(State{
+				Progress:                       test.progress,
+				NextActionPlanReady:            true,
+				NextActionDraftReady:           true,
+				NextActionDraftNamedPassFrozen: true,
+			})
+			if got == nil || got.Agent != "draft_finalizer" || got.Chapter != test.chapter ||
+				!strings.Contains(got.Task, "送检正文已经冻结") ||
+				!strings.Contains(got.Task, "最多调用一次 commit_chapter") ||
+				!strings.Contains(got.Task, "禁止 edit_chapter、draft_chapter") ||
+				!strings.Contains(got.Task, "新的显式整章重渲染授权") {
+				t.Fatalf("named-pass route must be immutable and commit-only, got %+v", got)
+			}
+		})
+	}
+}
+
+func TestRoute_StructuralReplanEscalationPreemptsExternalRerenderLoop(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowRewriting)
+	p.PendingRewrites = []int{2}
+	got := Route(State{
+		Progress:                                p,
+		NextActionPlanReady:                     false,
+		NextActionStructuralReplanRequired:      true,
+		NextActionStructuralReplanAttempts:      5,
+		NextActionStructuralReplanLimit:         2,
+		NextActionStructuralReplanReason:        "连续结构阻断",
+		NextActionWorldSimulationRequired:       true,
+		NextActionWorldSimulationReady:          false,
+		NextActionWorldSimulationGaps:           []string{"rewrite source stale"},
+		NextActionDraftExternalRerenderRequired: true,
+		NextActionDraftExternalRejudgePending:   true,
+	})
+	if got == nil || got.Agent != "world_simulator" || !strings.Contains(got.Task, "禁止沿用旧推演和旧 plan") || got.Reason != "连续结构阻断" {
+		t.Fatalf("structural escalation must preempt another prose rerender, got %+v", got)
+	}
+
+	got = Route(State{
+		Progress:                           p,
+		NextActionPlanReady:                false,
+		NextActionStructuralReplanRequired: true,
+		NextActionStructuralReplanAttempts: 5,
+		NextActionStructuralReplanLimit:    2,
+		NextActionStructuralReplanReason:   "连续结构阻断",
+		NextActionWorldSimulationRequired:  true,
+		NextActionWorldSimulationReady:     true,
+	})
+	if got == nil || got.Agent != "world_simulator" || !strings.Contains(got.Task, "禁止沿用旧推演和旧 plan") {
+		t.Fatalf("an escalation flag must force a new simulation epoch even when the old simulation was ready, got %+v", got)
+	}
+
+	got = Route(State{
+		Progress:                          p,
+		NextActionPlanReady:               false,
+		NextActionWorldSimulationRequired: true,
+		NextActionWorldSimulationReady:    true,
+	})
+	if got == nil || got.Agent != "writer" {
+		t.Fatalf("after the new simulation clears escalation, routing must continue to a fresh POV plan, got %+v", got)
+	}
+}
+
+func TestRoute_NewChapterStructuralEscalationPreemptsExternalRejudge(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowWriting)
+	got := Route(State{
+		Progress:                              p,
+		NextActionPlanReady:                   false,
+		NextActionStructuralReplanRequired:    true,
+		NextActionStructuralReplanAttempts:    3,
+		NextActionStructuralReplanLimit:       3,
+		NextActionStructuralReplanReason:      "新章连续结构阻断",
+		NextActionWorldSimulationRequired:     true,
+		NextActionWorldSimulationReady:        false,
+		NextActionDraftExternalRejudgePending: true,
+	})
+	if got == nil || got.Agent != "world_simulator" || got.Chapter != 2 || got.Reason != "新章连续结构阻断" ||
+		!strings.Contains(got.Task, "禁止沿用旧推演和旧 plan") {
+		t.Fatalf("new-chapter structural budget must not loop or stop behind external rejudge: %+v", got)
+	}
+}
+
+func TestRoute_NewChapterExternalRejudgeDoesNotMaskSimulationOrPlanRepair(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowWriting)
+	got := Route(State{
+		Progress:                              p,
+		NextActionPlanReady:                   false,
+		NextActionWorldSimulationRequired:     true,
+		NextActionWorldSimulationReady:        false,
+		NextActionWorldSimulationGaps:         []string{"current instruction not consumed"},
+		NextActionDraftExternalRejudgePending: true,
+	})
+	if got == nil || got.Agent != "world_simulator" || got.Chapter != 2 {
+		t.Fatalf("ordinary rejudge pending masked world-simulation repair: %+v", got)
+	}
+
+	got = Route(State{
+		Progress:                              p,
+		NextActionPlanReady:                   false,
+		NextActionWorldSimulationRequired:     true,
+		NextActionWorldSimulationReady:        true,
+		NextActionDraftExternalRejudgePending: true,
+	})
+	if got == nil || got.Agent != "writer" || got.Chapter != 2 || !strings.Contains(got.Task, "写前推演") {
+		t.Fatalf("ordinary rejudge pending masked POV-plan repair: %+v", got)
 	}
 }
 

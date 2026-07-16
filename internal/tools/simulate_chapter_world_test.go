@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -174,6 +175,225 @@ func TestSimulateChapterWorldReusesValidFinalAndDropsRedundantPartial(t *testing
 	}
 }
 
+func TestSimulationCheckpointCreatesNewEpochForAtoBtoA(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	makeSimulation := func(decision string) domain.ChapterWorldSimulation {
+		sim := domain.ChapterWorldSimulation{
+			Version: 1, Chapter: 1, TimeWindow: "当晚两小时",
+			CharacterDecisions: []domain.CharacterWorldDecision{
+				simulatedDecision("林澈", decision, true),
+				simulatedDecision("沈知遥", "继续夜市检查", false),
+			},
+			ProtagonistProjection: domain.ProtagonistDecisionProjection{
+				Protagonist: "林澈", ObservableEffects: []string{"饭桌追问"}, HiddenPressures: []string{"夜市检查"},
+				AvailableOptions: []string{"隐瞒", decision}, ChosenDecision: decision, DecisionReason: "当前证据支持",
+				PlanConstraints: []string{"限知"}, CausalChain: []string{"追问", decision},
+			},
+		}
+		sim.SimulationID = chapterWorldSimulationID(sim)
+		return sim
+	}
+	reuse := func() *domain.Checkpoint {
+		raw, _ := json.Marshal(map[string]any{"chapter": 1})
+		if _, err := NewSimulateChapterWorldTool(st).Execute(context.Background(), raw); err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "chapter_world_simulation")
+		if checkpoint == nil {
+			t.Fatal("valid final simulation was reused without a checkpoint")
+		}
+		return checkpoint
+	}
+
+	simA := makeSimulation("承认失业")
+	simB := makeSimulation("暂缓承认")
+	if err := st.SaveChapterWorldSimulation(simA); err != nil {
+		t.Fatal(err)
+	}
+	cpA1 := reuse()
+	if err := st.SaveChapterWorldSimulation(simB); err != nil {
+		t.Fatal(err)
+	}
+	cpB := reuse()
+	if cpB.Seq <= cpA1.Seq || cpB.Digest == cpA1.Digest {
+		t.Fatalf("A->B did not establish a new simulation epoch: A=%+v B=%+v", cpA1, cpB)
+	}
+	if err := st.SaveChapterWorldSimulation(simA); err != nil {
+		t.Fatal(err)
+	}
+	cpA2 := reuse()
+	if cpA2.Seq <= cpB.Seq || cpA2.Digest != cpA1.Digest {
+		t.Fatalf("A->B->A must append a new A epoch: A1=%+v B=%+v A2=%+v", cpA1, cpB, cpA2)
+	}
+	if repeated := reuse(); repeated.Seq != cpA2.Seq {
+		t.Fatalf("adjacent retry of the same simulation should remain idempotent: before=%+v after=%+v", cpA2, repeated)
+	}
+}
+
+func TestStructuralEscalationForcesReplacementOfReadySimulation(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	source := prepareRewriteSourceTest(t, st,
+		"第一章\n\n旧稿保留既定结果。",
+		"# brief\n\n## 保留事实\n\n- 无额外条目。\n\n## 必须修正\n\n- 重建场景因果。\n",
+	)
+	old := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "旧推演时段", RewriteSource: source,
+		Sources: []string{rewriteSourceToken(source), rewriteBriefToken(source)},
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "沿用旧选择", true),
+			simulatedDecision("沈知遥", "继续旧安排", false),
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"旧结果"}, HiddenPressures: []string{"旧压力"},
+			AvailableOptions: []string{"等待", "沿用旧选择"}, ChosenDecision: "沿用旧选择", DecisionReason: "旧证据",
+			PlanConstraints: []string{"保留事实"}, CausalChain: []string{"旧压力", "沿用旧选择"},
+		},
+	}
+	old.SimulationID = chapterWorldSimulationID(old)
+	if err := st.SaveChapterWorldSimulation(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "旧计划"}
+	plan.CausalSimulation.WorldSimulationID = old.SimulationID
+	plan.CausalSimulation.ReviewRefinement.IterationLimit = 2
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, digest := range []string{"sha256:blocked-a", "sha256:blocked-b"} {
+		if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "draft-structural-block", "reviews/drafts/01_full_rerender_required.json", digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); !escalation.Required {
+		t.Fatalf("test did not establish structural escalation: %+v", escalation)
+	}
+
+	projection := domain.ProtagonistDecisionProjection{
+		Protagonist: "林澈", ObservableEffects: []string{"新场景后果"}, HiddenPressures: []string{"新的离屏压力"},
+		AvailableOptions: []string{"拒绝", "重做选择"}, ChosenDecision: "重做选择", DecisionReason: "新证据改变了可选项",
+		PlanConstraints: []string{"保留既定结果但废弃旧场景"}, CausalChain: []string{"新压力", "误判", "重做选择"},
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "time_window": "新推演时段",
+		"character_decisions": []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "重做选择", true),
+			simulatedDecision("沈知遥", "改变安排", false),
+		},
+		"protagonist_projection": projection,
+		"finalize":               true,
+	})
+	raw, err := NewSimulateChapterWorldTool(st).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("forced structural resimulation failed: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["reused"] == true || result["simulation_id"] == old.SimulationID {
+		t.Fatalf("ready old simulation was reused during structural escalation: %s", raw)
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); escalation.Required {
+		t.Fatalf("new simulation checkpoint did not open a fresh causal epoch: %+v", escalation)
+	}
+}
+
+func TestStructuralEscalationRestartsEmptySimulationShellOnFirstGroundedBatch(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	source := prepareRewriteSourceTest(t, st,
+		"第一章\n\n林澈保住既定结果。",
+		"# brief\n\n## 保留事实\n\n- 林澈保住既定结果。\n",
+	)
+	old := domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "旧时段", RewriteSource: source,
+		Sources: []string{rewriteSourceToken(source), rewriteBriefToken(source)},
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("林澈", "旧选择", true),
+			simulatedDecision("沈知遥", "旧安排", false),
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ObservableEffects: []string{"旧结果"}, HiddenPressures: []string{"旧压力"},
+			AvailableOptions: []string{"停止", "继续"}, ChosenDecision: "旧选择", DecisionReason: "旧证据",
+			PlanConstraints: []string{"限知"}, CausalChain: []string{"旧因", "旧果"},
+		},
+		RewriteFactCoverage: []domain.ChapterRewriteFactCoverage{{
+			Fact: "林澈保住既定结果。", SimulationEvidence: []string{"旧证据"},
+		}},
+	}
+	old.SimulationID = chapterWorldSimulationID(old)
+	if err := st.SaveChapterWorldSimulation(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "旧计划"}
+	plan.CausalSimulation.WorldSimulationID = old.SimulationID
+	plan.CausalSimulation.ReviewRefinement.IterationLimit = 2
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, digest := range []string{"sha256:blocked-a", "sha256:blocked-b"} {
+		if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "draft-structural-block", "drafts/01.draft.md", digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); !escalation.Required {
+		t.Fatalf("test did not establish structural escalation: %+v", escalation)
+	}
+	if err := st.SaveChapterWorldSimulationPartial(domain.ChapterWorldSimulation{
+		Version: 1, Chapter: 1, TimeWindow: "未读到上下文时猜的时段",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{Protagonist: "林澈"},
+		Sources:               []string{"novel_context hard budget failed; ungrounded shell"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter":             1,
+		"time_window":         "当前上下文确认的新时段",
+		"character_decisions": []domain.CharacterWorldDecision{simulatedDecision("林澈", "重做选择", true)},
+		"sources":             []string{"current_chapter_outline", "character_dossiers"},
+	})
+	raw, err := NewSimulateChapterWorldTool(st).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("first grounded batch should restart the empty shell: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["partial_restarted"] != true {
+		t.Fatalf("empty-shell restart was not observable: %s", raw)
+	}
+	partial, err := st.LoadChapterWorldSimulationPartial(1)
+	if err != nil || partial == nil {
+		t.Fatalf("grounded replacement partial missing: partial=%+v err=%v", partial, err)
+	}
+	if partial.TimeWindow != "当前上下文确认的新时段" || len(partial.CharacterDecisions) != 1 ||
+		partial.CharacterDecisions[0].Decision != "重做选择" {
+		t.Fatalf("grounded replacement did not replace the shell: %+v", partial)
+	}
+	if slices.Contains(partial.Sources, "novel_context hard budget failed; ungrounded shell") {
+		t.Fatalf("ungrounded shell provenance leaked into replacement epoch: %+v", partial.Sources)
+	}
+	if !slices.Contains(partial.Sources, rewriteSourceToken(source)) || !slices.Contains(partial.Sources, "current_chapter_outline") {
+		t.Fatalf("replacement partial lost canonical sources: %+v", partial.Sources)
+	}
+	if checkpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "chapter_world_simulation"); checkpoint == nil {
+		t.Fatal("existing formal simulation checkpoint should remain until replacement finalizes")
+	}
+}
+
 func TestSimulateChapterWorldRejectsEmptyAndOversizedBatches(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	tool := NewSimulateChapterWorldTool(st)
@@ -338,5 +558,92 @@ func TestRewriteWorldSimulationRequiresFactCoverageAndCommittedVisibleCast(t *te
 	sim, err := st.LoadChapterWorldSimulation(1)
 	if err != nil || sim == nil || !rewriteSourceEqual(sim.RewriteSource, source) {
 		t.Fatalf("rewrite source not persisted: sim=%+v err=%v", sim, err)
+	}
+}
+
+func TestPlanningClearsWorldPartialWhenSimulationNoLongerRequired(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChapterWorldSimulationPartial(domain.ChapterWorldSimulation{
+		Chapter: 1, TimeWindow: "旧 cast 下的 staged simulation",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sim, err := ensureChapterWorldSimulationReadyForPlanning(st, 1); err != nil || sim != nil {
+		t.Fatalf("optional simulation recovery failed: sim=%+v err=%v", sim, err)
+	}
+	if partial, err := st.LoadChapterWorldSimulationPartial(1); err != nil || partial != nil {
+		t.Fatalf("no-longer-required partial was not cleared: partial=%+v err=%v", partial, err)
+	}
+}
+
+func TestIdenticalWorldSimulationCreatesNewEpochAfterStructuralEscalation(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: "same-semantic-simulation", TimeWindow: "同一事实窗口",
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	firstSimulation := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "chapter_world_simulation")
+	if firstSimulation == nil {
+		t.Fatal("missing initial simulation checkpoint")
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "旧计划"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+		"plan", "chapter_world_simulation", "review", "draft-structural-block",
+	); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < defaultRenderOnlyReplanLimit; i++ {
+		if _, err := st.Checkpoints.Append(
+			domain.ChapterScope(1), "draft-structural-block", "drafts/01.draft.md",
+			fmt.Sprintf("sha256:structural-%d", i),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); !escalation.Required {
+		t.Fatalf("regression setup did not exhaust the old causal budget: %+v", escalation)
+	}
+
+	// The formal simulation file is intentionally byte-identical. Finalizing
+	// it after structural escalation must still open a new causal epoch.
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	currentSimulation := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "chapter_world_simulation")
+	if currentSimulation == nil || currentSimulation.Seq <= firstSimulation.Seq {
+		t.Fatalf("identical simulation did not create a fresh epoch: first=%+v current=%+v", firstSimulation, currentSimulation)
+	}
+	if currentSimulation.Digest != firstSimulation.Digest {
+		t.Fatalf("regression setup must keep simulation bytes identical: first=%s current=%s", firstSimulation.Digest, currentSimulation.Digest)
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, 1); escalation.Required || escalation.Attempts != 0 {
+		t.Fatalf("new simulation epoch should reset the structural rendering budget: %+v", escalation)
+	}
+	if err := ensureChapterWorldSimulationCheckpoint(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	retry := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "chapter_world_simulation")
+	if retry == nil || retry.Seq != currentSimulation.Seq {
+		t.Fatalf("adjacent retry of identical simulation should remain idempotent: current=%+v retry=%+v", currentSimulation, retry)
 	}
 }

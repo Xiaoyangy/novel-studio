@@ -98,6 +98,29 @@ func Test_UsageTracker_ArchitectAliasNormalized(t *testing.T) {
 	}
 }
 
+func Test_UsageTracker_WritingStageAliasesUseConfiguredRoles(t *testing.T) {
+	tk := NewUsageTracker(nil, nil)
+	tk.Record("writer", makeUsageMsg(100, 0, 0, 10))
+	tk.Record("world_simulator", makeUsageMsg(200, 0, 0, 20))
+	tk.Record("drafter", makeUsageMsg(300, 0, 0, 30))
+	tk.Record("draft_finalizer", makeUsageMsg(400, 0, 0, 40))
+
+	per := tk.PerAgent()
+	if len(per) != 2 {
+		t.Fatalf("writing aliases should produce writer+drafter only, got %+v", per)
+	}
+	got := make(map[string]AgentUsage, len(per))
+	for _, usage := range per {
+		got[usage.Role] = usage
+	}
+	if got["writer"].Input != 300 {
+		t.Errorf("writer/world_simulator input = %d, want 300", got["writer"].Input)
+	}
+	if got["drafter"].Input != 700 {
+		t.Errorf("drafter/draft_finalizer input = %d, want 700", got["drafter"].Input)
+	}
+}
+
 func Test_UsageTracker_PerModelAccumulates(t *testing.T) {
 	tk := NewUsageTracker(nil, nil)
 	tk.accumulate("writer", "openrouter", "model-a", agentcore.Usage{Input: 1000, Output: 200, CacheRead: 700})

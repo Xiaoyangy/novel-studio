@@ -581,10 +581,10 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书系统人格硬设定冲突的建议。", removedUserRules),
 		)
 		artifact.RAGRules = appendUnique(artifact.RAGRules,
-			"用户硬设定：系统必须能短促接话、吐槽、撑腰并始终支持林澈；可控制频率和长度，不得改成冷硬静默的任务机器人。",
+			"用户硬设定：系统必须能短促接话、吐槽、撑腰并始终支持主角；可控制频率和长度，不得改成冷硬静默的任务机器人。",
 		)
 		artifact.DialogueFixPlan = appendUnique(artifact.DialogueFixPlan,
-			"保留系统接话和支持性人格，但每次只回应林澈眼前一个具体情绪或选择，独立成段，不改成通知播报。",
+			"保留系统接话和支持性人格，但每次只回应主角眼前一个具体情绪或选择，独立成段，不改成通知播报。",
 		)
 	}
 	if removedTrendRules > 0 {
@@ -612,13 +612,13 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 			"多人或多摊执行同类任务时，只完整渲染一到两个真正改变主角策略的代表场景，其余结果合并成一段；不得逐人、逐摊、逐项报到。",
 		)
 		artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-			"成果兑现只跟住一组顾客完成看价、选择和付款，其他摊位退成背景里的收款声、忙乱和摊主反应；禁止用三组平行顾客逐项验收。",
+			"同类成果只完整跟住一个真正改变主角判断的代表事件；其他同类结果退成背景后果或简短合并，不用多组平行对象逐项验收。",
 		)
 		artifact.DialogueFixPlan = appendUnique(artifact.DialogueFixPlan,
 			"删掉没有迫切目标的发言者；一组对白只完成一个局面变化，随后转入主角判断、后果行动或未被回答的沉默。",
 		)
 		artifact.DialogueFixPlan = appendUnique(artifact.DialogueFixPlan,
-			"朋友的玩笑不要重复报价、到账或进度；让他自然看出男女主的默契并轻轻点破，主角的反应把关系往前推半步。",
+			"关系角色的玩笑不要重复任务数据或进度；让其自然看出核心关系的变化并轻轻点破，主角的反应把关系往前推半步。",
 		)
 		artifact.AuthorVoicePlan = appendUnique(artifact.AuthorVoicePlan,
 			"作者声口从主角的偏见、误判、自嘲和选择余波里生长，不用掌心出汗、手指一顿、环境声插针等通用补丁。",
@@ -642,7 +642,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 			"心理去金句规则：主角的实时判断不得提炼成‘X只能Y、不能Z’‘理由一条比一条正确、只有……’等对称结论；保留具体误判，并让它直接改变下一句或下一动作。",
 		)
 		artifact.RAGRules = appendUnique(artifact.RAGRules,
-			"成果非排比规则：同类改善结果只选一个完整顾客链作为焦点，其他结果用背景声和人物忙碌合并承载，不按摊位或顾客组轮流证明成功。",
+			"成果非排比规则：同类结果只选一个完整代表事件作为焦点，其他结果用背景变化和人物忙碌合并承载，不按对象轮流证明成功。",
 		)
 		artifact.RAGRules = appendUnique(artifact.RAGRules,
 			"配角关系功能规则：朋友和闺蜜的台词优先改变主角关系位置或现场气氛，不重复金额、流程和审核口径，也不靠无关闲聊与随机事故伪装生活感。",
@@ -658,7 +658,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "进度汇报") || strings.Contains(evidenceText, "其余四处没再照一个样子摆") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘A如何、B如何、C如何’式安装成果汇总；第二趟回来只跟林澈眼前一处已经改变的通道或摊位状态，五家完成由最终亮起的总数证明，其余差异不再逐项复述。",
+				"删掉‘A如何、B如何、C如何’式成果汇总；回到现场后只跟主角眼前一个已经改变的状态，整体完成由一个可见总结果证明，其余差异不再逐项复述。",
 			)
 			artifact.RAGRules = appendUnique(artifact.RAGRules,
 				"群像压缩非清单规则：压缩同类对象不等于把每个人的结果塞进一个排比长句；只留一个连续视点和最终总结果，其他模拟事实继续保存在 plan。",
@@ -674,7 +674,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "一人一把") || strings.Contains(evidenceText, "接力链") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"开篇疏导只保留一个主导发言者；其他人的配合用桌脚退线、顾客找对摊和通道恢复承载，不再让沈知遥、贺骁、摊主按顺序各接一句。",
+				"开篇同一目标只保留一个主导发言者；其他人的配合用会改变空间或结果的行动承载，不再让参与者按顺序各接一句。",
 			)
 			artifact.RAGRules = appendUnique(artifact.RAGRules,
 				"开篇去接力规则：同一轮现场调整只留一人的关键原话，其余角色以选择和结果改变局面，禁止三人依次接话完成同一目标。",
@@ -682,7 +682,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "这个空子别钻") || strings.Contains(evidenceText, "像导师或编辑在改稿") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉系统的‘这个空子别钻’；林澈只是忙中漏看，不是故意钻空子。系统直接指眼前人和东西，如提醒他先别数，那个小伙子还没拿到烤串；不换成数据面板或客服话。",
+				"删掉系统对主角的泛化训话；忙中漏看不等于故意钻空子，系统只指出眼前漏掉的人、物或后果，不换成数据面板或客服话。",
 			)
 			artifact.RAGRules = appendUnique(artifact.RAGRules,
 				"误判不等于钻空子：只有主角明知规则仍故意规避时，系统才能用‘钻空子’评价；忙中疏漏要直接指出漏掉的人或东西。",
@@ -690,7 +690,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "这个“好”却比") || strings.Contains(evidenceText, "话不算甜，却让他") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘这个好比所有解释都重’和‘话不算甜，却让他踏实’这类情感标注；让林澈少说一句玩笑、把那张纸收进贴身口袋，做完就转场，不再解释这个动作多重。",
+				"删掉‘一句话比所有解释都重’‘话不甜却让他踏实’这类情感标注；只保留会改变关系位置的选择或动作，做完就转场，不再解释它有多重。",
 			)
 			artifact.RAGRules = appendUnique(artifact.RAGRules,
 				"关系动作不再标注重量：‘一句话比所有解释都重’‘话不甜却让他踏实’等句子直接删除，保留收纸、少开玩笑或改口的结果。",
@@ -698,7 +698,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "梁广财观察") && strings.Contains(evidenceText, "亲戚群") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"章末熟人圈反转只保留梁广财一条亲眼见证和群里一条明确改口；其余群消息、观望者反应与拦车动作不必同时交付，但必须在本章保留外界态度已改变的结果，不得拖到下一章。",
+				"章末熟人圈反转只保留一名亲眼见证者和群里一条明确改口；其余消息与围观反应不必同时交付，但要让外界态度已改变的结果在本章成立。",
 			)
 		}
 		if strings.Contains(evidenceText, "五个摊主逐一表态") || strings.Contains(evidenceText, "预设的关卡对话") {
@@ -713,7 +713,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		if strings.Contains(evidenceText, "便宜不等于省事") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘便宜不等于省事’这类教训句，不换成另一句道理；让林澈收起介绍、停止追劝并转身处理现有五家，选择本身就是认知变化。",
+				"删掉‘便宜不等于省事’这类教训句，不换成另一句道理；让主角停止追劝并转身处理已经成立的选择，行动本身就是认知变化。",
 			)
 			artifact.RAGRules = appendUnique(artifact.RAGRules,
 				"不等式金句规则：‘X不等于Y’若只负责总结人物刚学到的道理，整句删除；认知变化由紧接着的改口、放弃或行动承担。",
@@ -722,7 +722,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		retainedRevisionText := strings.Join(artifact.RevisionPlan, "\n")
 		if strings.Contains(retainedRevisionText, "你俩昨天才认识") || strings.Contains(retainedRevisionText, "任务场景落地为个人情感体验") {
 			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"朋友点破男女主默契后，先写主角对这段关系的新注意与女主是否介意的判断，再让女主用一句或一个选择接住；不要立刻回到卷尺、票据或下一摊。",
+				"关系角色点破核心同盟的默契后，先写主角对这段关系的新注意与对方是否介意的判断，再让对方用一句或一个选择接住；不要立刻回到任务流程。",
 			)
 		}
 	}
@@ -731,7 +731,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条会给男女主新增分歧、争执或误会的建议。", removedRelationshipAdvice),
 		)
 		artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-			"需要打断线性流程时，把阻力放在现场条件：允许林澈先误判，沈知遥用证据补位，林澈基于信任立即配合；二人共同承担返工，不制造关系分歧。",
+			"需要打断线性流程时，把阻力放在现场条件：允许主角先误判，核心同盟用证据补位，主角基于既有信任修正；双方共同承担后果，不凭空制造关系分歧。",
 		)
 		artifact.DialogueFixPlan = appendUnique(artifact.DialogueFixPlan,
 			"男女主对话保持同盟感：可以互相提醒、打趣、拆穿逞强，但不靠争执、误会或冷战制造戏剧性。",
@@ -756,6 +756,9 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 func deepSeekProjectRequestsCompanionSystem(st *store.Store) bool {
 	if st == nil {
 		return false
+	}
+	if toolspkg.ProjectRequiresSystemCompanion(st) {
+		return true
 	}
 	var b strings.Builder
 	if snapshot, err := st.UserRules.Load(); err == nil && snapshot != nil {

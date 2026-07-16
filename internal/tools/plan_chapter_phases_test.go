@@ -149,10 +149,10 @@ func TestFinalPlanGoalFollowsWorldSimulationDecision(t *testing.T) {
 	}
 	plan := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
 		WorldSimulationID:   "ch001-test",
-		ProtagonistDecision: "不临时扩摊，先守住五家真实交付",
+		ProtagonistDecision: "扩到十家后守住十家边界，拒绝第十一摊",
 	}}
 	applyOutlineAnchorsToPlan(st, &plan)
-	if want := "落实本轮世界模拟后的主角选择：不临时扩摊，先守住五家真实交付"; plan.Goal != want {
+	if want := "落实本轮世界模拟后的主角选择：扩到十家后守住十家边界，拒绝第十一摊"; plan.Goal != want {
 		t.Fatalf("goal = %q, want %q", plan.Goal, want)
 	}
 	if plan.Title != "旧大纲标题" || plan.Hook != "打开下一步" {
@@ -214,6 +214,37 @@ func TestPlanIdentityAllowsRequestedCompanionSystemWithoutAddingItToCast(t *test
 	}
 	if _, ok := knownCharacterNameSet(st)["系统"]; ok {
 		t.Fatal("system must not be persisted as a human cast identity")
+	}
+}
+
+func TestPlanIdentityAllowsJSONOnlyCompanionSystemPolicy(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Characters.Save([]domain.Character{{Name: "林澈", Role: "主角", Tier: "core"}}); err != nil {
+		t.Fatal(err)
+	}
+	policy := `{
+  "version": 1,
+  "system_companion": {
+    "required": true,
+    "companion_voice_beat": "系统短促接话并支持主角",
+    "forbidden_comedy": ["不连续抛梗"]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(st.Dir(), "meta", "web_reference_brief.json"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"title": "第一章",
+		"causal_simulation": map[string]any{
+			"voice_logic": []any{
+				map[string]any{"character": "林澈", "surface_voice": "正常说话"},
+				map[string]any{"character": "系统", "surface_voice": "短促接话"},
+			},
+		},
+	}
+	issues := ChapterPlanIdentityIssues(st, 1, payload)
+	if joined := strings.Join(issues, "\n"); strings.Contains(joined, `character="系统"`) {
+		t.Fatalf("JSON-only companion policy should allow the system speaking entity: %v", issues)
 	}
 }
 
@@ -403,6 +434,78 @@ func TestPlanDetailsAppendsSourceAndReviewArrays(t *testing.T) {
 	}
 	if strings.Count(string(raw), "world_foundation") != 1 {
 		t.Fatalf("source arrays should deduplicate: %s", raw)
+	}
+}
+
+func TestPlanDetailsPreserveConstraintBatchesDeduplicateQuoteVariants(t *testing.T) {
+	canonical := "只点“少糖”的两碗豆腐脑。"
+	merged := map[string]any{
+		"review_refinement": map[string]any{
+			"preserve_constraints": []any{canonical},
+		},
+	}
+	mergeCausalSimulationPatch(merged, map[string]any{
+		"review_refinement": map[string]any{
+			"preserve_constraints": []any{"只点'少糖'的两碗豆腐脑。", "模型新增约束。"},
+		},
+	})
+	refinement := merged["review_refinement"].(map[string]any)
+	got := stringSliceFromAny(refinement["preserve_constraints"])
+	want := []string{canonical, "模型新增约束。"}
+	if len(got) != len(want) {
+		t.Fatalf("quote-only batch duplicate survived: got=%#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("batch fact %d mismatch: got=%q want=%q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPlanDetailsSourceFactsOverrideModelSpellingAndOrder(t *testing.T) {
+	st := newPhaseTestStore(t)
+	prepareRewriteSourceTest(t, st,
+		"第一章\n\n林澈收下十二元。",
+		"# brief\n\n## 保留事实\n\n- 只点“少糖”的两碗豆腐脑。\n- 林澈先叫停，沈知遥后到场。\n")
+	merged := map[string]any{
+		"review_refinement": map[string]any{
+			"preserve_constraints": []any{
+				"模型新增约束。",
+				"只点「少糖」的两碗豆腐脑。",
+			},
+		},
+	}
+	applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil)
+	refinement := merged["review_refinement"].(map[string]any)
+	got := stringSliceFromAny(refinement["preserve_constraints"])
+	want := []string{
+		"只点“少糖”的两碗豆腐脑。",
+		"林澈先叫停，沈知遥后到场。",
+		"模型新增约束。",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("source-first facts length mismatch: got=%#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("source-first fact %d mismatch: got=%q want=%q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPlanDetailsRecommendedBatchesPreserveProjectContracts(t *testing.T) {
+	guidance := strings.Join(planDetailsRecommendedBatches(), "\n")
+	for _, required := range []string{
+		"reader_entertainment_plan",
+		"trend_language_plan",
+		"meta/web_reference_brief",
+	} {
+		if !strings.Contains(guidance, required) {
+			t.Fatalf("recommended batches omit project contract %q: %s", required, guidance)
+		}
+	}
+	if strings.Contains(guidance, "entertainment/longform/trend 均为可选") {
+		t.Fatalf("recommended batches still describe project-required contracts as optional: %s", guidance)
 	}
 }
 

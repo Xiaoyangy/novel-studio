@@ -15,6 +15,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/rules"
+	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/stylestat"
 )
 
@@ -50,6 +51,7 @@ type architectContextEnvelope struct {
 
 type mechanicalGateReviewPayload struct {
 	Chapter        int               `json:"chapter"`
+	BodySHA256     string            `json:"body_sha256,omitempty"`
 	AIGCReport     aigc.Report       `json:"aigc_report"`
 	RuleViolations []rules.Violation `json:"rule_violations"`
 	GeneratedAt    string            `json:"generated_at,omitempty"`
@@ -281,28 +283,35 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 			"policy":                "当前 staged plan 是唯一规划真相；不要读取或复述上一轮正式 plan。继续 plan_details 补最小缺项并 finalize，禁止转去下一章。",
 		}
 		chapterPlan = nil
-	} else if chapterPlanErr == nil && chapterPlan != nil && isRewrite && !renderOnlyRerender && chapterArtifactNotNewerThanFinal(t.store.Dir(), chapter, fmt.Sprintf("drafts/%02d.plan.json", chapter)) {
-		envelope.Working["chapter_plan_stage"] = map[string]any{
-			"status":  "stale_for_rewrite",
-			"chapter": chapter,
-			"policy":  "旧正式 plan 的修改时间不晚于待返工终稿，不能作为本轮规划事实；请按 current_chapter_outline 与 rewrite_brief 重新 plan_structure。",
-		}
-		chapterPlan = nil
 	} else if chapterPlanErr == nil && chapterPlan != nil {
-		envelope.Working["chapter_plan"] = chapterPlan
-		if len(chapterPlan.Contract.RequiredBeats) > 0 ||
-			len(chapterPlan.Contract.ForbiddenMoves) > 0 ||
-			len(chapterPlan.Contract.ContinuityChecks) > 0 ||
-			len(chapterPlan.Contract.EvaluationFocus) > 0 ||
-			chapterPlan.Contract.EmotionTarget != "" ||
-			len(chapterPlan.Contract.PayoffPoints) > 0 ||
-			chapterPlan.Contract.HookGoal != "" ||
-			len(chapterPlan.Contract.SceneAnchors) > 0 {
-			envelope.Working["chapter_contract"] = chapterPlan.Contract
+		staleReason := ""
+		if isRewrite && !renderOnlyRerender {
+			staleReason = chapterPlanRewriteStaleReason(t.store, chapter)
 		}
-		if hasChapterCausalSimulation(chapterPlan.CausalSimulation) {
-			envelope.Working["causal_simulation"] = chapterPlan.CausalSimulation
-			envelope.Working["causal_simulation_policy"] = "causal_simulation 是原章节计划的同源增强：必须服从 current_chapter_outline、chapter_contract、progression_snapshot、project_progress、resource_audit、user_rules 和 writing_engine；voice_logic 用于约束人物声口和说话逻辑；review_refinement 用于审核失败后的反馈来源、局部目标、保留约束、验收条件和停止条件；正文仍按原 plan->draft->check->commit 逻辑产出，返工章必须先吸收 rewrite_brief 审核结论再重建推演，不能另起大纲或绕开契约。"
+		if staleReason != "" {
+			envelope.Working["chapter_plan_stage"] = map[string]any{
+				"status":  "stale_for_rewrite",
+				"chapter": chapter,
+				"reason":  staleReason,
+				"policy":  "旧正式 plan 已被当前返工证据或世界推演越过，不能作为本轮规划事实；请按 current_chapter_outline、rewrite_brief 与当前 protagonist_projection 重新 plan_structure。",
+			}
+			chapterPlan = nil
+		} else {
+			envelope.Working["chapter_plan"] = chapterPlan
+			if len(chapterPlan.Contract.RequiredBeats) > 0 ||
+				len(chapterPlan.Contract.ForbiddenMoves) > 0 ||
+				len(chapterPlan.Contract.ContinuityChecks) > 0 ||
+				len(chapterPlan.Contract.EvaluationFocus) > 0 ||
+				chapterPlan.Contract.EmotionTarget != "" ||
+				len(chapterPlan.Contract.PayoffPoints) > 0 ||
+				chapterPlan.Contract.HookGoal != "" ||
+				len(chapterPlan.Contract.SceneAnchors) > 0 {
+				envelope.Working["chapter_contract"] = chapterPlan.Contract
+			}
+			if hasChapterCausalSimulation(chapterPlan.CausalSimulation) {
+				envelope.Working["causal_simulation"] = chapterPlan.CausalSimulation
+				envelope.Working["causal_simulation_policy"] = "causal_simulation 是原章节计划的同源增强：必须服从 current_chapter_outline、chapter_contract、progression_snapshot、project_progress、resource_audit、user_rules 和 writing_engine；voice_logic 用于约束人物声口和说话逻辑；review_refinement 用于审核失败后的反馈来源、局部目标、保留约束、验收条件和停止条件；正文仍按原 plan->draft->check->commit 逻辑产出，返工章必须先吸收 rewrite_brief 审核结论再重建推演，不能另起大纲或绕开契约。"
+			}
 		}
 	} else if chapterPlanErr != nil {
 		warn("chapter_plan", chapterPlanErr)
@@ -383,7 +392,7 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	} else if metricErr != nil {
 		warn("chapter_ai_voice_metrics", metricErr)
 	}
-	if preflight, preflightErr := loadDraftExternalJudgeContext(t.store.Dir(), chapter); preflightErr == nil && preflight != nil {
+	if preflight, preflightErr := loadDraftExternalJudgeContextWithStore(t.store, chapter); preflightErr == nil && preflight != nil {
 		if blocking, _ := preflight["blocking"].(bool); blocking {
 			envelope.Working["draft_external_ai_review"] = preflight
 			envelope.Working["draft_external_ai_review_policy"] = "这是未通过的旧稿诊断，只吸收能改善阅读的具体证据；不得照抄检测术语，不得靠错字、随机换词、碎句或无功能微动作降分。已通过的外审建议留在RAG和审阅档案，不再干扰新正文。"
@@ -499,6 +508,40 @@ func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContex
 	return state
 }
 
+// chapterPlanRewriteStaleReason prevents planning context from replaying a
+// formally saved but causally superseded plan. File mtimes cover imported
+// legacy projects; checkpoints cover pipeline cases where a new review,
+// structural block, or world simulation was appended after that plan.
+func chapterPlanRewriteStaleReason(st *store.Store, chapter int) string {
+	artifact := fmt.Sprintf("drafts/%02d.plan.json", chapter)
+	if chapterArtifactNotNewerThanFinal(st.Dir(), chapter, artifact) {
+		return "旧正式 plan 的修改时间不晚于待返工终稿"
+	}
+	planCheckpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "plan")
+	if planCheckpoint == nil {
+		if pipelineWritingManaged(st) {
+			return "pipeline 正式 plan 缺少当前 plan checkpoint"
+		}
+		return ""
+	}
+	if pipelineWritingManaged(st) {
+		if _, err := CurrentChapterPlanCheckpoint(st, chapter); err != nil {
+			return "正式 plan 与当前 plan checkpoint 不一致"
+		}
+	}
+	if plan, err := st.Drafts.LoadChapterPlan(chapter); err == nil && plan != nil {
+		if antiAIErr := ValidateChapterAntiAIExecutionPlanForCurrentRepair(st, *plan, true); antiAIErr != nil {
+			return "正式 plan 缺少当前整篇/单段 AIGC 返工所需的非空 anti_ai_execution_plan"
+		}
+	}
+	for _, step := range []string{"review", "draft-structural-block", "chapter_world_simulation"} {
+		if checkpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), step); checkpoint != nil && checkpoint.Seq > planCheckpoint.Seq {
+			return fmt.Sprintf("%s checkpoint(seq=%d) 晚于正式 plan checkpoint(seq=%d)", step, checkpoint.Seq, planCheckpoint.Seq)
+		}
+	}
+	return ""
+}
+
 func loadRewriteBriefHumanSupplements(outputDir string, chapter int) []string {
 	if strings.TrimSpace(outputDir) == "" || chapter <= 0 {
 		return nil
@@ -547,7 +590,11 @@ func loadRewriteBriefHumanSupplements(outputDir string, chapter int) []string {
 }
 
 func loadDraftExternalJudgeContext(projectDir string, chapter int) (map[string]any, error) {
-	inspection, inspectErr := InspectDraftExternalGate(projectDir, chapter)
+	return loadDraftExternalJudgeContextWithStore(store.NewStore(projectDir), chapter)
+}
+
+func loadDraftExternalJudgeContextWithStore(st *store.Store, chapter int) (map[string]any, error) {
+	inspection, inspectErr := InspectDraftExternalGateWithStore(st, chapter)
 	if inspectErr != nil {
 		return nil, inspectErr
 	}
@@ -564,7 +611,7 @@ func loadDraftExternalJudgeContext(projectDir string, chapter int) (map[string]a
 			"revision_plan":          requirement.RevisionPlan,
 		}, nil
 	}
-	path := filepath.Join(projectDir, "reviews", "drafts", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter))
+	path := filepath.Join(st.Dir(), "reviews", "drafts", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1783,8 +1830,8 @@ func aigcDetectorRewriteFocus(report aigc.Report) []string {
 	}
 	if hasSignal("pov_interiority_thin", "pov_interiority_low", "emotion_range_flat", "emotion_range_thin") {
 		focus = append(focus, fmt.Sprintf(
-			"主视角仍被经营流程压住（主观密度 %.2f/千字，流程密度 %.2f/千字）：选一个最在意的欲望或误判，让它贯穿完整场景并改变下一步做法或对某人的判断。删掉等量安装、票据、付款说明；不要补情绪标签、身体微反应或“他意识到”。",
-			statFloat("interiority_density_per_k"), statFloat("logistics_density_per_k")))
+			"主视角仍被经营流程或对白原话压住（对白段占比 %.1f%%，主观密度 %.2f/千字，流程密度 %.2f/千字）：至少重建两条分处不同场景的完整人物链，每条都必须落成“刺激→主观体验或误判→人物如何调节、压住或转移→因此改变的选择→关系或现实余波”，并真正改变后续行动，不能只插在原流程之间。每增加一段主观链，删掉等量安装、票据、付款等流程或非必要对白原话。情绪名词、抬眼/攥手等微动作，以及“他意识到/他觉得”单独出现都不算主观链。",
+			statFloat("dialogue_paragraph_ratio")*100, statFloat("interiority_density_per_k"), statFloat("logistics_density_per_k")))
 	}
 	if hasSignal("fast_detectgpt_curve_proxy_high", "sentence_classifier_consensus_flat", "bigram_unigram_curve_too_flat", "window_entropy_signature_flat") || report.Stats.SentenceCV < 0.50 || report.Stats.ParagraphCV < 0.50 {
 		focus = append(focus, fmt.Sprintf(
@@ -2101,7 +2148,7 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 			qdrantState := "not_configured"
 			if t.ragVectorSearcher != nil {
 				searchCtx, cancelSearch := context.WithTimeout(ctx, 8*time.Second)
-				hits, searchErr := t.ragVectorSearcher.Search(searchCtx, queryVector, maxRAGRecallResults*3)
+				hits, searchErr := searchNovelFactVectors(searchCtx, t.ragVectorSearcher, queryVector, maxRAGRecallResults*3)
 				cancelSearch()
 				if searchErr == nil {
 					qdrantState = "empty"
@@ -2121,7 +2168,7 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 			}
 
 			if vectorStore, err := t.store.RAG.LoadVectorStoreReadOnly(); err == nil && vectorStore != nil && len(vectorStore.Points) > 0 {
-				localHits := rag.SearchVectorStore(vectorStore, queryVector, maxRAGRecallResults*3)
+				localHits := rag.SearchVectorStoreWithOptions(vectorStore, queryVector, maxRAGRecallResults*3, rag.VectorSearchOptions{ExcludeDesignOnly: true})
 				for _, hit := range localHits {
 					addScore(hit.Point.Chunk, hit.Score*3.0, fmt.Sprintf("vector:%.3f", hit.Score))
 				}
@@ -2216,6 +2263,32 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 	return finishRAGRecall(scoredByID, focus, terms, strategy)
 }
 
+// searchNovelFactVectors asks capable vector stores to isolate the active
+// project's fact corpus before applying their top-k limit. The post-filter is a
+// defensive backstop for legacy searchers and misconfigured remote stores.
+func searchNovelFactVectors(ctx context.Context, searcher rag.VectorSearcher, query []float32, limit int) ([]rag.VectorSearchHit, error) {
+	var (
+		hits []rag.VectorSearchHit
+		err  error
+	)
+	if filtered, ok := searcher.(rag.FilteredVectorSearcher); ok {
+		hits, err = filtered.SearchWithOptions(ctx, query, limit, rag.VectorSearchOptions{ExcludeDesignOnly: true})
+	} else {
+		hits, err = searcher.Search(ctx, query, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	facts := make([]rag.VectorSearchHit, 0, len(hits))
+	for _, hit := range hits {
+		if rag.IsDesignOnlySourceKind(hit.Point.Chunk.SourceKind) {
+			continue
+		}
+		facts = append(facts, hit)
+	}
+	return facts, nil
+}
+
 func (t *ContextTool) cachedProjectBM25(state *domain.RAGIndexState) *rag.BM25Index {
 	if state == nil {
 		return rag.BuildBM25Index(nil)
@@ -2244,16 +2317,7 @@ type ragScored struct {
 }
 
 func finishRAGRecall(scoredByID map[string]*ragScored, focus string, terms []string, strategy string) ([]domain.RecallItem, *domain.RetrievalTrace) {
-	var scoredItems []ragScored
-	for _, item := range scoredByID {
-		scoredItems = append(scoredItems, *item)
-	}
-	sort.SliceStable(scoredItems, func(i, j int) bool {
-		return scoredItems[i].score > scoredItems[j].score
-	})
-	if len(scoredItems) > maxRAGRecallResults {
-		scoredItems = scoredItems[:maxRAGRecallResults]
-	}
+	scoredItems := selectDiverseRAGRecall(scoredByID, maxRAGRecallResults)
 	if len(scoredItems) == 0 {
 		return nil, nil
 	}

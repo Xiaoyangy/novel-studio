@@ -38,6 +38,39 @@ func TestConfigResolveReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestDrafterConfigInheritsWriterUntilExplicitlyConfigured(t *testing.T) {
+	cfg := Config{
+		ReasoningEffort: "low",
+		Roles: map[string]RoleConfig{
+			"writer": {ReasoningEffort: "high", MaxTurns: 42},
+		},
+	}
+	for _, role := range []string{"drafter", "draft_finalizer"} {
+		if got := cfg.ResolveReasoningEffort(role); got != "high" {
+			t.Errorf("ResolveReasoningEffort(%q) = %q, want inherited writer high", role, got)
+		}
+		if got := cfg.ResolveMaxTurns(role, 80); got != 42 {
+			t.Errorf("ResolveMaxTurns(%q) = %d, want inherited writer 42", role, got)
+		}
+	}
+	if got := cfg.ResolveReasoningEffort("world_simulator"); got != "high" {
+		t.Errorf("world_simulator reasoning = %q, want writer high", got)
+	}
+
+	cfg.Roles["drafter"] = RoleConfig{ReasoningEffort: "xhigh", MaxTurns: 63}
+	for _, role := range []string{"drafter", "draft_finalizer"} {
+		if got := cfg.ResolveReasoningEffort(role); got != "xhigh" {
+			t.Errorf("explicit ResolveReasoningEffort(%q) = %q, want xhigh", role, got)
+		}
+		if got := cfg.ResolveMaxTurns(role, 80); got != 63 {
+			t.Errorf("explicit ResolveMaxTurns(%q) = %d, want 63", role, got)
+		}
+	}
+	if got := cfg.ResolveReasoningEffort("world_simulator"); got != "high" {
+		t.Errorf("explicit drafter must not move world_simulator off writer, got %q", got)
+	}
+}
+
 func TestResolveContextWindowPerModel(t *testing.T) {
 	cfg := Config{
 		ContextWindow:  200000, // 全局

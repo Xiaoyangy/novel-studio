@@ -49,6 +49,8 @@ import (
 //     主视角只处理流程却没有误判、欲望冲突和情绪余波
 //   - dialogue_micro_period_chain：人物在多个话轮内反复用二至四字句号短句
 //     切开本可自然说完的同一段话
+//   - ascii_chinese_dialogue_quote：明确的人物对白使用 ASCII 双引号，绕过
+//     中文全角对白识别与节奏检查
 //   - trend_language_sound_effect_misuse：把“呱，”吐槽起手式写成叫声/拟声动作
 //   - system_procedure_narration：系统用后台核验术语代替可读、有人味的短回应
 //   - bureaucratic_register_overuse：制度/纪要/表单词连续驱动场景，人物口语和私人压力不足
@@ -63,6 +65,8 @@ import (
 //     规则演示、身份验证、空间称呼、载体比喻等因果链硬伤
 func Lint(text string) []Violation {
 	var vs []Violation
+	vs = append(vs, OrchestrationMetadataLeaks(text)...)
+	vs = append(vs, ASCIIChineseDialogueQuotes(text)...)
 	vs = appendMarkdownResidue(vs, text)
 	vs = appendNonCJKFragments(vs, text)
 	vs = appendContentCountMismatch(vs, text)

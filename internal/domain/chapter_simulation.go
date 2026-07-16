@@ -17,16 +17,20 @@ type ChapterWorldSimulation struct {
 	Sources               []string                      `json:"sources,omitempty"`
 }
 
-// ChapterRewriteSource pins a rewrite simulation to the exact committed body
-// and rewrite brief it is allowed to revise. PreserveFacts are copied from the
-// brief and become hard planning anchors; prose may change, these facts may not.
+// ChapterRewriteSource pins a rewrite simulation to the exact committed body,
+// rewrite brief, and (when available) the durable chapter-progress ledger it is
+// allowed to revise. PreserveFacts combine explicit brief constraints with
+// result-level facts already booked by the committed chapter; prose may change,
+// these facts may not.
 type ChapterRewriteSource struct {
-	BodyPath      string   `json:"body_path"`
-	BodySHA256    string   `json:"body_sha256"`
-	WordCount     int      `json:"word_count"`
-	BriefPath     string   `json:"brief_path"`
-	BriefSHA256   string   `json:"brief_sha256"`
-	PreserveFacts []string `json:"preserve_facts,omitempty"`
+	BodyPath             string   `json:"body_path"`
+	BodySHA256           string   `json:"body_sha256"`
+	WordCount            int      `json:"word_count"`
+	BriefPath            string   `json:"brief_path"`
+	BriefSHA256          string   `json:"brief_sha256"`
+	CanonicalStatePath   string   `json:"canonical_state_path,omitempty"`
+	CanonicalStateSHA256 string   `json:"canonical_state_sha256,omitempty"`
+	PreserveFacts        []string `json:"preserve_facts,omitempty"`
 }
 
 // ChapterRewriteFactCoverage makes the simulation account for every fact the

@@ -316,7 +316,15 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 	} else if r.Scope == "global" {
 		artifact = fmt.Sprintf("reviews/%02d-global.json", r.Chapter)
 	}
-	if _, err := t.store.Checkpoints.AppendArtifact(scope, "review", artifact); err != nil {
+	// A -> B -> A 的复审，以及“同字节 review 出现在新正文/计划/外部检测
+	// 之后”的情况，都必须形成新的因果 epoch。只按 review step 去重会把
+	// 当前复审错误地绑定回历史序号，恢复逻辑随后会一直判定 awaiting review。
+	if _, err := t.store.Checkpoints.AppendArtifactLatestAcross(
+		scope, "review", artifact,
+		"review", "registered-external-detection",
+		"chapter_world_simulation", "plan", "draft-structural-block",
+		"draft", "edit", "commit", "rewrite-body-swapped", "rewrite-existing", "causal-rewrite",
+	); err != nil {
 		return nil, fmt.Errorf("checkpoint review: %w", err)
 	}
 	ragIndexed, ragErr := t.sedimentReviewRAG(ctx, learningReview, finalVerdict, affected, escalationReason)
@@ -372,11 +380,7 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 }
 
 func reviewEntryForLearning(st *store.Store, r domain.ReviewEntry) domain.ReviewEntry {
-	if st == nil {
-		return r
-	}
-	snapshot, err := st.UserRules.Load()
-	if err != nil || snapshot == nil || !domain.SystemCompanionVoiceRequested(snapshot.Preferences) {
+	if !ProjectRequiresSystemCompanion(st) {
 		return r
 	}
 	filtered := r

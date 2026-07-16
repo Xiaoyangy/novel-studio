@@ -78,10 +78,9 @@ func CraftContentFacet(path, sample string) CraftFacet {
 	// 唯独 review-calibration 下的 novel-craft-methodology 是创作方法论，仍按关键词判 methodology。
 	lowerPath := strings.ToLower(filepath.ToSlash(path))
 	if strings.Contains(lowerPath, "review-calibration") {
-		if strings.Contains(lowerPath, "novel-craft-methodology") {
-			return FacetMethodology // 校准库里的创作方法论
+		if !strings.Contains(lowerPath, "novel-craft-methodology") {
+			return FacetCalibration // 人工文笔样本 + 校准报告
 		}
-		return FacetCalibration // 人工文笔样本 + 校准报告
 	}
 	name := strings.ToLower(filepath.Base(path))
 	body := strings.ToLower(sample)
@@ -106,6 +105,9 @@ func CraftContentFacet(path, sample string) CraftFacet {
 		}
 	}
 	if bestScore == 0 {
+		if isCuratedRewriteMethodPath(path) {
+			return FacetMethodology
+		}
 		return facetFromCategory(path)
 	}
 	return best

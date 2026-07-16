@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -70,5 +71,178 @@ func TestReadChapterWithholdsOldFinalDuringRewriteReplanning(t *testing.T) {
 	}
 	if allowed["content"] == nil || allowed["withheld"] == true {
 		t.Fatalf("expected final read after fresh plan, got %s", raw)
+	}
+}
+
+func TestReadChapterWithholdsSupersededSurfaceDuringRenderOnlyFreshDraft(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger string
+		setup   func(*testing.T, *store.Store, string)
+	}{
+		{
+			name:    "explicit full rerender",
+			trigger: "explicit_full_rerender",
+			setup: func(t *testing.T, st *store.Store, _ string) {
+				t.Helper()
+				if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+					t.Fatal(err)
+				}
+				requestPath := filepath.Join(st.Dir(), "drafts", "01.rerender_request.json")
+				if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:    "external whole chapter rerender",
+			trigger: "external_full_rerender",
+			setup: func(t *testing.T, st *store.Store, body string) {
+				t.Helper()
+				if err := SetDraftExternalRerenderRequirement(st.Dir(), DraftExternalRerenderRequirement{
+					Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(body),
+					AIProbabilityPercent: 86, PassExclusivePercent: 4,
+					RevisionPlan: []string{"整章重组人物选择链与段落功能。"}, AdviceComplete: true,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:    "formal review fresh draft",
+			trigger: "formal_review_fresh_draft",
+			setup: func(t *testing.T, st *store.Store, body string) {
+				t.Helper()
+				if err := st.World.SaveReview(domain.ReviewEntry{
+					Chapter: 1, BodySHA256: reviewreport.BodySHA256(body), Verdict: "rewrite", ContractStatus: "met",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := store.NewStore(t.TempDir())
+			if err := st.Init(); err != nil {
+				t.Fatal(err)
+			}
+			body := "# 第1章 旧正文\n\n这段旧措辞不能进入整章重渲染上下文。"
+			if err := st.Drafts.SaveDraft(1, body); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, st, body)
+
+			tool := NewReadChapterTool(st)
+			for _, source := range []string{"draft", "final"} {
+				raw, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1,"source":"`+source+`"}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got map[string]any
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got["withheld"] != true || got["stage"] != "render_only_fresh_draft" || got["trigger"] != tt.trigger {
+					t.Fatalf("source=%s did not fail closed: %s", source, raw)
+				}
+				if _, ok := got["content"]; ok {
+					t.Fatalf("source=%s leaked superseded prose: %s", source, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestReadChapterAllowsNewCandidateAfterExplicitRerenderConsumed(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	oldBody := "# 第1章 旧正文\n\n旧候选。"
+	if err := st.Drafts.SaveDraft(1, oldBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(st.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(st.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(oldBody),
+		AIProbabilityPercent: 86, PassExclusivePercent: 4,
+		RevisionPlan: []string{"重渲染完整新稿后复判。"}, AdviceComplete: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newBody := "# 第1章 新正文\n\n这是晚于整章重渲染请求的当前候选。"
+	if err := st.Drafts.SaveDraft(1, newBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := NewReadChapterTool(st).Execute(context.Background(), json.RawMessage(`{"chapter":1,"source":"draft"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["withheld"] == true || got["content"] != newBody {
+		t.Fatalf("current candidate reread was blocked after request consumption: %s", raw)
+	}
+}
+
+func TestReadChapterRangeWithholdsWhenItWouldIncludeRenderOnlyTarget(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	for chapter := 1; chapter <= 2; chapter++ {
+		if err := st.Drafts.SaveFinalChapter(chapter, "# 旧终稿\n\n范围读取不应泄漏重渲染目标。"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Drafts.SaveDraft(1, "# 旧草稿\n\n范围读取同样不能绕过重渲染门禁。"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(st.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := NewReadChapterTool(st).Execute(context.Background(), json.RawMessage(`{"from":1,"to":2,"source":"final"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["withheld"] != true || got["blocked_chapter"] != float64(1) {
+		t.Fatalf("range read leaked a render-only target: %s", raw)
+	}
+	if _, ok := got["chapters"]; ok {
+		t.Fatalf("withheld range must not contain prose: %s", raw)
 	}
 }

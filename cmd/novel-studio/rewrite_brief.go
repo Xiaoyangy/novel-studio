@@ -291,7 +291,7 @@ func acceptedIssueIsFutureOnly(text string) bool {
 
 func mechanicalRewriteBriefSuggestion(rule string) string {
 	switch strings.TrimSpace(rule) {
-	case "aigc_ratio":
+	case "aigc_ratio", "external_aigc_ratio":
 		return "AI率/segment_risk_floor 超标时按整章单检测片段重排：先删“第一/第二/第三”“不是A而是B”等结构标记，合并孤句段，打散连续同功能段落，用对话阻力、现场误判、延迟/缺席的物件响应和具体规则后果替换解释性总结。"
 	case "chapter_words":
 		return "篇幅超标只做局部压缩：优先删重复规则说明、重复互动问答和同义情绪句；保留已成立的场景、规则链、钩子和人物声口，不要整章重写。"
@@ -427,13 +427,14 @@ func renderRevisionBrief(plan revisionPlan, reviewMarkdown string) string {
 		fmt.Fprintf(&b, "- 汇总来源：%s\n", strings.Join(plan.Sources, "、"))
 	}
 
-	b.WriteString("\n## 质量优先边界\n\n")
+	b.WriteString("\n## 验收条件\n\n")
 	b.WriteString("- 红旗必须通过更好的剧情动作、对话摩擦、可见事实、人物选择或规则后果解决。\n")
 	b.WriteString("- 黄旗只在能提升人物、节奏、信息清晰度或语言质感时采用；若只是为了指标换词，保留原文。\n")
 	b.WriteString("- 禁止注水、乱码、OCR 脏码、随机汉字、冷僻词堆砌、无信息清单、拟声长串或刻意错别字。\n")
 	b.WriteString("- 不新增改变主线事实的人名、组织、合同、授权、证据或能力。\n")
+	b.WriteString("- 注册外部 detector/mode 必须对改后正式正文的精确 SHA 完成同 payload 复测，并严格 `<4%`；另一平台、旧 draft 或旧 SHA 的低分不能替代。\n")
 
-	b.WriteString("\n## 红旗阻断项\n\n")
+	b.WriteString("\n## 必须修正\n\n")
 	writeStringList(&b, plan.RedReasons)
 	b.WriteString("\n## 黄旗择优项\n\n")
 	writeStringList(&b, plan.YellowReasons)

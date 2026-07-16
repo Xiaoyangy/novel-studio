@@ -58,6 +58,24 @@ func containsSecondAlgorithmContaminationTerm(text string) bool {
 	return len(secondAlgorithmCrossProjectHits(text)) > 0 || len(secondAlgorithmDeprecatedEngineHits(text)) > 0
 }
 
+// sanitizeProjectDiagnosticForPlan keeps a negative rewrite diagnosis useful
+// without reintroducing forbidden cross-project nouns into the executable
+// plan. Only the active Second Algorithm restart policy needs this redaction;
+// the full review brief remains unchanged as the audit source.
+func sanitizeProjectDiagnosticForPlan(s *store.Store, text string) string {
+	active, _ := secondAlgorithmContaminationPolicy(s)
+	if !active || strings.TrimSpace(text) == "" {
+		return strings.TrimSpace(text)
+	}
+	for _, term := range secondAlgorithmContaminationTerms {
+		text = strings.ReplaceAll(text, term, "[跨项目旧设定]")
+	}
+	for _, term := range secondAlgorithmDeprecatedEngineTerms {
+		text = strings.ReplaceAll(text, term, "[旧版取证引擎元素]")
+	}
+	return strings.TrimSpace(text)
+}
+
 func secondAlgorithmCrossProjectHits(text string) []string {
 	return orderedTermHits(text, secondAlgorithmContaminationTerms)
 }

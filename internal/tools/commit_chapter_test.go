@@ -243,6 +243,72 @@ func TestRequireCurrentDraftConsistencyRejectsMissingAndStaleCheck(t *testing.T)
 	}
 }
 
+func TestRequireCurrentDraftConsistencyRejectsHistoricalCheckAcrossDraftEditDraftABA(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	scope := domain.ChapterScope(1)
+	artifact := "drafts/01.draft.md"
+	proseSteps := []string{"plan", "rerender-request", "draft", "edit"}
+	args, _ := json.Marshal(map[string]any{"chapter": 1})
+
+	const bodyA = "# 第一章 测试\n\nA 版正文先被检查。"
+	if err := s.Drafts.SaveDraft(1, bodyA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatestAcross(scope, "draft", artifact, proseSteps...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewCheckConsistencyTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	oldCheck := s.Checkpoints.LatestByStep(scope, "consistency_check")
+
+	const bodyB = "# 第一章 测试\n\nB 版正文来自一次编辑。"
+	if err := s.Drafts.SaveDraft(1, bodyB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatestAcross(scope, "edit", artifact, proseSteps...); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, bodyA); err != nil {
+		t.Fatal(err)
+	}
+	currentBody, err := s.Checkpoints.AppendArtifactLatestAcross(scope, "draft", artifact, proseSteps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentBody.Seq <= oldCheck.Seq {
+		t.Fatalf("ABA body did not establish a fresh epoch: body=%d old_check=%d", currentBody.Seq, oldCheck.Seq)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, bodyA); err == nil || !strings.Contains(err.Error(), "本次正文 epoch") {
+		t.Fatalf("historical same-digest consistency check crossed into current ABA body: %v", err)
+	}
+	if _, err := NewCheckConsistencyTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	newCheck := s.Checkpoints.LatestByStep(scope, "consistency_check")
+	if newCheck.Seq <= currentBody.Seq || newCheck.Seq == oldCheck.Seq {
+		t.Fatalf("same-digest recheck did not establish a post-body epoch: old=%d body=%d new=%d", oldCheck.Seq, currentBody.Seq, newCheck.Seq)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, bodyA); err != nil {
+		t.Fatalf("fresh exact post-body consistency should pass: %v", err)
+	}
+
+	// Simulate SaveDraft succeeding while checkpoint append fails. The old A
+	// checkpoint/check pair must not certify the new on-disk B bytes.
+	if err := s.Drafts.SaveDraft(1, bodyB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CurrentChapterBodyCheckpoint(s, 1); err == nil || !strings.Contains(err.Error(), "摘要不匹配") {
+		t.Fatalf("uncheckpointed body mutation borrowed old evidence: %v", err)
+	}
+	if err := requireCurrentDraftConsistency(s, 1, bodyB); err == nil {
+		t.Fatal("uncheckpointed body mutation borrowed old consistency evidence")
+	}
+}
+
 func TestRequireDraftPlanTitleMatchBlocksDrift(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
@@ -740,7 +806,7 @@ func assertChapterRAGChunk(t *testing.T, s *store.Store, chapter int, want strin
 	}
 }
 
-func TestMechanicalGateRetryLimitHandsOffToChapterReview(t *testing.T) {
+func TestStrictRewriteAIGCGateCannotBeBypassedByMechanicalRetryLimit(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
 	if err := s.Init(); err != nil {
@@ -759,45 +825,41 @@ func TestMechanicalGateRetryLimitHandsOffToChapterReview(t *testing.T) {
 		"character_stage_records": testCharacterStageRecords("主角", "配角"),
 	})
 
-	for i := 0; i < maxMechanicalGateCommitAttempts; i++ {
-		text := strings.Repeat(fmt.Sprintf("版本%d。首先，主角感到前所未有的恐惧，这意味着局势已经发生了变化。其次，他终于明白自己必须面对命运的安排。最后，所有人都意识到问题的严重性。\n", i), 70)
-		if err := s.Drafts.SaveDraft(1, text); err != nil {
-			t.Fatalf("SaveDraft(%d): %v", i, err)
-		}
-		raw, err := tool.Execute(context.Background(), commitArgs)
-		if err != nil {
-			t.Fatalf("Execute(%d): %v", i, err)
-		}
-		progress, err := s.Progress.Load()
-		if err != nil {
-			t.Fatalf("LoadProgress(%d): %v", i, err)
-		}
-		if i < maxMechanicalGateCommitAttempts-1 {
-			if progress.Flow != domain.FlowPolishing || len(progress.PendingRewrites) != 1 || progress.PendingRewrites[0] != 1 {
-				t.Fatalf("attempt %d should keep chapter queued, progress=%+v", i, progress)
-			}
-			continue
-		}
-		if progress.Flow != domain.FlowWriting || len(progress.PendingRewrites) != 0 {
-			t.Fatalf("retry limit should hand off to chapter review, progress=%+v", progress)
-		}
-		var payload struct {
-			RuleViolations []struct {
-				Rule string `json:"rule"`
-			} `json:"rule_violations"`
-		}
-		if err := json.Unmarshal(raw, &payload); err != nil {
-			t.Fatalf("Unmarshal final payload: %v", err)
-		}
-		foundLimit := false
-		for _, v := range payload.RuleViolations {
-			if v.Rule == "mechanical_gate_retry_limit" {
-				foundLimit = true
-			}
-		}
-		if !foundLimit {
-			t.Fatalf("expected retry-limit warning, got %+v", payload.RuleViolations)
-		}
+	first := strings.Repeat("版本零。首先，主角感到前所未有的恐惧，这意味着局势已经发生了变化。其次，他终于明白自己必须面对命运的安排。最后，所有人都意识到问题的严重性。\n", 70)
+	if err := s.Drafts.SaveDraft(1, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), commitArgs); err != nil {
+		t.Fatalf("legacy initial commit should retain compatibility: %v", err)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Flow != domain.FlowPolishing || len(progress.PendingRewrites) != 1 || progress.PendingRewrites[0] != 1 {
+		t.Fatalf("failed initial gate should queue polishing, progress=%+v", progress)
+	}
+
+	second := strings.Repeat("版本一。首先，主角感到前所未有的恐惧，这意味着局势已经发生了变化。其次，他终于明白自己必须面对命运的安排。最后，所有人都意识到问题的严重性。\n", 70)
+	if err := s.Drafts.SaveDraft(1, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), commitArgs); err == nil || !strings.Contains(err.Error(), "草稿本地 AIGC raw 门禁") {
+		t.Fatalf("strict polishing commit crossed the local AIGC gate: %v", err)
+	}
+	progress, err = s.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Flow != domain.FlowPolishing || len(progress.PendingRewrites) != 1 || progress.PendingRewrites[0] != 1 {
+		t.Fatalf("strict rejection must keep chapter queued, progress=%+v", progress)
+	}
+	got, err := s.Drafts.LoadChapterText(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != first {
+		t.Fatal("strict rejection overwrote the last committed chapter")
 	}
 }
 
@@ -823,6 +885,11 @@ func TestImmediateMechanicalGateBlocksRendererReadabilityFailures(t *testing.T) 
 		if !immediateMechanicalGateFailure(rules.Violation{Rule: rule, Severity: rules.SeverityWarning}) {
 			t.Fatalf("%s should block before review", rule)
 		}
+	}
+	if !immediateMechanicalGateFailure(rules.Violation{
+		Rule: rules.ASCIIChineseDialogueQuoteRule, Severity: rules.SeverityError,
+	}) {
+		t.Fatal("ASCII Chinese dialogue quote hard error should block before review")
 	}
 }
 
@@ -1001,6 +1068,9 @@ func TestCommitChapterReplayAfterPartialCommitDoesNotDuplicateWorldState(t *test
 	if err := s.Drafts.SaveDraft(1, "第一章正文，林墨遇到黑影并突破。"); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
 	}
+	if err := s.Drafts.SaveFinalChapter(1, "第一章正文，林墨遇到黑影并突破。"); err != nil {
+		t.Fatalf("SaveFinalChapter seed: %v", err)
+	}
 
 	timeline := []domain.TimelineEvent{{
 		Chapter:    1,
@@ -1031,11 +1101,20 @@ func TestCommitChapterReplayAfterPartialCommitDoesNotDuplicateWorldState(t *test
 	if err := s.World.UpdateForeshadow(1, foreshadow); err != nil {
 		t.Fatalf("UpdateForeshadow seed: %v", err)
 	}
-	if err := s.Signals.SavePendingCommit(domain.PendingCommit{
-		Chapter: 1,
-		Stage:   domain.CommitStageStateApplied,
-		Summary: "半提交摘要",
-	}); err != nil {
+	pendingArgs := commitChapterArgs{
+		Chapter: 1, Summary: "林墨遇到黑影并突破", Characters: []string{"林墨", "黑影"},
+		KeyEvents: []string{"遇到黑影", "突破"}, CharacterStage: testCharacterStageRecords("林墨", "黑影"),
+		TimelineEvents: timeline, StateChanges: stateChanges, ForeshadowUpdates: foreshadow,
+	}
+	pendingIntent, err := NewCommitChapterTool(s).newPendingCommit(
+		pendingArgs, domain.CommitModeInitial, "第一章正文，林墨遇到黑影并突破。",
+		len([]rune("第一章正文，林墨遇到黑影并突破。")), false, "", "",
+	)
+	if err != nil {
+		t.Fatalf("newPendingCommit: %v", err)
+	}
+	pendingIntent.Stage = domain.CommitStageStateApplied
+	if err := s.Signals.SavePendingCommit(pendingIntent); err != nil {
 		t.Fatalf("SavePendingCommit: %v", err)
 	}
 
@@ -1094,11 +1173,18 @@ func TestCommitChapterCompletedProgressResumesQualityBeforeClearingPending(t *te
 	if err := s.Progress.MarkChapterComplete(1, len([]rune(body)), "desire", "quest"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Signals.SavePendingCommit(domain.PendingCommit{
-		Chapter: 1,
-		Stage:   domain.CommitStageStateApplied,
-		Summary: "已写状态但质量门禁尚未落盘",
-	}); err != nil {
+	pendingArgs := commitChapterArgs{
+		Chapter: 1, Summary: "林墨回县城接下门店", Characters: []string{"林墨"},
+		KeyEvents: []string{"接下门店"}, HookType: "desire", DominantStrand: "quest",
+	}
+	pending, err := NewCommitChapterTool(s).newPendingCommit(
+		pendingArgs, domain.CommitModeInitial, body, len([]rune(body)), false, "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending.Stage = domain.CommitStageStateApplied
+	if err := s.Signals.SavePendingCommit(pending); err != nil {
 		t.Fatal(err)
 	}
 

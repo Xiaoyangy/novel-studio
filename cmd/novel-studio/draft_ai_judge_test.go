@@ -1,10 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/store"
+	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestParseDraftAIJudgeFlags(t *testing.T) {
@@ -67,5 +73,78 @@ func TestDraftChapterNumbersAndSelection(t *testing.T) {
 	selected := selectDraftJudgeChapters(chapters, draftAIJudgeFlags{Start: 2, End: 3})
 	if len(selected) != 1 || selected[0] != 3 {
 		t.Fatalf("selected = %v", selected)
+	}
+}
+
+func TestPassingDraftJudgePreservesReproducibleLocalStructuralMarker(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := toolspkg.SetDraftExternalRerenderRequirement(st.Dir(), toolspkg.DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(body),
+		AIProbabilityPercent: 18, PassExclusivePercent: 4, AdviceComplete: true,
+		RevisionPlan: []string{"整章重排同型流程，重建人物选择与关系后果。"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reviewDir := filepath.Join(st.Dir(), "reviews", "drafts")
+	if err := os.MkdirAll(reviewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	passingStatus, _ := json.Marshal(map[string]any{
+		"body_sha256": reviewreport.BodySHA256(body), "blocking": false,
+		"advice_complete": true, "ai_probability_percent": 3, "pass_exclusive_percent": 4,
+	})
+	if err := os.WriteFile(filepath.Join(reviewDir, "01_deepseek_ai_judge.json"), passingStatus, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !toolspkg.CurrentDraftHasLocalStructuralBlock(st, 1) {
+		t.Fatal("fixture no longer reproduces a local whole-text/segment structural block")
+	}
+
+	cleared, err := clearDraftRerenderRequirementAfterPassingJudge(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared {
+		t.Fatal("independent DeepSeek pass cleared a reproducible local structural marker")
+	}
+	marker := filepath.Join(reviewDir, "01_full_rerender_required.json")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("local structural marker was not preserved: %v", err)
+	}
+	inspection, err := toolspkg.InspectDraftExternalGateWithStore(st, 1)
+	if err != nil || inspection.Status != toolspkg.DraftExternalGateRerenderAuthorized {
+		t.Fatalf("passing judge unlocked locally blocked hash: inspection=%+v err=%v", inspection, err)
+	}
+}
+
+func TestPassingDraftJudgeClearsMarkerWhenLocalStructureIsClean(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章 雨停以后\n\n林澈推开门，桌边的人只看了他一眼，又低头去分那袋刚送来的橘子。"
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := toolspkg.SetDraftExternalRerenderRequirement(st.Dir(), toolspkg.DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(body),
+		AIProbabilityPercent: 12, PassExclusivePercent: 4, AdviceComplete: true,
+		RevisionPlan: []string{"调整局部节奏。"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := clearDraftRerenderRequirementAfterPassingJudge(st, 1)
+	if err != nil || !cleared {
+		t.Fatalf("clean current hash did not clear obsolete marker: cleared=%v err=%v", cleared, err)
+	}
+	if _, err := os.Stat(filepath.Join(st.Dir(), "reviews", "drafts", "01_full_rerender_required.json")); !os.IsNotExist(err) {
+		t.Fatalf("obsolete marker still exists: %v", err)
 	}
 }

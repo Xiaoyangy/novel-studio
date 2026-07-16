@@ -13,6 +13,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	agentcoretools "github.com/voocel/agentcore/tools"
 )
 
 // TestEditChapterAppliesEdit 正常路径：drafts 已有内容，唯一匹配替换成功。
@@ -220,6 +221,157 @@ func TestEditChapterApprovedHashAllowsOneEditThenRequiresExternalRejudge(t *test
 	}
 }
 
+func TestDraftExternalGateEditPreconditionAllowsOnlyLocalSoftPending(t *testing.T) {
+	soft := DraftExternalGateInspection{
+		Status:               DraftExternalGateRejudgePending,
+		LocalSoftEditPending: true,
+	}
+	if err := draftExternalGateEditPrecondition(1, soft); err != nil {
+		t.Fatalf("DeepSeek-passing local soft gate should permit one edit: %v", err)
+	}
+	if err := draftExternalGateEditPrecondition(1, DraftExternalGateInspection{Status: DraftExternalGateRejudgePending}); err == nil || !errors.Is(err, errs.ErrToolPrecondition) {
+		t.Fatalf("ordinary unjudged hash must remain fail-closed for edit: %v", err)
+	}
+}
+
+func TestEditChapterCrashAfterMarkdownReplaceRecoversExactEditCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	prior := "第一章 县城试点\n\n林澈把价牌放稳，才抬头看向门口。"
+	if err := s.Drafts.SaveDraft(1, prior); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewEditChapterTool(s)
+	tool.afterDraftWrite = func() error { return errors.New("simulated process exit") }
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "放稳", "new_string": "扶稳",
+	})
+	// Real Host calls may carry a cwd override. The isolated candidate planner
+	// must still edit only its temp copy before the intent becomes durable.
+	ctx := agentcoretools.WithCwd(context.Background(), dir)
+	if _, err := tool.Execute(ctx, args); err == nil || !strings.Contains(err.Error(), "simulated process exit") {
+		t.Fatalf("expected injected crash after Markdown replace, got %v", err)
+	}
+	candidate, err := s.Drafts.LoadDraft(1)
+	if err != nil || !strings.Contains(candidate, "扶稳") {
+		t.Fatalf("candidate bytes did not reach disk before crash: body=%q err=%v", candidate, err)
+	}
+	if _, err := os.Stat(draftWriteIntentPath(dir, 1)); err != nil {
+		t.Fatalf("edit crash did not retain write intent: %v", err)
+	}
+	if cp := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "edit"); cp != nil {
+		t.Fatalf("fixture crossed checkpoint boundary before crash: %+v", cp)
+	}
+
+	// A fresh process first inspects the external gate. That inspection must
+	// finish the edit saga in the same Store cache used by subsequent tools.
+	recovered := store.NewStore(dir)
+	if _, err := InspectDraftExternalGateWithStore(recovered, 1); err != nil {
+		t.Fatalf("recover edit intent through gate inspection: %v", err)
+	}
+	checkpoint, err := CurrentChapterBodyCheckpoint(recovered, 1)
+	if err != nil {
+		t.Fatalf("recovered edit remained unbound: %v", err)
+	}
+	if checkpoint.Step != "edit" || checkpoint.Digest != "sha256:"+reviewreport.BodySHA256(candidate) {
+		t.Fatalf("recovery emitted wrong body checkpoint: %+v", checkpoint)
+	}
+	if _, err := os.Stat(draftWriteIntentPath(dir, 1)); !os.IsNotExist(err) {
+		t.Fatalf("recovered edit intent was not cleared: %v", err)
+	}
+	checkArgs, _ := json.Marshal(map[string]any{"chapter": 1})
+	if _, err := NewCheckConsistencyTool(recovered).Execute(context.Background(), checkArgs); err != nil {
+		t.Fatalf("recovered edit still deadlocked consistency: %v", err)
+	}
+}
+
+func TestEditChapterRejectsApprovedHashAfterStructuralBudgetExhaustion(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章 县城试点\n\n林澈把价牌放稳，沈知遥站在一旁看着。"
+	if err := s.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	for _, digest := range []string{
+		"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		"sha256:3333333333333333333333333333333333333333333333333333333333333333",
+	} {
+		if _, err := s.Checkpoints.Append(domain.ChapterScope(1), "draft-structural-block", "drafts/01.draft.md", digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewDir := filepath.Join(s.Dir(), "reviews", "drafts")
+	if err := os.MkdirAll(reviewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(content), AdviceComplete: true,
+		AIProbabilityPercent: 3, PassExclusivePercent: 4,
+	})
+	if err := os.WriteFile(filepath.Join(reviewDir, "01_deepseek_ai_judge.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "放稳", "new_string": "扶稳",
+	})
+	_, err := NewEditChapterTool(s).Execute(context.Background(), args)
+	if err == nil || !errors.Is(err, errs.ErrToolPrecondition) || !strings.Contains(err.Error(), "绕过重规划") {
+		t.Fatalf("edit bypassed exhausted structural budget: %v", err)
+	}
+	if got, _ := s.Drafts.LoadDraft(1); got != content {
+		t.Fatalf("rejected edit changed current draft: %q", got)
+	}
+}
+
+func TestEditChapterSurfacesNewWholeTextStructuralBoundary(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, "第一章 县城试点\n\n待替换短段。"); err != nil {
+		t.Fatal(err)
+	}
+	replacement := strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "old_string": "待替换短段。", "new_string": replacement,
+	})
+	result, err := NewEditChapterTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["local_structural_rerender_required"] != true || payload["stop_prose_modification"] != true {
+		t.Fatalf("edit-created whole-text block was not surfaced as a stop boundary: %#v", payload)
+	}
+	if cp := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "draft-structural-block"); cp == nil {
+		t.Fatal("edit-created whole-text block has no structural checkpoint")
+	}
+	inspection, err := InspectDraftExternalGateWithStore(s, 1)
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized {
+		t.Fatalf("edit-created whole-text block did not authorize bounded full rerender: inspection=%+v err=%v", inspection, err)
+	}
+}
+
 // TestEditChapterRejectsAmbiguousMatch 多处匹配且未开 replace_all → 报错。
 func TestEditChapterRejectsAmbiguousMatch(t *testing.T) {
 	dir := t.TempDir()
@@ -368,6 +520,10 @@ func TestEditChapterWorksWithCommitValidation(t *testing.T) {
 	})
 	if _, err := editTool.Execute(context.Background(), editArgs); err != nil {
 		t.Fatalf("edit_chapter: %v", err)
+	}
+	checkArgs, _ := json.Marshal(map[string]any{"chapter": 2})
+	if _, err := NewCheckConsistencyTool(s).Execute(context.Background(), checkArgs); err != nil {
+		t.Fatalf("check_consistency after edit: %v", err)
 	}
 
 	commitTool := NewCommitChapterTool(s)

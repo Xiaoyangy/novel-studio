@@ -11,7 +11,9 @@ from aigc_value import (  # noqa: E402
     DIALOGUE_MICRO_PERIOD_EXEMPTIONS,
     analyze_text,
     dialogue_micro_period_chain_stats,
+    dialogue_ratio_estimate,
     high_quality_human_anchor_stats,
+    quoted_hanzi_ratio,
     score_narrative_dynamics,
     segment_aigc_proxy,
     whole_text_single_segment_risk,
@@ -279,6 +281,46 @@ class DialogueMicroPeriodChainTests(unittest.TestCase):
             anchor["metrics"]["dialogue_micro_period_chain_examples"],
             stats["examples"],
         )
+
+
+class StraightQuoteDialogueTests(unittest.TestCase):
+    def test_straight_chinese_dialogue_matches_typographic_metrics(self) -> None:
+        typographic = (
+            "林澈抬头说：“先关灯。别让孩子踩到线。”\n\n"
+            "“这边我来收，你去看摊主。”\n\n"
+            "“嗯”"
+        )
+        straight = typographic.replace("“", '"').replace("”", '"')
+        typographic_dimension = score_narrative_dynamics(typographic, 100)
+        straight_dimension = score_narrative_dynamics(straight, 100)
+        for key in (
+            "dialogue_paragraph_count",
+            "action_dialogue_lead_count",
+            "dialogue_turn_count",
+            "dialogue_micro_period_chain_turns",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    straight_dimension["stats"][key],
+                    typographic_dimension["stats"][key],
+                )
+        n_hanzi = len([char for char in straight if "\u4e00" <= char <= "\u9fff"])
+        self.assertEqual(
+            dialogue_ratio_estimate(straight, n_hanzi),
+            dialogue_ratio_estimate(typographic, n_hanzi),
+        )
+        self.assertEqual(
+            quoted_hanzi_ratio(straight, n_hanzi),
+            quoted_hanzi_ratio(typographic, n_hanzi),
+        )
+
+    def test_straight_english_and_embedded_labels_are_not_dialogue(self) -> None:
+        body = '项目名叫"青山夜市"，配置项 title="中文对白"，英文材料写着"hello world"。'
+        dimension = score_narrative_dynamics(body, 100)
+        self.assertEqual(dimension["stats"]["dialogue_paragraph_count"], 0)
+        self.assertEqual(dimension["stats"]["dialogue_turn_count"], 0)
+        self.assertEqual(dialogue_ratio_estimate(body, 15), 0)
+        self.assertEqual(quoted_hanzi_ratio(body, 15), 0)
 
 
 if __name__ == "__main__":

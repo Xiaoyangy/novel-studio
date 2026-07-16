@@ -52,7 +52,7 @@ type draftStyleContract struct {
 	ProfileName          string                `json:"profile_name,omitempty"`
 	Tone                 string                `json:"tone,omitempty"`
 	SourceIDs            []string              `json:"source_ids,omitempty"`
-	ActiveRules          []string              `json:"active_rules,omitempty"`
+	ActiveRules          []string              `json:"soft_craft_rules,omitempty"`
 	AntiAIRules          []string              `json:"anti_ai_rules,omitempty"`
 	Taboos               []string              `json:"taboos,omitempty"`
 	DialogueBreathPolicy string                `json:"dialogue_breath_policy,omitempty"`
@@ -61,7 +61,7 @@ type draftStyleContract struct {
 	GrowthPolicy         string                `json:"growth_policy,omitempty"`
 	RomancePolicy        string                `json:"romance_policy,omitempty"`
 	SystemPolicy         string                `json:"system_policy,omitempty"`
-	Cards                []draftGenreStyleCard `json:"cards,omitempty"`
+	Cards                []draftGenreStyleCard `json:"soft_cards,omitempty"`
 	SourceRefs           []string              `json:"source_refs,omitempty"`
 	UsagePolicy          string                `json:"usage_policy"`
 }
@@ -168,7 +168,7 @@ func newDraftStyleContract(result map[string]any) *draftStyleContract {
 	}
 	contract := &draftStyleContract{
 		Version:     1,
-		UsagePolicy: "用户最新规则优先；本合同只约束本章题材语域、口述气口和可读性，不追加剧情义务，不要求卡片齐全或统计次数。",
+		UsagePolicy: "用户最新规则优先。dialogue/romance/system 边界、anti_ai_rules 与 taboos 必须遵守；soft_craft_rules 和 soft_cards 只是写法候选，全章可择取、重排、替换或省略，未出现不算漏项，禁止为逐卡验收增加剧情。",
 	}
 	if engine != nil {
 		for _, feature := range engine.EnabledFeatures {
@@ -177,7 +177,7 @@ func newDraftStyleContract(result map[string]any) *draftStyleContract {
 			}
 		}
 		contract.SourceIDs = limitRenderStrings(compactStrings(contract.SourceIDs), 12)
-		contract.ActiveRules = compactStyleContractStrings(engine.ActiveRules, 12)
+		contract.ActiveRules = compactSoftStyleContractStrings(engine.ActiveRules, 4)
 		contract.AntiAIRules = compactStyleContractStrings(engine.AntiAIRules, 6)
 		contract.Taboos = compactStyleContractStrings(engine.Taboos, 6)
 	}
@@ -193,7 +193,7 @@ func newDraftStyleContract(result map[string]any) *draftStyleContract {
 		contract.SystemPolicy = firstRenderClause(profile.SystemPolicy)
 		contract.SourceRefs = limitRenderStrings(compactStrings(profile.SourceRefs), 10)
 		for _, card := range profile.Cards {
-			if len(contract.Cards) >= 8 || strings.TrimSpace(card.ID) == "" {
+			if len(contract.Cards) >= 2 || strings.TrimSpace(card.ID) == "" {
 				break
 			}
 			contract.Cards = append(contract.Cards, draftGenreStyleCard{
@@ -204,6 +204,39 @@ func newDraftStyleContract(result map[string]any) *draftStyleContract {
 		}
 	}
 	return contract
+}
+
+func compactSoftStyleContractStrings(values []string, limit int) []string {
+	out := make([]string, 0, min(limit, len(values)))
+	for _, value := range values {
+		value = firstRenderClause(value)
+		if value == "" || strings.Contains(value, "chapter_function_repetition") {
+			continue
+		}
+		// Old project snapshots may still carry the former hard quota. Normalize it
+		// at projection time so an existing book benefits without rewriting canon or
+		// mutating its output directory.
+		if strings.Contains(value, "每章至少让 2 个现场物件") ||
+			(strings.Contains(value, "scene_anchors") && strings.Contains(value, "至少一次改变")) {
+			value = "可从 soft_scene_anchors 择取0—2个真正改变信息、关系或代价的现场承载物；没有合适项可不用，禁止逐项回收。"
+		}
+		if !slicesContainsString(out, value) {
+			out = append(out, value)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func slicesContainsString(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func compactStyleContractStrings(values []string, limit int) []string {

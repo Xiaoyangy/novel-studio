@@ -138,6 +138,13 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 			continue
 		}
 		body := string(raw)
+		existingGate, gateErr := toolspkg.InspectDraftExternalGateWithStore(st, chapter)
+		if gateErr != nil {
+			fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 读取既有外部门禁失败：%v\n", chapter, gateErr)
+			failed++
+			continue
+		}
+		preserveRegisteredRetest := toolspkg.RequiresRegisteredExternalRetest(existingGate.Requirement)
 		fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d DeepSeek(%s/%s) 裸正文预审中（预算 %s）...\n", chapter, provider, model, flags.Budget)
 		result := loadOrGenerateDeepSeekAIJudge(eng.Dir(), reviewer, selection, chapter, body, flags.Budget)
 		if result.CacheLoadErr != nil {
@@ -181,7 +188,7 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 			failed++
 			continue
 		}
-		if artifact.Blocking {
+		if artifact.Blocking && !preserveRegisteredRetest {
 			requirement := toolspkg.DraftExternalRerenderRequirement{
 				Chapter:              chapter,
 				EvaluatedBodySHA256:  artifact.BodySHA256,
@@ -202,10 +209,16 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 				failed++
 				continue
 			}
-		} else if markerErr := toolspkg.ClearDraftExternalRerenderRequirement(eng.Dir(), chapter); markerErr != nil {
-			fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 清理整章重渲染标记失败：%v\n", chapter, markerErr)
-			failed++
-			continue
+		} else if !artifact.Blocking && !preserveRegisteredRetest {
+			cleared, markerErr := clearDraftRerenderRequirementAfterPassingJudge(st, chapter)
+			if markerErr != nil {
+				fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 清理整章重渲染标记失败：%v\n", chapter, markerErr)
+				failed++
+				continue
+			}
+			if !cleared {
+				fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d DeepSeek 已通过，但当前精确哈希仍可复现本地 whole-text/segment 结构阻断；保留整章重渲染锁\n", chapter)
+			}
 		}
 		if !flags.NoSediment && artifact.AdviceComplete {
 			if ragErr := sedimentDraftDeepSeekAIJudgeRAG(context.Background(), st, embedder, vectorWriter, artifact); ragErr != nil {
@@ -220,6 +233,20 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 		return fmt.Errorf("草稿外审未全部完成：失败 %d 章", failed)
 	}
 	return nil
+}
+
+// clearDraftRerenderRequirementAfterPassingJudge only clears an independent-
+// model marker when the current bytes are also free of deterministic local
+// whole-text/segment blockers. A provider pass is corroboration, not authority
+// to erase a reproducible structural failure or reset its bounded retry budget.
+func clearDraftRerenderRequirementAfterPassingJudge(st *store.Store, chapter int) (bool, error) {
+	if toolspkg.CurrentDraftHasLocalStructuralBlock(st, chapter) {
+		return false, nil
+	}
+	if err := toolspkg.ClearDraftExternalRerenderRequirement(st.Dir(), chapter); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func draftChapterNumbers(dir string) ([]int, error) {

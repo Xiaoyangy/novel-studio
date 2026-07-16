@@ -739,7 +739,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 
 // concreteThinkingRoles 是可应用推理强度的具体角色（与 agents.ApplyThinking 路由一致）。
 // 调 default 时按各角色 ResolveReasoningEffort 逐个重新应用。
-var concreteThinkingRoles = []string{"coordinator", "architect", "writer", "editor"}
+var concreteThinkingRoles = []string{"coordinator", "architect", "writer", "drafter", "editor"}
 
 // CurrentThinking 返回某角色当前生效的推理强度原始串（供 /model 面板同步当前值）。
 func (h *Host) CurrentThinking(role string) string {
@@ -803,6 +803,14 @@ func (h *Host) applyThinkingLocked(role string) {
 	}
 	lv, _ := agents.ParseThinkingLevel(h.cfg.ResolveReasoningEffort(role))
 	h.thinkingApplier(role, lv)
+	// 老配置没有 roles.drafter 时，drafter/draft_finalizer 完整继承
+	// writer；运行中调整 writer 也必须立即联动已构建的渲染 agent。
+	if role == "writer" {
+		if _, configured := h.cfg.Roles["drafter"]; !configured {
+			drafterLevel, _ := agents.ParseThinkingLevel(h.cfg.ResolveReasoningEffort("drafter"))
+			h.thinkingApplier("drafter", drafterLevel)
+		}
+	}
 }
 
 // SetRoleThinking 设置某角色（或 default）的推理强度：校验→持久化→联动 live agent→事件。
@@ -833,7 +841,7 @@ func (h *Host) SetRoleThinking(role, level string) error {
 		if h.cfg.Roles == nil {
 			h.cfg.Roles = make(map[string]bootstrap.RoleConfig)
 		}
-		rc := h.cfg.Roles[role]
+		rc := h.roleConfigForThinkingLocked(role)
 		rc.ReasoningEffort = string(parsed)
 		h.cfg.Roles[role] = rc
 	}
@@ -862,6 +870,24 @@ func (h *Host) SetRoleThinking(role, level string) error {
 		Level:    "info",
 	})
 	return nil
+}
+
+// roleConfigForThinkingLocked 为仅调整推理强度的新 drafter 补齐可持久化的
+// 模型字段。RoleConfig 不允许只写 reasoning_effort；若直接从空结构写入，
+// 当次能运行，下次启动却会被 ValidateBase 拒绝。其他已配置角色保持原样。
+func (h *Host) roleConfigForThinkingLocked(role string) bootstrap.RoleConfig {
+	if rc, ok := h.cfg.Roles[role]; ok {
+		return rc
+	}
+	if role != "drafter" {
+		return bootstrap.RoleConfig{}
+	}
+	if writer, ok := h.cfg.Roles["writer"]; ok {
+		writer.Fallbacks = append([]bootstrap.ModelRef(nil), writer.Fallbacks...)
+		return writer
+	}
+	provider, model, _ := h.models.CurrentSelection("drafter")
+	return bootstrap.RoleConfig{Provider: provider, Model: model}
 }
 
 // ── 事件回放 ──

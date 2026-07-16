@@ -24,6 +24,20 @@ type VectorSearcher interface {
 	Search(ctx context.Context, vector []float32, limit int) ([]VectorSearchHit, error)
 }
 
+// VectorSearchOptions controls corpus isolation before the vector engine applies
+// its result limit. The zero value preserves the generic search behavior used by
+// explicit design-time retrieval.
+type VectorSearchOptions struct {
+	ExcludeDesignOnly bool
+}
+
+// FilteredVectorSearcher is implemented by stores that can apply corpus filters
+// inside the vector search itself. Callers should keep accepting VectorSearcher
+// so older/test implementations remain compatible.
+type FilteredVectorSearcher interface {
+	SearchWithOptions(ctx context.Context, vector []float32, limit int, options VectorSearchOptions) ([]VectorSearchHit, error)
+}
+
 type SourcePathDeleter interface {
 	DeleteSourcePath(ctx context.Context, sourcePath string) error
 }
@@ -188,6 +202,10 @@ func (c *QdrantClient) WriteBatch(ctx context.Context, points []VectorPoint) err
 }
 
 func (c *QdrantClient) Search(ctx context.Context, vector []float32, limit int) ([]VectorSearchHit, error) {
+	return c.SearchWithOptions(ctx, vector, limit, VectorSearchOptions{})
+}
+
+func (c *QdrantClient) SearchWithOptions(ctx context.Context, vector []float32, limit int, options VectorSearchOptions) ([]VectorSearchHit, error) {
 	if len(vector) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -198,6 +216,15 @@ func (c *QdrantClient) Search(ctx context.Context, vector []float32, limit int) 
 		"vector":       vector,
 		"limit":        limit,
 		"with_payload": true,
+	}
+	if options.ExcludeDesignOnly {
+		body["filter"] = map[string]any{
+			"must_not": []map[string]any{
+				{"key": "source_kind", "match": map[string]any{"value": CraftSourceKind}},
+				{"key": "source_kind", "match": map[string]any{"value": BenchmarkSourceKind}},
+				{"key": "source_kind", "match": map[string]any{"value": CalibrationSourceKind}},
+			},
+		}
 	}
 	var out struct {
 		Result []struct {
@@ -212,7 +239,8 @@ func (c *QdrantClient) Search(ctx context.Context, vector []float32, limit int) 
 	hits := make([]VectorSearchHit, 0, len(out.Result))
 	for _, item := range out.Result {
 		chunk := chunkFromQdrantPayload(item.Payload)
-		if chunk.ID == "" || IsForbiddenChunk(chunk) {
+		if chunk.ID == "" || IsForbiddenChunk(chunk) ||
+			(options.ExcludeDesignOnly && IsDesignOnlySourceKind(chunk.SourceKind)) {
 			continue
 		}
 		hits = append(hits, VectorSearchHit{

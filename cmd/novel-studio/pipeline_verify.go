@@ -421,6 +421,7 @@ func verifyPipelineDeliverStage(outputDir string, flags pipelineFlags, evidence 
 		current := inspectCurrentChapterReview(outputDir, chapter)
 		evidence.Artifacts = append(evidence.Artifacts, current.Artifacts...)
 		evidence.Missing = append(evidence.Missing, current.Issues...)
+		evidence.Missing = append(evidence.Missing, currentRegisteredExternalDeliveryIssues(outputDir, chapter)...)
 		if len(current.Issues) == 0 && current.Verdict != "accept" {
 			evidence.Missing = append(evidence.Missing, fmt.Sprintf("reviews/%02d.json (verdict=%s, want accept)", chapter, current.Verdict))
 		}

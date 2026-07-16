@@ -480,6 +480,38 @@ func TestSanitizeDeepSeekAIJudgeRespectsCompanionSystemRule(t *testing.T) {
 	}
 }
 
+func TestSanitizeDeepSeekAIJudgeRespectsJSONOnlyCompanionPolicy(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"version":1,"system_companion":{"required":true}}`
+	if err := os.WriteFile(filepath.Join(st.Dir(), "meta", "web_reference_brief.json"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifact := &deepseekAIJudgeArtifact{
+		Chapter:         1,
+		Reasons:         []string{"系统保持静默可强化冷硬感。", "局部任务结构略对称。"},
+		DialogueFixPlan: []string{"系统不予回应。", "压缩人物重复解释。"},
+		RAGRules:        []string{"系统类信息必须绑定界面/载体，禁止以【】作为独立叙事段。"},
+		RawResponse:     `{"dialogue_fix_plan":["系统不予回应。"]}`,
+	}
+	sanitizeDeepSeekAIJudgeForProject(st, artifact)
+	joined := strings.Join(append(append([]string{}, artifact.Reasons...), artifact.DialogueFixPlan...), "\n")
+	if strings.Contains(joined, "系统保持静默") || strings.Contains(joined, "系统不予回应") {
+		t.Fatalf("JSON-only companion contradiction survived: %s", joined)
+	}
+	if !strings.Contains(joined, "任务结构") || !strings.Contains(joined, "重复解释") {
+		t.Fatalf("aligned advice was removed: %s", joined)
+	}
+	if artifact.RawResponse != "" {
+		t.Fatalf("contradictory raw response survived: %q", artifact.RawResponse)
+	}
+	if rules := strings.Join(artifact.RAGRules, "\n"); strings.Contains(rules, "必须绑定界面") || !strings.Contains(rules, "系统必须能短促接话") {
+		t.Fatalf("JSON-only companion RAG guard mismatch: %s", rules)
+	}
+}
+
 func TestSanitizeDeepSeekAIJudgeFindsCompanionSystemInWorldRules(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
@@ -647,13 +679,13 @@ func TestSanitizeDeepSeekAIJudgeRemovesAdviceThatRecreatesDialogueConveyor(t *te
 	if !strings.Contains(joined, "删掉没有迫切目标的发言者") || !strings.Contains(joined, "改变判断或选择") {
 		t.Fatalf("safe replacements missing: %s", joined)
 	}
-	for _, want := range []string{"多人开场删去一位角色", "开篇疏导只保留一个主导发言者", "多对象授权只完整写一个", "朋友点破男女主默契后", "删掉概括群像差异", "删掉‘便宜不等于省事’", "删除中间连续报时", "删掉‘A如何、B如何、C如何’式安装成果汇总"} {
+	for _, want := range []string{"多人开场删去一位角色", "开篇同一目标只保留一个主导发言者", "多对象授权只完整写一个", "关系角色点破核心同盟的默契后", "删掉概括群像差异", "删掉‘便宜不等于省事’", "删除中间连续报时", "删掉‘A如何、B如何、C如何’式成果汇总"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("evidence-specific safe replacement missing %q: %s", want, joined)
 		}
 	}
 	ragJoined := strings.Join(artifact.RAGRules, "\n")
-	if !strings.Contains(joined, "只完整渲染一到两个") || !strings.Contains(joined, "只跟住一组顾客") || !strings.Contains(ragJoined, "同类任务压缩规则") || !strings.Contains(ragJoined, "系统接话规则") || !strings.Contains(ragJoined, "代表操作压缩规则") || !strings.Contains(ragJoined, "心理去金句规则") || !strings.Contains(ragJoined, "成果非排比规则") || !strings.Contains(ragJoined, "配角关系功能规则") {
+	if !strings.Contains(joined, "只完整渲染一到两个") || !strings.Contains(joined, "真正改变主角判断的代表事件") || !strings.Contains(ragJoined, "同类任务压缩规则") || !strings.Contains(ragJoined, "系统接话规则") || !strings.Contains(ragJoined, "代表操作压缩规则") || !strings.Contains(ragJoined, "心理去金句规则") || !strings.Contains(ragJoined, "成果非排比规则") || !strings.Contains(ragJoined, "配角关系功能规则") {
 		t.Fatalf("representative-scene compression rule missing: %+v", artifact)
 	}
 	if !artifact.AdviceComplete || artifact.RawResponse != "" || len(artifact.ProjectGuardWarnings) == 0 {
@@ -734,7 +766,7 @@ func TestSanitizeDeepSeekAIJudgeProtectsHighSugarLeadAlliance(t *testing.T) {
 			t.Fatalf("lead-conflict advice survived %q: %s", forbidden, joined)
 		}
 	}
-	if !strings.Contains(joined, "基于信任立即配合") || !strings.Contains(joined, "不制造关系分歧") {
+	if !strings.Contains(joined, "基于既有信任修正") || !strings.Contains(joined, "不凭空制造关系分歧") {
 		t.Fatalf("aligned replacement missing: %s", joined)
 	}
 	if artifact.RawResponse != "" || len(artifact.ProjectGuardWarnings) == 0 {

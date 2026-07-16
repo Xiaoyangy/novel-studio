@@ -60,6 +60,12 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+		return nil, fmt.Errorf("第 %d 章一致性检查前 plan/receipt 复验失败: %w", a.Chapter, err)
+	}
+	if err := validateCurrentPlanBodyEpoch(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
 	result["content"] = content
 	result["word_count"] = wordCount
 	result["prose_rendering_check"] = map[string]any{
@@ -74,14 +80,41 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	wordContract := inspectChapterWordContract(t.store, content)
 	result["chapter_words_contract"] = wordContract
 	var hardGateViolations []string
+	hardFactAnchors, hardFactErr := InspectDraftHardFactAnchors(t.store, a.Chapter, content)
+	if hardFactErr != nil {
+		return nil, fmt.Errorf("第 %d 章一致性检查 hard-fact anchor 复验失败: %w", a.Chapter, hardFactErr)
+	}
+	result["hard_fact_anchor_check"] = hardFactAnchors
+	for _, anchor := range hardFactAnchors.Missing {
+		hardGateViolations = append(hardGateViolations, draftHardFactAnchorViolation(anchor))
+	}
+	if leaks := qualityrules.OrchestrationMetadataLeaks(content); len(leaks) > 0 {
+		keys := make([]string, 0, len(leaks))
+		for _, leak := range leaks {
+			keys = append(keys, leak.Target)
+		}
+		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+			"orchestration_metadata_leak: %s；必须删除内部规划/RAG/checkpoint 标识，当前不可 commit_chapter",
+			strings.Join(keys, "、")))
+	}
+	if quotes := qualityrules.ASCIIChineseDialogueQuotes(content); len(quotes) > 0 {
+		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+			"%s: %s，共 %v 处；人物对白必须改用中文全角引号“……”或「……”，当前不可 commit_chapter",
+			quotes[0].Rule, quotes[0].Target, quotes[0].Actual))
+	}
 	if wordContract.Configured && !wordContract.Passed {
 		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
 			"chapter_words: actual=%d, required=%d-%d；必须先用 edit_chapter 调整草稿，当前不可 commit_chapter",
 			wordContract.Actual, wordContract.Min, wordContract.Max))
 	}
-	_, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, content)
+	aigcReport, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, content)
+	rawAIGCGate := draftAIGCRawLocalGateResult(aigcReport, aigcGate)
+	if err := checkpointDraftStructuralBlock(t.store, a.Chapter, content, aigcReport, aigcGate); err != nil {
+		return nil, fmt.Errorf("checkpoint draft structural block: %w", err)
+	}
 	result["aigc_gate_check"] = aigcGate
-	externalGate, externalRerenderErr := InspectDraftExternalGate(t.store.Dir(), a.Chapter)
+	result["aigc_raw_local_gate_check"] = rawAIGCGate
+	externalGate, externalRerenderErr := InspectDraftExternalGateWithStore(t.store, a.Chapter)
 	if externalRerenderErr != nil {
 		return nil, fmt.Errorf("inspect draft external gate: %w", externalRerenderErr)
 	}
@@ -93,19 +126,25 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		case DraftExternalGateAdviceIncomplete:
 			hardGateViolations = append(hardGateViolations, "外判修改建议不完整；先重新外判，禁止盲目改写")
 		default:
-			hardGateViolations = append(hardGateViolations, "整章重渲染已产生新哈希；先停止正文修改并运行外部草稿复判")
+			if externalGate.LocalSoftEditPending {
+				hardGateViolations = append(hardGateViolations, "当前哈希已通过 DeepSeek，但本地非结构性 AIGC 门禁仍未通过；只允许一次定向 edit_chapter，随后立即停止并复判新哈希，注册平台复测继续暂缓")
+			} else {
+				hardGateViolations = append(hardGateViolations, "整章重渲染已产生新哈希；先停止正文修改并运行外部草稿复判")
+			}
 		}
 	}
-	if !aigcGate.Passed {
+	if !rawAIGCGate.Passed {
 		nextAction := "按 aigc_gate_check.rewrite_focus 使用 edit_chapter 重排草稿"
 		if externalGate.Status == DraftExternalGateRerenderAuthorized {
 			nextAction = "按 draft_external_ai_review 使用 draft_chapter(mode=write) 整章覆盖；禁止局部 edit"
+		} else if externalGate.LocalSoftEditPending {
+			nextAction = "当前哈希已通过 DeepSeek，只按 rewrite_focus 使用 edit_chapter 定向修改一次，落盘后立即停止并交外层复判新哈希"
 		} else if externalGate.Status == DraftExternalGateRejudgePending || externalGate.Status == DraftExternalGateAdviceIncomplete {
 			nextAction = "停止正文修改，先运行外部草稿复判"
 		}
 		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
 			"aigc_ratio: actual=%.2f%%, required=<%.0f%%；%s，当前不可 commit_chapter",
-			aigcGate.EffectiveGatePercent, aigcGate.PassExclusivePercent, nextAction))
+			rawAIGCGate.RawLocalGatePercent, rawAIGCGate.PassExclusivePercent, nextAction))
 	}
 
 	// 对照数据：保留全局性的一致性检查数据，避免重复加载 novel_context 已有的窗口数据
@@ -162,7 +201,7 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		}
 		attractionEvidence := inspectChapterAttractionEvidence(*plan, content)
 		result["reader_attraction_check"] = attractionEvidence
-		result["reader_attraction_check_usage"] = "逐项核对 opening_beat、humor_beat_targets、immediate_payoffs 是否已在页面形成事件与人物反应；trend_language_plan 是可选素材和使用上限，不是逐章原句门禁。正文用了才核对角色、语境和句法，生硬时应删除"
+		result["reader_attraction_check_usage"] = "opening_candidate、humor_candidates、payoff_candidates 与 trend_candidates 都是写前备选，不逐项对账，也不因缺少某个候选而返工。只按整章读者效果判断开篇是否抓人、轻松项目是否有自然的人物反应、核心结果是否可见；候选可重排、替换或省略。只有 trend_misuses 非空时才核对实际误用"
 	}
 	if warnings, _ := t.store.Drafts.LoadChapterPlanConsistencyWarnings(a.Chapter); len(warnings) > 0 {
 		result["plan_consistency_warnings"] = warnings
@@ -172,29 +211,30 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		result["hard_gate_violations"] = hardGateViolations
 	}
 
-	if _, err := t.store.Checkpoints.AppendArtifact(
-		domain.ChapterScope(a.Chapter), "consistency_check",
-		fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
-	); err != nil {
-		return nil, fmt.Errorf("checkpoint consistency check: %w", err)
+	_, hardReceipt, err := persistDraftHardConsistencyReceipt(t.store, a.Chapter, content, hardGateViolations)
+	if err != nil {
+		return nil, err
 	}
+	result["hard_consistency_receipt"] = hardReceipt
 
 	return json.Marshal(result)
 }
 
 func proseRenderingViolations(content string) []qualityrules.Violation {
 	wanted := map[string]struct{}{
-		"abstract_system_reassurance":     {},
-		"opaque_procedure_jargon":         {},
-		"ui_trial_checklist":              {},
-		"dialogue_action_lead_repetition": {},
-		"templated_dialogue_chain":        {},
-		"dialogue_conveyor_overuse":       {},
-		"pov_interiority_thin":            {},
-		"bureaucratic_register_overuse":   {},
-		"dialogue_aphorism_overuse":       {},
-		"dialogue_micro_period_chain":     {},
-		"system_message_overpacked":       {},
+		qualityrules.OrchestrationMetadataLeakRule: {},
+		qualityrules.ASCIIChineseDialogueQuoteRule: {},
+		"abstract_system_reassurance":              {},
+		"opaque_procedure_jargon":                  {},
+		"ui_trial_checklist":                       {},
+		"dialogue_action_lead_repetition":          {},
+		"templated_dialogue_chain":                 {},
+		"dialogue_conveyor_overuse":                {},
+		"pov_interiority_thin":                     {},
+		"bureaucratic_register_overuse":            {},
+		"dialogue_aphorism_overuse":                {},
+		"dialogue_micro_period_chain":              {},
+		"system_message_overpacked":                {},
 	}
 	var out []qualityrules.Violation
 	for _, violation := range qualityrules.Lint(content) {
@@ -209,6 +249,11 @@ func proseRenderingViolations(content string) []qualityrules.Violation {
 // scope 供 drafter 逐条自查；flags 是确定性命中的疑点（如正文出现 forbidden_move 的
 // 关键短语），需 LLM 复核。范围契约的语义级判断（是否引入计划外情节）交给 drafter。
 func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]any, []string) {
+	softPayoffDirections, promotedPayoffFacts := splitHardRenderMaterials(plan.Contract.PayoffPoints)
+	_, promotedAnchorFacts := splitHardRenderMaterials(renderSceneAnchors(plan.Contract.SceneAnchors))
+	factualContinuity := RenderContinuityChecks(plan)
+	factualContinuity = compactStrings(append(factualContinuity, promotedPayoffFacts...))
+	factualContinuity = compactStrings(append(factualContinuity, promotedAnchorFacts...))
 	scope := map[string]any{
 		"chapter":           plan.Chapter,
 		"title":             plan.Title,
@@ -217,10 +262,13 @@ func chapterPlanScopeCheck(plan domain.ChapterPlan, content string) (map[string]
 		"hook":              plan.Hook,
 		"required_outcomes": RenderRequiredOutcomes(plan),
 		"forbidden_moves":   plan.Contract.ForbiddenMoves,
-		"render_policy":     "结果必须成立；上游举例、点击路径、动作拍、句序和台词原句不是正文清单，可合并、替换或删除。",
+		"render_policy":     "required_outcomes、forbidden_moves 与事实连续性是硬范围；上游举例、点击路径、动作拍、句序、台词原句和 soft_* 候选不是正文清单，可合并、替换或删除。",
 	}
-	if len(plan.Contract.PayoffPoints) > 0 {
-		scope["payoff_points"] = plan.Contract.PayoffPoints
+	if len(factualContinuity) > 0 {
+		scope["factual_continuity"] = factualContinuity
+	}
+	if len(softPayoffDirections) > 0 {
+		scope["soft_payoff_directions"] = softPayoffDirections
 	}
 
 	// 确定性越界筛查：forbidden_move 的关键短语若出现在正文，提示可能触犯（供复核，非定论）。

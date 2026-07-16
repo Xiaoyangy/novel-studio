@@ -77,6 +77,35 @@ func TestLoadPromptsIncludeGoldenThreeAndWholeTextAIGCContracts(t *testing.T) {
 	}
 }
 
+func TestDrafterPromptKeepsExactRenderOnlySubmissionContracts(t *testing.T) {
+	prompt := Load("default").Prompts.Drafter
+	for _, want := range []string{
+		"少 1 字或多 1 字都会拒绝",
+		"首行必须逐字使用 `render_packet.heading`",
+		"submission_target_min-max",
+		"章级契约要求仅一条短提示时只能写一条",
+		"禁止为了说明完整把金额、禁项、地点、时限和验货要求塞进同一个",
+		"不得套用固定的 2-3 条配额",
+		"显式整章重渲染、AIGC 整章换稿",
+		"不得读取旧 draft/final",
+		"先删掉或合并整轮功能问答",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("drafter prompt missing exact render-only contract %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"高于上限 20% 以上",
+		"首次绑定也不例外",
+		"返工读取本章旧终稿",
+		"先 `read_chapter(source=\"final\")` 读原文",
+	} {
+		if strings.Contains(prompt, stale) {
+			t.Fatalf("drafter prompt retained contradictory rule %q", stale)
+		}
+	}
+}
+
 func TestLoadReferencesIncludesWritingTechniquesDigest(t *testing.T) {
 	bundle := Load("default")
 	if !strings.Contains(bundle.References.WritingTechniquesDigest, "19 篇写作技巧文章") {
@@ -221,8 +250,10 @@ func TestWritingPromptsCarryLiteraryRenderingContractWithoutQuotas(t *testing.T)
 	if !strings.Contains(bundle.Prompts.Writer, "literary-rendering#<card_id>") {
 		t.Fatal("writer prompt must preserve stable literary card provenance")
 	}
-	if !strings.Contains(bundle.Prompts.Drafter, "文学合同不是九项清单") {
-		t.Fatal("drafter prompt must treat literature methods as selected decisions, not a checklist")
+	if !strings.Contains(bundle.Prompts.Drafter, "文学合同硬软分层") ||
+		!strings.Contains(bundle.Prompts.Drafter, "soft_scene_choices") ||
+		!strings.Contains(bundle.Prompts.Drafter, "可重排、替换或全部省略") {
+		t.Fatal("drafter prompt must keep literary POV boundaries hard while treating shots as optional candidates")
 	}
 	if !strings.Contains(bundle.Prompts.Editor, "才是硬问题") || !strings.Contains(bundle.Prompts.Editor, "软诊断") {
 		t.Fatal("editor prompt must separate hard evidence boundaries from aesthetic diagnostics")

@@ -55,8 +55,35 @@ func (cs *CheckpointStore) loadFromDisk() {
 }
 
 // Append 追加一条 checkpoint。
-// 幂等：相同 Scope + Step + Digest 已存在则跳过写入，直接返回已有记录。
+// 幂等：相同 Scope + Step + Digest 历史上已存在则跳过写入，直接返回已有记录。
 func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
+	return cs.append(scope, step, artifact, digest, false, nil)
+}
+
+// AppendLatest 只把同 scope+step 的最新记录视为幂等命中。它用于 plan
+// 这类定义因果 epoch 的 checkpoint：A→B→A 必须追加新的 A epoch，不能返回
+// 历史上的第一个 A；但紧邻重试同一 A 仍应幂等。
+func (cs *CheckpointStore) AppendLatest(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
+	return cs.append(scope, step, artifact, digest, true, nil)
+}
+
+// AppendLatestAcross treats an exact checkpoint as idempotent only when it is
+// the latest event in the supplied causal step family. This is required for a
+// prose chain such as draft -> edit -> draft: returning an older draft with the
+// same digest would leave the current file falsely bound to the intervening
+// edit epoch. The emitted checkpoint still keeps its actual step.
+func (cs *CheckpointStore) AppendLatestAcross(scope domain.Scope, step, artifact, digest string, causalSteps ...string) (*domain.Checkpoint, error) {
+	stepSet := make(map[string]struct{}, len(causalSteps)+1)
+	stepSet[step] = struct{}{}
+	for _, candidate := range causalSteps {
+		if candidate != "" {
+			stepSet[candidate] = struct{}{}
+		}
+	}
+	return cs.append(scope, step, artifact, digest, true, stepSet)
+}
+
+func (cs *CheckpointStore) append(scope domain.Scope, step, artifact, digest string, latestOnly bool, causalSteps map[string]struct{}) (*domain.Checkpoint, error) {
 	checkpointProcessMu.Lock()
 	defer checkpointProcessMu.Unlock()
 	cs.io.mu.Lock()
@@ -77,8 +104,26 @@ func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest str
 	if digest != "" {
 		for i := len(cs.cache) - 1; i >= 0; i-- {
 			cp := cs.cache[i]
-			if cp.Scope.Matches(scope) && cp.Step == step && cp.Digest == digest {
+			if !cp.Scope.Matches(scope) {
+				continue
+			}
+			if len(causalSteps) > 0 {
+				if _, related := causalSteps[cp.Step]; !related {
+					continue
+				}
+				if cp.Step == step && cp.Artifact == artifact && cp.Digest == digest {
+					return &cp, nil
+				}
+				break
+			}
+			if cp.Step != step {
+				continue
+			}
+			if cp.Digest == digest && (!latestOnly || cp.Artifact == artifact) {
 				return &cp, nil
+			}
+			if latestOnly {
+				break
 			}
 		}
 	}
@@ -119,6 +164,35 @@ func (cs *CheckpointStore) AppendArtifact(scope domain.Scope, step, artifact str
 	}
 	sum := sha256.Sum256(data)
 	return cs.Append(scope, step, artifact, "sha256:"+hex.EncodeToString(sum[:]))
+}
+
+// AppendArtifactLatest is AppendLatest with a digest calculated from artifact.
+// Use it for artifacts whose repeated content still starts a new causal epoch
+// after a different version has been checkpointed.
+func (cs *CheckpointStore) AppendArtifactLatest(scope domain.Scope, step, artifact string) (*domain.Checkpoint, error) {
+	if artifact == "" {
+		return cs.AppendLatest(scope, step, "", "")
+	}
+	data, err := cs.io.ReadFile(artifact)
+	if err != nil {
+		return nil, fmt.Errorf("digest artifact %s: %w", artifact, err)
+	}
+	sum := sha256.Sum256(data)
+	return cs.AppendLatest(scope, step, artifact, "sha256:"+hex.EncodeToString(sum[:]))
+}
+
+// AppendArtifactLatestAcross calculates the current artifact digest and then
+// applies AppendLatestAcross causal-family idempotence.
+func (cs *CheckpointStore) AppendArtifactLatestAcross(scope domain.Scope, step, artifact string, causalSteps ...string) (*domain.Checkpoint, error) {
+	if artifact == "" {
+		return cs.AppendLatestAcross(scope, step, "", "", causalSteps...)
+	}
+	data, err := cs.io.ReadFile(artifact)
+	if err != nil {
+		return nil, fmt.Errorf("digest artifact %s: %w", artifact, err)
+	}
+	sum := sha256.Sum256(data)
+	return cs.AppendLatestAcross(scope, step, artifact, "sha256:"+hex.EncodeToString(sum[:]), causalSteps...)
 }
 
 // Latest 返回指定 scope 的最新 checkpoint。

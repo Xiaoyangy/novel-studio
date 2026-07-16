@@ -13,6 +13,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -53,9 +54,9 @@ func (t *PlanChapterTool) Schema() map[string]any {
 		schema.Property("continuity_checks", schema.Array("本章需特别核对的连续性点", schema.String(""))),
 		schema.Property("evaluation_focus", schema.Array("Editor 重点检查项", schema.String(""))),
 		schema.Property("emotion_target", schema.String("可选：本章希望读者主要感受到的情绪")),
-		schema.Property("payoff_points", schema.Array("可选：关键章希望回应的情节点或兑现点", schema.String(""))),
+		schema.Property("payoff_points", schema.Array("可选：关键章的兑现方向；不是逐项正文门禁，核心结果仍写入 required_beats", schema.String(""))),
 		schema.Property("hook_goal", schema.String("可选：章末希望驱动的追读欲望或悬念目标")),
-		schema.Property("scene_anchors", schema.Array("可选：本章要反复使用并承担信息、关系或代价的现场物件、痕迹、动作证据", schema.String(""))),
+		schema.Property("scene_anchors", schema.Array("可选0-2项：可承担信息、关系或代价的现场候选物件/痕迹；Drafter 可重排、替换或省略，不逐项回收", schema.String(""))),
 		schema.Property("causal_simulation", causalSimulationSchema(true)),
 	)
 }
@@ -199,6 +200,7 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
 		return nil, err
 	}
+	normalizeRewriteBriefRefinement(s, &plan)
 	normalizeChapterAttractionPlan(s, &plan)
 	plan.Contract.RequiredBeats = compactStrings(plan.Contract.RequiredBeats)
 	if len(plan.Contract.RequiredBeats) > 4 {
@@ -210,6 +212,11 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	}
 	if err := validateChapterPrewriteSimulation(s, plan, isRewritePlan); err != nil {
 		return nil, err
+	}
+	if isRewritePlan {
+		if err := validateRewriteCraftFinalization(s, plan); err != nil {
+			return nil, err
+		}
 	}
 	if issues := ChapterPlanIdentityIssues(s, plan.Chapter, plan); len(issues) > 0 {
 		return nil, fmt.Errorf("第 %d 章计划身份锚点不合格：%s: %w", plan.Chapter, strings.Join(issues, "；"), errs.ErrToolPrecondition)
@@ -238,9 +245,10 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 		}
 	}
 
-	if _, err := s.Checkpoints.AppendArtifact(
+	if _, err := s.Checkpoints.AppendArtifactLatestAcross(
 		domain.ChapterScope(plan.Chapter), "plan",
 		fmt.Sprintf("drafts/%02d.plan.json", plan.Chapter),
+		"plan", "chapter_world_simulation", "review", "draft-structural-block",
 	); err != nil {
 		return nil, fmt.Errorf("checkpoint chapter plan: %w", err)
 	}
@@ -278,7 +286,62 @@ func applyRewriteAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) error {
 	}
 	plan.Contract.ContinuityChecks = appendUniqueString(plan.Contract.ContinuityChecks,
 		fmt.Sprintf("局部返工源正文 %s 的 sha256 必须保持为 %s；若正文源已变化，本计划作废并重新推演。preserve_constraints 保护世界事实，不要求复刻旧场景、旧顺序或全部出场人物。", source.BodyPath, source.BodySHA256))
+	plan.CausalSimulation.ReviewRefinement.PreserveConstraints = canonicalPreserveFacts(
+		source.PreserveFacts,
+		plan.CausalSimulation.ReviewRefinement.PreserveConstraints,
+	)
 	return nil
+}
+
+// normalizeRewriteBriefRefinement deterministically projects the current
+// rewrite brief's top-level failure, target, and acceptance bullets into the
+// finalized plan. Large planning contexts may be compressed before the model
+// fills review_refinement; a fresh brief SHA must not be enough if its actual
+// structural diagnosis was silently dropped.
+func normalizeRewriteBriefRefinement(s *store.Store, plan *domain.ChapterPlan) {
+	if s == nil || plan == nil || plan.Chapter <= 0 {
+		return
+	}
+	_, _, brief, err := loadChapterRewriteSource(s, plan.Chapter)
+	if err != nil || strings.TrimSpace(brief) == "" {
+		return
+	}
+	refinement := &plan.CausalSimulation.ReviewRefinement
+	for _, item := range rewriteBriefTopLevelBullets(brief, "合同漏项") {
+		refinement.FailureModes = appendUniqueString(refinement.FailureModes, sanitizeProjectDiagnosticForPlan(s, item))
+	}
+	for _, item := range rewriteBriefTopLevelBullets(brief, "必须修正", "最新整篇单段门禁") {
+		refinement.LocalizedTargets = appendUniqueString(refinement.LocalizedTargets, sanitizeProjectDiagnosticForPlan(s, item))
+	}
+	for _, item := range rewriteBriefTopLevelBullets(brief, "验收条件") {
+		refinement.AcceptanceChecks = appendUniqueString(refinement.AcceptanceChecks, sanitizeProjectDiagnosticForPlan(s, item))
+	}
+	sanitizeReviewRefinementForPlan(s, refinement)
+}
+
+// sanitizeReviewRefinementForPlan also covers diagnosis text the model placed
+// in review_refinement before deterministic brief projection. Otherwise the
+// raw negative example can survive next to the sanitized brief item and make
+// the final project-contamination check impossible to pass.
+func sanitizeReviewRefinementForPlan(s *store.Store, refinement *domain.ReviewRefinementLoop) {
+	if refinement == nil {
+		return
+	}
+	refinement.TriggerSources = sanitizeProjectDiagnosticListForPlan(s, refinement.TriggerSources)
+	refinement.FailureModes = sanitizeProjectDiagnosticListForPlan(s, refinement.FailureModes)
+	refinement.LocalizedTargets = sanitizeProjectDiagnosticListForPlan(s, refinement.LocalizedTargets)
+	refinement.PreserveConstraints = canonicalPreserveFacts(nil, sanitizeProjectDiagnosticListForPlan(s, refinement.PreserveConstraints))
+	refinement.ReplanningMoves = sanitizeProjectDiagnosticListForPlan(s, refinement.ReplanningMoves)
+	refinement.AcceptanceChecks = sanitizeProjectDiagnosticListForPlan(s, refinement.AcceptanceChecks)
+	refinement.StopCondition = sanitizeProjectDiagnosticForPlan(s, refinement.StopCondition)
+}
+
+func sanitizeProjectDiagnosticListForPlan(s *store.Store, items []string) []string {
+	var sanitized []string
+	for _, item := range items {
+		sanitized = appendUniqueString(sanitized, sanitizeProjectDiagnosticForPlan(s, item))
+	}
+	return sanitized
 }
 
 func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
@@ -437,12 +500,7 @@ func planSystemEntityAllowed(s *store.Store) bool {
 	if s == nil {
 		return false
 	}
-	snapshot, err := s.UserRules.Load()
-	if err != nil || snapshot == nil {
-		return false
-	}
-	source := snapshot.Structured.Genre + "\n" + snapshot.Preferences
-	if domain.SystemCompanionVoiceRequested(source) {
+	if ProjectRequiresSystemCompanion(s) {
 		return true
 	}
 	for _, rel := range []string{"world_rules.json", filepath.Join("meta", "world_foundation.json")} {
@@ -740,6 +798,9 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	if err := validateChapterWorldSimulationReference(s, plan); err != nil {
 		return err
 	}
+	if err := ValidateChapterQuantityResultContract(s, plan); err != nil {
+		return err
+	}
 
 	var missing []string
 	require := func(ok bool, field string) {
@@ -766,20 +827,27 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 			require(false, "causal_simulation.literary_rendering_plan("+err.Error()+")")
 		}
 	}
-	if len(sim.TrendLanguage) > 0 {
+	attractionRequirements := attractionRequirementsForChapter(s, plan.Chapter)
+	if attractionRequirements.Trend || len(sim.TrendLanguage) > 0 {
 		require(domain.CompleteTrendLanguagePlan(sim.TrendLanguage), "causal_simulation.trend_language_plan")
+		if attractionRequirements.Trend {
+			require(domain.HasActiveTrendLanguagePlan(sim.TrendLanguage), "causal_simulation.trend_language_plan(active project item)")
+		}
+		require(trendLanguagePlanGroundedInChapterBrief(s, plan.Chapter, sim.TrendLanguage), "causal_simulation.trend_language_plan(grounded current-chapter source)")
 		if problems := domain.TrendLanguagePlanProblems(sim.TrendLanguage); len(problems) > 0 {
 			require(false, "causal_simulation.trend_language_plan(semantic_usage: "+strings.Join(problems, " | ")+")")
 		}
 	}
-	if len(sim.EntertainmentPlan.HumorBeats) > 0 || strings.TrimSpace(sim.EntertainmentPlan.OpeningBeat) != "" {
+	if attractionRequirements.Entertainment || len(sim.EntertainmentPlan.HumorBeats) > 0 || strings.TrimSpace(sim.EntertainmentPlan.OpeningBeat) != "" {
 		require(domain.CompleteReaderEntertainmentPlan(sim.EntertainmentPlan), "causal_simulation.reader_entertainment_plan")
 	}
-	if len(sim.AntiAIPlan.RiskSignals) > 0 || len(sim.AntiAIPlan.CounterMoves) > 0 {
-		require(hasFocusedAntiAIExecutionPlan(sim.AntiAIPlan), "causal_simulation.anti_ai_execution_plan")
+	if attractionRequirements.Longform {
+		require(domain.CompleteLongformOpeningDesign(sim.LongformOpening), "causal_simulation.longform_opening")
 	}
-	if attractionRequirementsForChapter(s, plan.Chapter).SystemCompanion &&
-		(len(sim.EntertainmentPlan.HumorBeats) > 0 || len(sim.AntiAIPlan.RiskSignals) > 0) {
+	if err := ValidateChapterAntiAIExecutionPlanForCurrentRepair(s, plan, rewrite); err != nil {
+		return err
+	}
+	if attractionRequirements.SystemCompanion {
 		if problems := domain.SystemCompanionPlanProblems(sim); len(problems) > 0 {
 			require(false, "causal_simulation.reader_entertainment_plan(system_companion_voice: 必须写系统接话/吐槽/解闷且始终支持主角；同时从anti_ai_execution_plan和forbidden_comedy删除反向句；当前问题="+strings.Join(problems, " | ")+")")
 		}
@@ -1158,8 +1226,122 @@ func hasFocusedAntiAIExecutionPlan(plan domain.AntiAIExecutionPlan) bool {
 	return len(plan.RiskSignals) > 0 &&
 		len(plan.CounterMoves) > 0 &&
 		strings.TrimSpace(plan.SentenceRhythmPolicy) != "" &&
+		strings.TrimSpace(plan.ObjectResponseBudget) != "" &&
 		strings.TrimSpace(plan.DialogueFunctionPlan) != "" &&
 		len(plan.ReviewChecks) > 0
+}
+
+func validateFocusedRepairLiteraryRendering(plan *domain.LiteraryRenderingPlan) error {
+	if plan == nil {
+		return fmt.Errorf("literary_rendering_plan is required")
+	}
+	if err := plan.Validate(); err != nil {
+		return err
+	}
+	if len(plan.SceneModes) == 0 {
+		return fmt.Errorf("literary_rendering_plan.scene_modes must contain at least one repair-specific scene/summary/pause choice")
+	}
+	if len(plan.ActiveLenses) == 0 {
+		return fmt.Errorf("literary_rendering_plan.active_lenses must contain at least one source-backed POV rendering move")
+	}
+	return nil
+}
+
+// ValidateChapterAntiAIExecutionPlanForCurrentRepair is the shared readiness
+// gate used by plan finalization, Flow routing and render-only plan reuse. An
+// anti-AI plan remains optional for ordinary chapters and non-AIGC rewrites,
+// but a rewrite that still owns whole-text AIGC evidence must carry an
+// executable plan before another Drafter turn can start.
+func ValidateChapterAntiAIExecutionPlanForCurrentRepair(s *store.Store, plan domain.ChapterPlan, rewrite bool) error {
+	required, reason, err := chapterRequiresFocusedAntiAIExecutionPlan(s, plan.Chapter, rewrite)
+	if err != nil {
+		return fmt.Errorf("第 %d 章检查 AIGC 返工合同失败：%v: %w", plan.Chapter, err, errs.ErrStoreRead)
+	}
+	provided := len(plan.CausalSimulation.AntiAIPlan.RiskSignals) > 0 ||
+		len(plan.CausalSimulation.AntiAIPlan.CounterMoves) > 0 ||
+		strings.TrimSpace(plan.CausalSimulation.AntiAIPlan.SentenceRhythmPolicy) != "" ||
+		strings.TrimSpace(plan.CausalSimulation.AntiAIPlan.ObjectResponseBudget) != "" ||
+		strings.TrimSpace(plan.CausalSimulation.AntiAIPlan.DialogueFunctionPlan) != "" ||
+		len(plan.CausalSimulation.AntiAIPlan.ReviewChecks) > 0
+	if !required && !provided {
+		return nil
+	}
+	if hasFocusedAntiAIExecutionPlan(plan.CausalSimulation.AntiAIPlan) {
+		if !required {
+			return nil
+		}
+		if err := validateFocusedRepairLiteraryRendering(plan.CausalSimulation.LiteraryRendering); err != nil {
+			return fmt.Errorf("第 %d 章 whole-text AIGC 结构返工缺少可执行文学渲染投影（%s）：必须提供有效 literary_rendering_plan，且至少包含一个 scene_mode 和一个带来源的 active_lens: %w",
+				plan.Chapter, err, errs.ErrToolPrecondition)
+		}
+		return nil
+	}
+	why := "已提供部分字段，必须补完整"
+	if required {
+		why = reason
+	}
+	return fmt.Errorf("第 %d 章 causal_simulation.anti_ai_execution_plan 不完整（%s）：必须同时包含 risk_signals、counter_moves、sentence_rhythm_policy、object_response_budget、dialogue_function_plan、review_checks: %w",
+		plan.Chapter, why, errs.ErrToolPrecondition)
+}
+
+func chapterRequiresFocusedAntiAIExecutionPlan(s *store.Store, chapter int, rewrite bool) (bool, string, error) {
+	if s == nil || chapter <= 0 || !rewrite {
+		return false, "", nil
+	}
+	requirement, err := loadDraftExternalRerenderRequirement(s.Dir(), chapter)
+	if err != nil {
+		return false, "", err
+	}
+	if requirement != nil && requirement.Source != draftRerenderAuthorizationSource {
+		threshold := requirement.PassExclusivePercent
+		if threshold <= 0 {
+			threshold = 4
+		}
+		if RequiresRegisteredExternalRetest(requirement) {
+			return true, "仍有命名外部复测合同：" + strings.Join(RegisteredExternalRetestLabels(requirement), ", "), nil
+		}
+		if requirement.Source == "local_mechanical_gate" || requirement.AIProbabilityPercent >= threshold {
+			return true, "仍有 whole-text AIGC 整章返工合同", nil
+		}
+	}
+	if body, bodyErr := s.Drafts.LoadChapterText(chapter); bodyErr == nil && strings.TrimSpace(body) != "" {
+		rows, rowsErr := reviewreport.LatestRegisteredExternalDetections(s.Dir(), chapter, reviewreport.BodySHA256(body))
+		if rowsErr != nil {
+			return false, "", rowsErr
+		}
+		var labels []string
+		for _, row := range rows {
+			if row.NormalizedScorePercent < 4 {
+				continue
+			}
+			labels = append(labels, strings.TrimSpace(row.Detector)+"/"+strings.TrimSpace(row.Mode))
+		}
+		if len(labels) > 0 {
+			return true, "当前正式正文仍有命名外部检测硬失败：" + strings.Join(labels, ", "), nil
+		}
+	}
+	if CurrentDraftHasLocalStructuralBlock(s, chapter) {
+		return true, "当前草稿仍可复现 whole-text/segment 结构型 AIGC 阻断", nil
+	}
+	scope := domain.ChapterScope(chapter)
+	if blocked := s.Checkpoints.LatestByStep(scope, "draft-structural-block"); blocked != nil {
+		committed := s.Checkpoints.LatestByStep(scope, "commit")
+		if committed == nil || blocked.Seq > committed.Seq {
+			return true, "当前未提交返工周期已有 whole-text/segment 结构阻断 checkpoint", nil
+		}
+	}
+	if brief, briefErr := s.Drafts.LoadRewriteBrief(chapter); briefErr == nil {
+		brief = strings.ToLower(brief)
+		for _, marker := range []string{"aigc", "ai 味", "ai味", "zhuque", "朱雀", "whole-text", "whole_text", "single-segment", "整篇单段", "整章单段", "结构指纹"} {
+			if strings.Contains(brief, marker) {
+				return true, "当前 rewrite_brief 明确要求整篇/单段 AIGC 返工", nil
+			}
+		}
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(s, chapter); escalation.Required {
+		return true, escalation.Reason, nil
+	}
+	return false, "", nil
 }
 
 func voiceLogicContainsCharacter(records []domain.CharacterVoiceLogic, character string) bool {
@@ -1323,12 +1505,12 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("risk_signals", schema.Array("本章高风险 AI 味", schema.String(""))).Required(),
 		schema.Property("counter_moves", schema.Array("对应阻断动作", schema.String(""))).Required(),
 		schema.Property("sentence_rhythm_policy", schema.String("句长和段落节奏")).Required(),
-		schema.Property("object_response_budget", schema.String("屏幕、物件回应预算")),
+		schema.Property("object_response_budget", schema.String("屏幕、物件回应的预算、间距、延迟或静默策略；整篇/单段 AIGC 返工时必填")).Required(),
 		schema.Property("dialogue_function_plan", schema.String("对白功能分配")).Required(),
 		schema.Property("review_checks", schema.Array("提交前检查项", schema.String(""))).Required(),
 	)
 	trendLanguage := schema.Object(
-		schema.Property("item", schema.String("本章会原样落进人物对白/系统交流/群聊反应的一条具体短梗；若项目 web_reference_brief 有本章热梗落点，只能从该小节选择，不得擅自换梗")).Required(),
+		schema.Property("item", schema.String("本章可选的一条短梗或其句式槽位；允许正文零使用，选用后才须按人物/系统/群聊语境正确落地；若项目 web_reference_brief 有本章热梗落点，只能从该小节选择，不得擅自换梗")).Required(),
 		schema.Property("source_context", schema.String("必须明确写 meta/web_reference_brief.md 或项目联网简报的具体条目；无简报时才可写当轮 web_research 来源")).Required(),
 		schema.Property("character_carrier", schema.String("明确到角色或媒介；不得写旁白")).Required(),
 		schema.Property("scene_function", schema.String("误会、社死、关系反应或轻喜剧反噬中的具体功能")).Required(),
@@ -1336,11 +1518,11 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("forbidden_usage", schema.String("明确旁白、关键判断、硬煽情和章末禁用")).Required(),
 	)
 	entertainmentPlan := schema.Object(
-		schema.Property("opening_beat", schema.String("前200字内的具体尴尬、冲突、误会或反转；写清谁做什么以及现场反应")).Required(),
-		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧节拍，每个写清铺垫、承载角色和反应后果；不能都靠热梗", schema.String(""))).Required(),
-		schema.Property("immediate_payoffs", schema.Array("至少2个本章页面可见的即时兑现：到账、打脸、关系偏转、结果反噬或新权限", schema.String(""))).Required(),
+		schema.Property("opening_beat", schema.String("前200字抓力的候选实现；写清谁做什么以及现场反应，Drafter 可用更自然的同功能开场替换")).Required(),
+		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧候选，供 Drafter 择取、重排、替换或省略；每个写清铺垫、承载角色和反应后果，不能都靠热梗，不构成逐项正文门禁", schema.String(""))).Required(),
+		schema.Property("immediate_payoffs", schema.Array("至少2个即时兑现候选：到账、打脸、关系偏转、结果反噬或新权限；正文只需让核心硬结果产生可见后果，不逐项兑现候选", schema.String(""))).Required(),
 		schema.Property("procedure_compression", schema.String("列明哪些流程一笔带过，以及保留的冲突/笑点/关系变化；不得把经营写成教程")).Required(),
-		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友如何用有性格的短回应陪主角推进；用户定义系统会交流解闷时，必须明确系统如何接话/吐槽并始终支持主角，禁止反向写成不接话")).Required(),
+		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友的声口与支持边界，以及一种候选回应方式；用户定义系统会交流解闷时不得反向写成不接话，但不锁定具体笑话或原句")).Required(),
 		schema.Property("forbidden_comedy", schema.Array("本章喜剧禁区：降智、梗串、旁白热词、拿严肃情绪硬抖包袱等", schema.String(""))).Required(),
 	)
 	longRangePromise := schema.Object(
@@ -1403,7 +1585,7 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺")),
 		schema.Property("chapter_function", schema.String("本章在全书中的功能")),
-		schema.Property("context_sources", schema.Array("本次实际使用的上下文来源", schema.String(""))),
+		schema.Property("context_sources", schema.Array("本次实际使用的上下文来源；存在 chapter_pipeline_instruction 时必须绑定其 source_token", schema.String(""))),
 		schema.Property("initial_state", schema.Array("最多2项：主角，必要时加当章关系核心", initialState)),
 		schema.Property("offscreen_character_stage", schema.Array("仅写本章相关人物；非本章角色不必填", offscreenStage)),
 		schema.Property("environment_state", schema.Array("现场环境和物件状态", environmentState)),
@@ -1654,8 +1836,8 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 	)
 	externalReferencePlan := schema.Object(
 		schema.Property("query_or_need", schema.String("本章需要的外部资料、行业流程、当代生活细节或网络语境；没有使用时说明不用的理由")).Required(),
-		schema.Property("source_type", schema.String("资料类型：web_search、official、news、platform_trend、project_web_reference_brief、RAG、local_reference 等")).Required(),
-		schema.Property("source_refs", schema.Array("来源链接、检索词、reference_pack 路径或 RAG trace id", schema.String(""))).Required(),
+		schema.Property("source_type", schema.String("资料类型。普通资料可写 web_search、official、news、platform_trend、project_web_reference_brief、RAG、local_reference；消费 rewrite_craft_pack 时只能写 canonical 值：calibration_reference/craft_technique 命中写 craft_recall，benchmark_reference 命中写 benchmark_craft_recall，禁止照抄 source_kind")).Required(),
+		schema.Property("source_refs", schema.Array("来源链接、检索词、reference_pack 路径或 RAG trace id；消费 rewrite_craft_pack 时每个 need.id 恰好一行，并把该 need 采用的精确 hit.ref 全部合入本数组", schema.String(""))).Required(),
 		schema.Property("retrieved_at", schema.String("检索或简报日期；没有实时检索时写项目简报日期/未知并说明需要刷新")).Required(),
 		schema.Property("freshness_requirement", schema.String("时效要求：最新/近90天/年度盘点/稳定常识/无需最新，并说明原因")).Required(),
 		schema.Property("usable_details", schema.Array("可转化成正文的细节：物件、界面、流程、口语、空间、价格、制度压力", schema.String(""))).Required(),
@@ -1671,11 +1853,11 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("forbidden_usage", schema.String("禁止用法：主角金句、旁白解释、章末钩子、规则条款、过时梗硬贴等")).Required(),
 	)
 	readerEntertainmentPlan := schema.Object(
-		schema.Property("opening_beat", schema.String("前200字内的具体尴尬、冲突、误会或反转；写清谁做什么以及现场反应")).Required(),
-		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧节拍，每个写清铺垫、承载角色和反应后果；不能都靠热梗", schema.String(""))).Required(),
-		schema.Property("immediate_payoffs", schema.Array("至少2个本章页面可见的即时兑现：到账、打脸、关系偏转、结果反噬或新权限", schema.String(""))).Required(),
+		schema.Property("opening_beat", schema.String("前200字抓力的候选实现；写清谁做什么以及现场反应，Drafter 可用更自然的同功能开场替换")).Required(),
+		schema.Property("humor_beats", schema.Array("至少2个不同机制的喜剧候选，供 Drafter 择取、重排、替换或省略；每个写清铺垫、承载角色和反应后果，不能都靠热梗，不构成逐项正文门禁", schema.String(""))).Required(),
+		schema.Property("immediate_payoffs", schema.Array("至少2个即时兑现候选：到账、打脸、关系偏转、结果反噬或新权限；正文只需让核心硬结果产生可见后果，不逐项兑现候选", schema.String(""))).Required(),
 		schema.Property("procedure_compression", schema.String("哪些流程压缩，以及保留的冲突、笑点或关系变化")).Required(),
-		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友的性格化短回应；无此类角色时写替代反应")).Required(),
+		schema.Property("companion_voice_beat", schema.String("系统、搭档或朋友的声口与支持边界，以及一种候选回应方式；不锁定具体笑话或原句，无此类角色时写替代反应")).Required(),
 		schema.Property("forbidden_comedy", schema.Array("喜剧禁区：降智、梗串、旁白热词、硬抖包袱等", schema.String(""))).Required(),
 	)
 	groundingDetail := schema.Object(
@@ -1991,7 +2173,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、可见事实回收、升级爽点等")),
 		schema.Property("chapter_function", schema.String("本章在全书/卷/弧中的功能；第一章必须写明开局承诺、核心问题和主角初始选择")),
-		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
+		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；存在 chapter_pipeline_instruction 时必须绑定其 source_token；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
 		req(schema.Property("writing_norms_applied", schema.Array("本章写作规范执行计划：必须覆盖 writing_engine/user_rules/anti_ai_tone/human_feel_craft/writing_techniques_digest/web_reference_guidelines/longform_ai_detector 中实际可见且相关的规则", writingNormApplication))),
 		req(schema.Property("anti_ai_execution_plan", antiAIExecutionPlan)),
 		req(schema.Property("external_reference_plan", schema.Array("外部资料、网络检索、项目 web_reference_brief 和 RAG 召回如何进入正文；不用网络资料也要说明不用原因", externalReferencePlan))),

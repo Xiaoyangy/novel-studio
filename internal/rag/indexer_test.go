@@ -39,6 +39,60 @@ type eofBatchWriter struct {
 	points   []VectorPoint
 }
 
+func TestChunkPayloadRejectsReservedMetadataCollisions(t *testing.T) {
+	chunk := domain.RAGChunk{
+		ID:         "chunk:trusted",
+		SourcePath: "deconstruction-library/writing-techniques/dialogue.md",
+		SourceKind: CraftSourceKind,
+		Facet:      "dialogue",
+		ParentID:   "parent:trusted",
+		Hash:       "hash:trusted",
+		Context:    "context:trusted",
+		Summary:    "summary:trusted",
+		Keywords:   []string{"可信关键词"},
+		Metadata: map[string]any{
+			"source_path": "meta/spoof.md",
+			"source_kind": "chapter_summary_facts",
+			"facet":       "spoof",
+			"parent_id":   "parent:spoof",
+			"hash":        "hash:spoof",
+			"context":     "context:spoof",
+			"summary":     "summary:spoof",
+			"keywords":    []string{"伪造关键词"},
+			"chunk_id":    "chunk:spoof",
+			"chunk":       "spoof",
+			"custom":      "kept",
+		},
+	}
+	payload := chunkPayload(chunk)
+	want := map[string]any{
+		"source_path": chunk.SourcePath,
+		"source_kind": chunk.SourceKind,
+		"facet":       chunk.Facet,
+		"parent_id":   chunk.ParentID,
+		"hash":        chunk.Hash,
+		"context":     chunk.Context,
+		"summary":     chunk.Summary,
+	}
+	for key, value := range want {
+		if payload[key] != value {
+			t.Fatalf("payload[%q] = %#v, want trusted %#v", key, payload[key], value)
+		}
+	}
+	if keywords, ok := payload["keywords"].([]string); !ok || len(keywords) != 1 || keywords[0] != "可信关键词" {
+		t.Fatalf("payload keywords were spoofed: %#v", payload["keywords"])
+	}
+	if _, ok := payload["chunk_id"]; ok {
+		t.Fatalf("metadata injected reserved chunk_id: %#v", payload["chunk_id"])
+	}
+	if _, ok := payload["chunk"]; ok {
+		t.Fatalf("metadata injected reserved chunk: %#v", payload["chunk"])
+	}
+	if payload["custom"] != "kept" {
+		t.Fatalf("non-reserved metadata was lost: %#v", payload["custom"])
+	}
+}
+
 func (w *eofBatchWriter) Write(ctx context.Context, point VectorPoint) error {
 	return w.WriteBatch(ctx, []VectorPoint{point})
 }

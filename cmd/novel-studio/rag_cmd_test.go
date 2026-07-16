@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,57 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestChunksFromRAGFileBuildsMethodOnlySafeRewriteSummary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deconstruction-library", "review-calibration", "novel-craft-methodology", "11-章节技法.md")
+	uniqueRaw := "独特原文前缀甲乙丙：某角色照着样例台词完整说出不应进入计划的句子。"
+	text := "# 对白技法\n\n" + uniqueRaw + " 对白要用打断和潜台词改变信息释放与主动权，而不是整段说明。"
+	chunks := chunksFromRAGFile(path, "", text, 500)
+	if len(chunks) != 1 {
+		t.Fatalf("chunks=%d, want 1", len(chunks))
+	}
+	chunk := chunks[0]
+	if got := chunk.Metadata["summary_origin"]; got != rag.SummaryOriginDerivedMethodMetadata {
+		t.Fatalf("summary_origin=%v", got)
+	}
+	if strings.Contains(chunk.Summary, uniqueRaw) || strings.HasPrefix(uniqueRaw, chunk.Summary) {
+		t.Fatalf("safe rewrite summary copied raw benchmark prose: %q", chunk.Summary)
+	}
+	result := rag.NewCraftCatalog(chunks).RecallWithOptions(
+		rag.CraftFieldDialogue, "对白 打断 潜台词 信息释放", 3,
+		rag.CraftRecallOptions{Stage: rag.StagePlan, RequireRelevant: true, SafeRewrite: true},
+	)
+	if result.NoMaterial || len(result.Hits) != 1 || strings.Contains(result.Hits[0].Chunk.Summary, uniqueRaw) {
+		t.Fatalf("indexed safe rewrite recall lost method card or leaked raw text: %+v", result)
+	}
+}
+
+func TestChunksFromRAGFileDropsEmbeddedBinaryBase64(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deconstruction-library", "novel_all", "01-教程方法论", "带图教程.md")
+	binary := make([]byte, 4096)
+	for i := range binary {
+		binary[i] = byte(i % 256)
+	}
+	encoded := base64.StdEncoding.EncodeToString(binary)
+	text := "# 正常方法\n\n场景必须由人物选择推动，观察、判断、动作和后果要真正改变下一步。\n\n" +
+		"# 内嵌图片\n\n![图](data:image/png;base64," + encoded + ")"
+	chunks := chunksFromRAGFile(path, "", text, 900)
+	if len(chunks) != 1 || !strings.Contains(chunks[0].Text, "人物选择") {
+		t.Fatalf("embedded binary was indexed or surrounding prose was lost: count=%d chunks=%+v", len(chunks), chunks)
+	}
+	for _, chunk := range chunks {
+		if strings.Contains(chunk.Text, encoded[:200]) {
+			t.Fatal("base64 image payload survived RAG chunk filtering")
+		}
+	}
+	// Long normal text and encoded *text* are not binary payloads.
+	if ragChunkLooksEncodedBlob(strings.Repeat("methodology keeps human choices visible ", 30)) {
+		t.Fatal("ordinary English prose was misclassified as an encoded blob")
+	}
+	if ragChunkLooksEncodedBlob(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("human readable method card "), 40))) {
+		t.Fatal("base64-encoded textual evidence was misclassified as binary")
+	}
+}
 
 func TestBuildLocalRAGIndexUsesCurrentProjectAndSkipsReferenceLibraries(t *testing.T) {
 	root := t.TempDir()
@@ -559,20 +612,67 @@ func TestPipelineRAGIncrementalPlanRejectsInvalidExistingVector(t *testing.T) {
 
 func TestMigrateRAGIndexSchemaRehashesSemanticContent(t *testing.T) {
 	state := &domain.RAGIndexState{
-		Chunks: []domain.RAGChunk{{
-			ID: "stable-id", Hash: "legacy-hash", SourcePath: "outline.md", SourceKind: "planning",
-			Summary: "青山县返乡经营", Text: "第一间门店开始试营业。", Metadata: map[string]any{"chapter": 1},
-		}},
-		ChunkHashes: []string{"legacy-hash"},
+		SchemaVersion: 2,
+		Chunks: []domain.RAGChunk{
+			{
+				ID: "stable-id", Hash: "legacy-hash", SourcePath: "outline.md", SourceKind: "planning",
+				Summary: "青山县返乡经营", Text: "第一间门店开始试营业。", Metadata: map[string]any{"chapter": 1},
+			},
+			{
+				ID: "legacy-design", Hash: "legacy-design-hash",
+				SourcePath: "deconstruction-library/review-calibration/novel-craft-methodology/11-章节技法.md",
+				SourceKind: rag.CalibrationSourceKind,
+				Summary:    "独特原文前缀不应继续充当摘要。",
+				Text:       "对白通过打断和潜台词改变主动权。",
+				Metadata:   map[string]any{"craft_facet": string(rag.FacetDialogue), "usage_stage": "plan"},
+			},
+			{
+				ID: "curated-design", Hash: "curated-design-hash",
+				SourcePath: "deconstruction-library/review-calibration/novel-craft-methodology/12-人工卡.md",
+				SourceKind: rag.CalibrationSourceKind,
+				Summary:    "人工方法卡；动作=保留作者明确编排的观察与后果；验收=人工定义不被迁移覆盖",
+				Text:       "这段原文即使含有打断和潜台词，也不能替换人工摘要。",
+				Metadata: map[string]any{
+					"craft_facet":    string(rag.FacetDialogue),
+					"usage_stage":    "plan",
+					"summary_origin": rag.SummaryOriginCuratedMethod,
+				},
+			},
+			{
+				ID:         "broad-benchmark",
+				SourcePath: "deconstruction-library/benchmarks/某本小说/正文.md",
+				SourceKind: rag.BenchmarkSourceKind,
+				Summary:    "宽参考库摘要不能被 schema 升级伪装成自动方法卡。",
+				Text:       "人物和故事原文只供显式拆解。",
+				Metadata:   map[string]any{"craft_facet": string(rag.FacetBenchmark), "usage_stage": "plan"},
+			},
+		},
+		ChunkHashes: []string{"legacy-hash", "legacy-design-hash", "curated-design-hash", "broad-benchmark-hash"},
 	}
+	broadBefore := rag.RehashChunk(state.Chunks[3])
+	state.Chunks[3] = broadBefore
+	state.ChunkHashes[3] = broadBefore.Hash
 	if !migrateRAGIndexSchema(state) {
 		t.Fatal("legacy state should migrate")
 	}
 	if state.SchemaVersion != domain.CurrentRAGIndexSchemaVersion || state.Chunks[0].Hash == "legacy-hash" {
 		t.Fatalf("state was not rehashed: %+v", state)
 	}
-	if state.Chunks[0].ID != "stable-id" || len(state.ChunkHashes) != 1 || state.ChunkHashes[0] != state.Chunks[0].Hash {
+	if state.Chunks[0].ID != "stable-id" || len(state.ChunkHashes) != 4 {
 		t.Fatalf("migration broke stable ID/hash list: %+v", state)
+	}
+	design := state.Chunks[1]
+	if design.Metadata["summary_origin"] != rag.SummaryOriginDerivedMethodMetadata || strings.Contains(design.Summary, "独特原文前缀") {
+		t.Fatalf("schema migration retained raw design summary: %+v", design)
+	}
+	curated := state.Chunks[2]
+	if curated.Summary != "人工方法卡；动作=保留作者明确编排的观察与后果；验收=人工定义不被迁移覆盖" ||
+		curated.Metadata["summary_origin"] != rag.SummaryOriginCuratedMethod {
+		t.Fatalf("schema migration replaced curated method summary: %+v", curated)
+	}
+	broad := state.Chunks[3]
+	if broad.Summary != "宽参考库摘要不能被 schema 升级伪装成自动方法卡。" || broad.Hash != broadBefore.Hash {
+		t.Fatalf("schema migration rewrote an out-of-scope benchmark: %+v", broad)
 	}
 	if migrateRAGIndexSchema(state) {
 		t.Fatal("current state migration must be idempotent")

@@ -125,6 +125,97 @@ func TestSaveReviewAccumulatesPendingRewritesAcrossChapterReviews(t *testing.T) 
 	}
 }
 
+func TestSaveReviewCheckpointStartsNewEpochAfterIdenticalBodyRewrite(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("复审因果轮次", 3); err != nil {
+		t.Fatal(err)
+	}
+	const body = "第一章正文。"
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(body)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "met", "issues": []map[string]any{},
+		"verdict": "accept", "summary": "正文与合同一致。",
+	})
+	tool := NewSaveReviewTool(s)
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("first review: %v", err)
+	}
+	first := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "review")
+	if first == nil {
+		t.Fatal("first review checkpoint missing")
+	}
+	swap, err := s.Checkpoints.Append(
+		domain.ChapterScope(1), "rewrite-body-swapped", "chapters/01.md",
+		"sha256:"+reviewreport.BodySHA256(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("second identical review: %v", err)
+	}
+	second := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "review")
+	if second == nil || second.Seq <= swap.Seq || second.Seq == first.Seq {
+		t.Fatalf("identical review after a body-swap must open a fresh epoch: first=%+v swap=%+v second=%+v", first, swap, second)
+	}
+	if second.Digest != first.Digest {
+		t.Fatalf("test requires identical review bytes: first=%s second=%s", first.Digest, second.Digest)
+	}
+}
+
+func TestSaveReviewProjectsCurrentRegisteredExternalGateIntoRewriteBrief(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("外部门禁投影", 3); err != nil {
+		t.Fatal(err)
+	}
+	const body = "第一章正文整篇单段检测稿。"
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(body)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	row := appendRegisteredExternalDetection(t, dir, 1, body, "zhuque", "novel-whole-text-single-segment", 86)
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 1, "scope": "chapter", "dimensions": acceptDimensions(),
+		"contract_status": "met", "issues": []map[string]any{},
+		"verdict": "rewrite", "summary": "外部整篇单段结果阻断当前稿。", "affected_chapters": []int{1},
+	})
+	if _, err := NewSaveReviewTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	brief, err := s.Drafts.LoadRewriteBrief(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## 最新整篇单段门禁（2026-07-15）",
+		"zhuque/novel-whole-text-single-segment",
+		row.BodySHA256,
+		"86.00%",
+		"严格 `<4%`",
+		"同 detector/mode 精确 payload 复测",
+	} {
+		if !strings.Contains(brief, want) {
+			t.Fatalf("rewrite brief missing registered external contract %q:\n%s", want, brief)
+		}
+	}
+}
+
 func TestSaveReviewShortGlobalAcceptCompletesAndWritesManuscript(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
@@ -942,6 +1033,25 @@ func TestReviewEntryForLearningDropsUserRuleContradictions(t *testing.T) {
 	filtered := reviewEntryForLearning(s, r)
 	if len(filtered.Issues) != 1 || !strings.Contains(filtered.Issues[0].Description, "沈知遥") {
 		t.Fatalf("unexpected filtered review: %+v", filtered.Issues)
+	}
+}
+
+func TestReviewEntryForLearningDropsJSONOnlyCompanionContradictions(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"version":1,"system_companion":{"required":true}}`
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.json"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := domain.ReviewEntry{Chapter: 1, Scope: "chapter", Issues: []domain.ConsistencyIssue{
+		{Type: "aesthetic", Severity: "warning", Description: "系统保持静默，建议强化冷硬感。"},
+		{Type: "aesthetic", Severity: "warning", Description: "第二句解释略长，可压缩。"},
+	}}
+	filtered := reviewEntryForLearning(s, r)
+	if len(filtered.Issues) != 1 || !strings.Contains(filtered.Issues[0].Description, "解释略长") {
+		t.Fatalf("JSON-only companion contradictions entered learning assets: %+v", filtered.Issues)
 	}
 }
 

@@ -36,17 +36,80 @@ func loadChapterRewriteSource(s *store.Store, chapter int) (*domain.ChapterRewri
 		return nil, "", "", fmt.Errorf("load rewrite brief %s: %w", briefPath, err)
 	}
 	brief := string(briefRaw)
+	canonicalFacts, canonicalPath, canonicalSHA256, err := rewriteCanonicalOutcomeFacts(s, chapter)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("load rewrite canonical outcomes: %w", err)
+	}
 	sum := sha256.Sum256([]byte(body))
 	briefSum := sha256.Sum256(briefRaw)
+	preserveFacts := canonicalPreserveFacts(rewriteBriefPreserveFacts(brief), canonicalFacts)
 	source := &domain.ChapterRewriteSource{
-		BodyPath:      bodyPath,
-		BodySHA256:    hex.EncodeToString(sum[:]),
-		WordCount:     utf8.RuneCountInString(body),
-		BriefPath:     briefPath,
-		BriefSHA256:   hex.EncodeToString(briefSum[:]),
-		PreserveFacts: rewriteBriefPreserveFacts(brief),
+		BodyPath:             bodyPath,
+		BodySHA256:           hex.EncodeToString(sum[:]),
+		WordCount:            utf8.RuneCountInString(body),
+		BriefPath:            briefPath,
+		BriefSHA256:          hex.EncodeToString(briefSum[:]),
+		CanonicalStatePath:   canonicalPath,
+		CanonicalStateSHA256: canonicalSHA256,
+		PreserveFacts:        preserveFacts,
 	}
 	return source, body, brief, nil
+}
+
+// rewriteCanonicalOutcomeFacts protects result-level canon that an editorial
+// rewrite brief may omit. chapter_progress is explicitly the already-written
+// fact ledger; only state/resource outcomes are projected here. Timeline prose,
+// summaries, and reasons are deliberately excluded because a review may be
+// correcting their causal order while keeping the booked result unchanged.
+func rewriteCanonicalOutcomeFacts(s *store.Store, chapter int) ([]string, string, string, error) {
+	if s == nil || chapter <= 0 {
+		return nil, "", "", nil
+	}
+	const relPath = "meta/chapter_progress.json"
+	raw, err := os.ReadFile(filepath.Join(s.Dir(), filepath.FromSlash(relPath)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", "", nil
+		}
+		return nil, "", "", err
+	}
+	ledger, err := s.LoadChapterProgressLedger()
+	if err != nil {
+		return nil, "", "", err
+	}
+	if ledger == nil {
+		return nil, "", "", nil
+	}
+	var facts []string
+	for _, entry := range ledger.Entries {
+		if entry.Chapter != chapter {
+			continue
+		}
+		for _, change := range entry.StateChanges {
+			entity, field, value := strings.TrimSpace(change.Entity), strings.TrimSpace(change.Field), strings.TrimSpace(change.NewValue)
+			if entity == "" || field == "" || value == "" {
+				continue
+			}
+			facts = appendUniqueString(facts, fmt.Sprintf("已提交状态结果：%s.%s = %s", entity, field, value))
+		}
+		for _, claim := range entry.ResourceChanges {
+			name, status := strings.TrimSpace(claim.Name), strings.TrimSpace(claim.Status)
+			if name == "" || status == "" {
+				continue
+			}
+			parts := []string{fmt.Sprintf("已提交资源结果：%s；status=%s", name, status)}
+			if risk := strings.TrimSpace(claim.Risk); risk != "" {
+				parts = append(parts, "边界="+risk)
+			}
+			if evidence := strings.TrimSpace(claim.Evidence); evidence != "" {
+				parts = append(parts, "证据="+evidence)
+			}
+			facts = appendUniqueString(facts, strings.Join(parts, "；"))
+		}
+		break
+	}
+	sum := sha256.Sum256(raw)
+	return facts, relPath, hex.EncodeToString(sum[:]), nil
 }
 
 func rewriteBriefPreserveFacts(markdown string) []string {
@@ -78,7 +141,7 @@ func rewriteBriefPreserveFacts(markdown string) []string {
 		if rewriteBriefEmptyItem(line) {
 			continue
 		}
-		facts = appendUniqueString(facts, line)
+		facts = canonicalPreserveFacts(facts, []string{line})
 	}
 	return facts
 }
@@ -91,6 +154,71 @@ func rewriteBriefEmptyItem(line string) bool {
 	default:
 		return false
 	}
+}
+
+// rewriteBriefTopLevelBullets returns only non-indented bullets from selected
+// H2 sections. Nested evidence and fix notes remain available in the full
+// brief, while the plan receives a compact set of hard failure/acceptance
+// anchors. A heading prefix also matches a parenthesized date suffix.
+func rewriteBriefTopLevelBullets(markdown string, headingPrefixes ...string) []string {
+	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
+	active := false
+	fence := ""
+	var items []string
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if marker := rewriteBriefFenceMarker(trimmed); marker != "" {
+			if fence == "" {
+				fence = marker
+			} else if fence == marker {
+				fence = ""
+			}
+			continue
+		}
+		if fence != "" {
+			continue
+		}
+		if level, heading, ok := parseMarkdownATXHeading(raw); ok {
+			active = false
+			if level == 2 {
+				for _, prefix := range headingPrefixes {
+					if rewriteBriefRefinementHeadingMatches(heading, strings.TrimSpace(prefix)) {
+						active = true
+						break
+					}
+				}
+			}
+			continue
+		}
+		if !active || !strings.HasPrefix(raw, "- ") {
+			continue
+		}
+		item := strings.TrimSpace(strings.TrimPrefix(raw, "- "))
+		if item != "" && !rewriteBriefEmptyItem(item) &&
+			!strings.HasPrefix(item, "说明：") && !strings.HasPrefix(item, "说明:") {
+			items = appendUniqueString(items, item)
+		}
+	}
+	return items
+}
+
+var rewriteBriefDatedGateHeadingPattern = regexp.MustCompile(`^最新整篇单段门禁(?:（[0-9]{4}-[0-9]{2}-[0-9]{2}）| \([0-9]{4}-[0-9]{2}-[0-9]{2}\))$`)
+
+func rewriteBriefRefinementHeadingMatches(heading, prefix string) bool {
+	if heading == prefix {
+		return true
+	}
+	return prefix == "最新整篇单段门禁" && rewriteBriefDatedGateHeadingPattern.MatchString(heading)
+}
+
+func rewriteBriefFenceMarker(line string) string {
+	if strings.HasPrefix(line, "```") {
+		return "```"
+	}
+	if strings.HasPrefix(line, "~~~") {
+		return "~~~"
+	}
+	return ""
 }
 
 var rewriteLiteralPatterns = []*regexp.Regexp{
@@ -132,7 +260,8 @@ func rewriteSourceEqual(a, b *domain.ChapterRewriteSource) bool {
 		return a == b
 	}
 	if a.BodyPath != b.BodyPath || a.BodySHA256 != b.BodySHA256 || a.WordCount != b.WordCount ||
-		a.BriefPath != b.BriefPath || a.BriefSHA256 != b.BriefSHA256 {
+		a.BriefPath != b.BriefPath || a.BriefSHA256 != b.BriefSHA256 ||
+		a.CanonicalStatePath != b.CanonicalStatePath || a.CanonicalStateSHA256 != b.CanonicalStateSHA256 {
 		return false
 	}
 	return stringSlicesEqual(a.PreserveFacts, b.PreserveFacts)
@@ -151,10 +280,12 @@ func stringSlicesEqual(a, b []string) bool {
 }
 
 func factCoveredByConstraints(fact string, constraints []string) bool {
-	fact = strings.TrimSpace(fact)
+	identity := rewriteFactIdentity(fact)
+	if identity == "" {
+		return false
+	}
 	for _, constraint := range constraints {
-		constraint = strings.TrimSpace(constraint)
-		if fact != "" && (constraint == fact || strings.Contains(constraint, fact)) {
+		if rewriteFactIdentity(constraint) == identity {
 			return true
 		}
 	}
@@ -170,6 +301,6 @@ func rewriteSourceContext(source *domain.ChapterRewriteSource, body, brief strin
 		"current_body":        body,
 		"brief_markdown":      brief,
 		"required_sources":    []string{rewriteSourceToken(source), rewriteBriefToken(source)},
-		"preservation_policy": "这是同一章的重新讲述。世界模拟必须逐条覆盖 preserve_facts，正文必须守住金额、秘密边界、关键选择、最终结果和章末后果；旧稿的场景数量、事件顺序、过场动作、对白、非关键角色出场都可以删除、合并、换序或改写，不得把 preserve_facts 逐条渲染成清单。",
+		"preservation_policy": "这是同一章的重新讲述。preserve_facts 同时来自 rewrite brief 与已提交 chapter_progress 结果台账；世界模拟必须逐条覆盖，正文必须守住金额、数量、资源状态、秘密边界、关键选择、最终结果和章末后果。评审明确纠正的因果顺序优先于旧摘要措辞；旧稿的场景数量、过场动作、对白、非关键角色出场可以删除、合并、换序或改写，不得把 preserve_facts 逐条渲染成清单。",
 	}
 }

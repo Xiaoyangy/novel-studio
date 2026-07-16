@@ -43,6 +43,73 @@ func TestFinalizeChapterPlanRejectsProseChecklistContract(t *testing.T) {
 	}
 }
 
+func TestFinalizeChapterPlanCreatesNewEpochAfterNewerSimulationWithIdenticalPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(planArgs(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const simulationID = "same-semantic-simulation"
+	plan.CausalSimulation.WorldSimulationID = simulationID
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: simulationID, TimeWindow: "初次推演窗口",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := finalizeChapterPlan(s, plan, false); err != nil {
+		t.Fatalf("initial finalize: %v", err)
+	}
+	firstPlan := s.Checkpoints.LatestByStep(domain.ChapterScope(1), "plan")
+	if firstPlan == nil {
+		t.Fatal("missing initial plan checkpoint")
+	}
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: simulationID, TimeWindow: "更新后的同一事实窗口",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newSimulation, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CurrentChapterPlanCausalCheckpoint(s, 1); err == nil {
+		t.Fatal("older plan checkpoint should be stale after the newer simulation epoch")
+	}
+
+	// Re-finalize the exact saved plan bytes. The content digest is unchanged,
+	// but the newer simulation opened a causal epoch that this plan now consumes.
+	saved, err := s.Drafts.LoadChapterPlan(1)
+	if err != nil || saved == nil {
+		t.Fatalf("load identical plan: plan=%v err=%v", saved, err)
+	}
+	if _, err := finalizeChapterPlan(s, *saved, false); err != nil {
+		t.Fatalf("re-finalize identical plan: %v", err)
+	}
+	currentPlan, err := CurrentChapterPlanCausalCheckpoint(s, 1)
+	if err != nil {
+		t.Fatalf("identical plan should recover causal readiness: %v", err)
+	}
+	if currentPlan.Seq <= newSimulation.Seq || currentPlan.Seq <= firstPlan.Seq {
+		t.Fatalf("expected a fresh plan epoch after simulation: first=%d simulation=%d current=%d", firstPlan.Seq, newSimulation.Seq, currentPlan.Seq)
+	}
+	if currentPlan.Digest != firstPlan.Digest {
+		t.Fatalf("regression setup must keep plan bytes identical: first=%s current=%s", firstPlan.Digest, currentPlan.Digest)
+	}
+}
+
 func testCausalSimulation(rewrite bool) map[string]any {
 	contextSources := []string{
 		"current_chapter_outline",

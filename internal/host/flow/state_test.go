@@ -1,18 +1,80 @@
 package flow
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+func checkpointFlowChapterPlan(t *testing.T, s *store.Store, chapter int) {
+	t.Helper()
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(chapter), "plan", fmt.Sprintf("drafts/%02d.plan.json", chapter),
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadStateRecoversDraftIntentIntoCallerCheckpointCache(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	candidate := "第一章 恢复测试\n\n林澈把湿伞靠在门边，先摸了摸口袋里的旧票据，才抬头看柜台后的那个人。"
+	intent := map[string]any{
+		"chapter":               1,
+		"mode":                  "write",
+		"artifact":              "drafts/01.draft.md",
+		"candidate_body_sha256": reviewreport.BodySHA256(candidate),
+		"causal_epoch_key":      "initial",
+		"created_at":            "2026-07-15T00:00:00Z",
+	}
+	raw, err := json.MarshalIndent(intent, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir(), "drafts", "01.draft_write_intent.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, candidate); err != nil {
+		t.Fatal(err)
+	}
+	if cp := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "draft"); cp != nil {
+		t.Fatalf("fixture unexpectedly has draft checkpoint before recovery: %+v", cp)
+	}
+
+	_ = LoadState(st)
+	recovered := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "draft")
+	if recovered == nil || recovered.Digest != "sha256:"+reviewreport.BodySHA256(candidate) {
+		t.Fatalf("LoadState recovery did not update caller checkpoint cache: %+v", recovered)
+	}
+
+	replacement := "第一章 恢复测试\n\n" + strings.Repeat("林澈换了张新票据，又沿着柜台逐项核对。", 20)
+	args, err := json.Marshal(map[string]any{"chapter": 1, "content": replacement, "mode": "write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolspkg.NewDraftChapterTool(st).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "check_consistency") {
+		t.Fatalf("recovered draft was overwritten as if its checkpoint were unseen: %v", err)
+	}
+	if got, err := st.Drafts.LoadDraft(1); err != nil || got != candidate {
+		t.Fatalf("failed overwrite guard changed recovered draft: got=%q err=%v", got, err)
+	}
+}
 
 func TestChapterPlanReadyForDraftRejectsStaleAttractionPlan(t *testing.T) {
 	s := store.NewStore(t.TempDir())
@@ -31,8 +93,223 @@ func TestChapterPlanReadyForDraftRejectsStaleAttractionPlan(t *testing.T) {
 	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "失业饭桌"}); err != nil {
 		t.Fatal(err)
 	}
+	checkpointFlowChapterPlan(t, s, 1)
 	if chapterPlanReadyForDraft(s, 1, false) {
 		t.Fatal("stale plan without attraction contract must route back to planner")
+	}
+}
+
+func TestCurrentExternalAIGCRepairWithEmptyAntiAIPlanRoutesBackToWriter(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("anti-ai-route", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 1000, "scene", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.SetPendingRewritesAndFlow([]int{1}, "朱雀整篇单段 86%", domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章\n\n主角把账本合上，没急着向任何人证明什么。"
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	brief := []byte("# ch01 rewrite brief\n\n- 当前 zhuque 整篇单段结果 86%，必须整章返工。\n")
+	briefPath := filepath.Join(st.Dir(), "reviews", "01_rewrite_brief.md")
+	if err := os.MkdirAll(filepath.Dir(briefPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(briefPath, brief, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bodySum := sha256.Sum256([]byte(body))
+	briefSum := sha256.Sum256(brief)
+	plan := domain.ChapterPlan{Chapter: 1, Title: "第一章"}
+	plan.CausalSimulation.ContextSources = []string{
+		fmt.Sprintf("rewrite_source:chapters/01.md#sha256=%x", bodySum),
+		fmt.Sprintf("rewrite_brief:reviews/01_rewrite_brief.md#sha256=%x", briefSum),
+	}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, st, 1)
+	percent := 86.0
+	row := reviewreport.RegisteredExternalDetection{
+		Chapter: 1, Detector: "zhuque", Mode: "novel-whole-text-single-segment",
+		Score: 86, ScoreScale: "percent", ScorePercent: &percent, Verdict: "ai_like",
+		BodySHA256: reviewreport.BodySHA256(body), CheckedAt: "2026-07-15T20:00:00+08:00",
+	}
+	raw, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir(), "meta", "external_detection_log.jsonl"), append(raw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := LoadState(st)
+	if state.NextActionPlanReady {
+		t.Fatal("current external AIGC repair accepted a formal plan with empty anti_ai_execution_plan")
+	}
+	instruction := Route(state)
+	if instruction == nil || instruction.Agent != "writer" {
+		t.Fatalf("invalid formal plan did not route back to Writer: %+v", instruction)
+	}
+}
+
+func TestChapterPlanReadyForDraftUsesWebBriefAttractionRequirements(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "# 项目文风\n\n轻松搞笑爽文；系统会接话并始终支持主角。\n"
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.md"), []byte(brief), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 2, Title: "第二章"}
+	plan.CausalSimulation.EntertainmentPlan.CompanionVoiceBeat = "系统用短促吐槽接话并支持主角。"
+	plan.CausalSimulation.EntertainmentPlan.ForbiddenComedy = []string{"不连续抛梗"}
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 2)
+	if chapterPlanReadyForDraft(s, 2, false) {
+		t.Fatal("Flow must not dispatch a plan that commit will reject under web-reference attraction rules")
+	}
+}
+
+func TestChapterPlanReadyForDraftRejectsLegacyQuantityConflict(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 3, CoreEvent: "已有摊主主动加入，试点由五家扩到十家。",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 3, Title: "五十单到了", Contract: domain.ChapterContract{
+		RequiredBeats: []string{"试点扩到十家"},
+	}}
+	plan.CausalSimulation.ProtagonistDecision = "维持五摊上限，拒绝第六摊。"
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 3)
+	if chapterPlanReadyForDraft(s, 3, false) {
+		t.Fatal("legacy ten-target/five-cap plan must route back through world simulation and planning")
+	}
+}
+
+func TestChapterPlanReadyForDraftRejectsInvalidCraftReceipt(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 2, Title: "第二章"}
+	plan.CausalSimulation.ContextSources = []string{"craft_recall_receipt:0123456789abcdef01234567"}
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 2)
+	if chapterPlanReadyForDraft(s, 2, true) {
+		t.Fatal("router must send a rewrite plan with a missing/stale craft receipt back to Writer")
+	}
+}
+
+func TestChapterPlanReadyForDraftRejectsStagedPlanOrWorldPartial(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "旧正式计划"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 1)
+	if err := s.Drafts.SaveChapterPlanPartial(1, map[string]any{"structure": map[string]any{"chapter": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("Flow accepted a formal plan while a staged plan partial was active")
+	}
+	if err := s.Drafts.DeleteChapterPlanPartial(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveChapterWorldSimulationPartial(domain.ChapterWorldSimulation{Chapter: 1, TimeWindow: "本章"}); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("Flow accepted a formal plan while a staged world partial was active")
+	}
+}
+
+func TestChapterPlanReadyIgnoresStaleFormalSimulationWhenNoLongerRequired(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: "old-cast-simulation", TimeWindow: "旧 cast 时段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "当前无需全角色推演"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 1)
+	if !chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("stale optional formal simulation should not make an otherwise valid plan unroutable")
+	}
+}
+
+func TestChapterPlanReadyRejectsNewerSimulationCheckpointWithSameID(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	const simulationID = "same-semantic-simulation"
+	plan := domain.ChapterPlan{Chapter: 1, Title: "旧 POV 计划"}
+	plan.CausalSimulation.WorldSimulationID = simulationID
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 1)
+	if !chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("checkpoint-bound plan should be ready before a newer simulation epoch")
+	}
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: simulationID, TimeWindow: "重新推演后的同一事实窗口",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("a matching SimulationID must not let an older POV plan cross a newer simulation checkpoint")
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+		"plan", "chapter_world_simulation", "review", "draft-structural-block",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("an identical plan finalized after the newer simulation checkpoint should recover routing readiness")
 	}
 }
 
@@ -48,6 +325,7 @@ func TestRenderOnlyReviewReusesCurrentCausalPlan(t *testing.T) {
 	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "第一章"}); err != nil {
 		t.Fatal(err)
 	}
+	checkpointFlowChapterPlan(t, s, 1)
 	bodyHash := reviewreport.BodySHA256(body)
 	review := domain.ReviewEntry{
 		Chapter: 1, BodySHA256: bodyHash, Scope: "chapter", ContractStatus: "met", Verdict: "rewrite",
@@ -124,6 +402,7 @@ func TestChapterPlanReadyForDraftRejectsStaleRewriteBrief(t *testing.T) {
 	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
 		t.Fatal(err)
 	}
+	checkpointFlowChapterPlan(t, s, 2)
 	if !chapterPlanReadyForDraft(s, 2, true) {
 		t.Fatal("plan bound to current body and brief should be ready")
 	}
@@ -132,6 +411,87 @@ func TestChapterPlanReadyForDraftRejectsStaleRewriteBrief(t *testing.T) {
 	}
 	if chapterPlanReadyForDraft(s, 2, true) {
 		t.Fatal("changed rewrite brief must invalidate the old plan")
+	}
+}
+
+func TestChapterPlanReadinessRejectsPlanWrittenAfterLatestCheckpoint(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "旧计划"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFlowChapterPlan(t, s, 1)
+	if !chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("checkpoint-bound old plan should be ready")
+	}
+	if err := s.Drafts.SaveDraft(1, "第一章\n\n旧计划生成的正文。"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !chapterDraftReadyForFinalize(s, 1) {
+		t.Fatal("draft after the checkpoint-bound plan should be ready")
+	}
+
+	// Simulate SaveChapterPlan succeeding while checkpoint append fails. The
+	// old checkpoint still exists but must not certify these new bytes.
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "新计划尚未 checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("new plan bytes inherited an old plan checkpoint")
+	}
+	if chapterDraftReadyForFinalize(s, 1) {
+		t.Fatal("body epoch used an old checkpoint after the formal plan changed")
+	}
+}
+
+func TestChapterPlanReadinessRejectsMissingOrWrongArtifactCheckpoint(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	// Checkpoint journaling is mandatory for pipeline-managed projects. Legacy
+	// imports without meta/pipeline.json keep the compatibility path exercised
+	// by the write-side guard tests.
+	if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "pipeline.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "当前计划"}); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("formal plan without a checkpoint was accepted")
+	}
+	current, err := os.ReadFile(filepath.Join(s.Dir(), "drafts", "01.plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongArtifact := filepath.Join(s.Dir(), "drafts", "01.plan.backup.json")
+	if err := os.WriteFile(wrongArtifact, current, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.backup.json"); err != nil {
+		t.Fatal(err)
+	}
+	if chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("same digest under the wrong artifact path was accepted")
+	}
+
+	// Plan's latest-only checkpoint API can repair a wrong-path checkpoint even
+	// when both files happen to have the same digest.
+	checkpointFlowChapterPlan(t, s, 1)
+	if !chapterPlanReadyForDraft(s, 1, false) {
+		t.Fatal("canonical artifact+digest checkpoint should make the plan ready")
 	}
 }
 
@@ -168,10 +528,16 @@ func TestChapterDraftReadyForFinalizeHonorsExplicitRerenderRequest(t *testing.T)
 	if err := s.Drafts.SaveDraft(2, "第二章\n\n新草稿"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md"); err != nil {
+	if _, err := s.Checkpoints.AppendArtifactLatestAcross(domain.ChapterScope(2), "draft", "drafts/02.draft.md", "plan", "rerender-request", "draft", "edit"); err != nil {
 		t.Fatal(err)
 	}
 	if !chapterDraftReadyForFinalize(s, 2) {
 		t.Fatal("new draft after rerender request should be ready")
+	}
+	if err := s.Drafts.SaveDraft(2, "第二章\n\n文件已改写但 checkpoint 模拟失败"); err != nil {
+		t.Fatal(err)
+	}
+	if chapterDraftReadyForFinalize(s, 2) {
+		t.Fatal("Host finalized draft bytes that were not bound to the latest body checkpoint")
 	}
 }

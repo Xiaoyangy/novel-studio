@@ -123,6 +123,7 @@ SOUND_NOISE_RE = re.compile(r"(?:[嗒咯叩沙咔啪滴哒哗啦停]{1,10}[，�
 CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{24,}")
 RARE_TERM_SOUP_RE = re.compile(r"(?:魑魅魍魉|饕餮|螭吻|赑屃|狴犴|蒲牢|睚眦|狻猊|椒图|囚牛|貔貅|獬豸|鸱吻|蚣蝮|趴蝮){4,}")
 DIALOGUE_QUOTE_RE = re.compile(r"[“「]([^”」\n]{1,240})[”」]")
+ASCII_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"')
 DIALOGUE_MICRO_PERIOD_EXEMPTIONS = {
     "好", "好的", "好吧", "行", "行吧", "可以",
     "知道", "知道了", "明白", "明白了",
@@ -132,6 +133,10 @@ DIALOGUE_MICRO_PERIOD_EXEMPTIONS = {
     "嗯", "嗯嗯", "嗯哼", "哦", "噢", "啊", "哎", "唉", "喂",
 }
 DIALOGUE_ACTION_LEAD_RE = re.compile(r"^[^“「\n]{0,42}(?:说|问|答|笑|抬|低|看|转|把|将|伸|放|推|拉|接|递|夹|拍|指|摇|点|站|走|收|翻|掀|护|敲)[^“「\n]{0,24}[“「]")
+ASCII_DIALOGUE_CONTEXT_RE = re.compile(
+    r"(?:说|问|答|喊|回|念|骂|嘀咕|提醒|解释|开口|接道|笑道|答道|问道|说道)"
+    r"[^\u4e00-\u9fff\n]{0,4}[：:]?\s*$"
+)
 GRAMMAR_CHARS = set("的一是不了在有和人这那中为上个我你他她它以要时来用们到于就对成会可也能下过说得着里把被给但并而或及其都还只又先再才没无")
 RARE_SOUP_CHARS = set("魑魅魍魉饕餮螭赑屃狴犴蒲牢睚眦狻猊椒图囚牛貔貅獬豸鸱吻蚣蝮趴")
 
@@ -142,6 +147,62 @@ def strip_markdown_titles(text: str) -> str:
 
 def hanzi(text: str) -> list[str]:
     return re.findall(r"[\u4e00-\u9fff]", text)
+
+
+def _ascii_quote_looks_like_dialogue(
+    text: str, start: int, end: int, message: str
+) -> bool:
+    if not hanzi(message):
+        return False
+    # A comma/colon alone is common inside product labels and config examples;
+    # require terminal speech punctuation unless paragraph position or a speech
+    # tag independently establishes that the straight quotes carry dialogue.
+    if re.search(r"[。！？!?；;…—]", message):
+        return True
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = len(text)
+    prefix = text[line_start:start].strip()
+    suffix = text[end:line_end].strip()
+    if not prefix and not suffix:
+        return True
+    return bool(ASCII_DIALOGUE_CONTEXT_RE.search(prefix))
+
+
+def dialogue_quote_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return validated Chinese-fiction dialogue spans in source order."""
+    spans = [
+        (match.start(), match.end(), match.group(1))
+        for match in DIALOGUE_QUOTE_RE.finditer(text)
+    ]
+    spans.extend(
+        (match.start(), match.end(), match.group(1))
+        for match in ASCII_QUOTE_RE.finditer(text)
+        if _ascii_quote_looks_like_dialogue(
+            text, match.start(), match.end(), match.group(1)
+        )
+    )
+    spans.sort(key=lambda item: item[0])
+    filtered: list[tuple[int, int, str]] = []
+    last_end = -1
+    for span in spans:
+        if span[0] < last_end:
+            continue
+        filtered.append(span)
+        last_end = span[1]
+    return filtered
+
+
+def has_dialogue_quote(text: str) -> bool:
+    return bool(dialogue_quote_spans(text))
+
+
+def dialogue_has_action_lead(paragraph: str) -> bool:
+    spans = dialogue_quote_spans(paragraph)
+    if not spans:
+        return False
+    return bool(DIALOGUE_ACTION_LEAD_RE.search(paragraph[: spans[0][0]] + "“"))
 
 
 def split_sentences(text: str) -> list[str]:
@@ -205,8 +266,8 @@ def dialogue_micro_period_chain_stats(text: str) -> dict:
 
     turn_examples: list[str] = []
     for paragraph in paragraphs(clean):
-        for match in DIALOGUE_QUOTE_RE.finditer(paragraph):
-            quote = match.group(1).strip()
+        for _, _, message in dialogue_quote_spans(paragraph):
+            quote = message.strip()
             clause_start = 0
             has_hit = False
             for index, char in enumerate(quote):
@@ -448,7 +509,7 @@ def paragraph_feature_rows(paras: list[str]) -> list[dict]:
                 "avg_sentence_len": sum(p_lens) / max(len(p_lens), 1),
                 "sentence_cv": coefficient_of_variation(p_lens),
                 "comma_period_ratio": para.count("，") / p_punct_period,
-                "dialogue": 1.0 if ("“" in para or "\"" in para) else 0.0,
+                "dialogue": 1.0 if has_dialogue_quote(para) else 0.0,
                 "cliche_total_per_k": p_total_cliche,
                 "cliche_per_k": p_per_k,
                 "concrete_density": density(count_markers(para, CONCRETE_HINTS) + len(re.findall(r"\d", para)), len(p_chars)),
@@ -495,13 +556,7 @@ def paragraph_fragmentation_stats(paras: list[str]) -> dict:
 def quoted_hanzi_ratio(text: str, n_hanzi: int) -> float:
     if n_hanzi <= 0:
         return 0.0
-    quoted = 0
-    for left, right in [("“", "”"), ("「", "」"), ("『", "』"), ('"', '"')]:
-        if left == right:
-            matches = re.findall(r'"([^"]+)"', text)
-        else:
-            matches = re.findall(re.escape(left) + r"(.*?)" + re.escape(right), text)
-        quoted += sum(len(hanzi(item)) for item in matches)
+    quoted = sum(len(hanzi(message)) for _, _, message in dialogue_quote_spans(text))
     return round(min(1.0, quoted / max(n_hanzi, 1)), 3)
 
 
@@ -509,7 +564,7 @@ def dialogue_ratio_estimate(text: str, n_hanzi: int) -> float:
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return 0.0
-    line_ratio = sum(1 for line in lines if "“" in line or "\"" in line) / len(lines)
+    line_ratio = sum(1 for line in lines if has_dialogue_quote(line)) / len(lines)
     quote_ratio = quoted_hanzi_ratio(text, n_hanzi)
     if len(lines) <= 2 and quote_ratio > 0:
         return round(min(line_ratio, quote_ratio * 1.15), 3)
@@ -1195,7 +1250,7 @@ def semantic_sentence_profile(sentence: str) -> dict:
     has_object = sum(sentence.count(item) for item in CONCRETE_HINTS) > 0 or bool(re.search(r"\d", sentence))
     has_action = count_markers(sentence, ACTION_HINTS) > 0
     has_sensory = count_markers(sentence, SENSORY_HINTS) > 0
-    has_dialogue = any(mark in sentence for mark in "“”「」") or count_markers(sentence, ["说", "问", "回答", "答道", "喊", "骂"]) > 0
+    has_dialogue = has_dialogue_quote(sentence) or count_markers(sentence, ["说", "问", "回答", "答道", "喊", "骂"]) > 0
     has_rule = count_markers(sentence, ["规则", "账单", "合同", "收据", "凭证", "审核", "交易", "边界", "名单", "价签", "账户", "回执"]) > 0
     has_abstract = count_markers(sentence, ABSTRACT_HINTS + ["这意味着", "终于明白", "不仅仅是"]) > 0
     has_emotion = count_markers(sentence, EMOTION_WORDS) > 0
@@ -1296,22 +1351,26 @@ def score_narrative_dynamics(
     current_run = 0
     for para in paras:
         stripped = para.strip()
-        if not any(mark in stripped for mark in "“「"):
+        if not has_dialogue_quote(stripped):
             current_run = 0
             continue
         dialogue_paras += 1
         current_run += 1
         max_dialogue_run = max(max_dialogue_run, current_run)
-        if DIALOGUE_ACTION_LEAD_RE.search(stripped):
+        if dialogue_has_action_lead(stripped):
             action_lead_paras += 1
 
-    quote_lens = [len(hanzi(match)) for match in DIALOGUE_QUOTE_RE.findall(body) if hanzi(match)]
+    quote_lens = [
+        len(hanzi(message))
+        for _, _, message in dialogue_quote_spans(body)
+        if hanzi(message)
+    ]
     dense_dialogue_windows = 0
     for start in range(max(0, len(paras) - 7)):
         window = paras[start : start + 8]
         if len(window) < 8:
             continue
-        dialogue_count = sum(1 for para in window if any(mark in para for mark in "“「"))
+        dialogue_count = sum(1 for para in window if has_dialogue_quote(para))
         if dialogue_count >= 6 and count_markers("\n".join(window), INTERIORITY_HINTS) <= 1:
             dense_dialogue_windows += 1
 
@@ -1532,7 +1591,7 @@ def high_quality_human_anchor_stats(
     sentence_cv = coefficient_of_variation(sent_lens)
     paragraph_cv = coefficient_of_variation(para_lens)
     short_sentence_ratio_12 = round(sum(1 for length in sent_lens if length <= 12) / max(len(sent_lens), 1), 3)
-    quote_marks = sum(body.count(mark) for mark in ["“", "”", "「", "」", "『", "』"])
+    quote_marks = len(dialogue_quote_spans(body)) * 2
     quote_density = density(quote_marks, n_hanzi)
     punct_kinds = punctuation_kind_count(body)
     technical_anchor = technical_expository_anchor_stats(

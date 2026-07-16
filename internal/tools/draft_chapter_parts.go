@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -60,7 +61,13 @@ func (t *DraftChapterPartTool) Execute(_ context.Context, args json.RawMessage) 
 	if err := validateChapterPartArgs(a.Chapter, a.Part, a.TotalParts, a.Content); err != nil {
 		return nil, err
 	}
+	if err := requireDraftPartRoute(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
 	if err := ensureChapterDraftPartWritable(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
 	if draft, err := t.store.Drafts.LoadDraft(a.Chapter); err != nil {
@@ -81,8 +88,9 @@ func (t *DraftChapterPartTool) Execute(_ context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, fmt.Errorf("save draft part: %w: %w", errs.ErrStoreWrite, err)
 	}
-	if _, err := t.store.Checkpoints.AppendArtifact(
+	if _, err := t.store.Checkpoints.AppendArtifactLatestAcross(
 		domain.ChapterScope(a.Chapter), "draft_part", item.ContentPath,
+		"plan", "rerender-request", "draft_part",
 	); err != nil {
 		return nil, fmt.Errorf("checkpoint draft part: %w", err)
 	}
@@ -142,14 +150,24 @@ func (t *MergeChapterPartsTool) Execute(_ context.Context, args json.RawMessage)
 	if a.ExpectedParts <= 0 {
 		return nil, fmt.Errorf("expected_parts must be > 0: %w", errs.ErrToolArgs)
 	}
+	if err := requireDraftPartRoute(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
 	if err := ensureChapterDraftPartWritable(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
-	if latest := t.store.Checkpoints.Latest(domain.ChapterScope(a.Chapter)); latest != nil && latest.Step == "draft" {
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
+	if draftNeedsConsistencyCheck(t.store, a.Chapter) {
 		return nil, fmt.Errorf("第 %d 章已有合并草稿且尚未执行 check_consistency，禁止重复 merge_chapter_parts；请先 read_chapter(source=draft)，再调用 check_consistency，若无硬伤直接 commit_chapter: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
-	if err := t.store.Progress.StartChapter(a.Chapter); err != nil {
-		return nil, fmt.Errorf("mark chapter in progress: %w", err)
+	indexBeforeMerge, err := t.store.Drafts.LoadDraftPartIndex(a.Chapter)
+	if err != nil {
+		return nil, fmt.Errorf("load draft parts index before epoch gate: %w: %w", errs.ErrStoreRead, err)
+	}
+	if err := validateDraftPartsPlanEpoch(t.store, a.Chapter, indexBeforeMerge); err != nil {
+		return nil, err
 	}
 	content, index, missing, err := t.store.Drafts.MergeDraftParts(a.Chapter, a.ExpectedParts)
 	if err != nil {
@@ -170,12 +188,29 @@ func (t *MergeChapterPartsTool) Execute(_ context.Context, args json.RawMessage)
 	if strings.TrimSpace(content) == "" {
 		return nil, fmt.Errorf("第 %d 章分片合并后为空: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
+	if err := validateFictionProseTypography(content); err != nil {
+		return nil, fmt.Errorf("第 %d 章分片合并正文格式门禁未通过: %w", a.Chapter, err)
+	}
+	if err := requireDraftHardFactAnchors(t.store, a.Chapter, content); err != nil {
+		return nil, fmt.Errorf("第 %d 章 merge_chapter_parts 候选未通过 hard-fact anchor 门禁，真实草稿与 checkpoint 均未改变: %w", a.Chapter, err)
+	}
+	if err := t.store.Progress.StartChapter(a.Chapter); err != nil {
+		return nil, fmt.Errorf("mark chapter in progress: %w", err)
+	}
+	prior, err := t.store.Drafts.LoadDraft(a.Chapter)
+	if err != nil {
+		return nil, fmt.Errorf("load prior draft before merge: %w: %w", errs.ErrStoreRead, err)
+	}
+	if err := beginDraftWriteIntent(t.store, a.Chapter, prior, content, "merge", a.Sampling); err != nil {
+		return nil, fmt.Errorf("begin merged draft write: %w", err)
+	}
 	if err := t.store.Drafts.SaveDraft(a.Chapter, content); err != nil {
 		return nil, fmt.Errorf("save merged draft: %w: %w", errs.ErrStoreWrite, err)
 	}
-	if _, err := t.store.Checkpoints.AppendArtifact(
+	if _, err := t.store.Checkpoints.AppendArtifactLatestAcross(
 		domain.ChapterScope(a.Chapter), "draft",
 		fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
+		"plan", "rerender-request", "draft", "edit",
 	); err != nil {
 		return nil, fmt.Errorf("checkpoint merged draft: %w", err)
 	}
@@ -183,17 +218,81 @@ func (t *MergeChapterPartsTool) Execute(_ context.Context, args json.RawMessage)
 	if err != nil {
 		return nil, err
 	}
+	wordContract := inspectChapterWordContract(t.store, content)
+	aigcReport, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, content)
+	rawAIGCGate := draftAIGCRawLocalGateResult(aigcReport, aigcGate)
+	if err := checkpointDraftStructuralBlock(t.store, a.Chapter, content, aigcReport, aigcGate); err != nil {
+		return nil, fmt.Errorf("checkpoint merged draft structural block: %w", err)
+	}
+	if !rawAIGCGate.Passed {
+		if err := persistDraftAIGCRerenderRequirement(t.store, a.Chapter, content, aigcReport, aigcGate); err != nil {
+			return nil, fmt.Errorf("persist merged draft AIGC rerender requirement: %w", err)
+		}
+	}
+	localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(content, aigcReport, aigcGate)
+	nextStep := draftQualityGateNextStep(wordContract, aigcGate)
+	if err := clearDraftWriteIntent(t.store.Dir(), a.Chapter); err != nil {
+		return nil, fmt.Errorf("complete merged draft write: %w", err)
+	}
+	managedJudgePending, err := pipelineManagedCurrentDraftNeedsDeepSeekJudge(
+		t.store, a.Chapter, reviewreport.BodySHA256(content),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inspect current-hash DeepSeek gate after merge: %w: %w", err, errs.ErrStoreRead)
+	}
+	if localStructuralRerender {
+		nextStep = "停止本次正文修改；合并后的精确整章哈希仍触发本地 whole-text/segment 结构阻断。分片不能绕过有界整章重渲染/重规划预算，立即把控制权交还外层 pipeline。"
+	} else if managedJudgePending {
+		nextStep = fmt.Sprintf("停止正文修改；合并后的 pipeline 新稿 drafts/%02d.draft.md 尚无可批准当前哈希的 DeepSeek 裸正文结论，立即把控制权交还外层 pipeline 复判；复判前禁止 check_consistency、edit 或 commit", a.Chapter)
+	}
+	stopForWholeDraftJudge := localStructuralRerender || managedJudgePending
 	return json.Marshal(map[string]any{
-		"merged":             true,
-		"chapter":            a.Chapter,
-		"parts":              len(index.Parts),
-		"word_count":         utf8.RuneCountInString(content),
-		"ai_voice_score":     analysis.Metrics.AIVoiceScore,
-		"figurative_density": analysis.Metrics.FigurativeDensity,
-		"dialogue_ratio":     analysis.Metrics.DialogueRatio,
-		"draft_path":         fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
-		"next_step":          "分片已合并为整章草稿。立即 read_chapter(source=draft) 回读整章，再调用 check_consistency；若无硬伤，必须调用 commit_chapter 提交终稿。",
+		"merged":                             true,
+		"chapter":                            a.Chapter,
+		"parts":                              len(index.Parts),
+		"word_count":                         utf8.RuneCountInString(content),
+		"word_contract":                      wordContract,
+		"aigc_gate":                          aigcGate,
+		"aigc_raw_local_gate":                rawAIGCGate,
+		"hard_gate_passed":                   wordContract.Passed && rawAIGCGate.Passed && !managedJudgePending,
+		"external_rejudge_required":          stopForWholeDraftJudge,
+		"external_rejudge_required_now":      managedJudgePending && !localStructuralRerender,
+		"local_structural_rerender_required": localStructuralRerender,
+		"stop_prose_modification":            stopForWholeDraftJudge,
+		"ai_voice_score":                     analysis.Metrics.AIVoiceScore,
+		"figurative_density":                 analysis.Metrics.FigurativeDensity,
+		"dialogue_ratio":                     analysis.Metrics.DialogueRatio,
+		"draft_path":                         fmt.Sprintf("drafts/%02d.draft.md", a.Chapter),
+		"next_step":                          nextStep,
 	})
+}
+
+// requireDraftPartRoute keeps long-chapter helpers from becoming a side door
+// around exact-hash rerender/rejudge locks or an exhausted structural budget.
+// Once any whole-draft state exists, the next replacement must use the single
+// atomic draft_chapter(mode=write) path so named detector identities and write
+// saga recovery remain intact.
+func requireDraftPartRoute(st *store.Store, chapter int) error {
+	if st == nil || chapter <= 0 {
+		return fmt.Errorf("invalid chapter %d: %w", chapter, errs.ErrToolArgs)
+	}
+	if err := NewDraftChapterTool(st).recoverDraftWriteIntent(chapter); err != nil {
+		return fmt.Errorf("recover interrupted whole-draft write before part route: %w: %w", err, errs.ErrStoreWrite)
+	}
+	if escalation := InspectRenderOnlyReplanEscalation(st, chapter); escalation.Required {
+		return fmt.Errorf("第 %d 章 render-only 已连续结构失败，分片不能绕过上限：%s；必须先重做 chapter_world_simulation 与 POV plan: %w", chapter, escalation.Reason, errs.ErrToolPrecondition)
+	}
+	if ExplicitRerenderRequestActive(st, chapter) || ReviewRequiresFreshDraft(st, chapter) {
+		return fmt.Errorf("第 %d 章已有整章重渲染授权，禁止改走 draft_chapter_part/merge_chapter_parts；必须使用 draft_chapter(mode=write): %w", chapter, errs.ErrToolPrecondition)
+	}
+	inspection, err := InspectDraftExternalGateWithStore(st, chapter)
+	if err != nil {
+		return fmt.Errorf("读取第 %d 章草稿外审门禁: %w: %w", chapter, err, errs.ErrStoreRead)
+	}
+	if inspection.Status != DraftExternalGateNotRequired {
+		return fmt.Errorf("第 %d 章处于草稿外审状态 %s，分片不能替代整章单次授权或同哈希复判；必须使用 draft_chapter(mode=write) 或等待外层复判: %w", chapter, inspection.Status, errs.ErrToolPrecondition)
+	}
+	return nil
 }
 
 func validateChapterPartArgs(chapter, part, totalParts int, content string) error {
@@ -211,6 +310,12 @@ func validateChapterPartArgs(chapter, part, totalParts int, content string) erro
 	}
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("content must not be empty: %w", errs.ErrToolArgs)
+	}
+	if err := validateFictionProseMetadataFree(content); err != nil {
+		return fmt.Errorf("draft part content is not chapter prose: %w", err)
+	}
+	if err := validateFictionProseTypography(content); err != nil {
+		return fmt.Errorf("draft part content is not chapter prose: %w", err)
 	}
 	return nil
 }

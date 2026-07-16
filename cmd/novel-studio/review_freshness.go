@@ -3,12 +3,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 type currentChapterReviewEvidence struct {
@@ -59,7 +64,8 @@ func inspectCurrentChapterReview(projectDir string, chapter int) currentChapterR
 
 	mechanicalRel := fmt.Sprintf("reviews/%02d_ai_gate.json", chapter)
 	var mechanical reviewreport.MechanicalGatePayload
-	if readJSON(mechanicalRel, &mechanical) {
+	mechanicalCurrent := readJSON(mechanicalRel, &mechanical)
+	if mechanicalCurrent {
 		checkIdentity(mechanicalRel, mechanical.Chapter, mechanical.BodySHA256)
 	}
 
@@ -98,6 +104,41 @@ func inspectCurrentChapterReview(projectDir string, chapter int) currentChapterR
 			result.Issues = append(result.Issues, reportRel+" (current body fingerprint missing)")
 		}
 	}
+
+	// A human-triggered detector result can be registered after an otherwise
+	// current review was produced. Bind every still-blocking detector/mode
+	// identity to the mechanical gate, checkpoint journal and unified report so
+	// appending one low result from another identity cannot revive that review.
+	registered, registeredErr := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, result.BodySHA256)
+	if registeredErr != nil {
+		result.Issues = append(result.Issues, "meta/external_detection_log.jsonl (registered external detection unreadable)")
+	} else {
+		checkpoints := store.NewStore(projectDir).Checkpoints.All()
+		for _, detection := range registered {
+			if detection.NormalizedScorePercent < aigc.PassExclusivePercent {
+				continue
+			}
+			identity := registeredExternalDetectionIdentity(detection)
+			if !mechanicalCurrent || !mechanicalHasRegisteredExternalDetection(&mechanical, detection) {
+				result.Issues = append(result.Issues, fmt.Sprintf(
+					"%s (current registered external detection %s %.2f%% missing)",
+					mechanicalRel, identity, detection.NormalizedScorePercent,
+				))
+			}
+			if !hasRegisteredExternalDetectionCheckpoint(checkpoints, chapter, detection) {
+				result.Issues = append(result.Issues, fmt.Sprintf(
+					"meta/checkpoints.jsonl (current registered external detection %s not reviewed)", identity,
+				))
+			}
+			reportNeedle := fmt.Sprintf("external_aigc_ratio｜actual=%v｜limit=<4%%｜target=%s",
+				detection.NormalizedScorePercent, registeredExternalDetectionTarget(detection))
+			if reportErr == nil && !strings.Contains(string(reportRaw), reportNeedle) {
+				result.Issues = append(result.Issues, fmt.Sprintf(
+					"%s (current registered external detection %s missing)", reportRel, identity,
+				))
+			}
+		}
+	}
 	if len(result.Issues) == 0 {
 		result.Disposition = reviewreport.RewriteDisposition(
 			&mechanical,
@@ -111,6 +152,80 @@ func inspectCurrentChapterReview(projectDir string, chapter int) currentChapterR
 	}
 
 	return result
+}
+
+func registeredExternalDetectionIdentity(detection reviewreport.RegisteredExternalDetection) string {
+	detector := strings.TrimSpace(detection.Detector)
+	mode := strings.TrimSpace(detection.Mode)
+	if mode == "" {
+		return detector
+	}
+	return detector + "/" + mode
+}
+
+func registeredExternalDetectionTarget(detection reviewreport.RegisteredExternalDetection) string {
+	return registeredExternalDetectionIdentity(detection)
+}
+
+func mechanicalHasRegisteredExternalDetection(mechanical *reviewreport.MechanicalGatePayload, detection reviewreport.RegisteredExternalDetection) bool {
+	if mechanical == nil {
+		return false
+	}
+	wantTarget := registeredExternalDetectionTarget(detection)
+	for _, violation := range mechanical.RuleViolations {
+		if strings.TrimSpace(violation.Rule) != "external_aigc_ratio" ||
+			!strings.EqualFold(strings.TrimSpace(violation.Target), wantTarget) {
+			continue
+		}
+		actual, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(violation.Actual)), 64)
+		if err == nil && math.Abs(actual-detection.NormalizedScorePercent) <= 0.0001 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRegisteredExternalDetectionCheckpoint(checkpoints []domain.Checkpoint, chapter int, detection reviewreport.RegisteredExternalDetection) bool {
+	wantDigest := reviewreport.RegisteredExternalDetectionDigest(detection)
+	wantScope := domain.ChapterScope(chapter)
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		checkpoint := checkpoints[i]
+		if checkpoint.Scope.Matches(wantScope) &&
+			checkpoint.Step == "registered-external-detection" &&
+			checkpoint.Digest == wantDigest {
+			return true
+		}
+	}
+	return false
+}
+
+// currentRegisteredExternalDeliveryIssues is deliberately delivery-only. A
+// blocking current-hash result is a valid completed review and must be allowed
+// to enter rewrite, while an unresolved named-platform rerender/retest contract
+// must never coexist with a delivery snapshot.
+func currentRegisteredExternalDeliveryIssues(projectDir string, chapter int) []string {
+	chapterPath := filepath.Join(projectDir, "chapters", fmt.Sprintf("%02d.md", chapter))
+	body, readErr := os.ReadFile(chapterPath)
+	if readErr != nil || strings.TrimSpace(string(body)) == "" {
+		return []string{fmt.Sprintf("chapters/%02d.md missing or empty", chapter)}
+	}
+	inspection, err := tools.InspectRegisteredExternalRetestsForBody(
+		projectDir, chapter, reviewreport.BodySHA256(string(body)),
+	)
+	if err != nil {
+		return []string{fmt.Sprintf("reviews/drafts/%02d external gate unreadable", chapter)}
+	}
+	if !inspection.Required || inspection.Approved {
+		return nil
+	}
+	details := append([]string(nil), inspection.Blocking...)
+	if len(inspection.Missing) > 0 {
+		details = append(details, "missing="+strings.Join(inspection.Missing, ","))
+	}
+	return []string{fmt.Sprintf(
+		"reviews/drafts/%02d registered external gate unresolved (required exact-payload retest: %s)",
+		chapter, strings.Join(details, "; "),
+	)}
 }
 
 func inspectReviewSummaryCurrent(projectDir string, chapters []int, hashes map[int]string) (string, []string) {

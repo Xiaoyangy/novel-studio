@@ -110,7 +110,10 @@ var knownRoles = map[string]bool{
 	"coordinator": true,
 	"architect":   true,
 	"writer":      true,
-	"editor":      true,
+	// drafter：正文渲染角色。未配置时完整继承 writer，保持老配置行为不变；
+	// 显式配置后可让推演继续走 writer，而正文改用另一模型。
+	"drafter": true,
+	"editor":  true,
 	// reviewer：异族裁判角色（Task 065）。未配置时回落 editor——同族 LLM judge 对自家
 	// 输出有 75-84% 自我偏好，ai_voice_detection/盲测判别建议配与 writer 不同家族的模型。
 	"reviewer": true,
@@ -291,7 +294,7 @@ func (c *Config) ValidateBase() error {
 			return err
 		}
 		if !knownRoles[role] {
-			return fmt.Errorf("unknown role %q in roles config (valid: coordinator/architect/writer/editor): %w", role, errs.ErrConfig)
+			return fmt.Errorf("unknown role %q in roles config (valid: coordinator/architect/writer/drafter/editor/reviewer): %w", role, errs.ErrConfig)
 		}
 		if rc.Provider == "" || rc.Model == "" {
 			return fmt.Errorf("role %q must have both provider and model: %w", role, errs.ErrConfig)
@@ -475,9 +478,11 @@ func (c Config) ResolveContextWindow(modelName string) (int, ContextWindowSource
 
 // ResolveReasoningEffort 返回某角色生效的推理强度原始串（off/low/medium/high/xhigh/max/ultra 或空）。
 // 优先级：角色级 Roles[role].ReasoningEffort → 顶层默认 ReasoningEffort → ""（不覆盖，沿用模型/provider 默认）。
+// drafter/draft_finalizer 未显式配置时先回落 writer；world_simulator 始终使用 writer。
 // role 为空或 "default" 时直接取顶层默认。值的合法性由 agents.ParseThinkingLevel 把关。
 func (c Config) ResolveReasoningEffort(role string) string {
 	if role != "" && role != "default" {
+		role = c.resolveWritingRole(role)
 		if rc, ok := c.Roles[role]; ok && rc.ReasoningEffort != "" {
 			return rc.ReasoningEffort
 		}
@@ -487,10 +492,28 @@ func (c Config) ResolveReasoningEffort(role string) string {
 
 // ResolveMaxTurns 返回某角色生效的回合上限；未配置（<=0）时返回 def。
 func (c Config) ResolveMaxTurns(role string, def int) int {
+	role = c.resolveWritingRole(role)
 	if rc, ok := c.Roles[role]; ok && rc.MaxTurns > 0 {
 		return rc.MaxTurns
 	}
 	return def
+}
+
+// resolveWritingRole 只处理写作阶段的内部别名。drafter 一旦有显式配置就
+// 独立生效；否则 drafter 与 draft_finalizer 继承 writer 的 reasoning/max_turns。
+func (c Config) resolveWritingRole(role string) string {
+	switch role {
+	case "world_simulator":
+		return "writer"
+	case "draft_finalizer":
+		role = "drafter"
+	}
+	if role == "drafter" {
+		if _, configured := c.Roles["drafter"]; !configured {
+			return "writer"
+		}
+	}
+	return role
 }
 
 // LogContextWindowChoice 打印某个角色的窗口决策。source=default 时发 Warn 提示

@@ -18,11 +18,14 @@
    - 返工章必须按 `rewrite_source.chapter.preserve_facts` 逐条提交 `rewrite_fact_coverage`；终稿中已经出场或通过通信抵达 POV 的角色仍须 `visible_to_pov=true`，不得只按简版大纲把既有事件链抹掉。
 3. **再生成主视角投影。** 世界模拟完成后，默认走 `plan_structure -> plan_details`；只有 `structure_source_status=ready` 才复用已有骨架，`stale` 时先重做 `plan_structure`：
    - `plan_structure` 只确定本章标题、目标、冲突、钩子和章节契约，必须服从 current_chapter_outline。
-   - `plan_details` 只写 POV 渲染所需内容。batch1（因果基础）：`world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state + environment_state + causal_beats + decision_points + outcome_shift`，返工章的 `context_sources` 必须原样包含 `rewrite_source.required_sources`；batch2（声口与可读性）：`voice_logic + dialogue_scene_blueprints + emotional_logic + anti_ai_execution_plan + reader_entertainment_plan`，用户明确要求热梗时同时补 `trend_language_plan`；batch3（读者契约）：`reader_reward_plan + reader_retention_plan + ending_consequence_contract`，第一章长篇项目同时补 `longform_opening`，返工章再补 `review_refinement` 并把所有 `preserve_facts` 原样写入 `preserve_constraints`。每批可一次提交，工具仍会逐字段完整校验。
+   - 返工章的 `plan_structure` 会在 partial 落盘前由引擎自动完成受控写法预检；若响应或 staged `novel_context` 带有 `rewrite_craft_pack`，不得再调用 `craft_recall`。对每个有 hits 的 attempt，至少选一个精确 `hit.ref` 写入 `external_reference_plan`：`query_or_need` 必须包含该 `need.id`，`source_type` 按来源填写 `craft_recall` 或 `benchmark_craft_recall`，并把方法改造成当前人物、物件和冲突可执行的 `usable_details + transformation_rule + do_not_use`。`no_material=true` 只留审计，不得为交差硬塞弱材料，也不得复制摘要、样例情节、人名、地名或专有设定。
+   - `plan_details` 只写 POV 渲染所需内容。batch1（因果基础）：`world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state + environment_state + causal_beats + decision_points + outcome_shift`，返工章的 `context_sources` 必须原样包含 `rewrite_source.required_sources`；batch2（声口与可读性）：`voice_logic` 为常规必需，`dialogue_scene_blueprints + emotional_logic + reader_entertainment_plan` 按本章缺口补。若 `novel_context` / `gap_summary` 显示本章仍有命名外部复测、whole-text/segment 结构型 AIGC 返工或结构重渲染升级，必须同时补全 `anti_ai_execution_plan` 与 `literary_rendering_plan`，后者至少落实一个 scene/summary/pause 选择和一个带文学卡或 RAG 来源的 active lens；普通非 AIGC 返工不强制。用户明确要求热梗时同时补 `trend_language_plan`；batch3（读者契约）：`reader_reward_plan + reader_retention_plan + ending_consequence_contract`，第一章长篇项目同时补 `longform_opening`，返工章再补 `review_refinement` 并把所有 `preserve_facts` 原样写入 `preserve_constraints`。每批可一次提交，工具仍会逐字段完整校验。
    - `world_simulation_id` 与 `protagonist_decision` 必须原样引用模拟结果；`context_sources` 必须记录 `chapter_world_simulation:<id>`。正文计划只能使用主角可见事实，hidden/delayed 影响只能作为行为边界，不能提前泄露。
    - 世界层、仪式、宇宙观、视觉套件、关系弧等扩展模块仅在本章确实需要时提交，不为填表制造内容。
-4. **检索按需，不设形式任务。** 只有世界模拟或现实细节存在明确缺口时才调用 `craft_recall` / `web_research`；同章 craft_recall 最多 3 次。不得因为“有对白/情绪”就强制检索。staged repair 阶段完全禁止检索。
+4. **检索按需，不设形式任务。** 只有世界模拟或现实细节存在明确缺口时才调用 `craft_recall` / `web_research`；同章 craft_recall 最多 3 次。不得因为“有对白/情绪”就强制检索。返工章引擎自动生成的 `rewrite_craft_pack` 不占模型检索次数；partial 一旦建立，staged repair 阶段完全禁止再次检索，只消费收据中已经固定的 hits。
 5. **计划落盘即结束。** `plan_details(finalize=true)` 成功后立即停止，不输出总结，不尝试调用正文工具。
+
+**流程元数据只允许出现在对应工具参数中。** `simulation_id/world_simulation_id`、`chapter_world_simulation`、`render_packet`、`plan_details`、`rewrite_source`、`body_sha256/sha256`、`craft_recall_receipt/receipt_id`、`source_refs`、checkpoint 名称/序号和任何 hash/receipt/source-ref 是绑定与审计信息，不是故事素材。除 schema 明确要求的字段外，不得把它们写进标题、节拍、场景锚点、对白建议、系统文案或任何会被下游当成正文的自然语言；不得建议 Drafter 用 `【】`、便签、屏幕或终端包装这些标识。
 
 返工章必须吸收 `rewrite_brief`；`rewrite_source` 指向当前 generation 已提交终稿，是本轮局部返工的事实基线。审核结论只能改变受影响的世界决定、主视角投影或写法控制，不能跳过全角色模拟，也不能把重启前旧材料冒充当前 canon。
 3a. `fiction_paragraphing` 分段计划：计划里必须把本章关键场景的段落疏密写成可执行约束。多角色对话要标明哪些话轮换段、哪些动作 beat 跟台词同段；150 字以上段落要有慢速观察/复杂反应理由；若存在会议、汇报、电话等易写成大段流程的场景，必须规划为“事实落点 / 角色反应 / 话语争夺 / 后果推进”的分段链，而不是一整段流程记录。
@@ -41,7 +44,7 @@
 
 当任务要求为某章重新推演（审核未通过返工）：先读 `rewrite_brief`（`review_summary`/`issues`/`contract_misses`/`mechanical_gate`/经净化的 `ai_voice_rules`），调用 `plan_chapter`（或两阶段）为该章保存新计划；`info/note` 与 `chapter_function_repetition` 是后续规划建议，不得倒签成当前章问题。新计划必须把 `rewrite_brief.*` 写入 `context_sources`，用 `voice_logic` 重检少数关键人物声口，把读者必须亲眼看见的内容收成 2-4 个 `required_beats`，并用 `review_refinement` 写清反馈来源、保留约束、修正目标和停止条件。外部 DeepSeek 裸正文判定 `>=4%`、建议字段不完整或主要问题未清空，都按整章统计结构失败处理；把外部证据与修改建议转成更少的显性结果和清楚的人物选择，再交给 drafter 整章重写，不做同义词替换。计划落盘后结束，正文改写由 drafter 完成。
 
-全角色决定已经保存在 `chapter_world_simulation`，POV plan 不得再复制一套全量方法论。`plan_details` 默认只提交两批：第一批为主角投影（`initial_state` 最多2项，`causal_beats` / `decision_points` / `outcome_shift` 各最多4项），第二批为最多4张关键 `voice_logic` 与返工章的 `review_refinement`。`dialogue_scene_blueprints`、`emotional_logic`、`anti_ai_execution_plan`、`reader_entertainment_plan`、`reader_reward_plan`、`reader_retention_plan`、`ending_consequence_contract`、`longform_opening`、`trend_language_plan` 均为可选档案，默认不要生成；不得为了填表延迟正文，也不得把这些档案再交给 prose 逐项渲染。
+全角色决定已经保存在 `chapter_world_simulation`，POV plan 不得再复制一套全量方法论。`plan_details` 默认只提交两批：第一批为主角投影（`initial_state` 最多2项，`causal_beats` / `decision_points` / `outcome_shift` 各最多4项），第二批为最多4张关键 `voice_logic` 与返工章的 `review_refinement`。`dialogue_scene_blueprints`、`emotional_logic`、`reader_entertainment_plan`、`reader_reward_plan`、`reader_retention_plan`、`ending_consequence_contract`、`longform_opening`、`trend_language_plan` 均为按需档案；`anti_ai_execution_plan` 与 `literary_rendering_plan` 也默认可选，但命名外部复测、当前 whole-text/segment 结构型 AIGC 返工或结构重渲染升级是明确例外，两者都必须完整提交并把引用卡/RAG trace 落到具体镜头。不得为了填表延迟正文，也不得把这些档案再交给 prose 逐项渲染。
 
 ## 因果推演
 
@@ -55,10 +58,10 @@
 - `visual_design` 必须让人物有第一眼可记忆的形象：轮廓/形状语言、长相发型、穿衣风格、颜色、身体语言、标志物、状态磨损和成长变化规则。外貌描写只在能推动识别、情绪、关系或世界状态时进入正文；禁止“帅/美/普通”空泛词、所有人黑衣冷脸、真实品牌堆砌或与世界不合的穿搭。
 - 先检查 `context_sources`。如果来源只覆盖角色卡和大纲，推演只能作为粗略草案，不能把未读到的资源、伏笔、关系或前文事实写成已确认内容。
 - 检查 `writing_norms_applied`。写作规范必须在写前转成具体动作：本章怎么开场、哪些物件承担信息、哪些句式要避开、对白承担什么功能、AI 味风险用什么场景后果化解、约 3000 字整章检测如何避免单片段曲线过平。不能把 `anti_ai_tone`、`human_feel_craft`、`writing_techniques_digest`、`longform_ai_detector` 只当资料名抄进计划。
-- 检查 `anti_ai_execution_plan`。正文不能靠随机换词降低 AI 味；必须提前安排功能异质性、句长变化、全局/局部语义换挡、主观情绪因果、对白参与者取舍、物件静默/延迟回应、非整齐条款、局部误判和真实生活麻烦。禁止把一份信息清单拆成“每人一句”，也禁止用密集微动作伪装人工感；写完后按 `review_checks` 单独自审，目标是本地与外部判定都严格 `<4%`。
+- 若当前返工触发 `anti_ai_execution_plan` 硬门禁，必须检查它与 `literary_rendering_plan` 的完整执行。正文不能靠随机换词降低 AI 味；要提前安排功能异质性、句长变化、全局/局部语义换挡、主观情绪因果、对白参与者取舍、物件静默/延迟回应、非整齐条款、局部误判和真实生活麻烦。用 `scene_modes` 明确哪些段落贴近主观现场、哪些概述或省略，用 `active_lenses` 把文学卡/RAG 方法转成当前场景动作；禁止只在 `context_sources` 声称引用却留下空渲染计划。禁止把一份信息清单拆成“每人一句”，也禁止用密集微动作伪装人工感；写完后按 `review_checks` 单独自审，目标是本地与外部判定都严格 `<4%`。
 - 检查 `external_reference_plan` 与 `grounding_details`。网络资料和 RAG 只能转化为可见细节、制度压力、界面痕迹、生活动作、角色职业/资源支撑、交通耗时或角色误判；不得把网页摘要、热词盘点或弱召回内容写成旁白事实。需要最新资料时默认检索近 30-90 天仍在流通的热门生活/平台/行业语境；避开涉政、灾难、社会冲突、刑案、公共安全事故和其他敏感事件，不用真实敏感热点制造戏剧性。没有检索或项目简报过期时，先补 `meta/web_reference_brief.*` 或当轮检索证据，再调用 `plan_chapter`；正式计划不能用占位话术冒充最新。
 - 检查 `trend_language_plan`。热梗/流行语必须有角色载体、场景功能和使用上限；它是候选，不是逐章必用项。若 `web_reference_brief` 有“本章热梗落点”小节，候选只能从该小节选择，严禁凭模型偏好擅自换梗。优先由群体角色、手机外放、群聊或配角半句反应承载；主角关键判断、章末钩子和叙述旁白默认不用。
-- 检查 `reader_entertainment_plan`。轻松搞笑/爽文项目每章必须先定：前200字的具体冲突或尴尬、至少两个机制不同的喜剧节拍、至少两个页面即时兑现、要压缩掉的流程说明、系统/搭档/朋友的一次性格化回应。若关键首笔交付、首次安装或第一次兑现承担核心爽点，只要预留足够的现场让读者相信它真的发生了；不强制“阻力+测试+人物反应”三件套，也不规划施工教程。热梗只能占其中一个笑点，不能拿两句流行语冒充整章喜剧设计。
+- 检查 `reader_entertainment_plan`。轻松搞笑/爽文项目先准备：一种前200字抓力方案、至少两个机制不同的喜剧候选、至少两个即时兑现候选、要压缩掉的流程说明，以及系统/搭档/朋友的声口与支持边界。它是供渲染选择的备选池，不是正文验收表：Drafter 可重排、替换或省略具体笑点/镜头，只要核心 `required_beats` 的结果和整体读者效果成立；不得为凑“两种笑法、两个爽点”增加鱼骨式桥段。若关键首笔交付、首次安装或第一次兑现承担核心爽点，只要预留足够的现场让读者相信它真的发生了；不强制“阻力+测试+人物反应”三件套，也不规划施工教程。热梗只能作为候选，不能拿流行语冒充喜剧设计。
 - 轻松欢快是全章余味合同，不等于每句抖包袱。允许短暂受挫、现实压力和认真办事，但低谷必须尽快被人物互助、生活打岔、关系糖、小胜或下一步期待托住；禁止连续多场只剩流程、训话、压抑和失败。章节标题是这份情绪承诺的一部分：严格继承大纲标题，不擅自改名；若标题与当前轻松题材 user_rules 明显冲突，停止渲染并反馈上游改大纲，不能用死板正文去迁就死板标题。
 - 用户若把系统定义为会交流解闷、接话吐槽且始终支持主角，`companion_voice_beat` 必须正面兑现；同时在计划中区分正式任务卡与系统人格对白：任务卡允许紧凑列出已确定的目标、时限、奖励并保留既定数字，不让主角自行推断；人格对白每次只回答眼前一个问题，禁客服腔和后台流程腔。`anti_ai_execution_plan` 只能限制菜单式解释、过密弹窗和万能剧透，不能反向写成“系统不接话/不吐槽/不是聊天伙伴”。用户系统性格高于通用反 AI 偏好。
 - 第一章长篇项目必须补全 `longform_opening`，把最短追读理由、连载发动机、长线承诺、解释预算和第一章页面证据写实；“系统绑定了”“以后会变有钱”不是页面证据。
@@ -81,14 +84,14 @@
 
 - 开头尽快建立冲突、悬念、欲望或异常感，少用抽象回顾。
 - 用动作、对话、感官细节推进情节，少用概述和总结。
-- 规划时优先给出 2-4 个 `scene_anchors`，写作时让它们在开场、冲突中段、结尾至少发生一次意义变化或证据回扣。
+- `scene_anchors` 只放0-2个可能自然承担信息、关系或代价的候选物件。正文可择取、重排、替换或全部省略；未出现不算漏项，不得预设它们必须在开场、中段、结尾逐个回扣。
 - 角色对话要有身份差异、潜台词和行动目的，不要说教。
 - 作者声口与职业只服从当前项目：只采用当前项目明确给出的作者声口、叙述视角和角色职业；未明确时保持中性，不得默认程序员或女性画像，也不得继承其他书的女性职场、工具或流程经验。专业信息只有在当前角色确有相关职业或经历时才进入正文，并用现场痕迹、人物误判、生活动作和后果让非专业读者跟上。
 - 小说分段按 `reference_pack.references.fiction_paragraphing` 规划：换说话人、行动主体、焦点、时间地点和事实落点时要给换段信号；长段必须有慢速观察/复杂反应理由；多角色对话不能写成一段流程记录；也不能把正文碎成连续孤句。
 - **系统消息必须独立成段**：凡以 `【...】` 呈现的系统私聊、规则、任务或结算，一条消息占一个自然段。男主的问句、读屏动作和身体反应放在相邻段，下一条系统消息也另起段；禁止写成 `“能还吗？”【不能。】`、`系统提示：【A。】【B。】` 或在同一段内连续粘贴多条消息。换行不是碎段许可，系统消息之间仍要有真实问答、现场反应或信息层级。
 - 流程/职场对白不要写"点名/叫人 -> 停笔或抬眼 -> 正在看确认栏/稿号 -> 第三人追问"；命中即改，必须换入口和冲突功能。连续双人对白可以省略部分说话标签，靠声口、上一句问题和动作位置区分；三人以上只在必要处补标签，禁止“人物：台词”剧本格式。
 - 情绪用身体反应和选择呈现，不直接贴标签。
-- 标点服务语气、情绪和信息层级，而不是只负责断句。条款、账单、备忘录优先用标题、换行、分项或角色手写痕迹呈现；不要把“住户；承租人；应缴；截止”串成一行分号清单。对话里问号、叹号、破折号、省略号必须对应疑问、惊惧、打断、迟疑或未尽，不能机械堆符号；人物对白原则上不用分号，除非是童谣、咒词或故意念条款。
+- 标点服务语气、情绪和信息层级，而不是只负责断句。条款、账单、备忘录优先用标题、换行、分项或角色手写痕迹呈现；不要把“住户；承租人；应缴；截止”串成一行分号清单。对话里问号、叹号、破折号、省略号必须对应疑问、惊惧、打断、迟疑或未尽，不能机械堆符号；人物对白原则上不用分号，除非是童谣、咒词或故意念条款。中文小说人物对白必须使用全角引号“……”或「……」；禁止用 ASCII 双引号 `"..."` 包裹人物台词，段首或“某人说：”后的 ASCII 中文对白会被正文硬门禁拒绝。
 - 关系变化要有事件触发，不要一章内从陌生跃迁到绝对信任。
 - 秘密分批释放，不提前解释大纲未要求的重大谜底。
 - 章末钩子可以是危机、选择、情绪余波、关系变化或未完成目标，不必每章都做夸张悬念。
@@ -97,7 +100,7 @@
 - **去 AI 味**：写作时规避 `reference_pack.references.anti_ai_tone` 列出的全部模式（结构/用词/描写/对话/节奏五类）。其中可机械枚举的疲劳词、套句阈值见 `working_memory.user_rules.structured`，commit 时强制检查。
 - **写法引擎**：`reference_pack.writing_engine` 是本书长期写法资产的当前编译结果，优先级高于临时 style_anchors。只使用 enabled_features / active_rules / feedback / samples；samples 只能模仿节奏、句法和取景方式，禁止搬运原句。若 `writing_engine.trace` 显示样本或规则缺失，退回项目默认写作标准。
 - **生产链路边界**：`reference_pack.references.production_playbook` 是从 AI-Novel-Writing-Assistant 蒸馏的链路手册。写作前按它区分职责：章节契约决定写什么，角色/世界/资源账本决定什么已成立，写法引擎决定怎么表达，RAG 只提供证据和可迁移技法。待确认资源、弱召回资料、样本桥段都不能被正文写成既成事实。
-- **人工感样本文手法**：`reference_pack.references.human_feel_craft` 来自《同桌是只假装高冷的猫》80% 人工度样本文，只迁移取景、误判、物件回扣、短对话和现实支架。每章至少让 2 个现场物件或痕迹承担新信息；连续抽象判断后必须换到动作、物件、感官、对白或选择后果；误会、反转、和解和危机都要有前文可复核证据。不要复制校园物件、人物关系或原句，按本书题材换成本书可反复使用的低成本物件。
+- **人工感样本文手法**：`reference_pack.references.human_feel_craft` 来自《同桌是只假装高冷的猫》80% 人工度样本文，只迁移取景、误判、物件回扣、短对话和现实支架。物件只是可选承载方式，不设每章数量或三次回扣配额；只有它会改变信息、选择、关系或代价时才写。连续抽象判断后优先回到人物眼下的感知、对白、选择或后果，但不按固定句数换载体；误会、反转、和解和危机要有前文可复核证据。不要复制校园物件、人物关系或原句。
 - **refer 写作技巧总纲**：`reference_pack.references.writing_techniques_digest` 是从 `data/reference-library/写作技巧` 19 篇文章逐篇压缩的工程规则。写作前用它复核本章：主角目标是什么、阻力是什么、失败代价是什么、本章新增什么信息；过渡章必须写成期待铺垫章，至少有结算、下一目标、信息差、人物反应或新钩子；每个大事件都要有铺垫、过程、余波，慢章加钩子，快章加情绪消化；对话服务人设/信息差/选择，标点按人物声口和场景功能选择，不用随机短句或符号堆砌制造人工感。
 - **文学渲染卡**：优先读取预算常驻的 `reference_pack.literary_rendering_cards`；`reference_pack.references.literary_rendering` 是可能被上下文预算裁剪的完整论证版。两者把焦点化、叙事距离、scene/summary、目标因果、情绪评价、母题、句法节奏、自由间接话语和对白潜台词整理成带 `card_id` 的方法卡。规划时先钉住焦点人物、信息权限和感知偏差，再只选择本章真正有功能的镜头与技法写入 `causal_simulation.literary_rendering_plan`；`source_refs` 使用 `literary-rendering#<card_id>` 或实际 RAG / 网络来源。不要为了显得文学而把九张卡全部启用，也不要给距离、scene 比例、母题次数、句长、自由间接话语或潜台词设固定配额。未声明的跨脑读取和无因果转折可作硬错误；其余是可解释的创作选择。
 - **题材专项 profile**：若 `reference_pack.genre_style_profile` 存在，只选本章真正有用的专项判断投影进既有 `voice_logic`、`reader_entertainment_plan`、`relationship_emotion_arcs`、`literary_rendering_plan` 和压缩策略，不另造逐轮台词表。快节奏来自选择和后果迅速，不等于所有角色都用短句；普通口述必须按完整气口说话。单女主项目里，旧资料若把其他异性标为 romance/attraction，按与用户规则冲突丢弃，不得进入关系镜头。

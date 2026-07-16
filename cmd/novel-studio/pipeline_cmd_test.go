@@ -50,6 +50,20 @@ func TestPipelineDraftNeedsExternalJudgeIncludesFirstUnjudgedHash(t *testing.T) 
 			want:       true,
 		},
 		{
+			name: "registered retest waits for operator",
+			inspection: tools.DraftExternalGateInspection{
+				Status:                   tools.DraftExternalGateRejudgePending,
+				RequiresRegisteredRetest: true,
+			},
+		},
+		{
+			name: "DeepSeek-passing local soft failure goes to one edit",
+			inspection: tools.DraftExternalGateInspection{
+				Status:               tools.DraftExternalGateRejudgePending,
+				LocalSoftEditPending: true,
+			},
+		},
+		{
 			name: "blocking hash authorized for rerender",
 			inspection: tools.DraftExternalGateInspection{
 				Status:            tools.DraftExternalGateRerenderAuthorized,
@@ -90,6 +104,98 @@ func TestPipelineExplicitRerenderSkipsJudgeForSupersededDraft(t *testing.T) {
 	}
 	if pipelineDraftNeedsExternalJudgeForChapter(dir, 2, inspection) {
 		t.Fatal("newer explicit rerender request should skip judging the superseded draft")
+	}
+}
+
+func TestPipelineJudgePendingDraftHashSkipsNamedRetestForExplicitlySupersededDraft(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "第二章\n\n这是已经被显式整章重渲染请求作废的旧候选。"
+	if err := st.Drafts.SaveDraft(2, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "draft", "drafts/02.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.SetRegisteredExternalRerenderRequirement(dir, reviewreport.RegisteredExternalDetection{
+		Chapter: 2, Detector: "zhuque", Mode: "novel-whole-text-single-segment",
+		BodySHA256: reviewreport.BodySHA256(body), NormalizedScorePercent: 83,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(dir, "drafts", "02.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(2), "rerender-request", "drafts/02.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	judged, err := pipelineJudgePendingDraftHash(cliOptions{}, dir, &domain.Progress{PendingRewrites: []int{2}})
+	if err != nil || judged {
+		t.Fatalf("explicit rerender should bypass all old-hash preflight: judged=%v err=%v", judged, err)
+	}
+	inspection, err := tools.InspectDraftExternalGateWithStore(st, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tools.RequiresRegisteredExternalRetest(inspection.Requirement) ||
+		!slices.Contains(tools.RegisteredExternalRetestLabels(inspection.Requirement), "zhuque/novel-whole-text-single-segment") {
+		t.Fatalf("explicit rerender erased the detector/mode obligation for the replacement: %+v", inspection.Requirement)
+	}
+}
+
+func TestRegisteredRetestSurvivesEarlierPendingRewriteAndBecomesNextDeepSeekGate(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("queue", 2); err != nil {
+		t.Fatal(err)
+	}
+	for chapter := 1; chapter <= 2; chapter++ {
+		if err := st.Progress.MarkChapterComplete(chapter, 20, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Progress.SetPendingRewritesAndFlow([]int{1, 2}, "registered retest queue", domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBody := "第二章\n\n旧平台送检正文。"
+	newBody := "第二章\n\n替换稿先交给当前哈希的 DeepSeek 判断。"
+	if err := st.Drafts.SaveDraft(2, oldBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.SetRegisteredExternalRerenderRequirement(dir, reviewreport.RegisteredExternalDetection{
+		Chapter: 2, Detector: "zhuque", Mode: "novel-whole-text-single-segment",
+		BodySHA256: reviewreport.BodySHA256(oldBody), NormalizedScorePercent: 83,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(2, newBody); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := tools.InspectDraftExternalGateWithStore(st, 2)
+	if err != nil || before.Status != tools.DraftExternalGateRejudgePending || !before.RegisteredRetestDeferred || before.RequiresRegisteredRetest {
+		t.Fatalf("chapter 2 should retain its named obligation but wait for DeepSeek while chapter 1 leads: inspection=%+v err=%v", before, err)
+	}
+	if err := st.Progress.CompleteRewrite(1); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil || len(progress.PendingRewrites) != 1 || progress.PendingRewrites[0] != 2 {
+		t.Fatalf("chapter 2 did not become queue head after chapter 1 completed: progress=%+v err=%v", progress, err)
+	}
+	after, err := tools.InspectDraftExternalGateWithStore(st, progress.PendingRewrites[0])
+	if err != nil || !after.RegisteredRetestDeferred || !tools.RequiresRegisteredExternalRetest(after.Requirement) ||
+		!pipelineDraftNeedsExternalJudgeForChapterWithStore(st, 2, after) {
+		t.Fatalf("chapter 2 lost its named obligation or failed to enter DeepSeek-first preflight: inspection=%+v err=%v", after, err)
 	}
 }
 
@@ -1005,12 +1111,33 @@ func TestPipelineRequestFullRerenderInvalidatesExistingDraftWithoutChangingPlan(
 	if err != nil || json.Unmarshal(raw, &request) != nil {
 		t.Fatalf("rerender request unreadable: err=%v body=%s", err, raw)
 	}
-	if request.Chapter != 2 || request.PlanSHA256 == "" || request.SupersededDraftSHA256 == "" || request.InstructionSHA256 == "" {
+	if request.Chapter != 2 || request.PlanSHA256 == "" || request.SupersededDraftSHA256 == "" ||
+		request.Instruction != "读起来像流程播报" || request.InstructionSHA256 == "" {
 		t.Fatalf("rerender request incomplete: %+v", request)
 	}
 	loadedPlan, err := st.Drafts.LoadChapterPlan(2)
 	if err != nil || loadedPlan == nil || loadedPlan.Title != plan.Title {
 		t.Fatalf("force rerender changed plan: plan=%+v err=%v", loadedPlan, err)
+	}
+
+	// A rerender request is authorization to reuse this plan, not a fresh
+	// causal budget. Repeating --force-rerender must not jump over exhausted
+	// structural attempts by writing a newer request checkpoint.
+	for i := 0; i < 3; i++ {
+		if _, err := st.Checkpoints.Append(
+			domain.ChapterScope(2), "draft-structural-block", "drafts/02.draft.md",
+			fmt.Sprintf("sha256:blocked-%d", i),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := st.Checkpoints.LatestByStep(domain.ChapterScope(2), "rerender-request")
+	if _, err := pipelineRequestFullRerender(st, []int{2}, "再来一次"); err == nil || !strings.Contains(err.Error(), "必须先重做") {
+		t.Fatalf("repeated force rerender should reject an exhausted plan, got %v", err)
+	}
+	after := st.Checkpoints.LatestByStep(domain.ChapterScope(2), "rerender-request")
+	if before == nil || after == nil || before.Seq != after.Seq {
+		t.Fatalf("rejected force rerender wrote a new boundary: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -1029,12 +1156,24 @@ func TestPipelineForceRerenderTargetsCompletedRangeWithoutPendingQueue(t *testin
 	}
 }
 
+func TestMergePendingRewriteChaptersPreservesOutOfRangeFailures(t *testing.T) {
+	got := mergePendingRewriteChapters([]int{1, 2}, []int{1})
+	if !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("scoped rerender erased an unrelated pending chapter: %v", got)
+	}
+
+	got = mergePendingRewriteChapters([]int{2, 4}, []int{3, 2, 1})
+	if !slices.Equal(got, []int{1, 2, 3, 4}) {
+		t.Fatalf("merged queue = %v", got)
+	}
+}
+
 func TestPipelineArchitectRefreshPromptLocksGoldenThreeAndStageBoundary(t *testing.T) {
 	prompt, err := pipelineArchitectRefreshPrompt(t.TempDir(), "整章朱雀分数过高，重做黄金三章")
 	if err != nil {
 		t.Fatalf("pipelineArchitectRefreshPrompt: %v", err)
 	}
-	for _, want := range []string{"architect_long", "番茄免费阅读留存闭环", "每条【系统消息】独立成段", "严禁 plan_chapter", "整章朱雀分数过高"} {
+	for _, want := range []string{"architect_long", "移动阅读留存闭环", "每条【系统消息】独立成段", "没有此类设定时严禁凭空新增", "严禁 plan_chapter", "整章朱雀分数过高"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("refresh prompt missing %q:\n%s", want, prompt)
 		}

@@ -390,8 +390,8 @@ func defaultWritingAssetFeatures(now string) []domain.WritingFeature {
 			Description: "每章让现场物件或痕迹真正承担信息、关系、代价或钩子。",
 			Enabled:     true,
 			Rules: []string{
-				"每章至少让 2 个现场物件或痕迹承担新信息、关系位移、规则代价或章末钩子。",
-				"规划时优先把这些物件写入 scene_anchors，正文中不能只重复名字，至少一次改变读者知道的信息或角色选择。",
+				"按现场需要择取0—2个物件或痕迹承担新信息、关系位移、规则代价或章末钩子；没有合适承载物时不为凑数添加。",
+				"规划时可把候选物件写入 scene_anchors；正文只使用真正改变读者认知或角色选择的少数项，允许重排、替换或省略，禁止逐项回收。",
 			},
 			Source:    "default:human_feel_craft",
 			UpdatedAt: now,

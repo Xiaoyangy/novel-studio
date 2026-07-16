@@ -14,6 +14,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
 )
 
@@ -70,6 +71,37 @@ func TestBuildEditorChapterReviewContextUsesResultLevelContract(t *testing.T) {
 	}
 	if strings.Contains(context, "系统绑定一百万元额度") {
 		t.Fatalf("Editor context kept duplicate staging language instead of the visible result: %s", context)
+	}
+}
+
+func TestEditorReviewRequiredOutcomesDropsOnlyProcessRecipes(t *testing.T) {
+	compound := "68000元取货款必须继续阻断；只准落地五摊；灯具材料680元、五金360元、老丁人工300元分别准确；往返43公里、油费86元、半日人工180元全部留痕；冷饮支架只允许唯一一次失败复测，不得增加第六套。"
+	plan := domain.ChapterPlan{Contract: domain.ChapterContract{RequiredBeats: []string{
+		"系统显示一百万元额度；林澈用旧债等两至三个短动作验证边界；旧债测试被明确拒绝。",
+		compound,
+		"逐笔票据核查",
+	}}}
+
+	complete := toolspkg.RenderRequiredOutcomes(plan)
+	if len(complete) == 0 || !strings.Contains(complete[0], "两至三个短动作") {
+		t.Fatalf("Drafter-facing hard outcome was unexpectedly shortened: %#v", complete)
+	}
+	got := editorReviewRequiredOutcomes(plan)
+	if len(got) != 2 || got[0] != "系统显示一百万元额度；旧债测试被明确拒绝" || got[1] != strings.TrimSuffix(compound, "。") {
+		t.Fatalf("Editor result projection removed a hard result or kept a recipe: %#v", got)
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{
+		"68000元", "五摊", "680元", "360元", "300元", "43公里", "86元", "180元", "唯一一次失败复测",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Editor projection lost hard result %q: %s", want, joined)
+		}
+	}
+	for _, recipe := range []string{"两至三个短动作", "逐笔票据核查"} {
+		if strings.Contains(joined, recipe) {
+			t.Fatalf("Editor projection kept process recipe %q: %s", recipe, joined)
+		}
 	}
 }
 

@@ -15,6 +15,22 @@ type PipelineState struct {
 	Evidence    map[string]PipelineStageEvidence `json:"evidence,omitempty"`
 }
 
+// ChapterRerenderRequest durably binds an explicit whole-chapter rerender to
+// the exact plan, draft and user instruction that authorized it. Keeping the
+// instruction body beside its digest matters after render-only escalation:
+// world simulation, POV planning and prose rendering run in separate agent
+// sessions and must all receive the same chapter-scoped contract.
+type ChapterRerenderRequest struct {
+	Version               int    `json:"version"`
+	Chapter               int    `json:"chapter"`
+	PlanSHA256            string `json:"plan_sha256"`
+	SupersededDraftSHA256 string `json:"superseded_draft_sha256"`
+	Instruction           string `json:"instruction,omitempty"`
+	InstructionSHA256     string `json:"instruction_sha256,omitempty"`
+	Reason                string `json:"reason"`
+	RequestedAt           string `json:"requested_at"`
+}
+
 // PipelineStageEvidence is the durable proof attached to a completed pipeline
 // stage. The pipeline CLI writes this after verifying artifacts/checkpoints.
 type PipelineStageEvidence struct {

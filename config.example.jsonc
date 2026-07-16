@@ -39,8 +39,9 @@
   },
 
   // 按角色覆盖默认模型；未配的角色使用上面的 model。
+  // drafter 专司正文渲染；未配置时完整继承 writer 的模型、兜底、推理强度和 max_turns。
   // reasoning_effort 也可按角色覆盖；未配时继承顶层 reasoning_effort。
-  // 角色：coordinator / architect / writer / editor / reviewer。
+  // 角色：coordinator / architect / writer / drafter / editor / reviewer。
   // fallbacks 在主模型失败（宕机/限流/余额不足）时按序尝试，恢复后自动回主路；
   // reasoning_effort 可给每个兜底模型单独设置，避免继承主模型不兼容的档位。
   // reviewer 用于三采样 pairwise 终选与 AI 味盲测判别；LLM judge 对同族输出有
@@ -53,6 +54,8 @@
     "architect":   { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high",
                      "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
     "writer":      { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high",
+                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
+    "drafter":     { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "high",
                      "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
     "editor":      { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "medium",
                      "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },

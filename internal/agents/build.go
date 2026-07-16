@@ -34,9 +34,12 @@ func agentToRole(name string) string {
 	if strings.HasPrefix(name, "architect_") {
 		return "architect"
 	}
-	if name == "drafter" || name == "draft_finalizer" || name == "world_simulator" {
-		// 渲染阶段与推演阶段共用 writer 角色的模型/推理强度配置。
+	if name == "world_simulator" {
+		// 全角色世界推演仍属于 writer，不跟随正文渲染模型。
 		return "writer"
+	}
+	if name == "drafter" || name == "draft_finalizer" {
+		return "drafter"
 	}
 	return name
 }
@@ -137,12 +140,13 @@ func cappedMaxTurns(configured, ceiling int) int {
 const worldSimulatorSystemPrompt = `你是全角色世界推演器，只负责在章节 POV plan 之前推进单一世界。
 
 执行协议：
-1. 只调用一次 novel_context(chapter=N, profile="world_simulation")，读取 simulation_characters、角色状态、世界状态、当前章大纲、用户规则、rewrite_source 和 gaps。
-2. 只调用 simulate_chapter_world。按 gaps 分批补角色，每批最多8名；同名角色不要重复提交。
-3. 每个实名角色都基于自己的目标、压力、资源、关系和知识边界列出至少两个可选项，作出决定，写明理由、行动、现实耗时、完成度、即时结果、后续状态和至少一个 butterfly_effect。
-4. 复杂经营、装修、审批、施工、招商等按现实时间跨章推进。角色看不到的信息不得提前写进其知识边界。
-5. 返工章逐条提交 rewrite_fact_coverage，保留终稿事实链；最后补完整 protagonist_projection 并 finalize=true。
-6. 工具返回 simulated=true 后立即停止。不得生成或尝试 plan_structure、plan_details、正文、审阅，也不输出总结。`
+1. 只调用一次 novel_context(chapter=N, profile="world_simulation")，读取 simulation_characters、simulation_character_authority、世界状态、当前章大纲、用户规则、rewrite_source、chapter_pipeline_instruction 和 gaps。chapter_pipeline_instruction 是当前章节最高优先级硬合同；存在时逐条核对，并把 source_token 原样写入 simulate_chapter_world.sources。
+2. 只调用 simulate_chapter_world。按 gaps 分批补角色，character_decisions 与 authority_contract_characters 合计每批最多8名；同名角色不要重复提交。若 chapter_world_simulation.status=ready_to_finalize 或 gaps 为空，只调用 simulate_chapter_world(chapter=N, finalize=true)，不得重发 character_decisions、authority_contract_characters、protagonist_projection、rewrite_fact_coverage、sources 或 time_window。
+3. simulation_character_authority 与名单一一对应，是角色事实的权威入口。simulation_status=already_present 时禁止重发；chapter_world_simulation.locked_character_decisions 提供这些已保存决定的原文，rewrite_fact_coverage 和 protagonist_projection 必须从它们派生，不得根据待修旧正文重新猜。blocking=true 时不得自行推演、不得手抄长合同 JSON：只把角色实名放进 authority_contract_characters，工具会在服务端物化对应 hold_baseline_contract 或 rewrite_source_only_contract，保留 exact action、引号与 required_knowledge_boundaries。unknown 是边界，不是待补空格。
+4. 其余实名角色基于权威目标、压力、资源、关系和知识边界列出至少两个真实可选项，作出决定，写明理由、行动、现实耗时、完成度、即时结果、后续状态和至少一个 butterfly_effect。
+5. 复杂经营、装修、审批、施工、招商等按现实时间跨章推进。角色看不到的信息不得提前写进其知识边界。
+6. 返工章逐条提交 rewrite_fact_coverage，保留终稿事实链；不得把 pending 资源写成已同意/已到位，不得让角色从票据、付款渠道或作者信息推知 knowledge_boundary 之外的秘密，也不得用“是否、可能、开始留意”等不确定措辞把 preserve_facts 已禁止的 hidden pressure 重新塞回投影；最后补完整 protagonist_projection 并 finalize=true。
+7. 工具返回 simulated=true 后立即停止。不得生成或尝试 plan_structure、plan_details、正文、审阅，也不输出总结。`
 
 // subagentMaxRetries 给所有 SubAgentConfig 与 Coordinator 统一的 LLM retry 上限。
 // 退避策略优先服从 server Retry-After。写工具图统一声明为非幂等，因此重试只会
@@ -322,8 +326,10 @@ func BuildCoordinator(
 
 	architectModel := models.ForRoleWithFailover("architect", reportFailover)
 	writerModel := writersampler.New(models.ForRoleWithFailover("writer", reportFailover))
+	drafterModel := writersampler.New(models.ForRoleWithFailover("drafter", reportFailover))
 	// Task 067：三采样 pairwise 终选用 reviewer 角色（异族裁判；未配置回落 editor）。
 	writerModel.Judge = models.ForRoleWithFailover("reviewer", reportFailover)
+	drafterModel.Judge = models.ForRoleWithFailover("reviewer", reportFailover)
 	editorModel := models.ForRoleWithFailover("editor", reportFailover)
 	coordinatorModel := models.ForRoleWithFailover("coordinator", reportFailover)
 
@@ -334,8 +340,11 @@ func BuildCoordinator(
 	// Writer 的 ContextManager 由工厂每次调用重建，窗口随模型 swap 动态跟随（见下方工厂）。
 	_, writerModelName, _ := models.CurrentSelection("writer")
 	writerContextWindow, writerSource := cfg.ResolveContextWindow(writerModelName)
+	_, drafterModelName, _ := models.CurrentSelection("drafter")
+	drafterContextWindow, drafterSource := cfg.ResolveContextWindow(drafterModelName)
 	bootstrap.LogContextWindowChoice("coordinator", coordinatorModelName, coordinatorContextWindow, coordinatorSource)
 	bootstrap.LogContextWindowChoice("writer", writerModelName, writerContextWindow, writerSource)
+	bootstrap.LogContextWindowChoice("drafter", drafterModelName, drafterContextWindow, drafterSource)
 
 	// modelLookup 写入 session 时给每条 assistant 消息附 _meta:{provider,model}，
 	// 让 replay 不再依赖"当前 ModelSet"来反推历史 cost，运行中切换模型也能精确算。
@@ -400,7 +409,7 @@ func BuildCoordinator(
 	restore := &ctxpack.WriterRestorePack{}
 	restore.Refresh(store)
 
-	// writerContextFactory 推演/渲染两阶段共用的上下文管理器工厂（同角色同窗口）。
+	// writerContextFactory 按 agent 的实际角色为推演/渲染阶段重建上下文管理器。
 	writerContextFactory := func(agentTag string) func(agentcore.ChatModel) agentcore.ContextManager {
 		return func(model agentcore.ChatModel) agentcore.ContextManager {
 			role := agentToRole(agentTag)
@@ -483,12 +492,12 @@ func BuildCoordinator(
 	drafter := subagent.Config{
 		Name:               "drafter",
 		Description:        "正文渲染者：基于已定稿的章节计划写出正文、自审并提交",
-		Model:              writerModel,
+		Model:              drafterModel,
 		SystemPrompt:       bundle.Prompts.Drafter,
 		Tools:              drafterTools,
-		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("writer", 80), 80),
+		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 80), 80),
 		MaxRetries:         subagentMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
+		ThinkingLevel:      resolvedRoleThinking(drafterModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
@@ -500,13 +509,13 @@ func BuildCoordinator(
 	draftFinalizer := subagent.Config{
 		Name:        "draft_finalizer",
 		Description: "草稿验收者：恢复已有且晚于当前 plan 的草稿，只做局部修复、检查和提交，不重新生成整章",
-		Model:       writerModel,
+		Model:       drafterModel,
 		SystemPrompt: bundle.Prompts.Drafter + "\n\n你处于草稿恢复验收阶段。必须先读取 source=draft。" +
 			"工具集中没有 draft_chapter；只在发现明确硬伤时用 edit_chapter 做最小替换，然后 check_consistency 并 commit_chapter。",
 		Tools:              draftFinalizerTools,
-		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("writer", 30), 30),
+		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 30), 30),
 		MaxRetries:         subagentMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(writerModel, cfg, "writer"),
+		ThinkingLevel:      resolvedRoleThinking(drafterModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
@@ -593,13 +602,12 @@ func BuildCoordinator(
 			level, _ = ResolveThinkingForModel(models.ForRole("architect"), level)
 			subagentTool.SetThinkingLevel("architect_short", level)
 			subagentTool.SetThinkingLevel("architect_long", level)
-		case "writer", "editor":
+		case "writer", "drafter", "editor":
 			level, _ = ResolveThinkingForModel(models.ForRole(role), level)
 			subagentTool.SetThinkingLevel(role, level)
 			if role == "writer" {
-				// drafter 与 writer 共用推理强度配置，联动切换。
-				subagentTool.SetThinkingLevel("drafter", level)
 				subagentTool.SetThinkingLevel("world_simulator", level)
+			} else if role == "drafter" {
 				subagentTool.SetThinkingLevel("draft_finalizer", level)
 			}
 		}

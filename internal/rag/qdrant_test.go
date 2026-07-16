@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -104,6 +105,112 @@ func TestQdrantClientWritesAndSearchesChunks(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+func TestQdrantSearchFiltersDesignOnlyBeforeTopK(t *testing.T) {
+	type rankedPoint struct {
+		chunk domain.RAGChunk
+		score float64
+	}
+	var ranked []rankedPoint
+	for i := range 18 {
+		chunk := NormalizeChunk(domain.RAGChunk{
+			SourcePath: "deconstruction-library/writing-techniques/craft-" + strconv.Itoa(i) + ".md",
+			SourceKind: CraftSourceKind,
+			Text:       "高相似度写作手法",
+			Metadata: map[string]any{
+				"source_kind": "chapter_summary_facts",
+				"source_path": "meta/spoofed-fact.md",
+			},
+		})
+		ranked = append(ranked, rankedPoint{chunk: chunk, score: 1 - float64(i)/100})
+	}
+	fact := NormalizeChunk(domain.RAGChunk{
+		SourcePath: "meta/chapter_facts.md",
+		SourceKind: "chapter_summary_facts",
+		Text:       "本书已发生的经营事实",
+	})
+	ranked = append(ranked, rankedPoint{chunk: fact, score: 0.7})
+
+	var sawFactFilter bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/collections/fact_collection/points/search" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Limit  int `json:"limit"`
+			Filter *struct {
+				MustNot []struct {
+					Key   string `json:"key"`
+					Match struct {
+						Value string `json:"value"`
+					} `json:"match"`
+				} `json:"must_not"`
+			} `json:"filter"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode search body: %v", err)
+		}
+		excluded := map[string]bool{}
+		if body.Filter != nil {
+			for _, condition := range body.Filter.MustNot {
+				if condition.Key == "source_kind" {
+					excluded[condition.Match.Value] = true
+				}
+			}
+			sawFactFilter = excluded[CraftSourceKind] && excluded[BenchmarkSourceKind] && excluded[CalibrationSourceKind]
+			if !sawFactFilter {
+				t.Fatalf("incomplete design-only filter: %+v", body.Filter.MustNot)
+			}
+		}
+
+		result := make([]map[string]any, 0, body.Limit)
+		for _, point := range ranked {
+			payload := chunkPayload(point.chunk)
+			payloadKind, _ := payload["source_kind"].(string)
+			if excluded[payloadKind] {
+				continue
+			}
+			payload["chunk_id"] = point.chunk.ID
+			payload["chunk"] = point.chunk
+			result = append(result, map[string]any{
+				"id": qdrantPointID(point.chunk.ID), "score": point.score, "payload": payload,
+			})
+			if len(result) == body.Limit {
+				break
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": result})
+	}))
+	defer server.Close()
+
+	client, err := NewQdrantClient(QdrantClientConfig{URL: server.URL, Collection: "fact_collection"})
+	if err != nil {
+		t.Fatalf("NewQdrantClient: %v", err)
+	}
+	unfiltered, err := client.Search(context.Background(), []float32{1, 0}, 18)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(unfiltered) != 18 {
+		t.Fatalf("unfiltered hits = %d, want 18", len(unfiltered))
+	}
+	for _, hit := range unfiltered {
+		if hit.Point.ID == fact.ID {
+			t.Fatal("test fixture invalid: rank-19 fact unexpectedly entered unfiltered top 18")
+		}
+	}
+
+	filtered, err := client.SearchWithOptions(context.Background(), []float32{1, 0}, 18, VectorSearchOptions{ExcludeDesignOnly: true})
+	if err != nil {
+		t.Fatalf("SearchWithOptions: %v", err)
+	}
+	if !sawFactFilter {
+		t.Fatal("fact search did not send a pre-truncation Qdrant filter")
+	}
+	if len(filtered) != 1 || filtered[0].Point.ID != fact.ID {
+		t.Fatalf("rank-19 fact should survive server-side filtering: %+v", filtered)
 	}
 }
 

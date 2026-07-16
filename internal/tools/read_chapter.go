@@ -15,6 +15,13 @@ type ReadChapterTool struct {
 	store *store.Store
 }
 
+type chapterSurfaceWithholding struct {
+	stage    string
+	trigger  string
+	reason   string
+	nextStep string
+}
+
 func NewReadChapterTool(store *store.Store) *ReadChapterTool {
 	return &ReadChapterTool{store: store}
 }
@@ -82,6 +89,28 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 
 	// 模式 2：范围读取
 	if a.From > 0 && a.To > 0 {
+		if a.Source == "" || a.Source == "final" || a.Source == "draft" {
+			for chapter := a.From; chapter <= a.To; chapter++ {
+				withholding, err := t.renderOnlySurfaceWithholding(chapter)
+				if err != nil {
+					return nil, fmt.Errorf("inspect chapter %d render-only read guard: %w", chapter, err)
+				}
+				if withholding != nil {
+					return json.Marshal(map[string]any{
+						"chapter":          chapter,
+						"blocked_chapter":  chapter,
+						"requested_from":   a.From,
+						"requested_to":     a.To,
+						"requested_source": normalizedChapterSurfaceSource(a.Source),
+						"withheld":         true,
+						"stage":            withholding.stage,
+						"trigger":          withholding.trigger,
+						"reason":           withholding.reason,
+						"next_step":        withholding.nextStep,
+					})
+				}
+			}
+		}
 		maxRunes := a.MaxRunes
 		if maxRunes <= 0 {
 			maxRunes = 2000
@@ -104,6 +133,23 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 			return nil, err
 		}
 		a.Chapter = resolved
+	}
+	if a.Source == "" || a.Source == "final" || a.Source == "draft" {
+		withholding, err := t.renderOnlySurfaceWithholding(a.Chapter)
+		if err != nil {
+			return nil, fmt.Errorf("inspect chapter %d render-only read guard: %w", a.Chapter, err)
+		}
+		if withholding != nil {
+			return json.Marshal(map[string]any{
+				"chapter":          a.Chapter,
+				"requested_source": normalizedChapterSurfaceSource(a.Source),
+				"withheld":         true,
+				"stage":            withholding.stage,
+				"trigger":          withholding.trigger,
+				"reason":           withholding.reason,
+				"next_step":        withholding.nextStep,
+			})
+		}
 	}
 	if (a.Source == "" || a.Source == "final") && t.rewritePlanningBlocksFinalRead(a.Chapter) {
 		return json.Marshal(map[string]any{
@@ -183,6 +229,50 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		"content":    content,
 		"word_count": len([]rune(content)),
 	})
+}
+
+func normalizedChapterSurfaceSource(source string) string {
+	if source == "" {
+		return "final"
+	}
+	return source
+}
+
+// renderOnlySurfaceWithholding keeps the superseded prose surface out of a
+// clean whole-chapter render. InspectDraftExternalGateWithStore runs first so
+// an interrupted but complete replacement draft can recover its checkpoint;
+// after recovery the explicit request is consumed and draft_finalizer may read
+// the current candidate normally.
+func (t *ReadChapterTool) renderOnlySurfaceWithholding(chapter int) (*chapterSurfaceWithholding, error) {
+	inspection, err := InspectDraftExternalGateWithStore(t.store, chapter)
+	if err != nil {
+		return nil, err
+	}
+	if ExplicitRerenderRequestActive(t.store, chapter) {
+		return &chapterSurfaceWithholding{
+			stage:    "render_only_fresh_draft",
+			trigger:  "explicit_full_rerender",
+			reason:   "显式整章重渲染授权尚未被新 draft checkpoint 消费；旧 draft/final 的措辞与段落表面已作废。",
+			nextStep: "只使用 novel_context(chapter=N, profile=draft) 提供的净化证据与正式 plan，调用 draft_chapter(mode=write) 产生完整新稿。",
+		}, nil
+	}
+	if inspection.Status == DraftExternalGateRerenderAuthorized {
+		return &chapterSurfaceWithholding{
+			stage:    "render_only_fresh_draft",
+			trigger:  "external_full_rerender",
+			reason:   "当前正文已被整章外审阻断并授权重渲染；旧 draft/final 只能作为哈希化失败对象，不能重新注入正文表面。",
+			nextStep: "只使用 novel_context(chapter=N, profile=draft) 中净化后的外审证据、rewrite_brief 与正式 plan，调用 draft_chapter(mode=write) 产生完整新稿。",
+		}, nil
+	}
+	if ReviewRequiresFreshDraft(t.store, chapter) {
+		return &chapterSurfaceWithholding{
+			stage:    "render_only_fresh_draft",
+			trigger:  "formal_review_fresh_draft",
+			reason:   "正式复审仍拒绝当前 draft/final 的同一正文哈希；回读旧表面只会复现已被拒绝的稿件。",
+			nextStep: "只使用 novel_context(chapter=N, profile=draft) 中净化后的 review/rewrite_brief 与可复用正式 plan，调用 draft_chapter(mode=write) 产生不同哈希的新稿。",
+		}, nil
+	}
+	return nil, nil
 }
 
 func (t *ReadChapterTool) rewritePlanningBlocksFinalRead(chapter int) bool {

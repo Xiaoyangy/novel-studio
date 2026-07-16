@@ -385,11 +385,21 @@ func ValidateVector(vector []float32) error {
 }
 
 func chunkPayload(chunk domain.RAGChunk) map[string]any {
-	payload := map[string]any{
+	payload := make(map[string]any, len(chunk.Metadata)+8)
+	for k, v := range chunk.Metadata {
+		if isReservedChunkPayloadKey(k) {
+			continue
+		}
+		payload[k] = v
+	}
+	trusted := map[string]any{
 		"source_path": chunk.SourcePath,
 		"source_kind": chunk.SourceKind,
 		"facet":       chunk.Facet,
 		"hash":        chunk.Hash,
+	}
+	for k, v := range trusted {
+		payload[k] = v
 	}
 	if chunk.ParentID != "" {
 		payload["parent_id"] = chunk.ParentID
@@ -403,10 +413,16 @@ func chunkPayload(chunk domain.RAGChunk) map[string]any {
 	if len(chunk.Keywords) > 0 {
 		payload["keywords"] = chunk.Keywords
 	}
-	for k, v := range chunk.Metadata {
-		payload[k] = v
-	}
 	return payload
+}
+
+func isReservedChunkPayloadKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "source_path", "source_kind", "facet", "hash", "parent_id", "context", "summary", "keywords", "chunk_id", "chunk":
+		return true
+	default:
+		return false
+	}
 }
 
 // EmbeddingText returns the enriched text used for semantic indexing.

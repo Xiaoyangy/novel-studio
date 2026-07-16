@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -59,9 +60,9 @@ func (t *PlanStructureTool) Schema() map[string]any {
 		schema.Property("continuity_checks", schema.Array("本章需特别核对的连续性点", schema.String(""))),
 		schema.Property("evaluation_focus", schema.Array("Editor 重点检查项", schema.String(""))),
 		schema.Property("emotion_target", schema.String("可选：本章希望读者主要感受到的情绪")),
-		schema.Property("payoff_points", schema.Array("可选：关键章希望回应的情节点或兑现点", schema.String(""))),
+		schema.Property("payoff_points", schema.Array("可选：关键章的兑现方向；不是逐项正文门禁，核心结果仍写入 required_beats", schema.String(""))),
 		schema.Property("hook_goal", schema.String("可选：章末希望驱动的追读欲望或悬念目标")),
-		schema.Property("scene_anchors", schema.Array("可选：本章要反复使用并承担信息、关系或代价的现场物件、痕迹、动作证据", schema.String(""))),
+		schema.Property("scene_anchors", schema.Array("可选0-2项：可承担信息、关系或代价的现场候选物件/痕迹；Drafter 可重排、替换或省略，不逐项回收", schema.String(""))),
 	)
 }
 
@@ -90,13 +91,22 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	}
 	bindPlanStructureToSources(t.store, chapter, structure, worldSimulation)
 	delete(structure, "causal_simulation") // 细节只走 plan_details，避免两处口径漂移
+	existingPartial, _ := t.store.Drafts.LoadChapterPlanPartial(chapter)
+	preferredReceiptID := ""
+	if existingPartial != nil {
+		preferredReceiptID, _ = existingPartial[planCraftReceiptKey].(string)
+	}
+	craftReceipt, err := ensureRewriteCraftReceipt(t.store, chapter, preferredReceiptID)
+	if err != nil {
+		return nil, err
+	}
 
 	// 保留已累积的 causal_simulation：planner 在重试/续跑时常再调一次 plan_structure，
 	// 若每次清空会把之前 plan_details 攒下的字段全丢，导致 MiniMax 卡流后进度归零死循环。
 	// 仅更新骨架，保住已有推演字段。
 	existingSim := map[string]any{}
-	if prev, err := t.store.Drafts.LoadChapterPlanPartial(chapter); err == nil && prev != nil {
-		if sim, ok := prev["causal_simulation"].(map[string]any); ok && planStructureBoundToSources(t.store, chapter, prev, worldSimulation) {
+	if existingPartial != nil {
+		if sim, ok := existingPartial["causal_simulation"].(map[string]any); ok && planStructureBoundToSources(t.store, chapter, existingPartial, worldSimulation) {
 			existingSim = sim
 		}
 	}
@@ -105,6 +115,11 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 		"causal_simulation": existingSim,
 		"rewrite":           isRewritePlan,
 		"updated_at":        time.Now().Format(time.RFC3339),
+	}
+	if craftReceipt != nil {
+		partial[planCraftReceiptKey] = craftReceipt.ID
+	} else {
+		delete(partial, planCraftReceiptKey)
 	}
 	if err := validateProjectContaminationFree(t.store, "plan_structure", partial); err != nil {
 		return nil, err
@@ -115,14 +130,18 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	if err := t.store.Drafts.SaveChapterPlanPartial(chapter, partial); err != nil {
 		return nil, fmt.Errorf("save chapter plan partial: %w: %w", errs.ErrStoreWrite, err)
 	}
-	return json.Marshal(map[string]any{
+	response := map[string]any{
 		"staged":  "structure",
 		"chapter": chapter,
 		"rewrite": isRewritePlan,
 		"next_step": "分批调用 plan_details(chapter, causal_simulation={...}) 提交推演细节；" +
 			"每批只带一部分字段即可（例如先 initial_state/offscreen_character_stage，再对白/世界层，最后计划类字段），" +
 			"最后一批传 finalize=true 触发完整校验并落成正式 plan",
-	})
+	}
+	if craftReceipt != nil {
+		response["rewrite_craft_pack"] = craftReceiptContext(craftReceipt)
+	}
+	return json.Marshal(response)
 }
 
 func applyRewriteAnchorsToStructure(s *store.Store, chapter int, structure map[string]any) error {
@@ -281,6 +300,16 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if !planStructureBoundToSources(t.store, a.Chapter, partial, worldSimulation) {
 		return nil, fmt.Errorf("第 %d 章 plan_structure 不是由当前 world_simulation/rewrite_source 生成；请先重新调用 plan_structure，再提交 plan_details: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
+	preferredReceiptID, _ := partial[planCraftReceiptKey].(string)
+	craftReceipt, err := ensureRewriteCraftReceipt(t.store, a.Chapter, preferredReceiptID)
+	if err != nil {
+		return nil, err
+	}
+	if craftReceipt != nil {
+		partial[planCraftReceiptKey] = craftReceipt.ID
+	} else {
+		delete(partial, planCraftReceiptKey)
+	}
 
 	merged, _ := partial["causal_simulation"].(map[string]any)
 	if merged == nil {
@@ -293,7 +322,7 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		)
 	}
 	mergeCausalSimulationPatch(merged, a.CausalSimulation)
-	applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation)
+	applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt)
 	normalizations := normalizePartialVisibleCharacterScope(t.store, a.Chapter, merged)
 	partial["causal_simulation"] = merged
 	if len(normalizations) > 0 {
@@ -324,6 +353,9 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		}
 		if len(normalizations) > 0 {
 			response["scope_normalizations"] = normalizations
+		}
+		if craftReceipt != nil {
+			response["rewrite_craft_pack"] = craftReceiptContext(craftReceipt)
 		}
 		return json.Marshal(response)
 	}
@@ -396,7 +428,13 @@ func mergeReviewRefinementPatch(existing, incoming any) (map[string]any, bool) {
 		maps.Copy(merged, existingMap)
 	}
 	for key, value := range incomingMap {
-		if key == "trigger_sources" || key == "preserve_constraints" {
+		if key == "preserve_constraints" {
+			if stringsMerged, ok := mergePreserveFactArrays(merged[key], value); ok {
+				merged[key] = stringsMerged
+				continue
+			}
+		}
+		if key == "trigger_sources" {
 			if stringsMerged, ok := mergeUniqueStringArrays(merged[key], value); ok {
 				merged[key] = stringsMerged
 				continue
@@ -405,6 +443,19 @@ func mergeReviewRefinementPatch(existing, incoming any) (map[string]any, bool) {
 		merged[key] = value
 	}
 	return merged, true
+}
+
+func mergePreserveFactArrays(existing, incoming any) ([]any, bool) {
+	incomingStrings := stringSliceFromAny(incoming)
+	if incomingStrings == nil {
+		return nil, false
+	}
+	merged := canonicalPreserveFacts(stringSliceFromAny(existing), incomingStrings)
+	out := make([]any, 0, len(merged))
+	for _, value := range merged {
+		out = append(out, value)
+	}
+	return out, true
 }
 
 func mergeUniqueStringArrays(existing, incoming any) ([]any, bool) {
@@ -423,15 +474,29 @@ func mergeUniqueStringArrays(existing, incoming any) ([]any, bool) {
 	return out, true
 }
 
-func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation) {
+func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation, craftReceipt *domain.CraftRecallReceipt) {
 	if st == nil || chapter <= 0 || merged == nil {
 		return
 	}
 	contextSources := stringSliceFromAny(merged["context_sources"])
+	withoutStaleCraftReceipt := contextSources[:0]
+	for _, source := range contextSources {
+		if strings.HasPrefix(strings.TrimSpace(source), craftReceiptTokenPrefix) {
+			continue
+		}
+		withoutStaleCraftReceipt = append(withoutStaleCraftReceipt, source)
+	}
+	contextSources = withoutStaleCraftReceipt
 	if simulation != nil {
 		merged["world_simulation_id"] = simulation.SimulationID
 		merged["protagonist_decision"] = simulation.ProtagonistProjection.ChosenDecision
 		contextSources = appendUniqueString(contextSources, "chapter_world_simulation:"+simulation.SimulationID)
+		for _, source := range simulation.Sources {
+			source = strings.TrimSpace(source)
+			if strings.HasPrefix(source, chapterPipelineInstructionTokenPrefix) {
+				contextSources = appendUniqueString(contextSources, source)
+			}
+		}
 	}
 	if source, _, _, err := loadChapterRewriteSource(st, chapter); err == nil && source != nil {
 		contextSources = appendUniqueString(contextSources, rewriteSourceToken(source))
@@ -440,16 +505,264 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 		if refinement == nil {
 			refinement = map[string]any{}
 		}
-		preserve := stringSliceFromAny(refinement["preserve_constraints"])
-		for _, fact := range source.PreserveFacts {
-			preserve = appendUniqueString(preserve, fact)
-		}
+		preserve := canonicalPreserveFacts(source.PreserveFacts, stringSliceFromAny(refinement["preserve_constraints"]))
 		refinement["preserve_constraints"] = preserve
 		merged["review_refinement"] = refinement
 	}
+	if craftReceipt != nil {
+		contextSources = appendUniqueString(contextSources, craftReceiptSourceToken(craftReceipt.ID))
+	}
+	normalizePartialCraftReferenceAliases(merged, craftReceipt)
+	removeStalePartialCraftReferences(merged, craftReceipt)
 	if len(contextSources) > 0 {
 		merged["context_sources"] = contextSources
 	}
+}
+
+// plan_details partial writes are intentionally patch-friendly, so a model can
+// occasionally use the receipt vocabulary (need_id/source_ref) instead of the
+// canonical ExternalReferencePlan field names. Normalize only these known,
+// lossless craft aliases before stale-receipt pruning and final validation.
+func normalizePartialCraftReferenceAliases(merged map[string]any, receipts ...*domain.CraftRecallReceipt) {
+	items, ok := merged["external_reference_plan"].([]any)
+	if !ok {
+		return
+	}
+	var receipt *domain.CraftRecallReceipt
+	if len(receipts) > 0 {
+		receipt = receipts[0]
+	}
+	needByRef := map[string]string{}
+	sourceTypeByRef := map[string]string{}
+	sourceKindByRef := map[string]string{}
+	if receipt != nil {
+		for _, attempt := range receipt.Attempts {
+			for _, hit := range attempt.Hits {
+				// A hit may legitimately satisfy more than one need. Keep the
+				// shorthand inference only while the ref still identifies one
+				// unambiguous need; explicit query_or_need remains authoritative.
+				if previous, exists := needByRef[hit.Ref]; !exists {
+					needByRef[hit.Ref] = attempt.Need.ID
+				} else if previous != attempt.Need.ID {
+					needByRef[hit.Ref] = ""
+				}
+				sourceTypeByRef[hit.Ref] = craftSourceType
+				if strings.EqualFold(hit.SourceKind, rag.BenchmarkSourceKind) {
+					sourceTypeByRef[hit.Ref] = benchmarkCraftSourceType
+				}
+				sourceKindByRef[hit.Ref] = strings.TrimSpace(hit.SourceKind)
+			}
+		}
+	}
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := entry["query_or_need"]; !exists {
+			if needID, ok := entry["need_id"].(string); ok && strings.TrimSpace(needID) != "" {
+				entry["query_or_need"] = strings.TrimSpace(needID)
+			}
+		}
+		promotedReceiptRef := false
+		if len(stringSliceFromAny(entry["source_refs"])) == 0 {
+			for _, alias := range []string{"source_ref", "hit_ref"} {
+				if sourceRef, ok := entry[alias].(string); ok && strings.TrimSpace(sourceRef) != "" {
+					entry["source_refs"] = []any{strings.TrimSpace(sourceRef)}
+					break
+				}
+			}
+			// Raw receipt hits expose the exact identifier as `ref`. Accept that
+			// shape only when it is authorized by the current receipt; a generic
+			// web/local `ref` must never be reclassified as craft evidence.
+			if len(stringSliceFromAny(entry["source_refs"])) == 0 && receipt != nil {
+				if sourceRef, ok := entry["ref"].(string); ok {
+					sourceRef = strings.TrimSpace(sourceRef)
+					if sourceTypeByRef[sourceRef] != "" {
+						entry["source_refs"] = []any{sourceRef}
+						promotedReceiptRef = true
+					}
+				}
+			}
+		}
+		refs := stringSliceFromAny(entry["source_refs"])
+		if query, _ := entry["query_or_need"].(string); strings.TrimSpace(query) == "" && len(refs) > 0 {
+			if need := needByRef[refs[0]]; need != "" {
+				entry["query_or_need"] = need
+			}
+		}
+		sourceType, _ := entry["source_type"].(string)
+		rawSourceType := strings.TrimSpace(sourceType)
+		if rawSourceType == "" {
+			if sourceKind, ok := entry["source_kind"].(string); ok {
+				rawSourceType = strings.TrimSpace(sourceKind)
+			}
+		}
+		if receipt == nil && strings.EqualFold(rawSourceType, "craft_recall_receipt") {
+			// Preserve the pre-receipt legacy alias used by historical partials;
+			// current enforced plans always take the authorized branch below.
+			entry["source_type"] = craftSourceType
+			sourceType = craftSourceType
+		} else if expected, authorized := canonicalCraftSourceTypeForRefs(refs, sourceTypeByRef); authorized &&
+			isReceiptCraftSourceTypeAlias(rawSourceType, refs, sourceKindByRef) {
+			entry["source_type"] = expected
+			sourceType = expected
+			delete(entry, "source_kind")
+		} else {
+			sourceType = strings.TrimSpace(sourceType)
+		}
+		if receipt != nil {
+			if retrieved, _ := entry["retrieved_at"].(string); strings.TrimSpace(retrieved) == "" {
+				entry["retrieved_at"] = receipt.CreatedAt
+			}
+			if freshness, _ := entry["freshness_requirement"].(string); strings.TrimSpace(freshness) == "" {
+				entry["freshness_requirement"] = "稳定写作方法；仅绑定当前 rewrite body、brief 与 RAG index 的 receipt"
+			}
+		}
+		for _, key := range []string{"usable_details", "do_not_use"} {
+			if scalar, ok := entry[key].(string); ok && strings.TrimSpace(scalar) != "" {
+				entry[key] = []any{strings.TrimSpace(scalar)}
+			}
+		}
+		delete(entry, "need_id")
+		delete(entry, "source_ref")
+		delete(entry, "hit_ref")
+		if promotedReceiptRef {
+			delete(entry, "ref")
+		}
+	}
+	// Models naturally emit one receipt hit per row, while the durable contract
+	// requires one row per need. Collapse authorized shorthand rows by need so
+	// all exact hit refs remain auditable without failing the one-need-one-plan
+	// invariant.
+	var normalized []any
+	grouped := map[string]map[string]any{}
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			normalized = append(normalized, item)
+			continue
+		}
+		query, _ := entry["query_or_need"].(string)
+		sourceType, _ := entry["source_type"].(string)
+		query = strings.TrimSpace(query)
+		sourceType = strings.TrimSpace(sourceType)
+		if query == "" || (sourceType != craftSourceType && sourceType != benchmarkCraftSourceType) {
+			normalized = append(normalized, item)
+			continue
+		}
+		key := query + "\x00" + sourceType
+		if existing := grouped[key]; existing != nil {
+			existing["source_refs"] = stringSliceAnyUnion(existing["source_refs"], entry["source_refs"])
+			existing["usable_details"] = stringSliceAnyUnion(existing["usable_details"], entry["usable_details"])
+			existing["do_not_use"] = stringSliceAnyUnion(existing["do_not_use"], entry["do_not_use"])
+			existing["transformation_rule"] = joinCraftTransformationRules(existing["transformation_rule"], entry["transformation_rule"])
+			continue
+		}
+		grouped[key] = entry
+		normalized = append(normalized, entry)
+	}
+	merged["external_reference_plan"] = normalized
+}
+
+// canonicalCraftSourceTypeForRefs returns a canonical plan source type only
+// when every ref belongs to the current receipt and all refs have the same
+// authority class. This keeps normalization fail-closed for spoofed, stale or
+// craft+benchmark mixed rows.
+func canonicalCraftSourceTypeForRefs(refs []string, sourceTypeByRef map[string]string) (string, bool) {
+	if len(refs) == 0 {
+		return "", false
+	}
+	expected := ""
+	for _, ref := range refs {
+		candidate := sourceTypeByRef[strings.TrimSpace(ref)]
+		if candidate == "" {
+			return "", false
+		}
+		if expected == "" {
+			expected = candidate
+			continue
+		}
+		if candidate != expected {
+			return "", false
+		}
+	}
+	return expected, expected != ""
+}
+
+func isReceiptCraftSourceTypeAlias(sourceType string, refs []string, sourceKindByRef map[string]string) bool {
+	sourceType = strings.TrimSpace(sourceType)
+	if sourceType == "" || strings.EqualFold(sourceType, "craft_recall_receipt") {
+		return true
+	}
+	for _, ref := range refs {
+		if sourceKind := sourceKindByRef[strings.TrimSpace(ref)]; sourceKind != "" && strings.EqualFold(sourceType, sourceKind) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceAnyUnion(left, right any) []any {
+	var merged []string
+	for _, value := range append(stringSliceFromAny(left), stringSliceFromAny(right)...) {
+		merged = appendUniqueString(merged, value)
+	}
+	result := make([]any, 0, len(merged))
+	for _, value := range merged {
+		result = append(result, value)
+	}
+	return result
+}
+
+func joinCraftTransformationRules(left, right any) string {
+	var rules []string
+	for _, value := range []any{left, right} {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			rules = appendUniqueString(rules, strings.TrimSpace(text))
+		}
+	}
+	return strings.Join(rules, "；")
+}
+
+func removeStalePartialCraftReferences(merged map[string]any, current *domain.CraftRecallReceipt) {
+	items, ok := merged["external_reference_plan"].([]any)
+	if !ok {
+		return
+	}
+	currentPrefix := ""
+	if current != nil {
+		currentPrefix = craftReceiptSourceToken(current.ID) + "#"
+	}
+	kept := items[:0]
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		sourceType, _ := entry["source_type"].(string)
+		sourceType = strings.ToLower(strings.TrimSpace(sourceType))
+		if sourceType != craftSourceType && sourceType != benchmarkCraftSourceType {
+			kept = append(kept, item)
+			continue
+		}
+		currentHit := false
+		for _, sourceRef := range stringSliceFromAny(entry["source_refs"]) {
+			if currentPrefix != "" && strings.HasPrefix(strings.TrimSpace(sourceRef), currentPrefix) {
+				currentHit = true
+				break
+			}
+		}
+		if currentHit {
+			kept = append(kept, item)
+		}
+	}
+	if len(kept) == 0 {
+		delete(merged, "external_reference_plan")
+		return
+	}
+	merged["external_reference_plan"] = kept
 }
 
 func mergeArrayObjectsByCharacter(existing, incoming any) ([]any, bool) {
@@ -563,7 +876,8 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 func planDetailsRecommendedBatches() []string {
 	return []string{
 		"batch1_pov_projection: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state(max 2) + causal_beats(max 4) + decision_points(max 4) + outcome_shift(max 4)",
-		"batch2_voice_and_rendering: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker) + literary_rendering_plan(可选：只选本章有功能的镜头并保留 source_refs，不做九项清单)；返工章同时补 review_refinement。dialogue/emotional/anti_ai/reader_reward/retention/ending/entertainment/longform/trend 均为可选，默认不要重复生成",
+		"batch2_voice_and_rendering: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker) + literary_rendering_plan(可选：只选本章有功能的镜头并保留 source_refs，不做九项清单)；返工章同时补 review_refinement；若 rewrite_craft_pack 有命中，补 receipt-backed external_reference_plan：每个 need.id 恰好一行，query_or_need 原样写 need.id，同 need 的精确 hit.ref 合入 source_refs；calibration_reference/craft_technique 统一写 source_type=craft_recall，benchmark_reference 写 source_type=benchmark_craft_recall，禁止把 source_kind 当 source_type，不得重新检索",
+		"batch3_project_contracts_if_required: 只补 gap_summary 或 finalize 错误明确点名的 emotional_logic / anti_ai_execution_plan / reader_reward_plan / retention_plan / ending_delivery_plan / reader_entertainment_plan / longform_opening / trend_language_plan；项目规则或 meta/web_reference_brief 要求的字段不是可选项，未点名的字段不要重复生成",
 	}
 }
 

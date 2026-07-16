@@ -92,9 +92,12 @@ func TestDraftProfileProjectsCompactStyleContractAndDropsRawAssets(t *testing.T)
 
 	applyChapterContextProfile(result, "draft")
 
-	packet, ok := result["render_packet"].(draftRenderPacket)
-	if !ok || packet.Version != 6 || packet.StyleContract == nil {
-		t.Fatalf("style contract was not projected into v6 packet: %#v", result["render_packet"])
+	packet, ok := working["render_packet"].(draftRenderPacket)
+	if !ok || packet.Version != 9 || packet.StyleContract == nil {
+		t.Fatalf("style contract was not projected into v9 packet: %#v", working["render_packet"])
+	}
+	if _, mirrored := result["render_packet"]; mirrored {
+		t.Fatal("draft profile duplicated render_packet outside canonical working_memory")
 	}
 	raw, err := json.Marshal(packet.StyleContract)
 	if err != nil {
@@ -116,6 +119,38 @@ func TestDraftProfileProjectsCompactStyleContractAndDropsRawAssets(t *testing.T)
 	}
 	if strings.Contains(serialized, "revision_plan") || strings.Contains(serialized, "chapter_function_repetition") {
 		t.Fatalf("advisory or external rewrite choreography leaked into style contract: %s", serialized)
+	}
+}
+
+func TestDraftStyleContractSoftensPersistedSceneAnchorQuota(t *testing.T) {
+	result := map[string]any{"writing_engine": &domain.WritingCompiled{
+		ActiveRules: []string{
+			"每章至少让 2 个现场物件或痕迹承担新信息、关系位移、规则代价或章末钩子。",
+			"规划时优先把这些物件写入 scene_anchors，正文中不能只重复名字，至少一次改变读者知道的信息或角色选择。",
+			"让人物选择产生现场后果。",
+		},
+		AntiAIRules: []string{"禁止对白传送带。"},
+		Taboos:      []string{"不得泄露人物知识边界。"},
+	}}
+	contract := newDraftStyleContract(result)
+	if contract == nil {
+		t.Fatal("style contract missing")
+	}
+	raw, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "每章至少让 2 个") || strings.Contains(text, "至少一次改变") {
+		t.Fatalf("persisted soft quota leaked into current render packet: %s", text)
+	}
+	for _, want := range []string{"soft_craft_rules", "择取0—2个", "anti_ai_rules", "taboos"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("style hard/soft role %q missing: %s", want, text)
+		}
+	}
+	if strings.Contains(text, `"active_rules"`) || strings.Contains(text, `"cards"`) {
+		t.Fatalf("ambiguous style fields survived: %s", text)
 	}
 }
 

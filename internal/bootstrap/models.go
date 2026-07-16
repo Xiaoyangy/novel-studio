@@ -126,7 +126,7 @@ type ModelSet struct {
 }
 
 // ForRole 返回指定角色的模型，未配置时返回默认模型。
-// reviewer 角色未显式配置时回落 editor（Task 065：异族裁判可选，老配置零影响）。
+// reviewer 未配置时回落 editor；drafter 未配置时回落 writer。
 func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
 	if m, ok := ms.models[resolveRoleAlias(ms, role)]; ok {
 		return m
@@ -134,8 +134,19 @@ func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
 	return ms.Default
 }
 
-// resolveRoleAlias reviewer 未配置时按 editor 解析（fallbacks 同规则）。
+// resolveRoleAlias 解析内部 agent 别名和可选角色的继承链（fallbacks 同规则）。
 func resolveRoleAlias(ms *ModelSet, role string) string {
+	switch role {
+	case "world_simulator":
+		return "writer"
+	case "draft_finalizer":
+		role = "drafter"
+	}
+	if role == "drafter" {
+		if _, ok := ms.models[role]; !ok {
+			return "writer"
+		}
+	}
 	if role == "reviewer" {
 		if _, ok := ms.models[role]; !ok {
 			return "editor"
@@ -204,6 +215,7 @@ func (ms *ModelSet) CurrentSelection(role string) (provider, model string, expli
 		provider, model = ms.Default.Current()
 		return provider, model, true
 	}
+	role = resolveRoleAlias(ms, role)
 	if sw, ok := ms.models[role]; ok {
 		provider, model = sw.Current()
 		return provider, model, true
@@ -309,7 +321,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 }
 
 func createOptionsForRole(role string) modelCreateOptions {
-	if role == "writer" {
+	if role == "writer" || role == "drafter" {
 		return modelCreateOptions{temperature: writerDefaultTemperature}
 	}
 	return modelCreateOptions{}

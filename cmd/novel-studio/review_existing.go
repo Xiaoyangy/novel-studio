@@ -249,7 +249,9 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 		}
 		mechanical, err := saveMechanicalGateForExistingChapter(st, chNum, frozenBody)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 机械门禁写入失败：%v\n", chNum, err)
+			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 机械门禁写入失败，已终止本章审核以避免沿用旧门禁：%v\n", chNum, err)
+			failureCount++
+			continue
 		}
 		chapterReviewContext := buildEditorChapterReviewContext(st, chNum)
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor(%s/%s) + DeepSeek(%s/%s) 并行评审中（预算 %s）...\n",
@@ -704,21 +706,32 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 			Severity:  severity,
 		})
 	}
-	if external, ok := latestExternalAIGCDetection(st.Dir(), chapter, body); ok && external.ScorePercent >= deepseekAIJudgePassExclusive {
+	registeredRows, registeredErr := reviewreport.LatestRegisteredExternalDetections(
+		st.Dir(), chapter, reviewreport.BodySHA256(body),
+	)
+	if registeredErr != nil {
+		return nil, fmt.Errorf("load registered external detection: %w", registeredErr)
+	}
+	blockingRegistered := make([]reviewreport.RegisteredExternalDetection, 0, len(registeredRows))
+	for _, registeredExternal := range registeredRows {
+		if registeredExternal.NormalizedScorePercent < deepseekAIJudgePassExclusive {
+			continue
+		}
+		blockingRegistered = append(blockingRegistered, registeredExternal)
 		severity := rules.SeverityWarning
-		if external.ScorePercent >= 35 {
+		if registeredExternal.NormalizedScorePercent >= 35 {
 			severity = rules.SeverityError
 		}
-		target := strings.TrimSpace(external.Detector)
-		if external.Mode != "" {
-			target += "/" + strings.TrimSpace(external.Mode)
+		target := strings.TrimSpace(registeredExternal.Detector)
+		if registeredExternal.Mode != "" {
+			target += "/" + strings.TrimSpace(registeredExternal.Mode)
 		}
 		violations = append(violations, rules.Violation{
 			Rule:      "external_aigc_ratio",
 			Target:    target,
 			Limit:     "<4%",
-			Actual:    external.ScorePercent,
-			Deviation: external.ScorePercent / 100,
+			Actual:    registeredExternal.NormalizedScorePercent,
+			Deviation: registeredExternal.NormalizedScorePercent / 100,
 			Severity:  severity,
 		})
 	}
@@ -731,6 +744,22 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 	}
 	if err := writeMechanicalGateForExistingChapter(st, &payload); err != nil {
 		return nil, err
+	}
+	for _, registeredExternal := range blockingRegistered {
+		if err := toolspkg.SetRegisteredExternalRerenderRequirement(st.Dir(), registeredExternal); err != nil {
+			return nil, fmt.Errorf("persist registered external rerender requirement: %w", err)
+		}
+		// Registered detector rows are immutable evidence, not causal plan/body
+		// epochs. More than one detector can block the same body, so latest-only
+		// idempotence would turn an unchanged A, B review into A, B, A, B on every
+		// run. Historical digest idempotence preserves one checkpoint per exact
+		// detector result; a genuinely new row still has a new semantic digest.
+		if _, err := st.Checkpoints.Append(
+			domain.ChapterScope(chapter), "registered-external-detection",
+			"meta/external_detection_log.jsonl", reviewreport.RegisteredExternalDetectionDigest(registeredExternal),
+		); err != nil {
+			return nil, fmt.Errorf("checkpoint registered external detection: %w", err)
+		}
 	}
 	return &payload, nil
 }
@@ -769,43 +798,18 @@ type externalAIGCDetection struct {
 }
 
 func latestExternalAIGCDetection(root string, chapter int, body string) (externalAIGCDetection, bool) {
-	chapterPath := filepath.Join(root, "chapters", fmt.Sprintf("%02d.md", chapter))
-	chapterInfo, _ := os.Stat(chapterPath)
-	sum := sha256.Sum256([]byte(body))
-	currentHash := fmt.Sprintf("%x", sum)
-	raw, err := os.ReadFile(filepath.Join(root, "meta", "external_detection_log.jsonl"))
-	if err != nil {
+	row, err := reviewreport.LatestRegisteredExternalDetection(
+		root, chapter, reviewreport.BodySHA256(body), "", "",
+	)
+	if err != nil || row == nil {
 		return externalAIGCDetection{}, false
 	}
-	var latest externalAIGCDetection
-	found := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var row externalAIGCDetection
-		if err := json.Unmarshal([]byte(line), &row); err != nil || row.Chapter != chapter {
-			continue
-		}
-		if row.BodySHA256 != "" && row.BodySHA256 != currentHash {
-			continue
-		}
-		if row.BodySHA256 == "" && chapterInfo != nil && !chapterInfo.ModTime().IsZero() && row.CheckedAt != "" {
-			checkedAt, err := time.ParseInLocation("2006-01-02T15:04:05", row.CheckedAt, time.Local)
-			if err == nil && checkedAt.Before(chapterInfo.ModTime().Add(-time.Second)) {
-				continue
-			}
-		}
-		score := row.Score
-		if score > 0 && score <= 1 {
-			score *= 100
-		}
-		row.ScorePercent = score
-		latest = row
-		found = true
-	}
-	return latest, found
+	return externalAIGCDetection{
+		Chapter: row.Chapter, Detector: row.Detector, Mode: row.Mode,
+		Score: row.Score, Verdict: row.Verdict, Note: row.Note,
+		BodySHA256: row.BodySHA256, CheckedAt: row.CheckedAt,
+		ScorePercent: row.NormalizedScorePercent,
+	}, true
 }
 
 var reviewDimensionNames = []string{
@@ -852,7 +856,11 @@ func buildEditorChapterReviewContext(st *store.Store, chapter int) string {
 		return ""
 	}
 	renderContract := plan.Contract
-	renderContract.RequiredBeats = toolspkg.RenderRequiredOutcomes(*plan)
+	// The Drafter receives every hard outcome in full. The Editor has a
+	// different job: verify visible results without turning an upstream action
+	// recipe into a new prose obligation. Keep this projection local to review
+	// context so it cannot weaken the prose-facing render packet.
+	renderContract.RequiredBeats = editorReviewRequiredOutcomes(*plan)
 	renderContract.ContinuityChecks = toolspkg.RenderContinuityChecks(*plan)
 	payload := struct {
 		Chapter             int                              `json:"chapter"`
@@ -876,7 +884,7 @@ func buildEditorChapterReviewContext(st *store.Store, chapter int) string {
 		TrendLanguage:       plan.CausalSimulation.TrendLanguage,
 		Entertainment:       plan.CausalSimulation.EntertainmentPlan,
 		EndingContract:      toolspkg.RenderEndingContract(*plan),
-		RenderPolicy:        "contract.required_beats 已投影为结果级要求，continuity_checks 只保留事实连续性；审核结果是否成立，不要求正文复现上游动作顺序、验证次数、流程举例、台词原句或指定末段物件。ending_consequence_contract 只核 consequence 与 next_chapter_pull，允许用更有吸引力的现场人物、动作或结果替换原计划镜头。逐项照抄 plan 本身属于审美问题。",
+		RenderPolicy:        "contract.required_beats 已投影为结果级要求，continuity_checks 只保留事实连续性；审核结果是否成立，不要求正文复现上游执行配方、动作节拍、台词原句或指定末段物件。ending_consequence_contract 只核 consequence 与 next_chapter_pull，允许用更有吸引力的现场人物、动作或结果替换原计划镜头。逐项照抄 plan 本身属于审美问题。",
 		TemporalPolicy:      "严格区分‘应下/约好次日八点之后’与‘到了次日八点之后’：前者表示人物先接受未来约定，后续动作仍可发生在当晚；只有合同明确写‘次日到场/复看完成后’才允许要求正文推进到次日。future/next_chapter 事件若被 forbidden_moves 保留为待发生事项，不得反向要求本章提前完成。",
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")
@@ -884,6 +892,59 @@ func buildEditorChapterReviewContext(st *store.Store, chapter int) string {
 		return ""
 	}
 	return string(raw)
+}
+
+func editorReviewRequiredOutcomes(plan domain.ChapterPlan) []string {
+	complete := toolspkg.RenderRequiredOutcomes(plan)
+	out := make([]string, 0, len(complete))
+	seen := make(map[string]bool, len(complete))
+	for _, outcome := range complete {
+		clauses := strings.FieldsFunc(outcome, func(r rune) bool {
+			return r == '；' || r == ';' || r == '。' || r == '\n'
+		})
+		results := make([]string, 0, len(clauses))
+		for _, clause := range clauses {
+			clause = strings.TrimSpace(clause)
+			if clause == "" || editorReviewProcessRecipeClause(clause) {
+				continue
+			}
+			results = append(results, clause)
+		}
+		result := strings.Join(results, "；")
+		if result == "" || seen[result] {
+			continue
+		}
+		seen[result] = true
+		out = append(out, result)
+	}
+	return out
+}
+
+func editorReviewProcessRecipeClause(clause string) bool {
+	// Explicit result/boundary markers win over procedure vocabulary. For
+	// example, "唯一一次失败复测" is a hard limitation even though it contains
+	// the word "复测", while "用两至三个短动作验证边界" is only a staging recipe.
+	for _, resultMarker := range []string{
+		"必须", "不得", "只准", "只允许", "唯一", "至少", "不低于", "准确",
+		"阻断", "拒绝", "完成", "成立", "到账", "解锁", "获得", "失去", "仍为",
+	} {
+		if strings.Contains(clause, resultMarker) {
+			return false
+		}
+	}
+	for _, recipeMarker := range []string{
+		"短动作", "动作拍", "动作步骤", "操作步骤", "点击路径", "流程举例",
+		"逐笔", "逐项核对", "逐项验证", "亲自到场复核", "验证边界",
+	} {
+		if strings.Contains(clause, recipeMarker) {
+			return true
+		}
+	}
+	hasExecutionNoun := strings.Contains(clause, "动作") || strings.Contains(clause, "点击") ||
+		strings.Contains(clause, "操作") || strings.Contains(clause, "步骤") || strings.Contains(clause, "流程")
+	hasVerificationVerb := strings.Contains(clause, "验证") || strings.Contains(clause, "复核") ||
+		strings.Contains(clause, "核验") || strings.Contains(clause, "测试")
+	return hasExecutionNoun && hasVerificationVerb
 }
 
 func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, analysis domain.AIVoiceAnalysis, entry *domain.ReviewEntry) []string {
@@ -907,14 +968,11 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 
 	var removed []string
 	removedDeferredCheckMisread := false
-	removedFamilyChoiceMisread := false
+	removedPlanCauseChoiceMisread := false
 	filtered := make([]domain.ConsistencyIssue, 0, len(entry.Issues))
 	for _, issue := range entry.Issues {
 		text := strings.Join([]string{issue.Description, issue.Evidence, issue.Suggestion}, "\n")
 		switch {
-		case reviewMisreadsColdDrinkOwnerVeto(text, body):
-			removed = append(removed, "冷饮摊主行动级否决已由正文明确落地")
-			continue
 		case reviewIssueIsExplicitlyNonActionable(issue):
 			removed = append(removed, "明确无需返工的零行动项")
 			continue
@@ -927,7 +985,7 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 		case reviewClaimsSystemMessageOverpacked(text) && !hasViolation("system_message_overpacked"):
 			removed = append(removed, "独立系统消息被错误拼接")
 			continue
-		case reviewRejectsApprovedTrendCarrier(text, body, plan):
+		case reviewRejectsApprovedTrendCarrier(st, text, body, plan):
 			removed = append(removed, "热梗承载人违背批准 plan")
 			continue
 		case reviewDemandsAbsentOptionalTrend(text, body, plan):
@@ -940,9 +998,9 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 			removed = append(removed, "八点约定后的主动查看已按批准时序落地，次日复看仍留待后章")
 			removedDeferredCheckMisread = true
 			continue
-		case entry.ContractStatus == "met" && len(entry.ContractMisses) == 0 && reviewMisreadsExistingFamilyProtectionChoice(text, body, plan):
-			removed = append(removed, "父亲护场已在正文中直接推动主角守密选择")
-			removedFamilyChoiceMisread = true
+		case entry.ContractStatus == "met" && len(entry.ContractMisses) == 0 && reviewMisreadsPlanBackedCauseChoice(text, body, plan):
+			removed = append(removed, "批准 plan 的因果选择已由正文顺序证据落地")
+			removedPlanCauseChoiceMisread = true
 			continue
 		default:
 			filtered = append(filtered, issue)
@@ -980,22 +1038,13 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 			}
 		}
 	}
-	if reviewMisreadsColdDrinkOwnerVeto(entry.Summary, body) {
-		entry.Summary = fmt.Sprintf("第 %d 章结果级合同已完成；冷饮摊主的空箱试走与当场否决已迫使方案重装。", chapter)
-		removed = append(removed, "冷饮摊主行动级否决已由正文明确落地")
-	}
-	if removedDeferredCheckMisread || removedFamilyChoiceMisread {
-		entry.Summary = fmt.Sprintf("第 %d 章已按批准合同完成未来约定后的主动查看顺序与家庭守密因果；其余意见按当前正文证据评估。", chapter)
-	}
-	for i := range entry.Dimensions {
-		dimension := &entry.Dimensions[i]
-		if !reviewMisreadsColdDrinkOwnerVeto(dimension.Comment, body) {
-			continue
-		}
-		dimension.Score = max(dimension.Score, 90)
-		dimension.Verdict = "pass"
-		dimension.Comment = "冷饮摊老板亲自把空箱往外推、当场摇头要求支架内收两指，行动级否决迫使方案拆下重装；人物行动与结果级合同均已落地。"
-		removed = append(removed, "冷饮摊主行动级否决已由正文明确落地")
+	switch {
+	case removedDeferredCheckMisread && removedPlanCauseChoiceMisread:
+		entry.Summary = fmt.Sprintf("第 %d 章已按批准合同完成未来约定后的主动查看顺序与计划内因果选择；其余意见按当前正文证据评估。", chapter)
+	case removedDeferredCheckMisread:
+		entry.Summary = fmt.Sprintf("第 %d 章已按批准合同完成未来约定后的主动查看顺序；其余意见按当前正文证据评估。", chapter)
+	case removedPlanCauseChoiceMisread:
+		entry.Summary = fmt.Sprintf("第 %d 章已按批准合同完成计划内因果选择；其余意见按当前正文证据评估。", chapter)
 	}
 	for i := range entry.Dimensions {
 		dimension := &entry.Dimensions[i]
@@ -1018,16 +1067,15 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 			dimension.Verdict = "pass"
 			removed = append(removed, "八点约定后的主动查看已按批准时序落地，次日复看仍留待后章")
 		}
-		if contractEvidenceTrusted && reviewMisreadsExistingFamilyProtectionChoice(dimension.Comment, body, plan) {
+		if contractEvidenceTrusted && reviewMisreadsPlanBackedCauseChoice(dimension.Comment, body, plan) {
 			dimension.Comment = removeReviewSentences(dimension.Comment, func(sentence string) bool {
-				return reviewTextContainsAny(sentence, "父亲护场", "父亲的代价", "鱼盘", "家庭守密") &&
-					reviewTextContainsAny(sentence, "缺失", "未兑现", "没有完成", "因果断裂", "未完成心理因果")
+				return reviewMisreadsPlanBackedCauseChoice(sentence, body, plan)
 			})
 			dimension.Comment = appendReviewComment(dimension.Comment,
-				"正文先给出公开秘密即可止住追问的反事实诱因，再写父亲替主角接住目光，最后让主角收起设备、压下公开冲动；护场已经直接推动守密选择。")
+				"批准 plan 的 causal beat 已在正文中按“原因动作→人物选择”的顺序落地；此项不再作为缺失返工。")
 			dimension.Score = max(dimension.Score, 90)
 			dimension.Verdict = "pass"
-			removed = append(removed, "父亲护场已在正文中直接推动主角守密选择")
+			removed = append(removed, "批准 plan 的因果选择已由正文顺序证据落地")
 		}
 	}
 	if len(entry.Issues) == 0 && entry.ContractStatus == "met" && reviewDimensionsPass(entry.Dimensions) {
@@ -1035,24 +1083,6 @@ func sanitizeEditorReviewForProject(st *store.Store, chapter int, body string, a
 		entry.AffectedChapters = nil
 	}
 	return uniqueNonEmptyStrings(removed)
-}
-
-func reviewMisreadsColdDrinkOwnerVeto(text, body string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" || !strings.Contains(text, "冷饮摊") ||
-		!strings.Contains(body, "老板把空箱往外一推") || !strings.Contains(body, "当场摇头") ||
-		!strings.Contains(body, "往里收两指") || !strings.Contains(body, "拆下重装") {
-		return false
-	}
-	for _, marker := range []string{
-		"本人没有行动级阻力", "本人没有行动阻力", "没有行动级阻力",
-		"空箱试走否决是沈知遥和林澈自己做的", "未由摊主现场否决", "不是摊主现场否决",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 var (
@@ -1098,27 +1128,114 @@ func reviewMisreadsDeferredCheckAfterFutureAppointment(text, body string, plan *
 	return acceptedAt > appointmentAt && checkedAt > acceptedAt && settledAt > checkedAt && settledAt-appointmentAt <= 1600
 }
 
-func reviewMisreadsExistingFamilyProtectionChoice(text, body string, plan *domain.ChapterPlan) bool {
-	text = strings.TrimSpace(text)
-	if text == "" || plan == nil {
-		return false
-	}
-	planText := chapterPlanReviewText(plan)
-	if !reviewTextContainsAny(planText, "父亲护场", "父亲护住", "父亲替他") ||
-		!reviewTextContainsAny(planText, "推动保密", "推动守密", "保密选择", "守密选择") {
-		return false
-	}
-	if !reviewTextContainsAny(text, "父亲护场", "父亲的代价", "鱼盘", "家庭守密") ||
-		!reviewTextContainsAny(text, "缺失", "未兑现", "没有完成", "因果断裂", "未完成心理因果") {
-		return false
-	}
+var reviewPlanEvidenceStopTokens = map[string]bool{
+	"主角": true, "角色": true, "人物": true, "本章": true, "正文": true,
+	"必须": true, "直接": true, "推动": true, "选择": true, "因果": true,
+	"已经": true, "完成": true, "落地": true, "缺失": true, "没有": true,
+	"未兑": true, "兑现": true, "要求": true, "通过": true, "当前": true,
+}
 
-	temptAt := firstTextIndex(body, "只要把", "本可以公开", "原本可以公开", "亮出来", "报出数字")
-	shieldAt := firstTextIndexAfter(body, temptAt, "像替他挡住", "替他挡住", "接走了全桌人的目光", "替他接住", "替自己顶住追问")
-	choiceAt := firstTextIndexAfter(body, shieldAt, "手机塞回兜里", "把屏幕扣住", "收起手机")
-	nightMarketAt := firstTextIndex(body, "饭桌散时", "夜市刚起烟火", "走到夜市")
-	return temptAt >= 0 && shieldAt > temptAt && choiceAt > shieldAt && choiceAt-temptAt <= 1600 &&
-		(nightMarketAt < 0 || choiceAt < nightMarketAt)
+// reviewMisreadsPlanBackedCauseChoice only clears a causal complaint when the
+// approved plan contains an explicit causal beat and the body independently
+// carries multiple plan-derived evidence tokens in cause -> choice order. It is
+// deliberately conservative: prose phrases, scene names and character names
+// are never embedded in the reviewer, and an unstructured body gets no waiver.
+func reviewMisreadsPlanBackedCauseChoice(text, body string, plan *domain.ChapterPlan) bool {
+	text = strings.TrimSpace(text)
+	body = strings.TrimSpace(body)
+	if text == "" || body == "" || plan == nil ||
+		!reviewTextContainsAny(text, "缺失", "未兑现", "没有完成", "因果断裂", "未完成", "未发生", "未推动", "没有推动") {
+		return false
+	}
+	for _, beat := range plan.CausalSimulation.CausalBeats {
+		causeTokens := reviewPlanEvidenceTokens(beat.Cause)
+		choiceTokens := reviewPlanEvidenceTokens(beat.CharacterChoice)
+		causeTokens, choiceTokens = reviewDistinctEvidenceTokens(causeTokens, choiceTokens)
+		if len(causeTokens) < 2 || len(choiceTokens) < 2 ||
+			reviewEvidenceHitCount(text, causeTokens) == 0 || reviewEvidenceHitCount(text, choiceTokens) == 0 {
+			continue
+		}
+		causeAt := reviewFirstEvidenceIndex(body, causeTokens)
+		if causeAt < 0 {
+			continue
+		}
+		choiceAt := reviewFirstEvidenceIndex(body[causeAt:], choiceTokens)
+		if choiceAt < 0 {
+			continue
+		}
+		choiceAt += causeAt
+		if choiceAt <= causeAt || choiceAt-causeAt > 1600 {
+			continue
+		}
+		windowEnd := causeAt + 1600
+		if windowEnd > len(body) {
+			windowEnd = len(body)
+		}
+		if reviewEvidenceHitCount(body[causeAt:choiceAt], causeTokens) < 2 ||
+			reviewEvidenceHitCount(body[choiceAt:windowEnd], choiceTokens) < 2 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func reviewPlanEvidenceTokens(text string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, token := range rag.TokenizeForBM25(text) {
+		token = strings.TrimSpace(token)
+		if token == "" || reviewPlanEvidenceStopTokens[token] || seen[token] {
+			continue
+		}
+		seen[token] = true
+		out = append(out, token)
+	}
+	return out
+}
+
+func reviewDistinctEvidenceTokens(left, right []string) ([]string, []string) {
+	leftSet := make(map[string]bool, len(left))
+	rightSet := make(map[string]bool, len(right))
+	for _, token := range left {
+		leftSet[token] = true
+	}
+	for _, token := range right {
+		rightSet[token] = true
+	}
+	leftOut := make([]string, 0, len(left))
+	for _, token := range left {
+		if !rightSet[token] {
+			leftOut = append(leftOut, token)
+		}
+	}
+	rightOut := make([]string, 0, len(right))
+	for _, token := range right {
+		if !leftSet[token] {
+			rightOut = append(rightOut, token)
+		}
+	}
+	return leftOut, rightOut
+}
+
+func reviewEvidenceHitCount(text string, tokens []string) int {
+	count := 0
+	for _, token := range tokens {
+		if strings.Contains(text, token) {
+			count++
+		}
+	}
+	return count
+}
+
+func reviewFirstEvidenceIndex(text string, tokens []string) int {
+	first := -1
+	for _, token := range tokens {
+		if at := strings.Index(text, token); at >= 0 && (first < 0 || at < first) {
+			first = at
+		}
+	}
+	return first
 }
 
 func chapterPlanReviewText(plan *domain.ChapterPlan) string {
@@ -1395,8 +1512,8 @@ func reviewClaimsSystemMessageOverpacked(text string) bool {
 	return false
 }
 
-func reviewRejectsApprovedTrendCarrier(text, body string, plan *domain.ChapterPlan) bool {
-	if plan == nil || !strings.Contains(text, "呱") {
+func reviewRejectsApprovedTrendCarrier(st *store.Store, text, body string, plan *domain.ChapterPlan) bool {
+	if plan == nil {
 		return false
 	}
 	rejectsCarrier := false
@@ -1410,17 +1527,141 @@ func reviewRejectsApprovedTrendCarrier(text, body string, plan *domain.ChapterPl
 		return false
 	}
 	for _, item := range plan.CausalSimulation.TrendLanguage {
-		if !strings.Contains(item.Item, "呱") || strings.TrimSpace(item.CharacterCarrier) == "" {
+		token := reviewTrendLanguageToken(item.Item)
+		if token == "" || !strings.Contains(text, token) || !strings.Contains(body, token) {
 			continue
 		}
-		for _, name := range []string{"赵航", "林澈", "沈知遥", "系统"} {
-			if strings.Contains(item.CharacterCarrier, name) && strings.Contains(text, name) &&
-				strings.Contains(body, name) && (strings.Contains(body, "“呱，") || strings.Contains(body, "\"呱，")) {
+		for _, name := range reviewApprovedTrendCarrierNames(st, plan, item.CharacterCarrier) {
+			if strings.Contains(text, name) && reviewCarrierUsesTrendToken(body, name, token) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func reviewApprovedTrendCarrierNames(st *store.Store, plan *domain.ChapterPlan, carrier string) []string {
+	carrier = strings.TrimSpace(carrier)
+	if carrier == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var known []string
+	addKnown := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] || !strings.Contains(carrier, name) {
+			return
+		}
+		seen[name] = true
+		known = append(known, name)
+	}
+	if st != nil {
+		if characters, err := st.Characters.Load(); err == nil {
+			for _, character := range characters {
+				addKnown(character.Name)
+			}
+		}
+	}
+	if plan != nil {
+		for _, state := range plan.CausalSimulation.InitialState {
+			addKnown(state.Character)
+		}
+		for _, voice := range plan.CausalSimulation.VoiceLogic {
+			addKnown(voice.Character)
+		}
+		for _, stage := range plan.CausalSimulation.OffscreenStage {
+			addKnown(stage.Character)
+		}
+		for _, emotion := range plan.CausalSimulation.EmotionalLogic {
+			addKnown(emotion.Character)
+		}
+		for _, visual := range plan.CausalSimulation.VisualDesign {
+			addKnown(visual.Character)
+		}
+	}
+	if len(known) > 0 {
+		return known
+	}
+	// CharacterCarrier is itself a structured plan field. A short leading label
+	// is accepted as a role/name fallback; free-form descriptions stay untrusted.
+	labels := strings.FieldsFunc(carrier, func(r rune) bool {
+		switch r {
+		case '；', ';', '，', ',', '。', '！', '？', '!', '?', '：', ':', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(labels) == 0 {
+		return nil
+	}
+	label := strings.TrimSpace(labels[0])
+	label = strings.TrimPrefix(label, "由")
+	for _, suffix := range []string{"本人", "可选使用", "负责使用", "使用", "承载"} {
+		label = strings.TrimSuffix(label, suffix)
+	}
+	label = strings.TrimSpace(label)
+	if n := len([]rune(label)); n == 0 || n > 8 || strings.ContainsAny(label, " \t") {
+		return nil
+	}
+	return []string{label}
+}
+
+func reviewCarrierUsesTrendToken(body, carrier, token string) bool {
+	for carrierOffset := 0; carrierOffset < len(body); {
+		carrierRel := strings.Index(body[carrierOffset:], carrier)
+		if carrierRel < 0 {
+			break
+		}
+		carrierAt := carrierOffset + carrierRel
+		for tokenOffset := 0; tokenOffset < len(body); {
+			tokenRel := strings.Index(body[tokenOffset:], token)
+			if tokenRel < 0 {
+				break
+			}
+			tokenAt := tokenOffset + tokenRel
+			distance := tokenAt - carrierAt
+			if distance < 0 {
+				distance = -distance
+			}
+			if distance <= 360 {
+				switch {
+				case carrierAt <= tokenAt:
+					window := body[carrierAt : tokenAt+len(token)]
+					if strings.ContainsAny(window, "：:\"“‘「【") {
+						return true
+					}
+				case tokenAt < carrierAt:
+					window := body[tokenAt : carrierAt+len(carrier)]
+					if strings.ContainsAny(window, "\"”’」】") {
+						return true
+					}
+				}
+			}
+			tokenOffset = tokenAt + len(token)
+		}
+		carrierOffset = carrierAt + len(carrier)
+	}
+	return false
+}
+
+func reviewTrendLanguageToken(item string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(item), func(r rune) bool {
+		switch r {
+		case '`', '\'', '"', '“', '”', '‘', '’', '「', '」', '…', '，', ',', '。', '.', '!', '！', '?', '？', '；', ';', '：', ':', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	token := strings.TrimSpace(parts[0])
+	if len([]rune(token)) > 24 {
+		return ""
+	}
+	return token
 }
 
 func reviewDemandsAbsentOptionalTrend(text, body string, plan *domain.ChapterPlan) bool {
@@ -1438,10 +1679,7 @@ func reviewDemandsAbsentOptionalTrend(text, body string, plan *domain.ChapterPla
 		return false
 	}
 	for _, item := range plan.CausalSimulation.TrendLanguage {
-		token := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’「」…，,。.!！?？")
-		if strings.HasPrefix(strings.TrimSpace(item.Item), "呱") {
-			token = "呱"
-		}
+		token := reviewTrendLanguageToken(item.Item)
 		if token != "" && strings.Contains(text, token) && !strings.Contains(body, token) {
 			return true
 		}

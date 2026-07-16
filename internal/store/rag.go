@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -84,6 +85,80 @@ func (s *RAGStore) AppendCraftRecallLog(entry map[string]any) error {
 		}
 		return s.io.AppendLineUnlocked("meta/rag/craft_recall_log.jsonl", append(data, '\n'))
 	})
+}
+
+// AppendCraftRecallLogOnce makes a receipt's audit evidence recoverable: if a
+// prior call saved the receipt but failed while appending the log, the next
+// retry fills the missing audit row without duplicating successful rows.
+func (s *RAGStore) AppendCraftRecallLogOnce(receiptID string, entry map[string]any) error {
+	receiptID = strings.TrimSpace(receiptID)
+	if !validCraftRecallReceiptID(receiptID) {
+		return fmt.Errorf("invalid craft recall receipt id %q", receiptID)
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	marker := []byte(`"receipt_id":"` + receiptID + `"`)
+	return s.io.WithWriteLock(func() error {
+		existing, readErr := s.io.ReadFileUnlocked("meta/rag/craft_recall_log.jsonl")
+		if readErr == nil && bytes.Contains(existing, marker) {
+			return nil
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+		if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+			if err := s.io.AppendLineUnlocked("meta/rag/craft_recall_log.jsonl", []byte("\n")); err != nil {
+				return err
+			}
+		}
+		return s.io.AppendLineUnlocked("meta/rag/craft_recall_log.jsonl", append(data, '\n'))
+	})
+}
+
+func craftRecallReceiptPath(id string) string {
+	id = strings.TrimSpace(id)
+	return fmt.Sprintf("meta/rag/craft_receipts/%s.json", id)
+}
+
+func validCraftRecallReceiptID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) != 24 {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// SaveCraftRecallReceipt atomically persists the replayable result before a
+// staged plan is created. The immutable id is content-derived by the caller.
+func (s *RAGStore) SaveCraftRecallReceipt(receipt domain.CraftRecallReceipt) error {
+	if !validCraftRecallReceiptID(receipt.ID) {
+		return fmt.Errorf("invalid craft recall receipt id %q", receipt.ID)
+	}
+	return s.io.WriteJSON(craftRecallReceiptPath(receipt.ID), receipt)
+}
+
+func (s *RAGStore) LoadCraftRecallReceipt(id string) (*domain.CraftRecallReceipt, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, nil
+	}
+	if !validCraftRecallReceiptID(id) {
+		return nil, fmt.Errorf("invalid craft recall receipt id %q", id)
+	}
+	var receipt domain.CraftRecallReceipt
+	if err := s.io.ReadJSON(craftRecallReceiptPath(id), &receipt); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &receipt, nil
 }
 
 func (s *RAGStore) SaveIndexState(state domain.RAGIndexState) error {

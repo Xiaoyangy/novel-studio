@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
@@ -27,6 +28,14 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 	if err != nil {
 		return "", err
 	}
+	bodySHA256 := ""
+	if strings.TrimSpace(body) != "" {
+		bodySHA256 = reviewreport.BodySHA256(body)
+	}
+	registeredDetections, err := reviewreport.LatestRegisteredExternalDetections(s.Dir(), review.Chapter, bodySHA256)
+	if err != nil {
+		return "", fmt.Errorf("load current registered external detections for rewrite brief: %w", err)
+	}
 	pendingSteer := ""
 	if meta, loadErr := s.RunMeta.Load(); loadErr != nil {
 		return "", loadErr
@@ -44,8 +53,8 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 	fmt.Fprintf(&b, "# ch%02d rewrite brief\n\n", review.Chapter)
 	b.WriteString("## 当前结论\n\n")
 	fmt.Fprintf(&b, "- 最新结构化评审：`%s`。\n", finalVerdict)
-	if strings.TrimSpace(body) != "" {
-		fmt.Fprintf(&b, "- 待返工正文 SHA-256：`%s`。\n", reviewreport.BodySHA256(body))
+	if bodySHA256 != "" {
+		fmt.Fprintf(&b, "- 待返工正文 SHA-256：`%s`。\n", bodySHA256)
 	}
 	if summary := strings.TrimSpace(review.Summary); summary != "" {
 		fmt.Fprintf(&b, "- 本轮结论：%s\n", summary)
@@ -80,6 +89,21 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		}
 	}
 
+	blockingRegistered := make([]reviewreport.RegisteredExternalDetection, 0, len(registeredDetections))
+	for _, detection := range registeredDetections {
+		if detection.NormalizedScorePercent >= 4 {
+			blockingRegistered = append(blockingRegistered, detection)
+		}
+	}
+	if len(blockingRegistered) > 0 {
+		fmt.Fprintf(&b, "\n## 最新整篇单段门禁（%s）\n\n", latestRegisteredDetectionDate(blockingRegistered))
+		for _, detection := range blockingRegistered {
+			identity := strings.TrimSpace(detection.Detector) + "/" + strings.TrimSpace(detection.Mode)
+			fmt.Fprintf(&b, "- `%s` 对当前正文 SHA `%s` 的整篇单段结果为 `%.2f%%`；必须保留既定事实后整章重渲染，新 SHA 用同 detector/mode 精确 payload 复测，严格 `<4%%` 才能交付。\n",
+				identity, bodySHA256, detection.NormalizedScorePercent)
+		}
+	}
+
 	b.WriteString("\n## 验收条件\n\n")
 	b.WriteString("- 逐条满足用户本轮要求、合同漏项和 error/critical issue；warning 只在不损伤正文时修正。\n")
 	b.WriteString("- 保留事实的事件顺序、金额、地点、角色、结果和章末后果不得漂移。\n")
@@ -97,6 +121,19 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		}
 	}
 	return path, nil
+}
+
+func latestRegisteredDetectionDate(rows []reviewreport.RegisteredExternalDetection) string {
+	latest := time.Time{}
+	for _, row := range rows {
+		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(row.CheckedAt)); err == nil && parsed.After(latest) {
+			latest = parsed
+		}
+	}
+	if latest.IsZero() {
+		latest = time.Now()
+	}
+	return latest.Format("2006-01-02")
 }
 
 func isInternalPipelineRepairSteer(text string) bool {

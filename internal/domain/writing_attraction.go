@@ -13,7 +13,17 @@ func TrendLanguageRequested(text string) bool {
 	if text == "" {
 		return false
 	}
-	for _, forbidden := range []string{"禁止使用热梗", "禁用热梗", "不要用热梗", "不使用热梗", "不用热梗"} {
+	// A ceiling such as “每章一个热梗，但不堆网络梗” limits density; it does
+	// not cancel the explicit positive request earlier in the sentence. Remove
+	// only the ceiling phrase, then evaluate any remaining positive wording.
+	for _, ceiling := range []string{
+		"不堆热梗", "不堆网络梗", "不堆流行梗", "避免堆热梗", "避免堆网络梗",
+	} {
+		text = strings.ReplaceAll(text, ceiling, "")
+	}
+	for _, forbidden := range []string{
+		"禁止使用热梗", "禁用热梗", "不要用热梗", "不使用热梗", "不用热梗",
+	} {
 		if strings.Contains(text, forbidden) {
 			return false
 		}
@@ -51,10 +61,8 @@ func SystemCompanionVoiceRequested(text string) bool {
 	if text == "" {
 		return false
 	}
-	for _, forbidden := range []string{"系统禁止聊天", "系统不能聊天", "系统不与主角交流", "纯任务机器人即可"} {
-		if strings.Contains(text, forbidden) {
-			return false
-		}
+	if SystemCompanionVoiceForbidden(text) {
+		return false
 	}
 	for _, wanted := range []string{"交流解闷", "不是一个纯下达任务", "不是纯下达任务", "系统会和", "系统会接话", "系统能接话", "系统短促、会接话", "系统提示短、能聊天", "系统始终支持", "始终支持主角"} {
 		if strings.Contains(text, wanted) {
@@ -64,6 +72,23 @@ func SystemCompanionVoiceRequested(text string) bool {
 	if strings.Contains(text, "系统") && (strings.Contains(text, "会聊天") ||
 		strings.Contains(text, "吐槽搭子") || strings.Contains(text, "情绪支持")) {
 		return true
+	}
+	return false
+}
+
+// SystemCompanionVoiceForbidden reports an explicit project decision that the
+// system must not act as a speaking companion. Keeping this separate from the
+// positive detector lets callers apply source precedence instead of merging an
+// old brief with newer user rules and letting either phrase win accidentally.
+func SystemCompanionVoiceForbidden(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	for _, forbidden := range []string{"系统禁止聊天", "系统不能聊天", "系统不与主角交流", "纯任务机器人即可"} {
+		if strings.Contains(text, forbidden) {
+			return true
+		}
 	}
 	return false
 }

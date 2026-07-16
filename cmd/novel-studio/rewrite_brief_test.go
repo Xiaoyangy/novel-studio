@@ -98,7 +98,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	if !plan.HasRed {
 		t.Fatalf("expected red plan, got %+v", plan)
 	}
-	for _, want := range []string{"catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：本地与外部均严格 <4%", "禁止注水", "改成交易动作和可见事实"} {
+	for _, want := range []string{"## 验收条件", "## 必须修正", "catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：本地与外部均严格 <4%", "禁止注水", "改成交易动作和可见事实"} {
 		if !strings.Contains(plan.Brief, want) {
 			t.Fatalf("brief missing %q:\n%s", want, plan.Brief)
 		}

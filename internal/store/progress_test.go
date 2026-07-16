@@ -282,6 +282,11 @@ func TestCompleteRewrite(t *testing.T) {
 	if p.RewriteReason != "" {
 		t.Errorf("reason should be cleared, got %s", p.RewriteReason)
 	}
+	// Saga replay after queue drain must be a no-op, not writing -> writing
+	// transition failure.
+	if err := store.Progress.CompleteRewrite(7); err != nil {
+		t.Fatalf("CompleteRewrite replay after drain: %v", err)
+	}
 }
 
 func TestCompleteRewrite_NotInQueue(t *testing.T) {

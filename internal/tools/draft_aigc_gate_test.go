@@ -44,6 +44,7 @@ func TestAIGCDetectorRewriteFocusUsesNarrativeSignals(t *testing.T) {
 				Stats: map[string]any{
 					"dense_dialogue_windows":     3,
 					"max_dialogue_paragraph_run": 7,
+					"dialogue_paragraph_ratio":   0.62,
 					"action_dialogue_lead_ratio": 0.52,
 					"interiority_density_per_k":  1.1,
 					"logistics_density_per_k":    6.4,
@@ -57,10 +58,18 @@ func TestAIGCDetectorRewriteFocusUsesNarrativeSignals(t *testing.T) {
 		}},
 	}
 	focus := strings.Join(aigcDetectorRewriteFocus(report), "\n")
-	for _, want := range []string{"对白传送带", "动作报幕式对白", "主视角仍被经营流程压住", "按焦点真实换段"} {
+	for _, want := range []string{
+		"对白传送带", "动作报幕式对白", "主视角仍被经营流程或对白原话压住", "按焦点真实换段",
+		"对白段占比 62.0%", "主观密度 1.10/千字", "流程密度 6.40/千字",
+		"至少重建两条分处不同场景", "刺激→主观体验或误判→人物如何调节、压住或转移→因此改变的选择→关系或现实余波",
+		"删掉等量安装、票据、付款等流程或非必要对白原话", "情绪名词", "微动作", "单独出现都不算主观链",
+	} {
 		if !strings.Contains(focus, want) {
 			t.Fatalf("focus missing %q:\n%s", want, focus)
 		}
+	}
+	if strings.Contains(focus, "选一个最在意的欲望或误判") {
+		t.Fatalf("focus regressed to a single vague interiority insert:\n%s", focus)
 	}
 	for _, stale := range []string{"事故触发", "保全/导出", "拒签"} {
 		if strings.Contains(focus, stale) {
@@ -107,6 +116,21 @@ func TestDraftAIGCGateUsesCurrentHashExternalCorroborationWithoutHidingRawScore(
 	}
 	if len(gate.RewriteFocus) != 0 || len(gate.DiagnosticFocus) == 0 {
 		t.Fatalf("passing corroboration should demote, not erase, raw diagnostics: %+v", gate)
+	}
+}
+
+func TestDraftAIGCLocalGateFailureMessageLeadsWithRawScoreAfterCorroboration(t *testing.T) {
+	gate := draftAIGCGateResult{
+		RawLocalGatePercent: 10.30, EffectiveGatePercent: 3, PassExclusivePercent: 4,
+		Enforced: true, Passed: true, ExternalCorroborated: true,
+		Calibration: "current_hash_external_consensus",
+	}
+	rawGate := draftAIGCRawLocalGateResult(aigc.Report{}, gate)
+	message := draftAIGCLocalGateFailureMessage(2, gate, rawGate, "3.00%", "修复人物选择链")
+	if !strings.Contains(message, "raw 门禁 10.30% 未达到严格 <4%") ||
+		!strings.Contains(message, "external_calibrated_effective=3.00%") ||
+		strings.Contains(message, "raw 门禁 3.00% 未达到") {
+		t.Fatalf("failure message hid the blocking raw-local score: %s", message)
 	}
 }
 
@@ -232,10 +256,14 @@ func TestDraftAIGCBlockPersistsSingleUseWholeRerenderEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := 2.0
+	report := aigc.Analyze(content)
 	gate := draftAIGCGateResult{
 		RawLocalGatePercent:          79.33,
-		EffectiveGatePercent:         79.33,
+		EffectiveGatePercent:         2,
 		PassExclusivePercent:         4,
+		Enforced:                     true,
+		Passed:                       true,
+		ExternalCorroborated:         true,
 		ExternalAIProbabilityPercent: &external,
 		CorroborationBlockedBy:       []string{"whole_text_or_segment_risk"},
 		RewriteFocus: []string{
@@ -244,7 +272,7 @@ func TestDraftAIGCBlockPersistsSingleUseWholeRerenderEvidence(t *testing.T) {
 		},
 	}
 
-	if err := persistDraftAIGCRerenderRequirement(st, 1, content, gate); err != nil {
+	if err := persistDraftAIGCRerenderRequirement(st, 1, content, report, gate); err != nil {
 		t.Fatal(err)
 	}
 	inspection, err := InspectDraftExternalGate(st.Dir(), 1)
@@ -265,6 +293,33 @@ func TestDraftAIGCBlockPersistsSingleUseWholeRerenderEvidence(t *testing.T) {
 	}
 	if context["blocking"] != true || context["source"] != "local_mechanical_gate" || context["revision_plan"] == nil {
 		t.Fatalf("draft context did not expose the local whole-text block: %#v", context)
+	}
+}
+
+func TestDraftAIGCSoftFailureDoesNotPersistFullRerenderMarker(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章\n\n这是一份只用于验证软门禁路由的草稿。"
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		RawLocalGatePercent:  12,
+		EffectiveGatePercent: 2,
+		PassExclusivePercent: 4,
+		Enforced:             true,
+		Passed:               true,
+		ExternalCorroborated: true,
+		DiagnosticFocus:      []string{"允许通过 edit_chapter 定点修复软诊断。"},
+	}
+	if draftAIGCRawLocalPassed(report, gate) {
+		t.Fatal("same-hash external calibration erased the raw local soft blocker")
+	}
+	if err := persistDraftAIGCRerenderRequirement(st, 1, content, report, gate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(draftExternalRerenderRequirementPath(st.Dir(), 1)); !os.IsNotExist(err) {
+		t.Fatalf("non-whole local failure created a full-rerender marker: %v", err)
 	}
 }
 

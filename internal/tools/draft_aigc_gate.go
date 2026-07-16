@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	qualityrules "github.com/chenhongyang/novel-studio/internal/rules"
@@ -62,10 +63,35 @@ func draftAIGCGateResultFromReport(report aigc.Report) draftAIGCGateResult {
 	}
 }
 
+// draftAIGCRawLocalGateResult restores the deterministic local decision that
+// existed before current-hash external corroboration. DeepSeek may lower the
+// effective diagnostic score, but it cannot spend the local gate on behalf of
+// the prose: raw whole-text failures still require rerender, while raw soft
+// failures require one bounded edit before a named-platform retest or commit.
+func draftAIGCRawLocalGateResult(report aigc.Report, gate draftAIGCGateResult) draftAIGCGateResult {
+	raw := gate
+	if raw.PassExclusivePercent <= 0 {
+		raw.PassExclusivePercent = aigc.PassExclusivePercent
+	}
+	raw.EffectiveGatePercent = raw.RawLocalGatePercent
+	raw.Passed = !raw.Enforced || raw.RawLocalGatePercent < raw.PassExclusivePercent
+	if raw.Enforced && !raw.Passed && len(raw.RewriteFocus) == 0 {
+		raw.RewriteFocus = mechanicalGateRewriteFocus(aigcViolation(report), report)
+		if len(raw.RewriteFocus) == 0 {
+			raw.RewriteFocus = []string{"整章重排段落功能、人物主观因果和对白换挡；不要随机换词、补微动作或制造病句。"}
+		}
+	}
+	return raw
+}
+
+func draftAIGCRawLocalPassed(report aigc.Report, gate draftAIGCGateResult) bool {
+	return draftAIGCRawLocalGateResult(report, gate).Passed
+}
+
 func corroborateDraftAIGCGate(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) draftAIGCGateResult {
 	status, err := loadDraftExternalJudgeStatus(st.Dir(), chapter)
 	if err != nil || status == nil || !status.AdviceComplete || status.Blocking ||
-		status.AIProbabilityPercent >= status.PassExclusivePercent ||
+		float64(status.AIProbabilityPercent) >= aigc.PassExclusivePercent ||
 		strings.TrimSpace(status.BodySHA256) != reviewreport.BodySHA256(content) {
 		return gate
 	}
@@ -144,6 +170,61 @@ func draftAIGCCorroborationBlockers(content string, report aigc.Report) []string
 	return blockers
 }
 
+// draftAIGCHasWholeTextStructuralBlock distinguishes a deterministic whole-text
+// failure from a soft local score. A fresh structural failure is useful before
+// paying the latency/cost of a named platform retest: the draft is not yet a
+// viable final candidate, so the pipeline may spend another bounded full-render
+// attempt while keeping every registered detector obligation for the eventual
+// locally clean hash.
+func draftAIGCHasWholeTextStructuralBlock(content string, report aigc.Report, gate draftAIGCGateResult) bool {
+	if draftAIGCRawLocalPassed(report, gate) {
+		return false
+	}
+	for _, blocker := range draftAIGCCorroborationBlockers(content, report) {
+		if blocker == "whole_text_or_segment_risk" {
+			return true
+		}
+	}
+	return false
+}
+
+// CurrentDraftHasLocalStructuralBlock independently reproduces the current
+// draft's deterministic whole-text/segment failure. Markers alone never grant
+// another write: the bytes on disk must still fail the current local engine.
+func CurrentDraftHasLocalStructuralBlock(st *store.Store, chapter int) bool {
+	_, ok := currentDraftLocalStructuralRerenderRequirement(st, chapter, nil)
+	return ok
+}
+
+// currentDraftLocalStructuralRerenderRequirement synthesizes an exact-hash
+// local marker from the current bytes while carrying forward every named
+// detector identity from base. Inspectors use the in-memory value so an older
+// registered marker can recover automatically; DraftChapter persists it before
+// replacing the bytes, preserving crash safety and the final retest contract.
+func currentDraftLocalStructuralRerenderRequirement(st *store.Store, chapter int, base *DraftExternalRerenderRequirement) (*DraftExternalRerenderRequirement, bool) {
+	if st == nil || chapter <= 0 {
+		return nil, false
+	}
+	content, err := st.Drafts.LoadDraft(chapter)
+	if err != nil || strings.TrimSpace(content) == "" {
+		return nil, false
+	}
+	report, gate := inspectDraftAIGCGate(st, chapter, content)
+	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) {
+		return nil, false
+	}
+	requirement := draftAIGCRerenderRequirement(chapter, content, draftAIGCRawLocalGateResult(report, gate))
+	if base != nil {
+		for _, identity := range registeredExternalRetestIdentities(base) {
+			requirement.RequiredExternalRetests = appendRegisteredExternalRetestIdentity(requirement.RequiredExternalRetests, identity)
+		}
+		requirement.RequiredDetector = strings.TrimSpace(base.RequiredDetector)
+		requirement.RequiredMode = strings.TrimSpace(base.RequiredMode)
+		requirement.InitialDraftBodySHA256 = strings.TrimSpace(base.InitialDraftBodySHA256)
+	}
+	return &requirement, true
+}
+
 func draftAIGCMarginalHumanWholeSegment(report aigc.Report) bool {
 	proxy := report.ZhuqueSegmentProxy
 	if !draftAIGCStrongNarrativeHumanAnchor(report) || report.WholeTextSegmentGate > aigc.PassExclusivePercent ||
@@ -177,29 +258,86 @@ func draftAIGCStrongNarrativeHumanAnchor(report aigc.Report) bool {
 }
 
 func requireDraftAIGCGate(st *store.Store, chapter int, content string) error {
-	_, gate := inspectDraftAIGCGate(st, chapter, content)
-	if gate.Passed {
+	report, gate := inspectDraftAIGCGate(st, chapter, content)
+	rawGate := draftAIGCRawLocalGateResult(report, gate)
+	if rawGate.Passed {
 		return nil
 	}
-	if err := persistDraftAIGCRerenderRequirement(st, chapter, content, gate); err != nil {
+	if err := persistDraftAIGCRerenderRequirement(st, chapter, content, report, gate); err != nil {
 		return fmt.Errorf("第 %d 章 AIGC 阻断已确认，但整章重渲染标记写入失败: %v: %w", chapter, err, errs.ErrStoreWrite)
 	}
-	focus := strings.Join(gate.RewriteFocus, "；")
+	if err := checkpointDraftStructuralBlock(st, chapter, content, report, gate); err != nil {
+		return fmt.Errorf("第 %d 章 AIGC 结构阻断已确认，但迭代 checkpoint 写入失败: %v: %w", chapter, err, errs.ErrStoreWrite)
+	}
+	focus := strings.Join(rawGate.RewriteFocus, "；")
 	external := "none"
 	if gate.ExternalAIProbabilityPercent != nil {
 		external = fmt.Sprintf("%.2f%%", *gate.ExternalAIProbabilityPercent)
 	}
-	return fmt.Errorf(
-		"第 %d 章草稿本地 AIGC 门禁 %.2f%% 未达到严格 <%.0f%%；禁止覆盖终稿。raw_local=%.2f%% external=%s corroboration_blockers=%v calibration=%q。请保持当前 world simulation 与 plan，先按 rewrite_focus 使用 edit_chapter 重排整章，再 read_chapter + check_consistency：%s: %w",
-		chapter, gate.EffectiveGatePercent, gate.PassExclusivePercent, gate.RawLocalGatePercent, external,
-		gate.CorroborationBlockedBy, gate.Calibration, focus, errs.ErrToolPrecondition,
+	return fmt.Errorf("%s: %w", draftAIGCLocalGateFailureMessage(chapter, gate, rawGate, external, focus), errs.ErrToolPrecondition)
+}
+
+func draftAIGCLocalGateFailureMessage(chapter int, gate, rawGate draftAIGCGateResult, external, focus string) string {
+	return fmt.Sprintf(
+		"第 %d 章草稿本地 AIGC raw 门禁 %.2f%% 未达到严格 <%.0f%%；禁止覆盖终稿。raw_local=%.2f%% external_calibrated_effective=%.2f%% external=%s corroboration_blockers=%v calibration=%q。请保持当前 world simulation 与 plan，先按 rewrite_focus 使用 edit_chapter 重排整章，再 read_chapter + check_consistency：%s",
+		chapter, rawGate.EffectiveGatePercent, rawGate.PassExclusivePercent, rawGate.RawLocalGatePercent,
+		gate.EffectiveGatePercent, external, gate.CorroborationBlockedBy, gate.Calibration, focus,
 	)
 }
 
-func persistDraftAIGCRerenderRequirement(st *store.Store, chapter int, content string, gate draftAIGCGateResult) error {
-	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" || len(gate.RewriteFocus) == 0 {
+// checkpointDraftStructuralBlock records one distinct whole-draft structural
+// failure per causal epoch. The digest binds body hash + current plan/simulation
+// epoch: repeated checks in one cycle remain idempotent, while the same prose
+// reappearing after a genuinely new causal plan is counted in that new budget.
+func checkpointDraftStructuralBlock(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) error {
+	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" {
 		return nil
 	}
+	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) {
+		return nil
+	}
+	bodyHash := reviewreport.BodySHA256(content)
+	epochKey := renderOnlyCausalEpochKey(st, chapter)
+	structuralDigest := "sha256:" + reviewreport.BodySHA256(bodyHash+"\n"+epochKey)
+	legacyDigest := "sha256:" + bodyHash
+	boundary := renderOnlyCausalBoundary(st, chapter)
+	for _, cp := range st.Checkpoints.All() {
+		if cp.Seq <= boundary || !cp.Scope.Matches(domain.ChapterScope(chapter)) || cp.Step != "draft-structural-block" {
+			continue
+		}
+		// Builds predating causal-epoch digests stored the raw body digest. Treat
+		// it as the same attempt during in-place upgrades instead of consuming a
+		// second slot for unchanged prose.
+		if cp.Digest == legacyDigest || cp.Digest == structuralDigest {
+			return nil
+		}
+	}
+	_, err := st.Checkpoints.Append(
+		domain.ChapterScope(chapter),
+		"draft-structural-block",
+		fmt.Sprintf("drafts/%02d.draft.md", chapter),
+		structuralDigest,
+	)
+	return err
+}
+
+func persistDraftAIGCRerenderRequirement(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) error {
+	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" {
+		return nil
+	}
+	rawGate := draftAIGCRawLocalGateResult(report, gate)
+	// The durable marker grants a one-shot *whole chapter* replacement. Soft
+	// local proxies, legacy cadence scores and content-integrity diagnostics are
+	// still commit blockers, but they remain repairable through edit_chapter.
+	// Persisting a full-render marker for those cases makes the returned edit
+	// instruction impossible to follow and can create an unbounded rerender loop.
+	if len(rawGate.RewriteFocus) == 0 || !draftAIGCHasWholeTextStructuralBlock(content, report, rawGate) {
+		return nil
+	}
+	return SetDraftExternalRerenderRequirement(st.Dir(), draftAIGCRerenderRequirement(chapter, content, rawGate))
+}
+
+func draftAIGCRerenderRequirement(chapter int, content string, gate draftAIGCGateResult) DraftExternalRerenderRequirement {
 	evidence := []string{
 		fmt.Sprintf("raw_local=%.2f%% effective=%.2f%%", gate.RawLocalGatePercent, gate.EffectiveGatePercent),
 	}
@@ -209,24 +347,24 @@ func persistDraftAIGCRerenderRequirement(st *store.Store, chapter int, content s
 	if gate.ExternalAIProbabilityPercent != nil {
 		evidence = append(evidence, fmt.Sprintf("current_hash_external=%.2f%%，但整章或确定性结构证据仍阻断校准", *gate.ExternalAIProbabilityPercent))
 	}
-	return SetDraftExternalRerenderRequirement(st.Dir(), DraftExternalRerenderRequirement{
+	return DraftExternalRerenderRequirement{
 		Chapter:              chapter,
 		EvaluatedBodySHA256:  reviewreport.BodySHA256(content),
 		Source:               "local_mechanical_gate",
-		AIProbabilityPercent: int(math.Round(gate.EffectiveGatePercent)),
+		AIProbabilityPercent: int(math.Round(gate.RawLocalGatePercent)),
 		PassExclusivePercent: int(gate.PassExclusivePercent),
 		Summary:              "当前草稿的整章单段或确定性结构风险未被同哈希外审消解，必须复用既有世界模拟与 plan 做完整重渲染，不能对原哈希重复提交。",
 		Evidence:             evidence,
 		RevisionPlan:         append([]string(nil), gate.RewriteFocus...),
 		AdviceComplete:       true,
-	})
+	}
 }
 
 func draftQualityGateNextStep(wordContract chapterWordContractResult, gate draftAIGCGateResult) string {
 	if !wordContract.Passed {
 		return draftWordContractNextStep(wordContract)
 	}
-	if !gate.Passed {
+	if gate.Enforced && gate.RawLocalGatePercent >= gate.PassExclusivePercent {
 		return "先 read_chapter(source=draft)，按 aigc_gate.rewrite_focus 用 edit_chapter 重排正文，再调用 check_consistency；本地 AIGC 严格 <4% 前禁止 commit_chapter。"
 	}
 	return draftWordContractNextStep(wordContract)

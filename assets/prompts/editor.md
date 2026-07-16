@@ -54,12 +54,11 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 如果存在 `crowd_roles`，检查它们是否只承担群体反应、规模感、现场压力、样本后果或后勤功能。某个成员一旦被命名并做出会影响后续的选择，就应进入角色册和下一轮全角色世界模拟，而不是临时补进 POV 正文。
 
 如果存在 `writing_norms_applied`、`anti_ai_execution_plan`、`external_reference_plan`、`trend_language_plan`、`reader_entertainment_plan` 或 `grounding_details`，只按**读者效果**检查本章真正启用的核心约束，不把写前表格逐项对账。轻松项目应有自然的松弛感、人物反应或可见兑现，但不要求每章固定两种笑法、两个爽点，也不要求所有候选物件和节拍出现。只有俏皮措辞、没有事件反应，不算喜剧；只有付款和核验流程、没有面子/关系/结果变化，不算爽点。外部资料不能变成网页摘要；热梗未使用不构成问题，使用后才核对角色、语境和句法。系统后台播报只保留正式任务所需数字，人格对白回答眼前问题。
-如果 contract 中包含 `emotion_target`、`payoff_points`、`hook_goal`，还要检查：
-- emotion_target 是否在正文里形成清晰的情绪主色
-- payoff_points 是否得到合理回应；如果本章本来就是铺垫/过渡章，不要因为“爽点不够强”而机械扣分
-- hook_goal 是否转化成章末可感知的追读驱动力
-如果 contract 中包含 `scene_anchors`，还要检查这些物件、痕迹、动作或证据是否在正文中承担新信息、关系位移、规则代价或钩子回扣；只出现名称、不改变局面，按 aesthetic 或 continuity 给出 issue。
-但不要把 contract 当成僵硬清单。过渡章、铺垫章、关系推进章本来就不该追求每章都有强爽点；只要章节职责清晰、服务整体节奏，就不应因为“没有显著兑现点”而机械降级。
+如果 contract 中包含 `emotion_target`、`payoff_points`、`hook_goal`，把它们当作整体方向而非逐项交付：情绪主色与章末拉力是否成立、核心硬结果是否带来可见后果即可。`payoff_points` 中未被选择的候选不算漏项；铺垫/过渡/关系推进章不因“爽点不够强”机械扣分。
+
+`scene_anchors` 只提供候选物件。只检查正文实际使用的物件是否有现场功能，以及是否出现了为了对账而依次展示鱼刺、酒杯、价牌、护套之类的物件鱼骨；未使用、被替换或被重排的 anchor 不构成 issue。单次自然出现也不必强迫三次回扣。
+
+不要把 contract 当成僵硬清单。只有 `required_beats` 的结果、`forbidden_moves`、事实连续性、准确金额、知识/授权边界和安全后果属于硬验收；soft/candidate 镜头、笑点、示例措辞与 craft move 不逐项核对。
 
 ### 2. 阅读原文
 **必须**调用 read_chapter 读取要审阅的章节原文。不能只看摘要就下结论。
@@ -114,7 +113,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 
 - **表达质感与基础 AI 味**：描写质感（抽象概述 vs 具象五感、情绪贴标签）、对话区分度（去掉说话人标记能否分辨角色）、用词质量（排比三连 / 四字成语堆砌 / "如同XX般"套句 / 重复用词）统一以 `reference_pack.references.anti_ai_tone` 为准，逐类对照原文检查，引用违例段落并指出改法。疲劳词与套句频次已由 `working_memory.user_rules.structured` 机械检查，issue 直接引用 `rule_violations.target`，不另列字词。量化 AI 腔门禁必须放入第八维 `ai_voice_detection`，不要只塞进 aesthetic。
 
-- **叙事手法与文学合同**：先看 `render_packet.literary_render_contract`（没有时再看 plan 的 `causal_simulation.literary_rendering_plan`）及其 `source_refs`，逐段核对焦点人物、信息权限、感知偏差、距离换挡、scene/summary/省略、情绪评价、母题变义、句法功能、自由间接话语和对白潜台词。未声明的跨脑读取、人物不可能知道的幕后事实，以及关键转折与前序行动完全无因果关系，才是硬问题；距离跳变、scene/summary 取舍、母题解释、句长曲线、自由间接话语和潜台词密度都只能引用位置与效果作软诊断。合同未启用某张卡不构成缺陷，有文本证据的有意偏离也不得按模板不一致直接打回。
+- **叙事手法与文学合同**：先看 `render_packet.literary_render_contract`（没有时再看 plan 的 `causal_simulation.literary_rendering_plan`）。只把焦点人物、叙事权限和知识边界作硬核对；`soft_perceptual_bias`、`soft_scene_choices`、`soft_lens_choices`、afterimage、距离换挡、scene/summary、母题、句法和潜台词都是候选，未采用、重排或替换不构成缺陷，也不得逐段寻找对应项。只有未声明的跨脑读取、人物不可能知道的幕后事实，以及关键转折与前序行动完全无因果关系才是硬问题；其余只能引用正文实际位置与效果作软诊断。
 - **题材专项合同**：若 `render_packet.style_contract` 或 `reference_pack.genre_style_profile` 存在，核对题材语域、普通口述气口、喜剧因果、经营结果压缩、唯一感情线和系统声口。它不要求逐卡出现；审核必须引用原句和现场后果。快节奏不能替“同一意思被切成连续2—4汉字句号短句”辩护，人物专业也不能替合同口述腔辩护。
 
 - **情感打动力**：是否有让读者心跳加速、喉头发紧或嘴角上扬的段落？重要刺激之后，主角的感知、误判、压住的反应是否改变了选择或关系判断，还是补一个“心里一暖/手指一顿”就继续执行计划？如果整章情感平淡，指出最该加强的 1-2 个因果位置，写清刺激、主观体验、选择变化和余波，不给通用微动作补丁。

@@ -220,6 +220,102 @@ func TestZeroInitCountySpendVoicesSeparateLeadsAndFriends(t *testing.T) {
 	}
 }
 
+func TestCountySpendCompatibilityProfileIsExactProjectOnly(t *testing.T) {
+	lookalike := zeroInitProject{
+		Name:    "县城消费系统",
+		Premise: "主角绑定一百万系统，在青山县夜市帮助商户。",
+		FirstChapter: domain.OutlineEntry{
+			Title: "县城第一夜", CoreEvent: "夜市完成第一笔消费。",
+		},
+	}
+	if zeroIsCountySpendProject(lookalike) {
+		t.Fatal("semantic lookalike inherited another book's project-owned character profile")
+	}
+	lookalike.Name = "只许把钱花在青山县"
+	if !zeroIsCountySpendProject(lookalike) {
+		t.Fatal("exact project key did not enable its compatibility profile")
+	}
+}
+
+func TestSecondAlgorithmCompatibilityProfileIsExactProjectOnly(t *testing.T) {
+	lookalike := zeroInitProject{
+		Name:    "澄光余晖",
+		Premise: "另一座城市也有一家名为澄光的公司，但人物与故事均无关。",
+		FirstChapter: domain.OutlineEntry{
+			Title: "新同事", CoreEvent: "林青第一次参加澄光的部门例会。",
+		},
+		Characters: []domain.Character{
+			{Name: "林青", Role: "主角", Tier: "core", Traits: []string{"谨慎"}},
+			{Name: "周野", Role: "男主", Tier: "core", Traits: []string{"直接"}},
+		},
+	}
+	if zeroIsSecondAlgorithmProject(lookalike) {
+		t.Fatal("a different project containing 澄光 inherited the second-algorithm profile")
+	}
+	for _, character := range lookalike.Characters {
+		principle := zeroSpeechPrinciple(lookalike, character)
+		for _, foreignName := range []string{"许闻溪", "梁渡", "程棠", "傅行简", "夏岚"} {
+			if strings.Contains(principle, foreignName) {
+				t.Fatalf("ordinary project speech principle contains foreign name %q: %s", foreignName, principle)
+			}
+		}
+	}
+
+	lookalike.Name = "她的第二算法"
+	if !zeroIsSecondAlgorithmProject(lookalike) {
+		t.Fatal("exact project identity did not enable the second-algorithm profile")
+	}
+}
+
+func TestZeroInitDelayedCharacterKeepsOffscreenStateUntilFirstMention(t *testing.T) {
+	project := zeroInitProject{
+		Name:    "只许把钱花在青山县",
+		Premise: "林澈失业返乡，在青山县经营县城生活。",
+		FirstChapter: domain.OutlineEntry{
+			Chapter: 1, Title: "一百万到账了", CoreEvent: "林澈离开接风饭后去河畔夜市核验第一笔消费。",
+		},
+		Characters: []domain.Character{
+			{Name: "林澈", Role: "主角", Tier: "core"},
+			{Name: "叶南栀", Role: "主角团配角", Tier: "core"},
+		},
+		FirstCast:     map[string]bool{"林澈": true},
+		FirstMentions: map[string]int{"林澈": 1, "叶南栀": 7},
+	}
+	dynamics := zeroInitDynamics(project)
+	var state domain.CharacterSimulationState
+	var voice domain.CharacterVoiceLogic
+	for _, candidate := range dynamics.Characters {
+		if candidate.Character == "叶南栀" {
+			state = candidate
+		}
+	}
+	for _, candidate := range dynamics.VoiceLogic {
+		if candidate.Character == "叶南栀" {
+			voice = candidate
+		}
+	}
+	if !strings.Contains(state.CurrentGoal, "第7章前") || !strings.Contains(voice.SceneObjective, "第7章前") {
+		t.Fatalf("delayed character lost its offscreen entry boundary: state=%+v voice=%+v", state, voice)
+	}
+	joined := strings.Join([]string{
+		state.Pressure,
+		state.EmotionAppraisal.TriggerEvent,
+		state.EmotionAppraisal.ActionPressure,
+		state.ArcAxis.PressureTest,
+		voice.SceneObjective,
+		voice.HiddenSubtext,
+	}, "\n")
+	for _, leaked := range []string{"接风饭", "夜市收摊时间", "第一章核心事件触发"} {
+		if strings.Contains(joined, leaked) {
+			t.Fatalf("delayed character inherited opening-only state %q: %s", leaked, joined)
+		}
+	}
+	emotion := zeroCharacterEmotionProfile(project, project.Characters[1])
+	if !strings.Contains(emotion.ImmediateState, "第7章正式入场前") || strings.Contains(emotion.ImmediateState, "接风饭") || strings.Contains(emotion.ImmediateState, "夜市收摊") {
+		t.Fatalf("delayed emotion profile is not offscreen-scoped: %+v", emotion)
+	}
+}
+
 func TestZeroInitOverwriteRepairsWorldTickFromExistingEvents(t *testing.T) {
 	dir := seedZeroInitProject(t)
 	st := store.NewStore(dir)
@@ -523,7 +619,7 @@ func seedZeroInitProject(t *testing.T) string {
 func seedSecondAlgorithmProject(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, "output", "novel")
+	dir := filepath.Join(root, "她的第二算法", "output", "novel")
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)

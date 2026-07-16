@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -449,6 +450,19 @@ func migrateRAGIndexSchema(state *domain.RAGIndexState) bool {
 		return false
 	}
 	for index, chunk := range state.Chunks {
+		if rag.IsSafeRewriteMethodSource(chunk) {
+			if chunk.Metadata == nil {
+				chunk.Metadata = map[string]any{}
+			}
+			origin, _ := chunk.Metadata["summary_origin"].(string)
+			// A curated_method summary is an intentionally authored, deliverable
+			// method card. Schema migrations may rehash it, but must not replace it
+			// with a derived card selected from the raw source text.
+			if !strings.EqualFold(strings.TrimSpace(origin), rag.SummaryOriginCuratedMethod) {
+				chunk.Summary = rag.DerivedSafeRewriteMethodSummary(chunk)
+				chunk.Metadata["summary_origin"] = rag.SummaryOriginDerivedMethodMetadata
+			}
+		}
 		state.Chunks[index] = rag.RehashChunk(chunk)
 	}
 	state.ChunkHashes = rebuildRAGChunkHashList(state.Chunks)
@@ -1520,6 +1534,9 @@ func chunksFromRAGFile(path, outputDir, text string, maxChunkRunes int) []domain
 			if len([]rune(part)) < 30 {
 				continue
 			}
+			if ragChunkLooksEncodedBlob(part) {
+				continue
+			}
 			if rag.MentionsForbiddenSourceMarker(part) {
 				continue
 			}
@@ -1544,7 +1561,7 @@ func chunksFromRAGFile(path, outputDir, text string, maxChunkRunes int) []domain
 				metadata["craft_facet"] = string(facet)
 				metadata["usage_stage"] = strings.Join(rag.UsageStagesForFacet(facet), ",")
 			}
-			chunks = append(chunks, domain.RAGChunk{
+			chunk := domain.RAGChunk{
 				ID:         fmt.Sprintf("local:%x:%03d", stableHash(rel), idx),
 				SourcePath: rel,
 				SourceKind: inferRAGSourceKind(path),
@@ -1553,10 +1570,68 @@ func chunksFromRAGFile(path, outputDir, text string, maxChunkRunes int) []domain
 				Text:       part,
 				Summary:    summarizeRAGText(part, 120),
 				Metadata:   metadata,
-			})
+			}
+			if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+				chunk.Summary = rag.DerivedSafeRewriteMethodSummary(chunk)
+				metadata["summary_origin"] = rag.SummaryOriginDerivedMethodMetadata
+			}
+			chunks = append(chunks, chunk)
 		}
 	}
 	return chunks
+}
+
+// ragChunkLooksEncodedBlob removes embedded image/archive payloads that appear
+// inside otherwise indexable Markdown. Several imported reference files carry
+// megabytes of unwrapped base64; treating each 900-character slice as prose
+// bloats the local store and can dominate lexical/vector retrieval. The check
+// requires a long uninterrupted base64 token and verifies that its decoded
+// bytes are predominantly non-text, so ordinary English/code paragraphs and
+// base64-encoded textual examples remain available.
+func ragChunkLooksEncodedBlob(text string) bool {
+	// 64 also catches the final tail of a payload after maxChunkRunes slicing;
+	// decoded-text verification below keeps ordinary identifiers/prose safe.
+	const minEncodedRun = 64
+	longest := ""
+	start := -1
+	for i := 0; i <= len(text); i++ {
+		isBase64 := i < len(text) && ((text[i] >= 'a' && text[i] <= 'z') ||
+			(text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= '0' && text[i] <= '9') ||
+			text[i] == '+' || text[i] == '/' || text[i] == '=')
+		if isBase64 {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if run := text[start:i]; len(run) > len(longest) {
+				longest = run
+			}
+			start = -1
+		}
+	}
+	if len(longest) < minEncodedRun {
+		return false
+	}
+	// A split chunk can end in the middle of the original payload. Decode only
+	// complete quartets and ignore trailing padding inherited from a later cut.
+	longest = strings.TrimRight(longest, "=")
+	longest = longest[:len(longest)/4*4]
+	if len(longest) < minEncodedRun {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(longest)
+	if err != nil || len(decoded) == 0 {
+		return false
+	}
+	printable := 0
+	for _, b := range decoded {
+		if b == '\n' || b == '\r' || b == '\t' || (b >= 0x20 && b <= 0x7e) {
+			printable++
+		}
+	}
+	return float64(printable)/float64(len(decoded)) < 0.75
 }
 
 type ragSection struct {

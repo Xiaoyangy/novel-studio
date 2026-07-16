@@ -57,55 +57,140 @@ func chapterTrendLanguagePolicyPlans(s *store.Store, chapter int) []domain.Trend
 	return append([]domain.TrendLanguagePlan(nil), policy.ChapterTrendLanguage[fmt.Sprintf("%d", chapter)]...)
 }
 
+// ProjectRequiresSystemCompanion centralizes the project-level companion
+// contract used by planning, review sedimentation, and external-judge guards.
+// The structured JSON policy must remain authoritative even when a legacy
+// project has no equivalent prose in user_rules or the Markdown brief.
+func ProjectRequiresSystemCompanion(s *store.Store) bool {
+	if s == nil {
+		return false
+	}
+	if policy, err := loadProjectWebReferencePolicy(s); err == nil && policy != nil && policy.SystemCompanion.Required {
+		return true
+	}
+	var userSource string
+	if snapshot, err := s.UserRules.Load(); err == nil && snapshot != nil {
+		userSource = snapshot.Structured.Genre + "\n" + snapshot.Preferences
+	}
+	if domain.SystemCompanionVoiceRequested(userSource) {
+		return true
+	}
+	if domain.SystemCompanionVoiceForbidden(userSource) {
+		return false
+	}
+	var briefSource string
+	if brief, err := os.ReadFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.md")); err == nil {
+		briefSource = string(brief)
+	}
+	return domain.SystemCompanionVoiceRequested(briefSource)
+}
+
 func attractionRequirementsForChapter(s *store.Store, chapter int) chapterAttractionRequirements {
-	var source string
+	var userSource, briefSource string
 	if s != nil {
 		if snapshot, err := s.UserRules.Load(); err == nil && snapshot != nil {
-			source = snapshot.Structured.Genre + "\n" + snapshot.Preferences
+			userSource = snapshot.Structured.Genre + "\n" + snapshot.Preferences
 		}
 		if brief, err := os.ReadFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.md")); err == nil {
-			source += "\n" + string(brief)
+			briefSource = string(brief)
 		}
 	}
+	globalSource := userSource + "\n" + briefSource
+	userTrendRequired := domain.TrendLanguageRequested(userSource)
 	requirements := chapterAttractionRequirements{
-		Trend:           domain.TrendLanguageRequested(source),
-		Entertainment:   domain.ReaderEntertainmentRequested(source),
-		SystemCompanion: domain.SystemCompanionVoiceRequested(source),
+		Entertainment:   domain.ReaderEntertainmentRequested(globalSource),
+		SystemCompanion: ProjectRequiresSystemCompanion(s),
+	}
+	// A structured chapter map is authoritative for web-reference trend items:
+	// chapter-one curation must not become an active-meme requirement for every
+	// later chapter. Legacy Markdown with chapter headings is scoped the same
+	// way; only an old unscoped brief falls back to whole-document heuristics.
+	policy, policyErr := loadProjectWebReferencePolicy(s)
+	if policyErr == nil && policy != nil && policy.ChapterTrendLanguage != nil {
+		requirements.Trend = userTrendRequired || len(policy.ChapterTrendLanguage[fmt.Sprintf("%d", chapter)]) > 0
+	} else if webReferenceBriefHasChapterTrendSections(briefSource) {
+		section := chapterTrendLanguageBriefSection(s, chapter)
+		requirements.Trend = userTrendRequired || domain.TrendLanguageRequested(section) || len(backtickBriefItemPattern.FindAllStringSubmatch(section, -1)) > 0
+	} else {
+		requirements.Trend = domain.TrendLanguageRequested(globalSource)
 	}
 	if chapter == 1 {
 		if progress, err := s.Progress.Load(); err == nil && progress != nil && progress.TotalChapters >= 50 {
 			requirements.Longform = true
 		}
-		if strings.Contains(source, "长篇") || strings.Contains(source, "万字") {
+		if strings.Contains(globalSource, "长篇") || strings.Contains(globalSource, "万字") {
 			requirements.Longform = true
 		}
 	}
 	return requirements
 }
 
+// ChapterAttractionPlanReadyForProject is the shared prewrite/commit contract.
+// Routing must use the same project sources (user rules plus the structured web
+// reference brief) as commit validation; otherwise a plan can be dispatched to
+// Drafter and only fail after an expensive whole-chapter render.
+func ChapterAttractionPlanReadyForProject(s *store.Store, plan domain.ChapterPlan) bool {
+	if s == nil || plan.Chapter <= 0 {
+		return false
+	}
+	requirements := attractionRequirementsForChapter(s, plan.Chapter)
+	if !domain.ChapterAttractionPlanReady(
+		plan,
+		requirements.Trend,
+		requirements.Entertainment,
+		requirements.Longform,
+		requirements.SystemCompanion,
+	) {
+		return false
+	}
+	trend := plan.CausalSimulation.TrendLanguage
+	if len(trend) > 0 && (!domain.CompleteTrendLanguagePlan(trend) ||
+		len(domain.TrendLanguagePlanProblems(trend)) > 0 ||
+		!trendLanguagePlanGroundedInChapterBrief(s, plan.Chapter, trend)) {
+		return false
+	}
+	entertainment := plan.CausalSimulation.EntertainmentPlan
+	if (len(entertainment.HumorBeats) > 0 || strings.TrimSpace(entertainment.OpeningBeat) != "") &&
+		!domain.CompleteReaderEntertainmentPlan(entertainment) {
+		return false
+	}
+	return true
+}
+
 func trendLanguagePlanGroundedInChapterBrief(s *store.Store, chapter int, items []domain.TrendLanguagePlan) bool {
-	if allowed := chapterTrendLanguagePolicyPlans(s, chapter); len(allowed) > 0 {
+	if policy, err := loadProjectWebReferencePolicy(s); err == nil && policy != nil && policy.ChapterTrendLanguage != nil {
+		allowed := policy.ChapterTrendLanguage[fmt.Sprintf("%d", chapter)]
+		if len(allowed) == 0 {
+			return !domain.HasActiveTrendLanguagePlan(items)
+		}
 		allowedItems := map[string]struct{}{}
 		for _, item := range allowed {
 			allowedItems[strings.TrimSpace(item.Item)] = struct{}{}
 		}
-		active := 0
+		seen := map[string]struct{}{}
 		for _, item := range items {
 			if !domain.HasActiveTrendLanguagePlan([]domain.TrendLanguagePlan{item}) {
 				continue
 			}
-			active++
-			if _, ok := allowedItems[strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’")]; !ok {
+			phrase := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’")
+			if _, ok := allowedItems[phrase]; !ok {
 				return false
 			}
+			if _, duplicate := seen[phrase]; duplicate {
+				return false
+			}
+			seen[phrase] = struct{}{}
 			if !strings.Contains(strings.ToLower(item.SourceContext), "meta/web_reference_brief") {
 				return false
 			}
 		}
-		return active == len(allowedItems)
+		return len(seen) == len(allowedItems)
 	}
 	section := chapterTrendLanguageBriefSection(s, chapter)
 	if section == "" {
+		if raw, err := os.ReadFile(filepath.Join(s.Dir(), "meta", "web_reference_brief.md")); err == nil && webReferenceBriefHasChapterTrendSections(string(raw)) {
+			return !domain.HasActiveTrendLanguagePlan(items)
+		}
 		return true
 	}
 	active := 0
@@ -126,6 +211,11 @@ func trendLanguagePlanGroundedInChapterBrief(s *store.Store, chapter int, items 
 	return active > 0
 }
 
+func webReferenceBriefHasChapterTrendSections(text string) bool {
+	return strings.Contains(text, "章热梗落点") &&
+		(strings.Contains(text, "## 第") || strings.Contains(text, "### 第"))
+}
+
 func chapterTrendLanguageBriefSection(s *store.Store, chapter int) string {
 	if s == nil || chapter <= 0 {
 		return ""
@@ -135,26 +225,57 @@ func chapterTrendLanguageBriefSection(s *store.Store, chapter int) string {
 		return ""
 	}
 	numerals := map[int]string{1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
-	headings := []string{fmt.Sprintf("## 第%d章热梗落点", chapter)}
+	labels := []string{fmt.Sprintf("第%d章热梗落点", chapter)}
 	if numeral := numerals[chapter]; numeral != "" {
-		headings = append(headings, "## 第"+numeral+"章热梗落点")
+		labels = append(labels, "第"+numeral+"章热梗落点")
 	}
-	text := string(raw)
-	for _, heading := range headings {
-		start := strings.Index(text, heading)
-		if start < 0 {
+	wanted := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		wanted[label] = struct{}{}
+	}
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		level, title, ok := parseMarkdownATXHeading(line)
+		if !ok || (level != 2 && level != 3) {
 			continue
 		}
-		section := text[start+len(heading):]
-		if end := strings.Index(section, "\n## "); end >= 0 {
-			section = section[:end]
+		if _, ok := wanted[title]; !ok {
+			continue
 		}
-		return strings.TrimSpace(section)
+		end := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			nextLevel, nextTitle, nextOK := parseMarkdownATXHeading(lines[j])
+			if !nextOK {
+				continue
+			}
+			// Ordinary nested headings remain part of the current chapter
+			// section. A same/higher-level heading ends it, and a chapter
+			// trend heading at any level always starts another chapter scope.
+			if nextLevel <= level || chapterTrendHeadingPattern.MatchString(nextTitle) {
+				end = j
+				break
+			}
+		}
+		return strings.TrimSpace(strings.Join(lines[i+1:end], "\n"))
 	}
 	return ""
 }
 
 var backtickBriefItemPattern = regexp.MustCompile("`([^`]+)`")
+var markdownATXHeadingPattern = regexp.MustCompile(`^ {0,3}(#{1,6})[\t ]+(.+?)[\t ]*$`)
+var chapterTrendHeadingPattern = regexp.MustCompile(`^第(?:[0-9]+|[零一二两三四五六七八九十百]+)章热梗落点$`)
+
+func parseMarkdownATXHeading(line string) (int, string, bool) {
+	match := markdownATXHeadingPattern.FindStringSubmatch(line)
+	if len(match) != 3 {
+		return 0, "", false
+	}
+	title := strings.TrimSpace(match[2])
+	if strings.HasSuffix(title, "#") {
+		title = strings.TrimSpace(strings.TrimRight(title, "#"))
+	}
+	return len(match[1]), title, title != ""
+}
 
 func chapterTrendLanguageBriefItems(s *store.Store, chapter int) []string {
 	if allowed := chapterTrendLanguagePolicyPlans(s, chapter); len(allowed) > 0 {
@@ -246,17 +367,17 @@ func normalizeSystemCompanionAntiAI(plan *domain.AntiAIExecutionPlan) {
 
 func normalizeSystemCompanionText(text string) string {
 	for _, replacement := range [][2]string{
-		{"系统不回应情绪吐槽", "系统接话保持短促、有性格且始终支持林澈"},
-		{"系统不接话", "系统用短句接话并支持林澈"},
-		{"系统不回应", "系统用短句回应并支持林澈"},
+		{"系统不回应情绪吐槽", "系统接话保持短促、有性格且始终支持主角"},
+		{"系统不接话", "系统用短句接话并支持主角"},
+		{"系统不回应", "系统用短句回应并支持主角"},
 		{"系统只用冷硬", "系统以短促、有性格的方式"},
-		{"系统保持冷硬", "系统保持规则边界，同时用短句支持林澈"},
+		{"系统保持冷硬", "系统保持规则边界，同时用短句支持主角"},
 		{"未变成陪聊", "既能接话解闷又未变成菜单或万能剧透"},
 		{"不能陪聊", "可以短促陪聊但不能连续抛梗或万能剧透"},
 		{"不拟人闲聊", "每次只用一两句有性格地接话，不铺菜单"},
-		{"不暗示系统人格", "显出系统支持林澈但不剧透后续"},
-		{"系统界面保持静默", "系统用一句短回应支持林澈，随后不连弹规则"},
-		{"系统保持静默", "系统用一句短回应支持林澈，随后不连弹规则"},
+		{"不暗示系统人格", "显出系统支持主角但不剧透后续"},
+		{"系统界面保持静默", "系统用一句短回应支持主角，随后不连弹规则"},
+		{"系统保持静默", "系统用一句短回应支持主角，随后不连弹规则"},
 	} {
 		text = strings.ReplaceAll(text, replacement[0], replacement[1])
 	}
@@ -276,7 +397,7 @@ func normalizeSystemCompanionDialogues(items []domain.DialogueSceneBlueprint) {
 		items[i].ExitBeat = normalizeSystemCompanionText(items[i].ExitBeat)
 		items[i].DoNotUse = normalizeSystemCompanionStrings(items[i].DoNotUse)
 		if !strings.Contains(items[i].RelationshipFrame, "始终支持") {
-			items[i].RelationshipFrame += "；系统会接话解闷并始终支持林澈，但规则边界不可谈判，也不替他做决定。"
+			items[i].RelationshipFrame += "；系统会接话解闷并始终支持主角，但规则边界不可谈判，也不替主角做决定。"
 		}
 		for j := range items[i].TurnProgression {
 			turn := &items[i].TurnProgression[j]
@@ -300,19 +421,21 @@ func normalizeSystemCompanionStrings(items []string) []string {
 }
 
 type chapterAttractionEvidence struct {
-	OpeningBeat      string   `json:"opening_beat,omitempty"`
-	HumorBeatTargets []string `json:"humor_beat_targets,omitempty"`
-	ImmediatePayoffs []string `json:"immediate_payoffs,omitempty"`
-	TrendItems       []string `json:"trend_items,omitempty"`
+	OpeningCandidate string   `json:"opening_candidate,omitempty"`
+	HumorCandidates  []string `json:"humor_candidates,omitempty"`
+	PayoffCandidates []string `json:"payoff_candidates,omitempty"`
+	TrendItems       []string `json:"trend_candidates,omitempty"`
 	TrendMatches     []string `json:"trend_matches,omitempty"`
-	TrendPassed      bool     `json:"trend_passed"`
+	TrendMisuses     []string `json:"trend_misuses,omitempty"`
+	SelectionPolicy  string   `json:"selection_policy"`
 }
 
 func inspectChapterAttractionEvidence(plan domain.ChapterPlan, content string) chapterAttractionEvidence {
 	evidence := chapterAttractionEvidence{
-		OpeningBeat:      strings.TrimSpace(plan.CausalSimulation.EntertainmentPlan.OpeningBeat),
-		HumorBeatTargets: compactStrings(plan.CausalSimulation.EntertainmentPlan.HumorBeats),
-		ImmediatePayoffs: compactStrings(plan.CausalSimulation.EntertainmentPlan.ImmediatePayoffs),
+		OpeningCandidate: strings.TrimSpace(plan.CausalSimulation.EntertainmentPlan.OpeningBeat),
+		HumorCandidates:  compactStrings(plan.CausalSimulation.EntertainmentPlan.HumorBeats),
+		PayoffCandidates: compactStrings(plan.CausalSimulation.EntertainmentPlan.ImmediatePayoffs),
+		SelectionPolicy:  "以上均为写前备选，正文不逐项验收。只评估开篇抓力、自然喜剧/松弛感和可见后果的整体读者效果；可重排、替换或省略。只有 trend_misuses 表示正文实际用了候选却用错。",
 	}
 	for _, item := range plan.CausalSimulation.TrendLanguage {
 		phrase := strings.Trim(strings.TrimSpace(item.Item), "`'\"“”‘’")
@@ -322,10 +445,16 @@ func inspectChapterAttractionEvidence(plan domain.ChapterPlan, content string) c
 		evidence.TrendItems = append(evidence.TrendItems, phrase)
 		if trendPhraseRealized(content, phrase) {
 			evidence.TrendMatches = append(evidence.TrendMatches, phrase)
+		} else if trendPhraseAttempted(content, phrase) {
+			evidence.TrendMisuses = append(evidence.TrendMisuses, phrase)
 		}
 	}
-	evidence.TrendPassed = len(evidence.TrendItems) == 0 || len(evidence.TrendMatches) > 0
 	return evidence
+}
+
+func trendPhraseAttempted(content, phrase string) bool {
+	base := strings.TrimSpace(strings.TrimRight(phrase, "，,。！？!?"))
+	return base != "" && strings.Contains(content, base)
 }
 
 func trendPhraseRealized(content, phrase string) bool {
@@ -341,8 +470,7 @@ func requireChapterAttractionContent(s *store.Store, chapter int, content string
 	if err != nil || plan == nil {
 		return err
 	}
-	requirements := attractionRequirementsForChapter(s, chapter)
-	if !domain.ChapterAttractionPlanReady(*plan, requirements.Trend, requirements.Entertainment, requirements.Longform, requirements.SystemCompanion) {
+	if !ChapterAttractionPlanReadyForProject(s, *plan) {
 		return fmt.Errorf("第 %d 章写前吸引力合同不完整：必须先重做 plan，补齐 reader_entertainment_plan、需要时的 trend_language_plan 与第一章 longform_opening: %w", chapter, errs.ErrToolPrecondition)
 	}
 	// trend_language_plan is a curated option and usage ceiling, not a literal

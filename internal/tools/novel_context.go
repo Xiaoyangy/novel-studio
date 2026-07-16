@@ -129,6 +129,9 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 			if err != nil {
 				return nil, err
 			}
+			if err := t.addChapterPipelineInstructionContext(staged, a.Chapter); err != nil {
+				return nil, fmt.Errorf("load chapter pipeline instruction: %w", err)
+			}
 			return finalizeContextResult(staged, a.Chapter, a.Profile)
 		}
 	}
@@ -165,6 +168,9 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		seed.apply(result)
 		t.buildChapterContext(ctx, result, state, warn)
 		t.buildChapterWorldSimulationContext(result, a.Chapter, warn)
+		if err := t.addChapterPipelineInstructionContext(result, a.Chapter); err != nil {
+			return nil, fmt.Errorf("load chapter pipeline instruction: %w", err)
+		}
 		if hasRewriteTarget {
 			// 返工只需要当前章契约、原文与 review brief。完整 outline 和未来章窗口会让
 			// planner 把已完成的目标章误当作“上一章”，继而规划 next chapter。
@@ -195,6 +201,17 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	}
 
 	t.buildUserRules(result)
+	if a.Profile == "draft" && a.Chapter > 0 {
+		plan, err := t.store.Drafts.LoadChapterPlan(a.Chapter)
+		if err != nil {
+			return nil, fmt.Errorf("load chapter plan before draft context: %w", err)
+		}
+		if plan != nil {
+			if err := validateRewriteCraftConsumption(t.store, *plan); err != nil {
+				return nil, fmt.Errorf("第 %d 章 draft render_packet 的 craft receipt 已失效，必须重新规划：%w", a.Chapter, err)
+			}
+		}
+	}
 
 	if len(warnings) > 0 {
 		result["_warnings"] = warnings
@@ -216,6 +233,22 @@ func contextBudget(chapter int, profile string) int {
 	}
 }
 
+// contextHardBudget is a fail-closed ceiling, not the normal delivery target.
+// Rewrite planning is the one profile that must sometimes carry both the old
+// chapter body and its full review brief so the new causal plan can preserve
+// facts without guessing. Keep trimming toward 64 KiB first; only the protected
+// remainder may use the same 96 KiB ceiling as world simulation.
+func contextHardBudget(chapter int, profile string) int {
+	if chapter > 0 && profile == "planning" {
+		return 96 * 1024
+	}
+	return contextBudget(chapter, profile)
+}
+
+func allowRewritePlanningCriticalOverflow(result map[string]any, chapter int, profile string) bool {
+	return chapter > 0 && profile == "planning" && hasContextKey(result, "rewrite_source")
+}
+
 func finalizeContextResult(result map[string]any, chapter int, profile string) (json.RawMessage, error) {
 	applyChapterContextProfile(result, profile)
 	if chapter > 0 && profile != "" && profile != "full" {
@@ -226,17 +259,35 @@ func finalizeContextResult(result map[string]any, chapter int, profile string) (
 		result["_reading_guide"] = contextReadingGuide
 	}
 
-	budget := contextBudget(chapter, profile)
-	if !trimByBudget(result, budget, chapter) {
+	preferredBudget := contextBudget(chapter, profile)
+	finalBudget := preferredBudget
+	if !trimByBudget(result, preferredBudget, chapter) {
 		data, _ := json.Marshal(result)
-		return nil, fmt.Errorf("novel_context profile=%q 的关键上下文无法安全收敛：budget=%d actual=%d critical=%s；请使用更大 profile 或压缩上游 plan，不会静默删除当前任务: %w", profile, budget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
+		hardBudget := preferredBudget
+		if allowRewritePlanningCriticalOverflow(result, chapter, profile) {
+			hardBudget = contextHardBudget(chapter, profile)
+		}
+		if hardBudget <= preferredBudget || len(data) > hardBudget {
+			return nil, fmt.Errorf("novel_context profile=%q 的关键上下文无法安全收敛：preferred=%d hard=%d actual=%d critical=%s；请压缩上游 plan，不会静默删除当前任务: %w", profile, preferredBudget, hardBudget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
+		}
+		result["_context_budget"] = map[string]any{
+			"mode":             "rewrite_critical_overflow",
+			"preferred_bytes":  preferredBudget,
+			"hard_limit_bytes": hardBudget,
+			"policy":           "已按首选预算删除镜像、宽快照与低优先级资料；仅受保护的返工正文、brief 和当前任务使用硬上限。",
+		}
+		if !trimByBudget(result, hardBudget, chapter) {
+			data, _ = json.Marshal(result)
+			return nil, fmt.Errorf("novel_context profile=%q 的返工关键上下文超过硬上限：preferred=%d hard=%d actual=%d critical=%s: %w", profile, preferredBudget, hardBudget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
+		}
+		finalBudget = hardBudget
 	}
 	raw, err := marshalOrderedContext(result)
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > budget {
-		return nil, fmt.Errorf("novel_context 最终序列化结果超过预算：profile=%q budget=%d actual=%d: %w", profile, budget, len(raw), errs.ErrToolPrecondition)
+	if len(raw) > finalBudget {
+		return nil, fmt.Errorf("novel_context 最终序列化结果超过预算：profile=%q budget=%d actual=%d: %w", profile, finalBudget, len(raw), errs.ErrToolPrecondition)
 	}
 	return raw, nil
 }
@@ -304,29 +355,70 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 	if !chapterWorldSimulationRequired(t.store) {
 		return
 	}
+	escalation := InspectRenderOnlyReplanEscalation(t.store, chapter)
 	result["simulation_characters"] = requiredDossierCharacterNames(t.store, chapter)
 	result["visible_characters"] = chapterOutlineCharacterNames(t.store, chapter)
+	addAuthority := func() {
+		if _, exists := result["simulation_character_authority"]; exists {
+			return
+		}
+		authority := buildSimulationCharacterAuthority(t.store, chapter)
+		result["simulation_character_authority"] = authority
+		result["simulation_character_authority_policy"] = simulationCharacterAuthorityPolicy(authority)
+	}
 	if partial, err := t.store.LoadChapterWorldSimulationPartial(chapter); err != nil {
 		warn("chapter_world_simulation_partial", err)
 	} else if partial != nil {
+		status := "partial"
+		policy := "复用已落盘的角色决定，只补 gaps 中的最小缺口，不重发已完成角色。"
+		gaps := chapterWorldSimulationGaps(t.store, *partial)
+		if escalation.Required && !chapterWorldSimulationHasCausalWork(*partial) {
+			status = "restartable_shell"
+			policy = "该 partial 没有任何角色决定、保留事实覆盖或主角投影；下一次有效 simulate_chapter_world 提交会先丢弃这个空壳，再从当前上下文重建。"
+		} else if len(gaps) == 0 {
+			status = "ready_to_finalize"
+			policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、sources 或 time_window。"
+		}
+		if status != "ready_to_finalize" {
+			addAuthority()
+		}
+		lockedDecisions := protectedPartialCharacterDecisions(t.store, *partial)
 		result["chapter_world_simulation"] = map[string]any{
-			"status":             "partial",
-			"base_tick_id":       partial.BaseTickID,
-			"time_window":        partial.TimeWindow,
-			"characters_present": characterDecisionNames(partial.CharacterDecisions),
-			"gaps":               chapterWorldSimulationGaps(t.store, *partial),
+			"status":                     status,
+			"base_tick_id":               partial.BaseTickID,
+			"time_window":                partial.TimeWindow,
+			"characters_present":         characterDecisionNames(partial.CharacterDecisions),
+			"locked_character_decisions": lockedDecisions,
+			"projection_seed":            partial.ProtagonistProjection,
+			"rewrite_fact_coverage":      partial.RewriteFactCoverage,
+			"gaps":                       gaps,
+			"policy":                     policy,
+			"projection_policy":          "locked_character_decisions 是已落盘、禁止覆盖的权威证据。protagonist_projection 只能由这些决定及本轮新增决定派生；rewrite_source 正文可能正是待修旧稿，不得用旧稿覆盖锁定决定。hidden_pressures 也不得把 preserve_facts 明令禁止的推测改写成‘是否/可能’后重新引入。",
 		}
 		return
 	}
 	if sim, err := t.store.LoadChapterWorldSimulation(chapter); err != nil {
 		warn("chapter_world_simulation", err)
 	} else if sim != nil {
+		if escalation.Required {
+			// The checkpointed simulation is still valuable provenance, but its
+			// character decisions and protagonist projection are precisely the
+			// exhausted causal surface the Router ordered us to replace. Replaying
+			// all of it both breaches the focused profile budget and anchors the new
+			// simulator on the failed scene logic. Canonical facts remain available
+			// through rewrite_source/rewrite_brief, current outline, dossiers and
+			// world state in working_memory.
+			addAuthority()
+			result["chapter_world_simulation"] = supersededWorldSimulationContext(*sim, escalation)
+			return
+		}
 		gaps := chapterWorldSimulationGaps(t.store, *sim)
 		renderOnlyRerender := RenderOnlyRerenderReady(t.store, chapter)
 		if renderOnlyRerender {
 			gaps = reusableChapterWorldSimulationGaps(t.store, *sim)
 		}
 		if len(gaps) > 0 {
+			addAuthority()
 			result["chapter_world_simulation"] = map[string]any{
 				"status":             "invalid",
 				"simulation_id":      sim.SimulationID,
@@ -354,9 +446,54 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 		result["chapter_world_simulation"] = ready
 		return
 	}
+	addAuthority()
 	result["chapter_world_simulation"] = map[string]any{
 		"status":    "missing",
 		"next_step": "先调用 simulate_chapter_world 推演全部实名角色并 finalize，再开始 plan_structure。",
+	}
+}
+
+// protectedPartialCharacterDecisions returns the already-persisted decisions
+// that a resumed simulator must use to build rewrite coverage and the POV
+// projection. Returning names alone forced the model to reconstruct those
+// decisions from the stale rewrite body—the exact artifact being corrected.
+// On rewrites, keep the protagonist plus every saved actor named by a preserve
+// fact; for non-rewrite partials, retain all saved decisions.
+func protectedPartialCharacterDecisions(st *store.Store, partial domain.ChapterWorldSimulation) []domain.CharacterWorldDecision {
+	if len(partial.CharacterDecisions) == 0 {
+		return nil
+	}
+	protagonist := strings.TrimSpace(inferCommitProtagonist(st))
+	var preserveText string
+	if partial.RewriteSource != nil {
+		preserveText = strings.Join(partial.RewriteSource.PreserveFacts, "\n")
+	}
+	if strings.TrimSpace(preserveText) == "" {
+		return append([]domain.CharacterWorldDecision(nil), partial.CharacterDecisions...)
+	}
+	locked := make([]domain.CharacterWorldDecision, 0, len(partial.CharacterDecisions))
+	for _, decision := range partial.CharacterDecisions {
+		name := strings.TrimSpace(decision.Character)
+		if name == "" || (name != protagonist && !strings.Contains(preserveText, name)) {
+			continue
+		}
+		locked = append(locked, decision)
+	}
+	return locked
+}
+
+func supersededWorldSimulationContext(sim domain.ChapterWorldSimulation, escalation RenderOnlyReplanEscalation) map[string]any {
+	return map[string]any{
+		"status":                   "superseded_for_structural_replan",
+		"previous_simulation_id":   sim.SimulationID,
+		"previous_base_tick_id":    sim.BaseTickID,
+		"previous_character_count": len(sim.CharacterDecisions),
+		"previous_rewrite_source":  sim.RewriteSource,
+		"reason":                   escalation.Reason,
+		"attempts":                 escalation.Attempts,
+		"limit":                    escalation.Limit,
+		"policy":                   "旧 character_decisions/protagonist_projection 已因连续整章结构失败隐藏；以 current_chapter_outline、rewrite_source.preserve_facts、rewrite_brief、当前角色档案和世界状态建立新因果 epoch，不得沿用旧场景与对白投影。",
+		"next_step":                "分批调用 simulate_chapter_world 重建全部实名角色决定和 protagonist_projection，finalize 后才可重建 plan_structure。",
 	}
 }
 
@@ -389,16 +526,43 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	nextStep := "直接调用 plan_details，只补 gap_summary 最靠前的一组；禁止 craft_recall/read_chapter，禁止重新 plan_structure。"
 	var simulationStage any
 	var readySimulation *domain.ChapterWorldSimulation
-	if chapterWorldSimulationRequired(t.store) {
+	simulationAuthorityNeeded := false
+	simulationFinalizationOnly := false
+	worldSimulationRequired := chapterWorldSimulationRequired(t.store)
+	escalation := InspectRenderOnlyReplanEscalation(t.store, chapter)
+	if worldSimulationRequired {
 		if partialSim, partialErr := t.store.LoadChapterWorldSimulationPartial(chapter); partialErr == nil && partialSim != nil {
-			simulationStage = map[string]any{
-				"status":             "partial",
-				"characters_present": characterDecisionNames(partialSim.CharacterDecisions),
-				"gaps":               chapterWorldSimulationGaps(t.store, *partialSim),
+			status := "partial"
+			policy := "复用已落盘角色决定，只补 gaps 中的最小缺口。"
+			gaps := chapterWorldSimulationGaps(t.store, *partialSim)
+			if escalation.Required && !chapterWorldSimulationHasCausalWork(*partialSim) {
+				status = "restartable_shell"
+				policy = "本 partial 只是无因果证据空壳；下一次带真实角色决定、保留事实覆盖或主角投影的 simulate_chapter_world 提交会自动从当前上下文重建。"
+				simulationAuthorityNeeded = true
+			} else if len(gaps) == 0 {
+				status = "ready_to_finalize"
+				policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、sources 或 time_window。"
+				simulationFinalizationOnly = true
+			} else {
+				simulationAuthorityNeeded = true
 			}
-			nextStep = "先继续分批调用 simulate_chapter_world，完成全角色决定、理由、蝴蝶效应和 protagonist_projection 并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
+			simulationStage = map[string]any{
+				"status":             status,
+				"characters_present": characterDecisionNames(partialSim.CharacterDecisions),
+				"gaps":               gaps,
+				"policy":             policy,
+			}
+			if simulationFinalizationOnly {
+				nextStep = "只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发任何已落盘字段。成功后重新调用 novel_context(profile=planning) 并按新 simulation 重建 plan_structure。"
+			} else {
+				nextStep = "先继续分批调用 simulate_chapter_world，完成全角色决定、理由、蝴蝶效应和 protagonist_projection 并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
+			}
 		} else if final, loadErr := t.store.LoadChapterWorldSimulation(chapter); loadErr == nil && final != nil {
-			if gaps := chapterWorldSimulationGaps(t.store, *final); len(gaps) > 0 {
+			if escalation.Required {
+				simulationStage = supersededWorldSimulationContext(*final, escalation)
+				nextStep = "旧 world simulation 已因连续整章结构失败失效；重新分批调用 simulate_chapter_world 并 finalize，随后重建 plan_structure。"
+				simulationAuthorityNeeded = true
+			} else if gaps := chapterWorldSimulationGaps(t.store, *final); len(gaps) > 0 {
 				simulationStage = map[string]any{
 					"status":             "invalid",
 					"simulation_id":      final.SimulationID,
@@ -406,6 +570,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 					"gaps":               gaps,
 				}
 				nextStep = "当前正式模拟未绑定返工源或未覆盖保留事实；重新分批调用 simulate_chapter_world 并 finalize，随后重新 plan_structure。"
+				simulationAuthorityNeeded = true
 			} else {
 				readySimulation = final
 				simulationStage = map[string]any{
@@ -420,10 +585,18 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 		} else {
 			simulationStage = map[string]any{"status": "missing"}
 			nextStep = "先调用 simulate_chapter_world 完成全角色世界推演并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
+			simulationAuthorityNeeded = true
 		}
 	}
 	structureStatus := "waiting_for_simulation"
-	if readySimulation != nil {
+	if !worldSimulationRequired {
+		if planStructureBoundToSources(t.store, chapter, partial, nil) {
+			structureStatus = "ready"
+		} else {
+			structureStatus = "stale"
+			nextStep = "当前 plan_structure 未绑定最新 rewrite_source；先重新调用 plan_structure，再用 plan_details 补缺并 finalize。"
+		}
+	} else if readySimulation != nil {
 		if planStructureBoundToSources(t.store, chapter, partial, readySimulation) {
 			structureStatus = "ready"
 		} else {
@@ -435,7 +608,11 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	case "stale":
 		stage["policy"] = "当前骨架绑定的是旧 world_simulation/rewrite_source，必须先重新 plan_structure；新骨架提交后再用 plan_details 补缺，不检索、不写正文。"
 	case "waiting_for_simulation":
-		stage["policy"] = "先完成或重建 world simulation；模拟 finalize 后重新 plan_structure，再用 plan_details 收口。不检索、不写正文。"
+		if simulationFinalizationOnly {
+			stage["policy"] = "world simulation 的 gaps 已清零；当前只允许 finalize=true 原子收口。正式 simulation 落盘后必须重新 plan_structure，再用 plan_details 收口。不检索、不写正文。"
+		} else {
+			stage["policy"] = "先完成或重建 world simulation；模拟 finalize 后重新 plan_structure，再用 plan_details 收口。不检索、不写正文。"
+		}
 	}
 	result := map[string]any{
 		"active_chapter_task": map[string]any{
@@ -462,8 +639,45 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 		"next_step":        nextStep,
 		"_loading_summary": fmt.Sprintf("ch=%d | staged_plan_repair | fields=%d", chapter, len(fields)),
 	}
+	if worldSimulationRequired && simulationAuthorityNeeded {
+		authority := buildSimulationCharacterAuthority(t.store, chapter)
+		result["simulation_character_authority"] = authority
+		result["simulation_character_authority_policy"] = simulationCharacterAuthorityPolicy(authority)
+	}
+	if receiptID, _ := partial[planCraftReceiptKey].(string); strings.TrimSpace(receiptID) != "" {
+		if receipt, loadErr := t.store.RAG.LoadCraftRecallReceipt(receiptID); loadErr != nil {
+			result["_warnings"] = []string{fmt.Sprintf("rewrite craft receipt 读取失败: %v", loadErr)}
+		} else if receipt != nil {
+			current, currentErr := rewriteCraftReceiptIsCurrent(t.store, chapter, receipt)
+			if currentErr != nil {
+				result["_warnings"] = []string{fmt.Sprintf("rewrite craft receipt 当前绑定复验失败: %v", currentErr)}
+			} else if current {
+				result["rewrite_craft_pack"] = craftReceiptContext(receipt)
+			} else {
+				warnings, _ := result["_warnings"].([]string)
+				result["_warnings"] = append(warnings, "staged rewrite craft receipt 已因正文/brief/index/triggers/generation 变化而失效；未向 Planner 回放旧方法包")
+				result["rewrite_craft_status"] = "stale_refresh_in_plan_details"
+				result["next_step"] = "当前 staged craft receipt 已失效；调用 plan_details 提交下一批时会自动刷新 receipt 并剔除旧 refs，刷新前不要按旧 pack 规划或写正文。"
+			}
+		}
+	} else if rewrite {
+		needs := deriveRewriteCraftNeeds(t.store, chapter)
+		if len(needs) > 0 {
+			result["rewrite_craft_status"] = map[string]any{
+				"status": "pending_deterministic_receipt",
+				"needs":  needs,
+				"policy": "不得凭空补写 RAG 手法，也不得直接 craft_recall。先完成当前 world simulation；随后下一次合法的 plan_structure（骨架 stale）或 plan_details（旧中间态恢复）会原子生成 receipt 并返回 rewrite_craft_pack，之后均按 receipt_id 回放同一方法包。",
+			}
+		} else {
+			result["rewrite_craft_status"] = map[string]any{
+				"status": "not_required",
+				"policy": "当前结构化 review 未派生 rewrite craft need；不得为了形式自行引用 RAG 素材。",
+			}
+		}
+	}
 	if cards, decodeErr := decodeLiteraryRenderingCards(t.refs.LiteraryRenderingCards); decodeErr != nil {
-		result["_warnings"] = []string{fmt.Sprintf("literary_rendering_cards 读取失败: %v", decodeErr)}
+		warnings, _ := result["_warnings"].([]string)
+		result["_warnings"] = append(warnings, fmt.Sprintf("literary_rendering_cards 读取失败: %v", decodeErr))
 	} else if cards != nil {
 		result["reference_pack"] = map[string]any{"literary_rendering_cards": cards}
 	}
@@ -479,6 +693,18 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 			brief["review_summary"] = review.Summary
 			brief["issues"] = review.Issues
 			brief["contract_misses"] = review.ContractMisses
+		}
+		if gate, gateErr := t.loadMechanicalGateBrief(chapter); gateErr == nil && gate != nil {
+			brief["mechanical_gate"] = gate
+		}
+		if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
+			if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
+				brief["ai_voice_redflags"] = actionable
+			}
+		}
+		if supplements := loadRewriteBriefHumanSupplements(t.store.Dir(), chapter); len(supplements) > 0 {
+			brief["human_acceptance_supplements"] = supplements
+			brief["human_acceptance_policy"] = "人工验收补充优先于概率代理和评审示例；其中禁止项是硬约束，示例只能说明问题，不得照搬或换皮。"
 		}
 		if len(brief) > 0 {
 			result["rewrite_brief"] = brief
@@ -1057,6 +1283,20 @@ func trimByBudget(result map[string]any, budget int, chapter ...int) bool {
 		if !hasContextKey(result, key) {
 			continue
 		}
+		if key == "rag_recall" {
+			// RAG is executable context, not merely a pre-trim diagnostic. Keep
+			// the highest-ranked fact even under pressure, then trim broader
+			// snapshots around it. If the critical payload plus one fact cannot
+			// fit, fail explicitly instead of reporting recall success while
+			// silently delivering zero hits to the Writer.
+			if retainStrongestRAGRecall(result) {
+				recordTrimmed("rag_recall:top1_preserved")
+			}
+			if fits() {
+				return true
+			}
+			continue
+		}
 		deleteContextKey(result, key)
 		recordTrimmed(key)
 		if fits() {
@@ -1064,6 +1304,32 @@ func trimByBudget(result map[string]any, budget int, chapter ...int) bool {
 		}
 	}
 	return fits()
+}
+
+func retainStrongestRAGRecall(result map[string]any) bool {
+	changed := false
+	retain := func(section map[string]any) {
+		if section == nil {
+			return
+		}
+		switch items := section["rag_recall"].(type) {
+		case []domain.RecallItem:
+			if len(items) > 1 {
+				section["rag_recall"] = append([]domain.RecallItem(nil), items[0])
+				changed = true
+			}
+		case []any:
+			if len(items) > 1 {
+				section["rag_recall"] = append([]any(nil), items[0])
+				changed = true
+			}
+		}
+	}
+	retain(result)
+	if selected, ok := result["selected_memory"].(map[string]any); ok {
+		retain(selected)
+	}
+	return changed
 }
 
 func hasContextKey(result map[string]any, key string) bool {

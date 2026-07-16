@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
@@ -77,38 +78,83 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 // NewWriterStopGuard 要求 writer（正文渲染阶段/drafter）本轮至少产生一次 commit_chapter。
 // HARNESS-METADATA: name=writer_stop_guard class=model_gap review=2027-Q1
 func NewWriterStopGuard(st *store.Store) agentcore.StopGuard {
+	baseline := latestCheckpointSeq(st)
 	base := newCheckpointDeltaGuard(st, "writer",
 		[]string{"commit"},
 		"你必须调用 commit_chapter 提交本章后才能结束。draft_chapter / draft_chapter_part / merge_chapter_parts 只是保存草稿，不算完成；分片写完要先合并、回读、check_consistency，再 commit_chapter。",
 	)
+	localSoftEdit := newCheckpointDeltaGuard(st, "writer_local_soft_edit",
+		[]string{"edit"},
+		"当前精确哈希已通过 DeepSeek，但本地非结构性 AIGC 门禁仍未通过。必须严格按 check_consistency 返回的 rewrite_focus 调用 edit_chapter 一次；禁止 commit 或整章重写。edit 落盘后立即结束，交外层 pipeline 复判新哈希。",
+	)
 	return func(ctx context.Context, info agentcore.StopInfo) agentcore.StopDecision {
-		if awaitingDraftExternalRejudge(st) {
+		if draftPauseBoundaryReached(st, baseline) {
 			return agentcore.StopDecision{Allow: true}
+		}
+		if currentDraftLocalSoftEditPending(st) {
+			return localSoftEdit(ctx, info)
 		}
 		return base(ctx, info)
 	}
 }
 
-func awaitingDraftExternalRejudge(st *store.Store) bool {
-	if st == nil {
-		return false
+func latestCheckpointSeq(st *store.Store) int64 {
+	if st != nil {
+		if cp := st.Checkpoints.LatestGlobal(); cp != nil {
+			return cp.Seq
+		}
 	}
-	progress, err := st.Progress.Load()
-	if err != nil || progress == nil {
-		return false
+	return 0
+}
+
+// draftPauseBoundaryReached allows a writer/coordinator run to end at either a
+// provider rejudge boundary or a *new* deterministic whole-text structural
+// block produced in this run. An old rerender_authorized marker at factory time
+// is deliberately insufficient: the writer still has to consume that one-shot
+// authorization and emit a different draft before control returns to Host.
+func draftPauseBoundaryReached(st *store.Store, structuralBaseline int64) bool {
+	if awaitingDraftExternalRejudge(st) {
+		return true
 	}
-	chapter := 0
-	if len(progress.PendingRewrites) > 0 {
-		chapter = progress.PendingRewrites[0]
-	} else {
-		chapter = progress.NextChapter()
-	}
+	chapter := activeDraftChapter(st)
 	if chapter <= 0 {
 		return false
 	}
-	inspection, err := tools.InspectDraftExternalGate(st.Dir(), chapter)
-	return err == nil && (inspection.Status == tools.DraftExternalGateRejudgePending ||
+	cp := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "draft-structural-block")
+	return cp != nil && cp.Seq > structuralBaseline && tools.CurrentDraftHasLocalStructuralBlock(st, chapter)
+}
+
+func activeDraftChapter(st *store.Store) int {
+	if st == nil {
+		return 0
+	}
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		return 0
+	}
+	if len(progress.PendingRewrites) > 0 {
+		return progress.PendingRewrites[0]
+	}
+	return progress.NextChapter()
+}
+
+func awaitingDraftExternalRejudge(st *store.Store) bool {
+	chapter := activeDraftChapter(st)
+	if chapter <= 0 {
+		return false
+	}
+	inspection, err := tools.InspectDraftExternalGateWithStore(st, chapter)
+	return err == nil && !inspection.LocalSoftEditPending && (inspection.Status == tools.DraftExternalGateRejudgePending ||
 		inspection.Status == tools.DraftExternalGateAdviceIncomplete)
+}
+
+func currentDraftLocalSoftEditPending(st *store.Store) bool {
+	chapter := activeDraftChapter(st)
+	if chapter <= 0 {
+		return false
+	}
+	inspection, err := tools.InspectDraftExternalGateWithStore(st, chapter)
+	return err == nil && inspection.LocalSoftEditPending
 }
 
 // NewPlannerStopGuard 要求推演阶段（planner）本轮至少落盘一次章节计划（plan checkpoint）。

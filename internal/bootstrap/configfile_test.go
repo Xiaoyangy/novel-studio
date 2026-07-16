@@ -309,6 +309,24 @@ func TestValidateBaseRejectsProviderAPIOnNonOpenAIProvider(t *testing.T) {
 	}
 }
 
+func TestValidateBaseAcceptsDrafterRole(t *testing.T) {
+	cfg := Config{
+		Provider:  "local",
+		ModelName: "default-model",
+		Providers: map[string]ProviderConfig{
+			"local": {Type: "openai"},
+		},
+		Roles: map[string]RoleConfig{
+			"writer":  {Provider: "local", Model: "planner-model"},
+			"drafter": {Provider: "local", Model: "prose-model"},
+		},
+	}
+	cfg.FillDefaults()
+	if err := cfg.ValidateBase(); err != nil {
+		t.Fatalf("drafter should be a valid configured role: %v", err)
+	}
+}
+
 // 示例配置必须自洽：去注释后是合法 JSON、
 // 顶层 provider 指针不悬空、且点破了“指针”心智——它是用户照抄的样板，自己坏了就坑人。
 func TestExampleConfigIsValidAndSelfConsistent(t *testing.T) {

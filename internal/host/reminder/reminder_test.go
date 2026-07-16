@@ -2,6 +2,7 @@ package reminder
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -78,6 +79,86 @@ func TestStopGuardsAllowPauseForDraftExternalRejudge(t *testing.T) {
 	if decision := NewStopGuard(s, nil)(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
 		t.Fatalf("coordinator guard must allow external-rejudge pause: %+v", decision)
 	}
+}
+
+func TestWriterStopGuardRequiresNewLocalStructuralBoundary(t *testing.T) {
+	newStructuralBody := func(destination string) string {
+		return "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到"+destination+"。", 100)
+	}
+
+	t.Run("existing marker does not let writer skip rerender", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("test", 3); err != nil {
+			t.Fatal(err)
+		}
+		args, _ := json.Marshal(map[string]any{"chapter": 1, "content": newStructuralBody("第一家"), "mode": "write"})
+		if _, err := tools.NewDraftChapterTool(s).Execute(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+		decision := NewWriterStopGuard(s)(context.Background(), agentcore.StopInfo{TurnIndex: 1})
+		if decision.Allow {
+			t.Fatalf("pre-existing rerender authorization let a new writer stop without consuming it: %+v", decision)
+		}
+	})
+
+	t.Run("whole write produced after factory is a stop boundary", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("test", 3); err != nil {
+			t.Fatal(err)
+		}
+		writerGuard := NewWriterStopGuard(s)
+		coordinatorGuard := NewStopGuard(s, nil)
+		args, _ := json.Marshal(map[string]any{"chapter": 1, "content": newStructuralBody("第二家"), "mode": "write"})
+		if _, err := tools.NewDraftChapterTool(s).Execute(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+		if decision := writerGuard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("writer guard rejected a new local structural stop boundary: %+v", decision)
+		}
+		if decision := coordinatorGuard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("coordinator guard rejected a new local structural stop boundary: %+v", decision)
+		}
+	})
+
+	t.Run("append structural result is a stop boundary", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("test", 3); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Drafts.SaveDraft(1, "第一章 县城试点\n\n"); err != nil {
+			t.Fatal(err)
+		}
+		guard := NewWriterStopGuard(s)
+		args, _ := json.Marshal(map[string]any{"chapter": 1, "content": strings.Repeat("林澈把价牌放好，然后核对票据，然后走到第三家。", 100), "mode": "append"})
+		if _, err := tools.NewDraftChapterTool(s).Execute(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+		if decision := guard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("append structural boundary was not allowed to stop: %+v", decision)
+		}
+	})
+
+	t.Run("merged structural result is a stop boundary", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("test", 3); err != nil {
+			t.Fatal(err)
+		}
+		guard := NewWriterStopGuard(s)
+		part, _ := json.Marshal(map[string]any{
+			"chapter": 1, "part": 1, "total_parts": 1, "title": "整章", "focus": "结构门禁",
+			"content": newStructuralBody("第四家"),
+		})
+		if _, err := tools.NewDraftChapterPartTool(s).Execute(context.Background(), part); err != nil {
+			t.Fatal(err)
+		}
+		merge, _ := json.Marshal(map[string]any{"chapter": 1, "expected_parts": 1})
+		if _, err := tools.NewMergeChapterPartsTool(s).Execute(context.Background(), merge); err != nil {
+			t.Fatal(err)
+		}
+		if decision := guard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("merged structural boundary was not allowed to stop: %+v", decision)
+		}
+	})
 }
 
 func TestStopGuard_EscalatesAfterTooManyConsecutiveBlocks(t *testing.T) {

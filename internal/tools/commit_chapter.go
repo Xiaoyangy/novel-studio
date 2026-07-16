@@ -31,6 +31,36 @@ type CommitChapterTool struct {
 	store           *store.Store
 	ragEmbedder     rag.Embedder
 	ragVectorWriter rag.VectorWriter
+	// failCommitAt is a test-only crash injector. Production constructors leave
+	// it nil; keeping the hook at saga boundaries lets recovery tests exercise
+	// real persisted state instead of hand-authoring an impossible snapshot.
+	failCommitAt func(string) error
+}
+
+const (
+	commitFailureAfterFinalSaved      = "after_final_saved"
+	commitFailureAfterProgressUpdated = "after_progress_updated"
+)
+
+type commitChapterArgs struct {
+	Chapter             int                           `json:"chapter"`
+	Summary             string                        `json:"summary"`
+	Characters          []string                      `json:"characters"`
+	KeyEvents           []string                      `json:"key_events"`
+	TimelineEvents      []domain.TimelineEvent        `json:"timeline_events"`
+	ForeshadowUpdates   []domain.ForeshadowUpdate     `json:"foreshadow_updates"`
+	RelationshipChanges []domain.RelationshipEntry    `json:"relationship_changes"`
+	StateChanges        []domain.StateChange          `json:"state_changes"`
+	CharacterStage      []domain.CharacterStageRecord `json:"character_stage_records"`
+	ResourceUpdates     []domain.ResourceClaim        `json:"resource_updates"`
+	ResourceProposals   []domain.ResourceClaim        `json:"resource_proposals"`
+	CastIntros          []domain.CastIntro            `json:"cast_intros"`
+	HookType            string                        `json:"hook_type"`
+	DominantStrand      string                        `json:"dominant_strand"`
+	OpeningDevice       string                        `json:"opening_device"`
+	EndingDevice        string                        `json:"ending_device"`
+	Feedback            *domain.OutlineFeedback       `json:"feedback"`
+	methodologyCommitExtras
 }
 
 func NewCommitChapterTool(store *store.Store) *CommitChapterTool {
@@ -173,113 +203,12 @@ func (t *CommitChapterTool) Schema() map[string]any {
 }
 
 func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	var a struct {
-		Chapter             int                           `json:"chapter"`
-		Summary             string                        `json:"summary"`
-		Characters          []string                      `json:"characters"`
-		KeyEvents           []string                      `json:"key_events"`
-		TimelineEvents      []domain.TimelineEvent        `json:"timeline_events"`
-		ForeshadowUpdates   []domain.ForeshadowUpdate     `json:"foreshadow_updates"`
-		RelationshipChanges []domain.RelationshipEntry    `json:"relationship_changes"`
-		StateChanges        []domain.StateChange          `json:"state_changes"`
-		CharacterStage      []domain.CharacterStageRecord `json:"character_stage_records"`
-		ResourceUpdates     []domain.ResourceClaim        `json:"resource_updates"`
-		ResourceProposals   []domain.ResourceClaim        `json:"resource_proposals"`
-		CastIntros          []domain.CastIntro            `json:"cast_intros"`
-		HookType            string                        `json:"hook_type"`
-		DominantStrand      string                        `json:"dominant_strand"`
-		OpeningDevice       string                        `json:"opening_device"`
-		EndingDevice        string                        `json:"ending_device"`
-		Feedback            *domain.OutlineFeedback       `json:"feedback"`
-		methodologyCommitExtras
-	}
+	var a commitChapterArgs
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
-	}
-	if t.store.Progress.IsChapterCompleted(a.Chapter) {
-		// Saga recovery: completed progress is not sufficient proof. Resume the
-		// quality gate, checkpoint and RAG stages before clearing PendingCommit.
-		if pending, _ := t.store.Signals.LoadPendingCommit(); pending != nil && pending.Chapter == a.Chapter {
-			content, wordCount, loadErr := t.store.Drafts.LoadChapterContent(a.Chapter)
-			if loadErr != nil || strings.TrimSpace(content) == "" {
-				return nil, fmt.Errorf("resume commit content: %w: %w", errs.ErrStoreRead, loadErr)
-			}
-			if !commitStageAtLeast(pending.Stage, domain.CommitStageQualityChecked) {
-				aiVoiceAnalysis, qualityErr := t.saveFinalAIVoice(a.Chapter, content, "")
-				if qualityErr != nil {
-					return nil, qualityErr
-				}
-				_ = aiVoiceAnalysis
-				aigcReport := aigc.Analyze(content)
-				violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
-				violations = append(violations, aigcViolation(aigcReport)...)
-				violations = append(violations, t.resourcePendingViolations(content)...)
-				a.methodologyCommitExtras.ChapterContent = content
-				violations = append(violations, t.methodologyViolations(a.Chapter, wordCount, a.HookType, a.methodologyCommitExtras)...)
-				violations = append(violations, consistencyReconcile(t.store, a.Chapter, content, a.ResourceUpdates)...)
-				if err := t.saveAIGCReviewFiles(a.Chapter, content, aigcReport, violations); err != nil {
-					return nil, fmt.Errorf("resume save aigc review: %w: %w", errs.ErrStoreWrite, err)
-				}
-				if reason := blockingViolationReason(violations); reason != "" {
-					if err := t.enqueueMechanicalGateFailure(a.Chapter, reason); err != nil {
-						return nil, fmt.Errorf("resume mechanical gate: %w: %w", errs.ErrStoreWrite, err)
-					}
-				}
-				pending.Stage = domain.CommitStageQualityChecked
-				pending.UpdatedAt = time.Now().Format(time.RFC3339)
-				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
-					return nil, fmt.Errorf("resume quality stage: %w: %w", errs.ErrStoreWrite, err)
-				}
-			}
-			if !commitStageAtLeast(pending.Stage, domain.CommitStageCheckpointed) {
-				if err := t.appendCommitCheckpoint(a.Chapter); err != nil {
-					return nil, fmt.Errorf("checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
-				}
-				pending.Stage = domain.CommitStageCheckpointed
-				pending.UpdatedAt = time.Now().Format(time.RFC3339)
-				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
-					return nil, fmt.Errorf("resume checkpoint stage: %w: %w", errs.ErrStoreWrite, err)
-				}
-			}
-			if !commitStageAtLeast(pending.Stage, domain.CommitStageRAGIndexed) {
-				_, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
-					Chapter: a.Chapter, Summary: a.Summary, Characters: a.Characters, KeyEvents: a.KeyEvents,
-					TimelineEvents: a.TimelineEvents, ForeshadowUpdates: a.ForeshadowUpdates,
-					RelationshipChanges: a.RelationshipChanges, StateChanges: a.StateChanges,
-					ResourceUpdates: a.ResourceUpdates, ResourceProposals: a.ResourceProposals,
-					HookType: a.HookType, DominantStrand: a.DominantStrand,
-					OpeningDevice: a.OpeningDevice, EndingDevice: a.EndingDevice, WordCount: wordCount,
-				})
-				if ragErr != nil {
-					slog.Warn("恢复提交时章节 RAG 沉淀失败，已交给 pending upserts", "module", "commit", "chapter", a.Chapter, "err", ragErr)
-				}
-				pending.Stage = domain.CommitStageRAGIndexed
-				pending.UpdatedAt = time.Now().Format(time.RFC3339)
-				if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
-					return nil, fmt.Errorf("resume rag stage: %w: %w", errs.ErrStoreWrite, err)
-				}
-			}
-			if err := t.store.Progress.ClearInProgress(); err != nil {
-				return nil, fmt.Errorf("resume clear in-progress: %w: %w", errs.ErrStoreWrite, err)
-			}
-			if err := t.store.Signals.ClearPendingCommit(); err != nil {
-				return nil, fmt.Errorf("resume clear pending commit: %w: %w", errs.ErrStoreWrite, err)
-			}
-			progress, _ := t.store.Progress.Load()
-			return t.buildSkipResult(a.Chapter, progress)
-		}
-		// 打磨/重写路径：章节虽已完成，但仍在 pending_rewrites 中，允许覆盖并 drain 队列
-		progress, _ := t.store.Progress.Load()
-		if progress != nil && slices.Contains(progress.PendingRewrites, a.Chapter) {
-			return t.executeRewriteCommit(ctx, a.Chapter, a.Summary, a.Characters, a.KeyEvents,
-				a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
-				a.CharacterStage, a.ResourceUpdates, a.ResourceProposals,
-				a.HookType, a.DominantStrand, a.OpeningDevice, a.EndingDevice, progress)
-		}
-		return t.buildSkipResult(a.Chapter, progress)
 	}
 	existingPending, err := t.store.Signals.LoadPendingCommit()
 	if err != nil {
@@ -287,6 +216,27 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	if existingPending != nil && existingPending.Chapter != a.Chapter {
 		return nil, fmt.Errorf("存在未恢复的章节提交：第 %d 章（阶段 %s），请先恢复或重新提交该章: %w", existingPending.Chapter, existingPending.Stage, errs.ErrToolConflict)
+	}
+	if existingPending != nil && existingPending.Mode == domain.CommitModeRewrite {
+		return t.resumeRewriteCommit(ctx, existingPending)
+	}
+	if t.store.Progress.IsChapterCompleted(a.Chapter) {
+		if existingPending != nil {
+			return t.resumeInitialCommit(ctx, existingPending)
+		}
+		// 打磨/重写路径：章节虽已完成，但仍在 pending_rewrites 中，允许覆盖并 drain 队列
+		progress, _ := t.store.Progress.Load()
+		if progress != nil && slices.Contains(progress.PendingRewrites, a.Chapter) {
+			return t.executeRewriteCommit(ctx, a, progress)
+		}
+		return t.buildSkipResult(a.Chapter, progress)
+	}
+	if existingPending != nil {
+		persisted, _, validateErr := t.validatePendingCommitIdentity(existingPending, false)
+		if validateErr != nil {
+			return nil, validateErr
+		}
+		a = persisted
 	}
 	if err := t.store.Progress.ValidateChapterWork(a.Chapter); err != nil {
 		// 队列冲突保持原样（已带 ErrToolConflict 分类）；其他 IO 错误归 Precondition。
@@ -323,7 +273,16 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if content == "" {
 		return nil, fmt.Errorf("no content found for chapter %d: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
-	if err := RequireDraftExternalApproval(t.store.Dir(), a.Chapter); err != nil {
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+		return nil, fmt.Errorf("第 %d 章提交前 plan/receipt 复验失败: %w", a.Chapter, err)
+	}
+	if err := validateCurrentPlanBodyEpoch(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
+	if err := requireDraftHardFactAnchors(t.store, a.Chapter, content); err != nil {
+		return nil, fmt.Errorf("第 %d 章提交前 exact draft hard-fact anchor 门禁未通过: %w", a.Chapter, err)
+	}
+	if err := RequireDraftExternalApprovalWithStore(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
 	if err := requireCurrentDraftConsistency(t.store, a.Chapter, content); err != nil {
@@ -338,16 +297,19 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if err := requireChapterAttractionContent(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
+	// Pipeline commits are strict delivery boundaries: a consistency checkpoint
+	// records what was inspected, not that every embedded quality gate passed.
+	// Recompute the exact current bytes here so a soft/non-structural local AIGC
+	// failure cannot be hidden by an old checkpoint or a provider-only pass.
+	if pipelineWritingManaged(t.store) {
+		if err := requireDraftAIGCGate(t.store, a.Chapter, content); err != nil {
+			return nil, err
+		}
+	}
 
-	now := time.Now().Format(time.RFC3339)
-	pending := domain.PendingCommit{
-		Chapter:        a.Chapter,
-		Stage:          domain.CommitStageStarted,
-		Summary:        a.Summary,
-		HookType:       a.HookType,
-		DominantStrand: a.DominantStrand,
-		StartedAt:      now,
-		UpdatedAt:      now,
+	pending, err := t.newPendingCommit(a, domain.CommitModeInitial, content, wordCount, pipelineWritingManaged(t.store), "", "")
+	if err != nil {
+		return nil, err
 	}
 	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
 		return nil, fmt.Errorf("save pending commit: %w: %w", errs.ErrStoreWrite, err)
@@ -356,6 +318,9 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	// 2. 保存终稿
 	if err := t.store.Drafts.SaveFinalChapter(a.Chapter, content); err != nil {
 		return nil, fmt.Errorf("save final chapter: %w: %w", errs.ErrStoreWrite, err)
+	}
+	if err := t.injectCommitFailure(commitFailureAfterFinalSaved); err != nil {
+		return nil, err
 	}
 	if err := t.store.World.ClearChapterReview(a.Chapter); err != nil {
 		return nil, fmt.Errorf("clear stale review: %w: %w", errs.ErrStoreWrite, err)
@@ -443,6 +408,14 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	// 5. 更新进度
 	if err := t.store.Progress.MarkChapterComplete(a.Chapter, wordCount, a.HookType, a.DominantStrand); err != nil {
 		return nil, fmt.Errorf("mark chapter complete: %w: %w", errs.ErrStoreWrite, err)
+	}
+	pending.Stage = domain.CommitStageProgressMarked
+	pending.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
+		return nil, fmt.Errorf("update progress-marked commit stage: %w: %w", errs.ErrStoreWrite, err)
+	}
+	if err := t.injectCommitFailure(commitFailureAfterProgressUpdated); err != nil {
+		return nil, err
 	}
 
 	// 6. 判断是否需要审阅
@@ -571,6 +544,8 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if ragErr != nil {
 		slog.Warn("章节 RAG 沉淀失败，跳过", "module", "commit", "chapter", a.Chapter, "err", ragErr)
 	}
+	pending.RAGIndexed = ragIndexed
+	pending.RAGError = errorString(ragErr)
 	pending.Stage = domain.CommitStageRAGIndexed
 	pending.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
@@ -593,24 +568,300 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	return json.Marshal(commitOutput{CommitResult: result, RuleViolations: violations, AIGCReport: &aigcReport, AIVoice: &aiVoiceAnalysis, ResourceAudit: audit, RAGIndexed: ragIndexed, RAGError: errorString(ragErr)})
 }
 
+func (t *CommitChapterTool) injectCommitFailure(point string) error {
+	if t.failCommitAt == nil {
+		return nil
+	}
+	if err := t.failCommitAt(point); err != nil {
+		return fmt.Errorf("injected commit failure at %s: %w", point, err)
+	}
+	return nil
+}
+
+func (t *CommitChapterTool) newPendingCommit(
+	a commitChapterArgs,
+	mode domain.CommitMode,
+	content string,
+	wordCount int,
+	strictAIGC bool,
+	previousFinalBody string,
+	rewriteFlow string,
+) (domain.PendingCommit, error) {
+	payload, err := json.Marshal(a)
+	if err != nil {
+		return domain.PendingCommit{}, fmt.Errorf("encode pending commit payload: %w: %w", errs.ErrStoreWrite, err)
+	}
+	now := time.Now().Format(time.RFC3339)
+	pending := domain.PendingCommit{
+		Chapter:            a.Chapter,
+		Mode:               mode,
+		Stage:              domain.CommitStageStarted,
+		Summary:            a.Summary,
+		HookType:           a.HookType,
+		DominantStrand:     a.DominantStrand,
+		Payload:            payload,
+		PayloadSHA256:      reviewreport.BodySHA256(string(payload)),
+		BodySHA256:         reviewreport.BodySHA256(content),
+		WordCount:          wordCount,
+		ExternalBodySHA256: reviewreport.BodySHA256(content),
+		StrictAIGC:         strictAIGC,
+		PreviousFinalBody:  previousFinalBody,
+		RewriteFlow:        rewriteFlow,
+		StartedAt:          now,
+		UpdatedAt:          now,
+	}
+	if previousFinalBody != "" {
+		pending.PreviousFinalSHA256 = reviewreport.BodySHA256(previousFinalBody)
+	}
+	scope := domain.ChapterScope(a.Chapter)
+	if t.store.Checkpoints.LatestByStep(scope, "plan") != nil {
+		cp, cpErr := CurrentChapterPlanCheckpoint(t.store, a.Chapter)
+		if cpErr != nil {
+			return domain.PendingCommit{}, fmt.Errorf("capture pending plan identity: %w", cpErr)
+		}
+		pending.PlanCheckpointSeq = cp.Seq
+		pending.PlanCheckpointDigest = cp.Digest
+	}
+	if t.store.Checkpoints.LatestByStep(scope, "draft") != nil || t.store.Checkpoints.LatestByStep(scope, "edit") != nil {
+		cp, cpErr := CurrentChapterBodyCheckpoint(t.store, a.Chapter)
+		if cpErr != nil {
+			return domain.PendingCommit{}, fmt.Errorf("capture pending body identity: %w", cpErr)
+		}
+		pending.BodyCheckpointSeq = cp.Seq
+		pending.BodyCheckpointDigest = cp.Digest
+		consistency, consistencyErr := requirePassedDraftHardConsistencyReceipt(t.store, a.Chapter, content)
+		if consistencyErr != nil {
+			return domain.PendingCommit{}, fmt.Errorf("capture pending consistency identity: %w", consistencyErr)
+		}
+		pending.ConsistencyCheckpointSeq = consistency.Seq
+		pending.ConsistencyCheckpointDigest = consistency.Digest
+	}
+	return pending, nil
+}
+
+// validatePendingCommitIdentity re-runs every mutable pre-write gate and also
+// proves that the current artifacts are still the exact plan/body epoch named
+// by PendingCommit. Recovery never treats "progress completed" as evidence that
+// whichever draft is now on disk may be committed.
+func (t *CommitChapterTool) validatePendingCommitIdentity(pending *domain.PendingCommit, requireFinal bool) (commitChapterArgs, string, error) {
+	var a commitChapterArgs
+	if pending == nil || pending.Chapter <= 0 || len(pending.Payload) == 0 || !validExternalBodySHA256(pending.BodySHA256) {
+		return a, "", fmt.Errorf("pending commit 缺少正文 SHA 或不可变 payload，拒绝猜测恢复: %w", errs.ErrToolPrecondition)
+	}
+	if pending.Mode != domain.CommitModeInitial && pending.Mode != domain.CommitModeRewrite {
+		return a, "", fmt.Errorf("pending commit mode=%q 无法安全恢复: %w", pending.Mode, errs.ErrToolPrecondition)
+	}
+	switch pending.Stage {
+	case domain.CommitStageStarted, domain.CommitStageStateApplied, domain.CommitStageProgressMarked,
+		domain.CommitStageQualityChecked, domain.CommitStageCheckpointed, domain.CommitStageRAGIndexed,
+		domain.CommitStageSignalSaved:
+	default:
+		return a, "", fmt.Errorf("pending commit stage=%q 无法安全恢复: %w", pending.Stage, errs.ErrToolPrecondition)
+	}
+	if pending.PreviousFinalBody != "" && pending.PreviousFinalSHA256 != reviewreport.BodySHA256(pending.PreviousFinalBody) {
+		return a, "", fmt.Errorf("pending commit 覆盖前终稿摘要不匹配: %w", errs.ErrToolPrecondition)
+	}
+	if err := json.Unmarshal(pending.Payload, &a); err != nil {
+		return a, "", fmt.Errorf("decode pending commit payload: %w: %w", errs.ErrStoreRead, err)
+	}
+	canonicalPayload, err := json.Marshal(a)
+	if err != nil || pending.PayloadSHA256 != reviewreport.BodySHA256(string(canonicalPayload)) {
+		return a, "", fmt.Errorf("pending commit payload 摘要不匹配，拒绝使用被改写的恢复参数: %v: %w", err, errs.ErrToolPrecondition)
+	}
+	if a.Chapter != pending.Chapter {
+		return a, "", fmt.Errorf("pending commit payload chapter=%d 与 identity chapter=%d 不一致: %w", a.Chapter, pending.Chapter, errs.ErrToolPrecondition)
+	}
+	content, wordCount, err := t.store.Drafts.LoadChapterContent(a.Chapter)
+	if err != nil {
+		return a, "", fmt.Errorf("resume commit content: %w: %w", errs.ErrStoreRead, err)
+	}
+	currentSHA := reviewreport.BodySHA256(content)
+	if strings.TrimSpace(content) == "" || currentSHA != pending.BodySHA256 || wordCount != pending.WordCount {
+		return a, "", fmt.Errorf("第 %d 章恢复失败：当前 draft SHA/字数已变化（pending=%s/%d, current=%s/%d），禁止从可变草稿继续: %w",
+			a.Chapter, pending.BodySHA256, pending.WordCount, currentSHA, wordCount, errs.ErrToolPrecondition)
+	}
+	if pending.ExternalBodySHA256 != pending.BodySHA256 {
+		return a, "", fmt.Errorf("第 %d 章 pending external identity=%q 未绑定正文 SHA=%q: %w",
+			a.Chapter, pending.ExternalBodySHA256, pending.BodySHA256, errs.ErrToolPrecondition)
+	}
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+		return a, "", fmt.Errorf("第 %d 章恢复时 plan/receipt 复验失败: %w", a.Chapter, err)
+	}
+	if err := validateCurrentPlanBodyEpoch(t.store, a.Chapter); err != nil {
+		return a, "", err
+	}
+	if err := requireDraftHardFactAnchors(t.store, a.Chapter, content); err != nil {
+		return a, "", fmt.Errorf("第 %d 章恢复提交前 exact draft hard-fact anchor 门禁未通过: %w", a.Chapter, err)
+	}
+	scope := domain.ChapterScope(a.Chapter)
+	if pending.PlanCheckpointSeq > 0 {
+		cp, cpErr := CurrentChapterPlanCheckpoint(t.store, a.Chapter)
+		if cpErr != nil || cp.Seq != pending.PlanCheckpointSeq || cp.Digest != pending.PlanCheckpointDigest {
+			return a, "", fmt.Errorf("第 %d 章恢复失败：当前 plan epoch 不再等于 pending identity（pending=%d/%s）: %v: %w",
+				a.Chapter, pending.PlanCheckpointSeq, pending.PlanCheckpointDigest, cpErr, errs.ErrToolPrecondition)
+		}
+	} else if t.store.Checkpoints.LatestByStep(scope, "plan") != nil {
+		return a, "", fmt.Errorf("第 %d 章 pending 启动后出现了新的 plan epoch，拒绝跨 epoch 恢复: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if pending.BodyCheckpointSeq > 0 {
+		cp, cpErr := CurrentChapterBodyCheckpoint(t.store, a.Chapter)
+		if cpErr != nil || cp.Seq != pending.BodyCheckpointSeq || cp.Digest != pending.BodyCheckpointDigest {
+			return a, "", fmt.Errorf("第 %d 章恢复失败：当前 body epoch 不再等于 pending identity（pending=%d/%s）: %v: %w",
+				a.Chapter, pending.BodyCheckpointSeq, pending.BodyCheckpointDigest, cpErr, errs.ErrToolPrecondition)
+		}
+		consistency, consistencyErr := requirePassedDraftHardConsistencyReceipt(t.store, a.Chapter, content)
+		if consistencyErr != nil || consistency.Seq != pending.ConsistencyCheckpointSeq ||
+			consistency.Digest != pending.ConsistencyCheckpointDigest {
+			return a, "", fmt.Errorf("第 %d 章恢复失败：当前 passed=true hard consistency receipt 不再等于 pending identity: %v: %w",
+				a.Chapter, consistencyErr, errs.ErrToolPrecondition)
+		}
+	} else if t.store.Checkpoints.LatestByStep(scope, "draft") != nil || t.store.Checkpoints.LatestByStep(scope, "edit") != nil {
+		return a, "", fmt.Errorf("第 %d 章 pending 启动后出现了新的 body epoch，拒绝跨 epoch 恢复: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if err := RequireDraftExternalApprovalWithStore(t.store, a.Chapter); err != nil {
+		return a, "", err
+	}
+	if err := requireCurrentDraftConsistency(t.store, a.Chapter, content); err != nil {
+		return a, "", err
+	}
+	if err := requireDraftPlanTitleMatch(t.store, a.Chapter, content); err != nil {
+		return a, "", err
+	}
+	if err := requireChapterWordContract(t.store, a.Chapter, content); err != nil {
+		return a, "", err
+	}
+	if err := requireChapterAttractionContent(t.store, a.Chapter, content); err != nil {
+		return a, "", err
+	}
+	if pending.StrictAIGC {
+		if err := requireDraftAIGCGate(t.store, a.Chapter, content); err != nil {
+			return a, "", err
+		}
+	}
+	finalBody, err := t.store.Drafts.LoadChapterText(a.Chapter)
+	if err != nil {
+		return a, "", fmt.Errorf("load final chapter during recovery: %w: %w", errs.ErrStoreRead, err)
+	}
+	finalSHA := ""
+	if finalBody != "" {
+		finalSHA = reviewreport.BodySHA256(finalBody)
+	}
+	if requireFinal || commitStageAtLeast(pending.Stage, domain.CommitStageStateApplied) {
+		if finalSHA != pending.BodySHA256 {
+			return a, "", fmt.Errorf("第 %d 章恢复失败：终稿 SHA=%q 与 pending 正文 SHA=%q 不一致: %w",
+				a.Chapter, finalSHA, pending.BodySHA256, errs.ErrToolPrecondition)
+		}
+	} else if finalSHA != "" && finalSHA != pending.BodySHA256 && finalSHA != pending.PreviousFinalSHA256 {
+		return a, "", fmt.Errorf("第 %d 章恢复失败：终稿既不是 pending candidate 也不是覆盖前版本: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	return a, content, nil
+}
+
+func (t *CommitChapterTool) resumeInitialCommit(ctx context.Context, pending *domain.PendingCommit) (json.RawMessage, error) {
+	a, content, err := t.validatePendingCommitIdentity(pending, true)
+	if err != nil {
+		return nil, err
+	}
+	wordCount := pending.WordCount
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageProgressMarked) {
+		// MarkChapterComplete is idempotent. Completed Progress proves this write
+		// happened even if persisting the stage marker was the crashing operation.
+		if err := t.store.Progress.MarkChapterComplete(a.Chapter, wordCount, a.HookType, a.DominantStrand); err != nil {
+			return nil, fmt.Errorf("resume mark chapter complete: %w: %w", errs.ErrStoreWrite, err)
+		}
+		pending.Stage = domain.CommitStageProgressMarked
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("resume progress stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageQualityChecked) {
+		if _, err := t.saveFinalAIVoice(a.Chapter, content, ""); err != nil {
+			return nil, err
+		}
+		aigcReport := aigc.Analyze(content)
+		violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+		violations = append(violations, aigcViolation(aigcReport)...)
+		violations = append(violations, t.resourcePendingViolations(content)...)
+		a.methodologyCommitExtras.ChapterContent = content
+		violations = append(violations, t.methodologyViolations(a.Chapter, wordCount, a.HookType, a.methodologyCommitExtras)...)
+		violations = append(violations, consistencyReconcile(t.store, a.Chapter, content, a.ResourceUpdates)...)
+		if err := t.saveAIGCReviewFiles(a.Chapter, content, aigcReport, violations); err != nil {
+			return nil, fmt.Errorf("resume save aigc review: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if reason := blockingViolationReason(violations); reason != "" {
+			if err := t.enqueueMechanicalGateFailure(a.Chapter, reason); err != nil {
+				return nil, fmt.Errorf("resume mechanical gate: %w: %w", errs.ErrStoreWrite, err)
+			}
+		}
+		pending.Stage = domain.CommitStageQualityChecked
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("resume quality stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageCheckpointed) {
+		if err := t.appendCommitCheckpoint(a.Chapter); err != nil {
+			return nil, fmt.Errorf("resume checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
+		}
+		pending.Stage = domain.CommitStageCheckpointed
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("resume checkpoint stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageRAGIndexed) {
+		ragIndexed, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFactsFromArgs(a, wordCount))
+		if ragErr != nil {
+			slog.Warn("恢复提交时章节 RAG 沉淀失败，已交给 pending upserts", "module", "commit", "chapter", a.Chapter, "err", ragErr)
+		}
+		pending.RAGIndexed = ragIndexed
+		pending.RAGError = errorString(ragErr)
+		pending.Stage = domain.CommitStageRAGIndexed
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("resume rag stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+	if err := t.store.Progress.ClearInProgress(); err != nil {
+		return nil, fmt.Errorf("resume clear in-progress: %w: %w", errs.ErrStoreWrite, err)
+	}
+	if err := t.store.Signals.ClearPendingCommit(); err != nil {
+		return nil, fmt.Errorf("resume clear pending commit: %w: %w", errs.ErrStoreWrite, err)
+	}
+	progress, _ := t.store.Progress.Load()
+	return t.buildSkipResult(a.Chapter, progress)
+}
+
+func chapterRAGFactsFromArgs(a commitChapterArgs, wordCount int) chapterRAGFacts {
+	return chapterRAGFacts{
+		Chapter: a.Chapter, Summary: a.Summary, Characters: a.Characters, KeyEvents: a.KeyEvents,
+		TimelineEvents: a.TimelineEvents, ForeshadowUpdates: a.ForeshadowUpdates,
+		RelationshipChanges: a.RelationshipChanges, StateChanges: a.StateChanges,
+		ResourceUpdates: a.ResourceUpdates, ResourceProposals: a.ResourceProposals,
+		HookType: a.HookType, DominantStrand: a.DominantStrand,
+		OpeningDevice: a.OpeningDevice, EndingDevice: a.EndingDevice, WordCount: wordCount,
+	}
+}
+
 func commitStageAtLeast(stage, want domain.CommitStage) bool {
 	rank := map[domain.CommitStage]int{
-		domain.CommitStageStarted:      1,
-		domain.CommitStageStateApplied: 2,
-		// Legacy progress_marked was saved only after quality checks completed.
+		domain.CommitStageStarted:        1,
+		domain.CommitStageStateApplied:   2,
 		domain.CommitStageProgressMarked: 3,
-		domain.CommitStageQualityChecked: 3,
-		domain.CommitStageCheckpointed:   4,
-		domain.CommitStageRAGIndexed:     5,
-		domain.CommitStageSignalSaved:    5,
+		domain.CommitStageQualityChecked: 4,
+		domain.CommitStageCheckpointed:   5,
+		domain.CommitStageRAGIndexed:     6,
+		domain.CommitStageSignalSaved:    6,
 	}
 	return rank[stage] >= rank[want]
 }
 
 func (t *CommitChapterTool) appendCommitCheckpoint(chapter int) error {
-	_, err := t.store.Checkpoints.AppendArtifact(
+	_, err := t.store.Checkpoints.AppendArtifactLatestAcross(
 		domain.ChapterScope(chapter), "commit",
 		fmt.Sprintf("chapters/%02d.md", chapter),
+		"plan", "rerender-request", "draft", "edit", "consistency_check", "consistency_check_failed", "commit",
 	)
 	return err
 }
@@ -911,196 +1162,268 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-// executeRewriteCommit 处理打磨/重写章节的提交：覆盖终稿与摘要、更新字数、drain 队列。
-// 跳过所有世界状态追加（timeline / foreshadow / relationship / state_changes）与弧边界检测，
-// 这些已在章节原始提交时应用。
+// executeRewriteCommit starts a durable overwrite saga. Every recovery-relevant
+// input and artifact identity is persisted before chapters/NN.md is replaced.
 func (t *CommitChapterTool) executeRewriteCommit(
 	ctx context.Context,
-	chapter int,
-	summary string,
-	characters, keyEvents []string,
-	timelineEvents []domain.TimelineEvent,
-	foreshadowUpdates []domain.ForeshadowUpdate,
-	relationshipChanges []domain.RelationshipEntry,
-	stateChanges []domain.StateChange,
-	characterStage []domain.CharacterStageRecord,
-	resourceUpdates []domain.ResourceClaim,
-	resourceProposals []domain.ResourceClaim,
-	hookType, dominantStrand string,
-	openingDevice, endingDevice string,
+	a commitChapterArgs,
 	progress *domain.Progress,
 ) (json.RawMessage, error) {
-	// 1. 加载打磨后的正文
-	content, wordCount, err := t.store.Drafts.LoadChapterContent(chapter)
+	content, wordCount, err := t.store.Drafts.LoadChapterContent(a.Chapter)
 	if err != nil {
 		return nil, fmt.Errorf("rewrite: load chapter content: %w: %w", errs.ErrStoreRead, err)
 	}
-	if content == "" {
-		return nil, fmt.Errorf("no content found for chapter %d: %w", chapter, errs.ErrToolPrecondition)
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("no content found for chapter %d: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
-	if err := RequireDraftExternalApproval(t.store.Dir(), chapter); err != nil {
+	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+		return nil, fmt.Errorf("第 %d 章返工提交前 plan/receipt 复验失败: %w", a.Chapter, err)
+	}
+	if err := validateCurrentPlanBodyEpoch(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
-	if err := requireCurrentDraftConsistency(t.store, chapter, content); err != nil {
+	if err := requireDraftHardFactAnchors(t.store, a.Chapter, content); err != nil {
+		return nil, fmt.Errorf("第 %d 章返工提交前 exact draft hard-fact anchor 门禁未通过: %w", a.Chapter, err)
+	}
+	if err := RequireDraftExternalApprovalWithStore(t.store, a.Chapter); err != nil {
 		return nil, err
 	}
-	if err := requireDraftPlanTitleMatch(t.store, chapter, content); err != nil {
+	if err := requireCurrentDraftConsistency(t.store, a.Chapter, content); err != nil {
+		return nil, err
+	}
+	if err := requireDraftPlanTitleMatch(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
 
-	// 2. 硬校验：drafts 与现终稿完全相同 → 判定为未真正打磨/重写（writer 跳过了 draft_chapter）
-	// 拒绝 commit，强制 writer 先调 draft_chapter(mode=write) 写入新版本。
-	existingFinal, _ := t.store.Drafts.LoadChapterText(chapter)
-	if existingFinal != "" && existingFinal == content {
+	previousFinal, err := t.store.Drafts.LoadChapterText(a.Chapter)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite: load previous final: %w: %w", errs.ErrStoreRead, err)
+	}
+	if previousFinal != "" && previousFinal == content {
 		mode := "重写"
 		if progress != nil && progress.Flow == domain.FlowPolishing {
 			mode = "打磨"
 		}
 		return nil, fmt.Errorf("第 %d 章 drafts 与 chapters 内容完全相同，未检测到%s改动。请先调 draft_chapter(mode=write, chapter=%d) 写入%s后的新正文，再 commit_chapter: %w",
-			chapter, mode, chapter, mode, errs.ErrToolPrecondition)
+			a.Chapter, mode, a.Chapter, mode, errs.ErrToolPrecondition)
 	}
-	if err := requireChapterWordContract(t.store, chapter, content); err != nil {
+	if err := requireChapterWordContract(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
-	if err := requireChapterAttractionContent(t.store, chapter, content); err != nil {
+	if err := requireChapterAttractionContent(t.store, a.Chapter, content); err != nil {
 		return nil, err
 	}
-	// 因果重写明确承诺严格本地门禁，必须在覆盖终稿和世界状态前拦住。
-	// 旧 polishing 路径保留原有有限重试语义，避免改变兼容命令的恢复协议。
-	if progress != nil && progress.Flow == domain.FlowRewriting {
-		if err := requireDraftAIGCGate(t.store, chapter, content); err != nil {
+	strictAIGC := pipelineWritingManaged(t.store) || (progress != nil &&
+		(progress.Flow == domain.FlowRewriting || progress.Flow == domain.FlowPolishing))
+	if strictAIGC {
+		if err := requireDraftAIGCGate(t.store, a.Chapter, content); err != nil {
 			return nil, err
 		}
 	}
-	characterStage = mergeRewriteCharacterStage(t.store, chapter, characterStage)
-	if len(characterStage) > 0 || len(requiredDossierCharacterNames(t.store, chapter)) > 0 {
-		if err := validateCommitCharacterStage(t.store, chapter, characterStage); err != nil {
+	a.CharacterStage = mergeRewriteCharacterStage(t.store, a.Chapter, a.CharacterStage)
+	if len(a.CharacterStage) > 0 || len(requiredDossierCharacterNames(t.store, a.Chapter)) > 0 {
+		if err := validateCommitCharacterStage(t.store, a.Chapter, a.CharacterStage); err != nil {
 			return nil, err
 		}
 	}
 
-	// 3. 覆盖终稿
-	if err := t.store.Drafts.SaveFinalChapter(chapter, content); err != nil {
-		return nil, fmt.Errorf("rewrite: save final chapter: %w: %w", errs.ErrStoreWrite, err)
+	rewriteFlow := ""
+	if progress != nil {
+		rewriteFlow = string(progress.Flow)
 	}
-	if err := t.store.World.ClearChapterReview(chapter); err != nil {
-		return nil, fmt.Errorf("rewrite: clear stale review: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	// 3. 覆盖摘要
-	if err := t.store.Summaries.SaveSummary(domain.ChapterSummary{
-		Chapter:       chapter,
-		Summary:       summary,
-		Characters:    characters,
-		KeyEvents:     keyEvents,
-		OpeningDevice: openingDevice,
-		EndingDevice:  endingDevice,
-	}); err != nil {
-		return nil, fmt.Errorf("rewrite: save summary: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	for i := range timelineEvents {
-		timelineEvents[i].Chapter = chapter
-	}
-	if err := t.store.World.ReplaceTimelineEventsForChapter(chapter, timelineEvents); err != nil {
-		return nil, fmt.Errorf("rewrite: replace timeline: %w: %w", errs.ErrStoreWrite, err)
-	}
-	for i := range relationshipChanges {
-		relationshipChanges[i].Chapter = chapter
-	}
-	if len(relationshipChanges) > 0 {
-		if err := t.store.World.UpdateRelationships(relationshipChanges); err != nil {
-			return nil, fmt.Errorf("rewrite: update relationships: %w: %w", errs.ErrStoreWrite, err)
-		}
-	}
-	for i := range stateChanges {
-		stateChanges[i].Chapter = chapter
-	}
-	if err := t.store.World.ReplaceStateChangesForChapter(chapter, stateChanges); err != nil {
-		return nil, fmt.Errorf("rewrite: replace state changes: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if len(foreshadowUpdates) > 0 {
-		if err := t.store.World.UpdateForeshadow(chapter, foreshadowUpdates); err != nil {
-			return nil, fmt.Errorf("rewrite: update foreshadow: %w: %w", errs.ErrStoreWrite, err)
-		}
-	}
-	if err := t.store.SaveCharacterStageRecords(chapter, characterStage); err != nil {
-		return nil, fmt.Errorf("rewrite: save character stage records: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if err := t.store.SaveSideCharacterJourneys(chapter, characterStage); err != nil {
-		return nil, fmt.Errorf("rewrite: save side character journeys: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if err := t.store.ResourceLedger.ReplaceChapterClaims(chapter, resourceUpdates, resourceProposals); err != nil {
-		return nil, fmt.Errorf("rewrite: replace resource ledger: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if err := t.saveChapterWorldDelta(
-		chapter, true, summary, characterStage,
-		timelineEvents, foreshadowUpdates, relationshipChanges, stateChanges,
-		resourceUpdates, resourceProposals,
-	); err != nil {
-		return nil, fmt.Errorf("rewrite: save chapter world delta: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	// 4. 更新字数（MarkChapterComplete 对已完成章节是幂等的：replaces word count, slice.Contains 防止重复入队）
-	if err := t.store.Progress.MarkChapterComplete(chapter, wordCount, hookType, dominantStrand); err != nil {
-		return nil, fmt.Errorf("rewrite: update word count: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	// 5. Drain 待处理队列；队列空时 CompleteRewrite 会自动把 flow 切回 writing
-	if err := t.store.Progress.CompleteRewrite(chapter); err != nil {
-		return nil, fmt.Errorf("rewrite: complete rewrite: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	// 6. Checkpoint
-	if _, err := t.store.Checkpoints.AppendArtifact(
-		domain.ChapterScope(chapter), "commit",
-		fmt.Sprintf("chapters/%02d.md", chapter),
-	); err != nil {
-		return nil, fmt.Errorf("rewrite: checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
-	}
-
-	// 7. 机械检查先跑。返工后仍未通过时，把当前章重新压回队列，不能向后续章节放行。
-	// 若同一章已经经历"原提交 + 两次打磨"仍被启发式检测卡住，则保留报告，
-	// 交给后续章级审阅判定，避免机械指标无限返工。
-	aiVoiceAnalysis, err := t.saveFinalAIVoice(chapter, content, existingFinal)
+	pending, err := t.newPendingCommit(a, domain.CommitModeRewrite, content, wordCount, strictAIGC, previousFinal, rewriteFlow)
 	if err != nil {
 		return nil, err
 	}
-	aigcReport := aigc.Analyze(content)
-	violations := append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
-	violations = append(violations, aigcViolation(aigcReport)...)
-	violations = append(violations, t.resourcePendingViolations(content)...)
-	gateBlocked := false
-	if reason := blockingViolationReason(violations); reason != "" {
-		commitAttempts := t.chapterCommitCheckpointCount(chapter)
-		if commitAttempts >= maxMechanicalGateCommitAttempts {
-			violations = append(violations, rules.Violation{
-				Rule:     "mechanical_gate_retry_limit",
-				Target:   reason,
-				Limit:    fmt.Sprintf("%d commit attempts", maxMechanicalGateCommitAttempts),
-				Actual:   commitAttempts,
-				Severity: rules.SeverityWarning,
-			})
-		} else {
-			gateBlocked = true
+	if err := t.store.Signals.SavePendingCommit(pending); err != nil {
+		return nil, fmt.Errorf("rewrite: save pending commit: %w: %w", errs.ErrStoreWrite, err)
+	}
+	return t.resumeRewriteCommit(ctx, &pending)
+}
+
+// resumeRewriteCommit advances only stages that have no persisted evidence yet.
+// Each stage is idempotent, so a crash between its data write and stage write is
+// safe to replay.
+func (t *CommitChapterTool) resumeRewriteCommit(ctx context.Context, pending *domain.PendingCommit) (json.RawMessage, error) {
+	a, content, err := t.validatePendingCommitIdentity(pending, false)
+	if err != nil {
+		return nil, err
+	}
+	chapter := a.Chapter
+	wordCount := pending.WordCount
+	mode := "rewrite"
+	if pending.RewriteFlow == string(domain.FlowPolishing) {
+		mode = "polish"
+	}
+
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageStateApplied) {
+		if err := t.store.Drafts.SaveFinalChapter(chapter, content); err != nil {
+			return nil, fmt.Errorf("rewrite: save final chapter: %w: %w", errs.ErrStoreWrite, err)
 		}
-	}
-	if err := t.saveAIGCReviewFiles(chapter, content, aigcReport, violations); err != nil {
-		return nil, fmt.Errorf("rewrite: save aigc review: %w: %w", errs.ErrStoreWrite, err)
-	}
-	if gateBlocked {
-		reason := blockingViolationReason(violations)
-		if err := t.enqueueMechanicalGateFailure(chapter, reason); err != nil {
-			return nil, fmt.Errorf("rewrite: enqueue mechanical gate failure: %w: %w", errs.ErrStoreWrite, err)
+		if err := t.injectCommitFailure(commitFailureAfterFinalSaved); err != nil {
+			return nil, err
+		}
+		if err := t.store.World.ClearChapterReview(chapter); err != nil {
+			return nil, fmt.Errorf("rewrite: clear stale review: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.store.Summaries.SaveSummary(domain.ChapterSummary{
+			Chapter: chapter, Summary: a.Summary, Characters: a.Characters, KeyEvents: a.KeyEvents,
+			OpeningDevice: a.OpeningDevice, EndingDevice: a.EndingDevice,
+		}); err != nil {
+			return nil, fmt.Errorf("rewrite: save summary: %w: %w", errs.ErrStoreWrite, err)
+		}
+		for i := range a.TimelineEvents {
+			a.TimelineEvents[i].Chapter = chapter
+		}
+		if err := t.store.World.ReplaceTimelineEventsForChapter(chapter, a.TimelineEvents); err != nil {
+			return nil, fmt.Errorf("rewrite: replace timeline: %w: %w", errs.ErrStoreWrite, err)
+		}
+		for i := range a.RelationshipChanges {
+			a.RelationshipChanges[i].Chapter = chapter
+		}
+		if len(a.RelationshipChanges) > 0 {
+			if err := t.store.World.UpdateRelationships(a.RelationshipChanges); err != nil {
+				return nil, fmt.Errorf("rewrite: update relationships: %w: %w", errs.ErrStoreWrite, err)
+			}
+		}
+		for i := range a.StateChanges {
+			a.StateChanges[i].Chapter = chapter
+		}
+		if err := t.store.World.ReplaceStateChangesForChapter(chapter, a.StateChanges); err != nil {
+			return nil, fmt.Errorf("rewrite: replace state changes: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if len(a.ForeshadowUpdates) > 0 {
+			if err := t.store.World.UpdateForeshadow(chapter, a.ForeshadowUpdates); err != nil {
+				return nil, fmt.Errorf("rewrite: update foreshadow: %w: %w", errs.ErrStoreWrite, err)
+			}
+		}
+		if err := t.store.SaveCharacterStageRecords(chapter, a.CharacterStage); err != nil {
+			return nil, fmt.Errorf("rewrite: save character stage records: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.store.SaveSideCharacterJourneys(chapter, a.CharacterStage); err != nil {
+			return nil, fmt.Errorf("rewrite: save side character journeys: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.store.ResourceLedger.ReplaceChapterClaims(chapter, a.ResourceUpdates, a.ResourceProposals); err != nil {
+			return nil, fmt.Errorf("rewrite: replace resource ledger: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.saveChapterWorldDelta(
+			chapter, true, a.Summary, a.CharacterStage,
+			a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
+			a.ResourceUpdates, a.ResourceProposals,
+		); err != nil {
+			return nil, fmt.Errorf("rewrite: save chapter world delta: %w: %w", errs.ErrStoreWrite, err)
+		}
+		pending.Stage = domain.CommitStageStateApplied
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("rewrite: save state-applied stage: %w: %w", errs.ErrStoreWrite, err)
 		}
 	}
 
-	// 8. 读取 drain / gate 后的 Progress 快照，作为事实返回
-	mode := "rewrite"
-	if progress.Flow == domain.FlowPolishing {
-		mode = "polish"
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageProgressMarked) {
+		if err := t.store.Progress.MarkChapterComplete(chapter, wordCount, a.HookType, a.DominantStrand); err != nil {
+			return nil, fmt.Errorf("rewrite: update word count: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.store.Progress.CompleteRewrite(chapter); err != nil {
+			return nil, fmt.Errorf("rewrite: complete rewrite: %w: %w", errs.ErrStoreWrite, err)
+		}
+		pending.Stage = domain.CommitStageProgressMarked
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("rewrite: save progress-marked stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if err := t.injectCommitFailure(commitFailureAfterProgressUpdated); err != nil {
+			return nil, err
+		}
+	}
+
+	var aiVoiceAnalysis domain.AIVoiceAnalysis
+	var aigcReport aigc.Report
+	var violations []rules.Violation
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageQualityChecked) {
+		aiVoiceAnalysis, err = t.loadOrSaveFinalAIVoice(chapter, content, pending.PreviousFinalBody)
+		if err != nil {
+			return nil, err
+		}
+		aigcReport = aigc.Analyze(content)
+		violations = append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+		violations = append(violations, aigcViolation(aigcReport)...)
+		violations = append(violations, t.resourcePendingViolations(content)...)
+		gateBlocked := false
+		if reason := blockingViolationReason(violations); reason != "" {
+			commitAttempts := t.chapterCommitCheckpointCount(chapter) + 1
+			if commitAttempts >= maxMechanicalGateCommitAttempts {
+				violations = append(violations, rules.Violation{
+					Rule: "mechanical_gate_retry_limit", Target: reason,
+					Limit:  fmt.Sprintf("%d commit attempts", maxMechanicalGateCommitAttempts),
+					Actual: commitAttempts, Severity: rules.SeverityWarning,
+				})
+			} else {
+				gateBlocked = true
+			}
+		}
+		if err := t.saveAIGCReviewFiles(chapter, content, aigcReport, violations); err != nil {
+			return nil, fmt.Errorf("rewrite: save aigc review: %w: %w", errs.ErrStoreWrite, err)
+		}
+		if gateBlocked {
+			if err := t.enqueueMechanicalGateFailure(chapter, blockingViolationReason(violations)); err != nil {
+				return nil, fmt.Errorf("rewrite: enqueue mechanical gate failure: %w: %w", errs.ErrStoreWrite, err)
+			}
+		}
+		pending.Stage = domain.CommitStageQualityChecked
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("rewrite: save quality-checked stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageCheckpointed) {
+		if err := t.appendCommitCheckpoint(chapter); err != nil {
+			return nil, fmt.Errorf("rewrite: checkpoint commit: %w: %w", errs.ErrStoreWrite, err)
+		}
+		pending.Stage = domain.CommitStageCheckpointed
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("rewrite: save checkpointed stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+
+	ragIndexed := pending.RAGIndexed
+	var ragErr error
+	if pending.RAGError != "" {
+		ragErr = errors.New(pending.RAGError)
+	}
+	if !commitStageAtLeast(pending.Stage, domain.CommitStageRAGIndexed) {
+		ragIndexed, ragErr = t.sedimentChapterRAG(ctx, chapterRAGFactsFromArgs(a, wordCount))
+		if ragErr != nil {
+			slog.Warn("返工章节 RAG 沉淀失败，已交给 pending upserts", "module", "commit", "chapter", chapter, "err", ragErr)
+		}
+		pending.RAGIndexed = ragIndexed
+		pending.RAGError = errorString(ragErr)
+		pending.Stage = domain.CommitStageRAGIndexed
+		pending.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := t.store.Signals.SavePendingCommit(*pending); err != nil {
+			return nil, fmt.Errorf("rewrite: save rag-indexed stage: %w: %w", errs.ErrStoreWrite, err)
+		}
+	}
+
+	if aiVoiceAnalysis.Chapter == 0 {
+		if saved, loadErr := t.store.AIVoice.LoadRedFlags(chapter); loadErr == nil && saved != nil && saved.BodySHA256 == pending.BodySHA256 {
+			aiVoiceAnalysis = *saved
+		}
+	}
+	if aigcReport.Engine == "" {
+		aigcReport = aigc.Analyze(content)
+	}
+	if violations == nil {
+		violations = append(t.checkRules(content, wordCount), t.projectContaminationViolations(content)...)
+		violations = append(violations, aigcViolation(aigcReport)...)
+		violations = append(violations, t.resourcePendingViolations(content)...)
 	}
 	latest, _ := t.store.Progress.Load()
+	if latest != nil {
+		t.clearStaleFinalGlobalReview(latest)
+	}
 	remaining := []int{}
 	nextChapter := chapter + 1
 	flow := string(domain.FlowWriting)
@@ -1109,51 +1432,27 @@ func (t *CommitChapterTool) executeRewriteCommit(
 		nextChapter = latest.NextChapter()
 		flow = string(latest.Flow)
 	}
-	drained := len(remaining) == 0
-
-	if latest != nil {
-		t.clearStaleFinalGlobalReview(latest)
+	if err := t.store.Signals.ClearPendingCommit(); err != nil {
+		return nil, fmt.Errorf("rewrite: clear pending commit: %w: %w", errs.ErrStoreWrite, err)
 	}
-	ragIndexed, ragErr := t.sedimentChapterRAG(ctx, chapterRAGFacts{
-		Chapter:             chapter,
-		Summary:             summary,
-		Characters:          characters,
-		KeyEvents:           keyEvents,
-		TimelineEvents:      timelineEvents,
-		ForeshadowUpdates:   foreshadowUpdates,
-		RelationshipChanges: relationshipChanges,
-		StateChanges:        stateChanges,
-		ResourceUpdates:     resourceUpdates,
-		ResourceProposals:   resourceProposals,
-		HookType:            hookType,
-		DominantStrand:      dominantStrand,
-		OpeningDevice:       openingDevice,
-		EndingDevice:        endingDevice,
-		WordCount:           wordCount,
-	})
-	if ragErr != nil {
-		slog.Warn("返工章节 RAG 沉淀失败，跳过", "module", "commit", "chapter", chapter, "err", ragErr)
-	}
-
 	return json.Marshal(map[string]any{
-		"chapter":         chapter,
-		"rewritten":       true,
-		"mode":            mode,
-		"word_count":      wordCount,
-		"remaining_queue": remaining,
-		"queue_drained":   drained,
-		"next_chapter":    nextChapter,
-		"flow":            flow,
-		"opening_device":  openingDevice,
-		"ending_device":   endingDevice,
+		"chapter": chapter, "rewritten": true, "mode": mode, "word_count": wordCount,
+		"remaining_queue": remaining, "queue_drained": len(remaining) == 0,
+		"next_chapter": nextChapter, "flow": flow,
+		"opening_device": a.OpeningDevice, "ending_device": a.EndingDevice,
 		"review_required": true,
 		"review_reason":   fmt.Sprintf("第 %d 章返工终稿已提交，必须重新通过章级审阅", chapter),
-		"rule_violations": violations,
-		"aigc_report":     aigcReport,
-		"ai_voice":        aiVoiceAnalysis,
-		"rag_indexed":     ragIndexed,
-		"rag_error":       errorString(ragErr),
+		"rule_violations": violations, "aigc_report": aigcReport, "ai_voice": aiVoiceAnalysis,
+		"rag_indexed": ragIndexed, "rag_error": errorString(ragErr),
 	})
+}
+
+func (t *CommitChapterTool) loadOrSaveFinalAIVoice(chapter int, content, previous string) (domain.AIVoiceAnalysis, error) {
+	if saved, err := t.store.AIVoice.LoadRedFlags(chapter); err == nil && saved != nil &&
+		saved.BodySHA256 == reviewreport.BodySHA256(content) {
+		return *saved, nil
+	}
+	return t.saveFinalAIVoice(chapter, content, previous)
 }
 
 func mergeRewriteCharacterStage(st *store.Store, chapter int, submitted []domain.CharacterStageRecord) []domain.CharacterStageRecord {
@@ -1360,22 +1659,27 @@ func summarizeBeforeAfter(before, after string) string {
 // over those exact bytes.
 func requireCurrentDraftConsistency(st *store.Store, chapter int, content string) error {
 	scope := domain.ChapterScope(chapter)
-	draftCheckpoint := st.Checkpoints.LatestByStep(scope, "draft")
-	if draftCheckpoint == nil {
+	var latestBodyEvent int64
+	for _, step := range []string{"draft", "edit"} {
+		if cp := st.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > latestBodyEvent {
+			latestBodyEvent = cp.Seq
+		}
+	}
+	if latestBodyEvent == 0 {
 		return nil
 	}
 	wantDigest := "sha256:" + reviewreport.BodySHA256(content)
-	consistencyCheckpoint := st.Checkpoints.LatestByStep(scope, "consistency_check")
-	// edit_chapter 会有意修改 draft checkpoint 之后的字节。只要随后确实对当前
-	// 精确字节重新执行过 check_consistency，它就应成为新的提交凭证；过去先比较
-	// draft digest，导致 edit -> check -> commit 永远无法通过并循环重发提交参数。
-	if consistencyCheckpoint != nil && consistencyCheckpoint.Digest == wantDigest {
+	bodyCheckpoint, err := CurrentChapterBodyCheckpoint(st, chapter)
+	if err != nil {
+		return fmt.Errorf("第 %d 章当前草稿没有精确正文 checkpoint：%w", chapter, err)
+	}
+	if bodyCheckpoint.Digest != wantDigest {
+		return fmt.Errorf("第 %d 章提交内容与当前 draft artifact 不一致；请重新读取草稿后再检查: %w", chapter, errs.ErrToolPrecondition)
+	}
+	if _, err := requirePassedDraftHardConsistencyReceipt(st, chapter, content); err == nil {
 		return nil
 	}
-	if draftCheckpoint.Digest != wantDigest {
-		return fmt.Errorf("第 %d 章草稿在 draft checkpoint 后发生变化；请重新调用 draft_chapter 或 check_consistency 后再提交: %w", chapter, errs.ErrToolPrecondition)
-	}
-	return fmt.Errorf("第 %d 章当前草稿尚未通过 check_consistency（或检查后正文又被修改）；请回读 drafts/%02d.draft.md 并重新检查后再 commit_chapter: %w", chapter, chapter, errs.ErrToolPrecondition)
+	return fmt.Errorf("第 %d 章当前草稿尚未在本次正文 epoch 后通过 check_consistency 取得 passed=true 的 exact-body hard consistency receipt（或检查后正文/plan 又被修改）；请回读 drafts/%02d.draft.md 并重新检查后再 commit_chapter: %w", chapter, chapter, errs.ErrToolPrecondition)
 }
 
 func requireDraftPlanTitleMatch(st *store.Store, chapter int, content string) error {
@@ -1448,6 +1752,8 @@ func blockingViolationReason(violations []rules.Violation) string {
 func immediateMechanicalGateFailure(v rules.Violation) bool {
 	switch v.Rule {
 	case "aigc_ratio":
+		return v.Severity == rules.SeverityError
+	case rules.ASCIIChineseDialogueQuoteRule:
 		return v.Severity == rules.SeverityError
 	case "templated_dialogue_chain", "abstract_system_reassurance", "opaque_procedure_jargon", "dialogue_action_lead_repetition":
 		return true

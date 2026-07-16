@@ -462,8 +462,13 @@ func (s *ProgressStore) CompleteRewrite(chapter int) error {
 		}
 		p.PendingRewrites = remaining
 		if len(remaining) == 0 {
-			if err := domain.ValidateFlowTransition(p.Flow, domain.FlowWriting); err != nil {
-				return err
+			// A rewrite commit is a recoverable saga. The queue may have been
+			// drained immediately before a crash, so replaying CompleteRewrite
+			// from the persisted pending commit must remain idempotent.
+			if p.Flow != domain.FlowWriting {
+				if err := domain.ValidateFlowTransition(p.Flow, domain.FlowWriting); err != nil {
+					return err
+				}
 			}
 			p.Flow = domain.FlowWriting
 			p.RewriteReason = ""

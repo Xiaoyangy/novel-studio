@@ -194,6 +194,51 @@ func TestDialogueMicroPeriodChainSignalsNarrativeDynamics(t *testing.T) {
 	}
 }
 
+func TestStraightChineseDialogueMatchesTypographicQuoteMetrics(t *testing.T) {
+	typographic := `林澈抬头说：“先关灯。别让孩子踩到线。”
+
+“这边我来收，你去看摊主。”
+
+“嗯”`
+	straight := strings.NewReplacer("“", `"`, "”", `"`).Replace(typographic)
+
+	typographicDim := scoreNarrativeDynamics(typographic, Stats{Hanzi: len(hanzi(typographic))})
+	straightDim := scoreNarrativeDynamics(straight, Stats{Hanzi: len(hanzi(straight))})
+	for _, key := range []string{
+		"dialogue_paragraph_count",
+		"action_dialogue_lead_count",
+		"dialogue_turn_count",
+		"dialogue_micro_period_chain_turns",
+	} {
+		if got, want := intFromAny(straightDim.Stats[key]), intFromAny(typographicDim.Stats[key]); got != want {
+			t.Fatalf("straight quote %s=%d, want typographic parity %d: straight=%+v typographic=%+v", key, got, want, straightDim, typographicDim)
+		}
+	}
+	if got, want := dialogueRatio(straight), dialogueRatio(typographic); got != want {
+		t.Fatalf("straight dialogue ratio=%.3f, want typographic parity %.3f", got, want)
+	}
+	if got, want := quotedHanziRatio(straight), quotedHanziRatio(typographic); got != want {
+		t.Fatalf("straight quoted Hanzi ratio=%.3f, want typographic parity %.3f", got, want)
+	}
+}
+
+func TestStraightQuotedEnglishAndEmbeddedLabelsAreNotDialogue(t *testing.T) {
+	body := `项目名叫"青山夜市"，配置项 title="中文对白"，英文材料写着"hello world"。`
+	dimension := scoreNarrativeDynamics(body, Stats{Hanzi: len(hanzi(body))})
+	if got := intFromAny(dimension.Stats["dialogue_paragraph_count"]); got != 0 {
+		t.Fatalf("embedded labels counted as dialogue paragraphs: spans=%+v dimension=%+v", dialogueQuoteSpans(body), dimension)
+	}
+	if got := intFromAny(dimension.Stats["dialogue_turn_count"]); got != 0 {
+		t.Fatalf("embedded labels counted as dialogue turns: %+v", dimension)
+	}
+	if got := dialogueRatio(body); got != 0 {
+		t.Fatalf("embedded labels produced dialogue ratio %.3f", got)
+	}
+	if got := quotedHanziRatio(body); got != 0 {
+		t.Fatalf("embedded labels produced quoted Hanzi ratio %.3f", got)
+	}
+}
+
 func TestDialogueMicroPeriodChainBlocksNarrativeHumanAnchor(t *testing.T) {
 	stats := Stats{
 		Hanzi:               1800,

@@ -41,6 +41,16 @@ func inspectChapterWordContract(st *store.Store, content string) chapterWordCont
 }
 
 func requireChapterWordContract(st *store.Store, chapter int, content string) error {
+	// Every initial, resumed and rewrite commit passes this delivery boundary.
+	// Keep the metadata guard here as an early, retry-proof precondition so a
+	// forged legacy draft or a mechanical-gate retry limit cannot commit leaked
+	// planner/RAG/checkpoint fields to the final chapter.
+	if err := validateFictionProseMetadataFree(content); err != nil {
+		return fmt.Errorf("第 %d 章终稿完整性门禁未通过: %w", chapter, err)
+	}
+	if err := validateFictionProseTypography(content); err != nil {
+		return fmt.Errorf("第 %d 章终稿格式门禁未通过: %w", chapter, err)
+	}
 	result := inspectChapterWordContract(st, content)
 	if !result.Configured || result.Passed {
 		return nil

@@ -302,8 +302,9 @@ type TrendLanguagePlan struct {
 	ForbiddenUsage   string `json:"forbidden_usage,omitempty"`
 }
 
-// ReaderEntertainmentPlan 把“抓人、好笑、有爽点”从笼统风格词变成可验收的页面计划。
-// 它不替代因果推演，只约束既定事件以什么节奏和人物反应进入主视角正文。
+// ReaderEntertainmentPlan 把“抓人、好笑、有爽点”从笼统风格词变成写前候选池。
+// 它不替代因果推演，也不形成逐项正文验收：Drafter 可按现场择取、重排、替换或省略
+// 具体 beat，审阅只看整体读者效果；硬结果仍只来自 ChapterContract。
 type ReaderEntertainmentPlan struct {
 	OpeningBeat          string   `json:"opening_beat,omitempty"`
 	HumorBeats           []string `json:"humor_beats,omitempty"`
