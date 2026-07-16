@@ -104,6 +104,19 @@ type ArcOutline struct {
 // IsExpanded 判断弧是否已展开（有详细章节）。
 func (a *ArcOutline) IsExpanded() bool { return len(a.Chapters) > 0 }
 
+// ChapterSpan 返回该弧在全局章号空间中占用的章数。
+// 已展开弧使用真实章节数；尚未展开的骨架弧使用预估章节数预留位置，
+// 避免后续已展开弧因中间骨架暂未展开而获得不稳定的全局章号。
+func (a ArcOutline) ChapterSpan() int {
+	if a.IsExpanded() {
+		return len(a.Chapters)
+	}
+	if a.EstimatedChapters > 0 {
+		return a.EstimatedChapters
+	}
+	return 0
+}
+
 // TotalChapters 计算分层大纲的当前规划总章数。
 // 已展开弧按真实章节数计，骨架弧按 EstimatedChapters 计。
 // Progress.TotalChapters 用它判断长篇上下文策略；真正可写章节仍来自 FlattenOutline。
@@ -111,27 +124,25 @@ func TotalChapters(volumes []VolumeOutline) int {
 	n := 0
 	for _, v := range volumes {
 		for _, a := range v.Arcs {
-			if a.IsExpanded() {
-				n += len(a.Chapters)
-			} else {
-				n += a.EstimatedChapters
-			}
+			n += a.ChapterSpan()
 		}
 	}
 	return n
 }
 
-// FlattenOutline 将分层大纲展开为扁平章节列表，保持全局章节号连续。
+// FlattenOutline 将分层大纲展开为扁平章节列表。
+// 骨架弧不产生可写条目，但会按 EstimatedChapters 预留全局章号，因此结果
+// 可能有空档；这些空档只会在对应弧展开后被填入，不会让后续弧的章号前移。
 func FlattenOutline(volumes []VolumeOutline) []OutlineEntry {
 	var result []OutlineEntry
 	ch := 1
 	for _, v := range volumes {
 		for _, a := range v.Arcs {
-			for _, e := range a.Chapters {
-				e.Chapter = ch
+			for i, e := range a.Chapters {
+				e.Chapter = ch + i
 				result = append(result, e)
-				ch++
 			}
+			ch += a.ChapterSpan()
 		}
 	}
 	return result

@@ -20,6 +20,13 @@ const draftExternalEvaluatorRegistered = "registered_external_detector"
 
 const draftRerenderAuthorizationSource = "render_only_authorization"
 
+type DraftExternalRetestPolicy string
+
+const (
+	DraftExternalRetestPolicySamplingOptional DraftExternalRetestPolicy = "sampling_optional"
+	DraftExternalRetestPolicyAutomatedHard    DraftExternalRetestPolicy = "automated_hard"
+)
+
 // DraftExternalRerenderRequirement is written by the external draft judge when
 // a whole-chapter result is blocking. It prevents a structural diagnosis from
 // being "fixed" through a chain of tiny string replacements.
@@ -31,18 +38,28 @@ type DraftExternalRerenderRequirement struct {
 	RequiredDetector        string                        `json:"required_detector,omitempty"`
 	RequiredMode            string                        `json:"required_mode,omitempty"`
 	RequiredExternalRetests []DraftExternalRetestIdentity `json:"required_external_retests,omitempty"`
-	InitialDraftBodySHA256  string                        `json:"initial_draft_body_sha256,omitempty"`
-	AIProbabilityPercent    int                           `json:"ai_probability_percent"`
-	PassExclusivePercent    int                           `json:"pass_exclusive_percent"`
-	Summary                 string                        `json:"summary,omitempty"`
-	Evidence                []string                      `json:"evidence,omitempty"`
-	RevisionPlan            []string                      `json:"revision_plan,omitempty"`
-	AdviceComplete          bool                          `json:"advice_complete"`
+	// ExternalRetestPolicy makes the production semantics explicit in every new
+	// marker. Legacy markers without this field remain compatible: a true
+	// block_until_external_retest maps to automated_hard, otherwise they map to
+	// sampling_optional.
+	ExternalRetestPolicy DraftExternalRetestPolicy `json:"external_retest_policy"`
+	// BlockUntilExternalRetest is retained as a legacy compatibility alias.
+	// New readers use ExternalRetestPolicy; new hard markers write both fields so
+	// older readers still fail closed.
+	BlockUntilExternalRetest bool     `json:"block_until_external_retest,omitempty"`
+	InitialDraftBodySHA256   string   `json:"initial_draft_body_sha256,omitempty"`
+	AIProbabilityPercent     int      `json:"ai_probability_percent"`
+	PassExclusivePercent     int      `json:"pass_exclusive_percent"`
+	Summary                  string   `json:"summary,omitempty"`
+	Evidence                 []string `json:"evidence,omitempty"`
+	RevisionPlan             []string `json:"revision_plan,omitempty"`
+	AdviceComplete           bool     `json:"advice_complete"`
 }
 
-// DraftExternalRetestIdentity is one durable named-platform obligation. More
-// than one detector/mode may independently block the same body; a passing row
-// only clears its own identity.
+// DraftExternalRetestIdentity preserves which detector/mode produced a sampled
+// result. It is provenance by default, not a per-chapter production obligation.
+// Only an explicitly opted-in BlockUntilExternalRetest marker treats these
+// identities as hard requirements.
 type DraftExternalRetestIdentity struct {
 	Detector          string `json:"detector"`
 	Mode              string `json:"mode"`
@@ -76,12 +93,9 @@ type DraftExternalGateInspection struct {
 	// changed hash returns to the independent judge. Named-platform retests stay
 	// deferred until both earlier stages pass.
 	LocalSoftEditPending bool
-	// CurrentHashNamedRetestsPassed is true only when Status=approved and every
-	// registered detector/mode required by Requirement has a result bound to the
-	// exact CurrentBodySHA256 whose normalized score is strictly below the fixed
-	// 4% platform gate. Prose tools treat that payload as frozen; commit remains
-	// allowed. A newer explicit full-rerender request or a new blocking result
-	// moves routing out of this terminal prose state.
+	// CurrentHashNamedRetestsPassed is retained for the explicit opt-in hard
+	// external-detector policy. Human-operated sampling never sets it and never
+	// freezes or blocks an otherwise approved replacement hash.
 	CurrentHashNamedRetestsPassed bool
 	RegisteredDetection           *reviewreport.RegisteredExternalDetection
 }
@@ -105,10 +119,12 @@ func SetDraftExternalRerenderRequirement(projectDir string, requirement DraftExt
 	if requirement.Chapter <= 0 {
 		return fmt.Errorf("chapter must be > 0")
 	}
-	// A named platform retest is a durable obligation across every subsequent
-	// rewrite. DeepSeek or a local whole-text gate may add a newer structural
-	// reason, but neither is allowed to downgrade the required detector/mode to
-	// an independent-model-only marker.
+	if err := normalizeDraftExternalRetestPolicy(&requirement); err != nil {
+		return err
+	}
+	// Only an explicitly opted-in external retest is durable across rewrites.
+	// User-reported sampling markers are one-shot rewrite triggers and may be
+	// replaced by the current local/DeepSeek reason after the body hash changes.
 	incomingRegistered := RequiresRegisteredExternalRetest(&requirement)
 	if existing, err := loadDraftExternalRerenderRequirement(projectDir, requirement.Chapter); err != nil {
 		return err
@@ -123,6 +139,8 @@ func SetDraftExternalRerenderRequirement(projectDir string, requirement DraftExt
 		if requirement.InitialDraftBodySHA256 == "" {
 			requirement.InitialDraftBodySHA256 = existing.InitialDraftBodySHA256
 		}
+		requirement.ExternalRetestPolicy = DraftExternalRetestPolicyAutomatedHard
+		requirement.BlockUntilExternalRetest = true
 		requirement.Evidence = append(requirement.Evidence,
 			fmt.Sprintf("registered_external_retest_required:%s", strings.Join(RegisteredExternalRetestLabels(existing), ",")),
 		)
@@ -190,6 +208,9 @@ func loadDraftExternalRerenderRequirement(projectDir string, chapter int) (*Draf
 	}
 	if requirement.Chapter != chapter {
 		return nil, fmt.Errorf("marker chapter=%d, want %d", requirement.Chapter, chapter)
+	}
+	if err := normalizeDraftExternalRetestPolicy(&requirement); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &requirement, nil
 }
@@ -312,7 +333,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 	// stale drafts/NN.draft.md cannot hide a registered blocker when the marker
 	// has not yet been materialized (or was lost before the first rerender).
 	if inspection.FinalBodySHA256 != "" && inspection.FinalBodySHA256 != inspection.CurrentBodySHA256 {
-		finalRows, finalRowsErr := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, inspection.FinalBodySHA256)
+		finalRows, finalRowsErr := latestRegisteredExternalDetectionsForDraftGate(projectDir, chapter, inspection.FinalBodySHA256, requirement)
 		if finalRowsErr != nil {
 			return inspection, finalRowsErr
 		}
@@ -332,7 +353,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 			inspection.EvaluatedBodySHA256 = inspection.FinalBodySHA256
 		}
 	}
-	registeredRows, err := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, inspection.CurrentBodySHA256)
+	registeredRows, err := latestRegisteredExternalDetectionsForDraftGate(projectDir, chapter, inspection.CurrentBodySHA256, requirement)
 	if err != nil {
 		return inspection, err
 	}
@@ -360,6 +381,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		return inspection, nil
 	}
 	requiresRegisteredRetest := RequiresRegisteredExternalRetest(requirement)
+	registeredSamplingTrigger := isRegisteredExternalSamplingTrigger(requirement)
 	if requirement != nil {
 		inspection.EvaluatedBodySHA256 = strings.TrimSpace(requirement.EvaluatedBodySHA256)
 		if !requirement.AdviceComplete || len(requirement.RevisionPlan) == 0 {
@@ -374,7 +396,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		// appended a passing result for these exact bytes: that newer event clears
 		// the old platform blocker and lets the remaining stages decide the hash.
 		registeredMarkerCleared := (requirement.Source == "registered_external_detection" || requirement.Evaluator == draftExternalEvaluatorRegistered) &&
-			registeredExternalRetestsStrictlyPassedInRows(requirement, registeredRows)
+			registeredExternalMarkerClearedInRows(requirement, inspection.CurrentBodySHA256, registeredRows)
 		if inspection.CurrentBodySHA256 != "" && inspection.CurrentBodySHA256 == inspection.EvaluatedBodySHA256 {
 			if !registeredMarkerCleared {
 				inspection.Status = DraftExternalGateRerenderAuthorized
@@ -382,7 +404,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 				return inspection, nil
 			}
 		}
-		if requiresRegisteredRetest {
+		if requiresRegisteredRetest || registeredSamplingTrigger {
 			// Stage 1: never spend a named-platform retest on an intermediate hash
 			// that the deterministic whole-text/segment gate still rejects. The
 			// exact local marker authorizes one bounded full render while every
@@ -391,14 +413,14 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 				inspection.Requirement = localRequirement
 				inspection.EvaluatedBodySHA256 = inspection.CurrentBodySHA256
 				inspection.Status = DraftExternalGateRerenderAuthorized
-				inspection.RegisteredRetestDeferred = true
+				inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 				return inspection, nil
 			}
 			if initialDraft := strings.TrimSpace(requirement.InitialDraftBodySHA256); initialDraft != "" &&
 				inspection.CurrentBodySHA256 == initialDraft && inspection.CurrentBodySHA256 != inspection.EvaluatedBodySHA256 &&
 				inspection.FinalBodySHA256 == inspection.EvaluatedBodySHA256 {
 				inspection.Status = DraftExternalGateRerenderAuthorized
-				inspection.RegisteredRetestDeferred = true
+				inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 				return inspection, nil
 			}
 		}
@@ -436,7 +458,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		return inspection, nil
 	}
 	if status.Blocking || float64(status.AIProbabilityPercent) >= aigc.PassExclusivePercent {
-		if requiresRegisteredRetest {
+		if requirement != nil {
 			clone := *requirement
 			clone.EvaluatedBodySHA256 = inspection.CurrentBodySHA256
 			clone.Source = "deepseek_ai_judge"
@@ -452,7 +474,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 			} else {
 				inspection.Status = DraftExternalGateAdviceIncomplete
 			}
-			inspection.RegisteredRetestDeferred = true
+			inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 			return inspection, nil
 		}
 		// A crash may leave the result but not its marker. Re-running the cached
@@ -460,11 +482,12 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		inspection.Status = DraftExternalGateRejudgePending
 		return inspection, nil
 	}
-	if requiresRegisteredRetest {
+	if requirement != nil {
 		// DeepSeek passed the exact current hash. Re-run the effective local gate
-		// with that corroboration before scheduling a named detector. Structural
-		// failures still consume the bounded full-render budget; a remaining soft
-		// failure permits one hash-changing edit while commit stays fail-closed.
+		// with that corroboration before approval. Structural failures still
+		// consume the bounded full-render budget; a remaining soft failure permits
+		// one hash-changing edit while commit stays fail-closed. This applies to
+		// sampled external failures too, even though no follow-up sample is needed.
 		content, loadErr := st.Drafts.LoadDraft(chapter)
 		if loadErr != nil {
 			return inspection, loadErr
@@ -476,19 +499,26 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 				inspection.Requirement = localRequirement
 				inspection.EvaluatedBodySHA256 = inspection.CurrentBodySHA256
 				inspection.Status = DraftExternalGateRerenderAuthorized
-				inspection.RegisteredRetestDeferred = true
+				inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 				return inspection, nil
 			}
 		}
 		if localSoft {
 			inspection.Status = DraftExternalGateRejudgePending
 			inspection.LocalSoftEditPending = true
-			inspection.RegisteredRetestDeferred = true
+			inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 			return inspection, nil
 		}
 
-		// Stage 3: only a current hash that passed both the deterministic local
-		// gate and DeepSeek may consume the named-platform retest obligation.
+		// Stage 3 exists only for an explicitly opted-in automated external gate.
+		// Human-operated detector results are sampling signals: once the replacement
+		// hash passes the local gate and DeepSeek, production continues without a
+		// follow-up result. A later user-reported high score on that exact hash will
+		// independently trigger another bounded rewrite.
+		if !requiresRegisteredRetest {
+			inspection.Status = DraftExternalGateApproved
+			return inspection, nil
+		}
 		missingRegistered := false
 		for _, identity := range registeredExternalRetestIdentities(requirement) {
 			registered, registeredErr := reviewreport.LatestRegisteredExternalDetection(
@@ -531,10 +561,107 @@ func draftExternalLocalGateDisposition(content string, report aigc.Report, gate 
 	return structural, rawGate.Enforced && !structural
 }
 
-// RequiresRegisteredExternalRetest distinguishes a named human-triggered
-// detector requirement from the independent model-judge requirement.
+func normalizeDraftExternalRetestPolicy(requirement *DraftExternalRerenderRequirement) error {
+	if requirement == nil {
+		return nil
+	}
+	switch requirement.ExternalRetestPolicy {
+	case "":
+		if requirement.BlockUntilExternalRetest {
+			requirement.ExternalRetestPolicy = DraftExternalRetestPolicyAutomatedHard
+		} else {
+			requirement.ExternalRetestPolicy = DraftExternalRetestPolicySamplingOptional
+		}
+	case DraftExternalRetestPolicySamplingOptional:
+		// The explicit policy wins over a contradictory legacy alias.
+		requirement.BlockUntilExternalRetest = false
+	case DraftExternalRetestPolicyAutomatedHard:
+		requirement.BlockUntilExternalRetest = true
+	default:
+		return fmt.Errorf("unsupported external_retest_policy %q", requirement.ExternalRetestPolicy)
+	}
+	if requirement.ExternalRetestPolicy == DraftExternalRetestPolicyAutomatedHard {
+		if err := validateAutomatedHardExternalRetestIdentities(requirement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAutomatedHardExternalRetestIdentities(requirement *DraftExternalRerenderRequirement) error {
+	if requirement == nil {
+		return fmt.Errorf("automated_hard external retest policy requires a marker")
+	}
+	legacyDetector := strings.TrimSpace(requirement.RequiredDetector)
+	legacyMode := strings.TrimSpace(requirement.RequiredMode)
+	if (legacyDetector == "") != (legacyMode == "") {
+		return fmt.Errorf("automated_hard external retest policy requires a complete required_detector/required_mode pair")
+	}
+	identityCount := 0
+	if legacyDetector != "" {
+		identityCount++
+	}
+	for i, identity := range requirement.RequiredExternalRetests {
+		detector := strings.TrimSpace(identity.Detector)
+		mode := strings.TrimSpace(identity.Mode)
+		if detector == "" || mode == "" {
+			return fmt.Errorf("automated_hard external retest identity %d requires non-empty detector and mode", i)
+		}
+		if triggerSHA := strings.TrimSpace(identity.TriggerBodySHA256); triggerSHA != "" && !validExternalBodySHA256(triggerSHA) {
+			return fmt.Errorf("automated_hard external retest identity %d has invalid trigger_body_sha256", i)
+		}
+		identityCount++
+	}
+	if identityCount == 0 {
+		return fmt.Errorf("automated_hard external retest policy requires at least one detector/mode identity")
+	}
+	return nil
+}
+
+func effectiveDraftExternalRetestPolicy(requirement *DraftExternalRerenderRequirement) DraftExternalRetestPolicy {
+	if requirement == nil {
+		return DraftExternalRetestPolicySamplingOptional
+	}
+	switch requirement.ExternalRetestPolicy {
+	case DraftExternalRetestPolicySamplingOptional, DraftExternalRetestPolicyAutomatedHard:
+		return requirement.ExternalRetestPolicy
+	default:
+		// Backward compatibility for markers written before
+		// external_retest_policy existed.
+		if requirement.BlockUntilExternalRetest {
+			return DraftExternalRetestPolicyAutomatedHard
+		}
+		return DraftExternalRetestPolicySamplingOptional
+	}
+}
+
+// RequiresRegisteredExternalRetest is deliberately opt-in. Human-triggered
+// detectors are sampled by the user and therefore never become an implicit
+// per-chapter production dependency merely because a marker names them.
 func RequiresRegisteredExternalRetest(requirement *DraftExternalRerenderRequirement) bool {
-	return requirement != nil && (requirement.Evaluator == draftExternalEvaluatorRegistered || len(requirement.RequiredExternalRetests) > 0)
+	return requirement != nil &&
+		effectiveDraftExternalRetestPolicy(requirement) == DraftExternalRetestPolicyAutomatedHard &&
+		len(registeredExternalRetestIdentities(requirement)) > 0
+}
+
+func isRegisteredExternalSamplingTrigger(requirement *DraftExternalRerenderRequirement) bool {
+	return requirement != nil && (requirement.Source == "registered_external_detection" || requirement.Evaluator == draftExternalEvaluatorRegistered)
+}
+
+// latestRegisteredExternalDetectionsForDraftGate keeps a human-operated
+// sampling journal observational. A missing or malformed optional journal is
+// equivalent to no usable sample and must not become a production dependency.
+// An explicitly configured automated-hard marker still fails closed because
+// that deployment has made the journal part of its release contract.
+func latestRegisteredExternalDetectionsForDraftGate(projectDir string, chapter int, bodySHA256 string, requirement *DraftExternalRerenderRequirement) ([]reviewreport.RegisteredExternalDetection, error) {
+	rows, err := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, bodySHA256)
+	if err != nil {
+		if RequiresRegisteredExternalRetest(requirement) {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return rows, nil
 }
 
 func registeredExternalRetestIdentities(requirement *DraftExternalRerenderRequirement) []DraftExternalRetestIdentity {
@@ -561,13 +688,7 @@ func RegisteredExternalRetestLabels(requirement *DraftExternalRerenderRequiremen
 	return labels
 }
 
-// registeredExternalRetestsStrictlyPassedInRows is deliberately independent
-// of a persisted marker's pass_exclusive_percent. Named-platform acceptance is
-// a fixed protocol boundary: every required detector/mode must score <4% for
-// the exact body. A malformed or legacy marker with a looser threshold must
-// never freeze prose as if it had met the current contract.
-func registeredExternalRetestsStrictlyPassedInRows(requirement *DraftExternalRerenderRequirement, rows []reviewreport.RegisteredExternalDetection) bool {
-	identities := registeredExternalRetestIdentities(requirement)
+func registeredExternalIdentitiesStrictlyPassedInRows(identities []DraftExternalRetestIdentity, rows []reviewreport.RegisteredExternalDetection) bool {
 	if len(identities) == 0 {
 		return false
 	}
@@ -589,6 +710,57 @@ func registeredExternalRetestsStrictlyPassedInRows(requirement *DraftExternalRer
 		}
 	}
 	return true
+}
+
+// registeredExternalRetestsStrictlyPassedInRows is deliberately independent
+// of a persisted marker's pass_exclusive_percent. Automated-hard acceptance is
+// a fixed protocol boundary: every required detector/mode must score <4% for
+// the exact body. A malformed or legacy marker with a looser threshold must
+// never freeze prose as if it had met the current contract.
+func registeredExternalRetestsStrictlyPassedInRows(requirement *DraftExternalRerenderRequirement, rows []reviewreport.RegisteredExternalDetection) bool {
+	return registeredExternalIdentitiesStrictlyPassedInRows(registeredExternalRetestIdentities(requirement), rows)
+}
+
+// registeredExternalMarkerClearedInRows distinguishes a same-payload sampling
+// correction from an automated-hard retest contract. Optional sampling markers
+// may contain identities accumulated by an older build; only identities bound
+// to the marker's current body may participate in clearing it. Historical-body
+// identities can therefore never turn a missing user sample into a production
+// dependency.
+func registeredExternalMarkerClearedInRows(requirement *DraftExternalRerenderRequirement, bodySHA256 string, rows []reviewreport.RegisteredExternalDetection) bool {
+	if requirement == nil {
+		return false
+	}
+	if RequiresRegisteredExternalRetest(requirement) {
+		return registeredExternalRetestsStrictlyPassedInRows(requirement, rows)
+	}
+	bodySHA256 = strings.ToLower(strings.TrimSpace(bodySHA256))
+	if bodySHA256 == "" || bodySHA256 != strings.ToLower(strings.TrimSpace(requirement.EvaluatedBodySHA256)) {
+		return false
+	}
+	var exactBodyIdentities []DraftExternalRetestIdentity
+	for _, identity := range registeredExternalRetestIdentities(requirement) {
+		triggerSHA := strings.ToLower(strings.TrimSpace(identity.TriggerBodySHA256))
+		if triggerSHA == bodySHA256 {
+			exactBodyIdentities = appendRegisteredExternalRetestIdentity(exactBodyIdentities, identity)
+			continue
+		}
+		if triggerSHA != "" {
+			continue
+		}
+		// Some legacy markers omitted trigger_body_sha256. Treat such an identity
+		// as current only when an exact-body row for it actually exists; never
+		// manufacture a missing obligation from the absent hash.
+		for _, row := range rows {
+			if strings.EqualFold(strings.TrimSpace(row.Detector), strings.TrimSpace(identity.Detector)) &&
+				strings.EqualFold(strings.TrimSpace(row.Mode), strings.TrimSpace(identity.Mode)) {
+				identity.TriggerBodySHA256 = bodySHA256
+				exactBodyIdentities = appendRegisteredExternalRetestIdentity(exactBodyIdentities, identity)
+				break
+			}
+		}
+	}
+	return registeredExternalIdentitiesStrictlyPassedInRows(exactBodyIdentities, rows)
 }
 
 func draftCurrentHashNamedPassFrozen(inspection DraftExternalGateInspection) bool {
@@ -614,10 +786,33 @@ func InspectRegisteredExternalRetestsForBody(projectDir string, chapter int, bod
 		return result, err
 	}
 	result.Requirement = requirement
-	identities := registeredExternalRetestIdentities(requirement)
-	rows, err := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, bodySHA256)
+	var identities []DraftExternalRetestIdentity
+	if RequiresRegisteredExternalRetest(requirement) {
+		identities = registeredExternalRetestIdentities(requirement)
+	}
+	rows, err := latestRegisteredExternalDetectionsForDraftGate(projectDir, chapter, bodySHA256, requirement)
 	if err != nil {
 		return result, err
+	}
+	// A persisted optional marker is itself durable evidence that this exact
+	// payload was sampled high. Losing or corrupting the observational journal
+	// must not turn the already-known rejected bytes into a delivery pass. A
+	// later same-identity low row on the same SHA may still clear the marker; an
+	// old-body marker never affects a replacement body.
+	if requirement != nil && !RequiresRegisteredExternalRetest(requirement) &&
+		isRegisteredExternalSamplingTrigger(requirement) &&
+		strings.EqualFold(strings.TrimSpace(requirement.EvaluatedBodySHA256), strings.TrimSpace(bodySHA256)) &&
+		float64(requirement.AIProbabilityPercent) >= aigc.PassExclusivePercent &&
+		!registeredExternalMarkerClearedInRows(requirement, bodySHA256, rows) {
+		labels := RegisteredExternalRetestLabels(requirement)
+		label := "registered-sampling-marker"
+		if len(labels) > 0 {
+			label = strings.Join(labels, ",")
+		}
+		result.Required = true
+		result.Approved = false
+		result.Blocking = []string{fmt.Sprintf("%s=marker %.2f%%", label, float64(requirement.AIProbabilityPercent))}
+		return result, nil
 	}
 	rowByIdentity := make(map[string]reviewreport.RegisteredExternalDetection, len(rows))
 	identityKey := func(detector, mode string) string {
@@ -682,9 +877,10 @@ func registeredExternalRerenderRequirement(detection reviewreport.RegisteredExte
 		Chapter: detection.Chapter, EvaluatedBodySHA256: strings.TrimSpace(detection.BodySHA256),
 		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
 		RequiredDetector: strings.TrimSpace(detection.Detector), RequiredMode: strings.TrimSpace(detection.Mode),
+		ExternalRetestPolicy: DraftExternalRetestPolicySamplingOptional,
 		AIProbabilityPercent: int(math.Round(detection.NormalizedScorePercent)),
 		PassExclusivePercent: int(aigc.PassExclusivePercent),
-		Summary: fmt.Sprintf("%s/%s 整篇检测 %.2f%%，当前正文必须整章重渲染并以同 detector/mode 复测新哈希。",
+		Summary: fmt.Sprintf("%s/%s 抽查整篇检测 %.2f%%，当前正文必须整章重渲染；替换稿通过本地门禁、DeepSeek 与一致性检查后即可继续生产，不等待人工复测。",
 			strings.TrimSpace(detection.Detector), strings.TrimSpace(detection.Mode), detection.NormalizedScorePercent),
 		Evidence: []string{
 			fmt.Sprintf("registered_external_detection:%s/%s", strings.TrimSpace(detection.Detector), strings.TrimSpace(detection.Mode)),
@@ -693,26 +889,43 @@ func registeredExternalRerenderRequirement(detection reviewreport.RegisteredExte
 		RevisionPlan: []string{
 			"保留结果事实，重新设计主视角选择链、场景承压和段落功能，禁止局部同义替换。",
 			"让对白通过漏答、打断、动作和权力转移发生，不按问答模板传递信息。",
-			"整章覆盖后冻结新正文，并用同一 detector/mode 对精确 payload 复测；严格低于 4% 才可提交。",
+			"整章覆盖后冻结新正文，依次通过本地 AIGC 门禁、DeepSeek 裸正文判定和事实一致性检查；外部平台仅由用户抽查，缺少复测结果不得阻塞提交。",
 		},
 		AdviceComplete: true,
 	}
+	priorIsAutomatedHard := RequiresRegisteredExternalRetest(prior)
 	if prior != nil {
 		requirement.InitialDraftBodySHA256 = strings.TrimSpace(prior.InitialDraftBodySHA256)
 	}
-	requirement.RequiredExternalRetests = registeredExternalRetestIdentities(prior)
-	requirement.RequiredExternalRetests = appendRegisteredExternalRetestIdentity(requirement.RequiredExternalRetests, DraftExternalRetestIdentity{
-		Detector: detection.Detector, Mode: detection.Mode, TriggerBodySHA256: detection.BodySHA256,
-	})
-	if prior != nil && len(prior.RevisionPlan) > 0 {
-		requirement.RevisionPlan = append([]string(nil), prior.RevisionPlan...)
+	if priorIsAutomatedHard {
+		requirement.ExternalRetestPolicy = DraftExternalRetestPolicyAutomatedHard
+		requirement.BlockUntilExternalRetest = true
+		requirement.RequiredDetector = strings.TrimSpace(prior.RequiredDetector)
+		requirement.RequiredMode = strings.TrimSpace(prior.RequiredMode)
+		requirement.RequiredExternalRetests = registeredExternalRetestIdentities(prior)
+		if len(prior.RevisionPlan) > 0 {
+			requirement.RevisionPlan = append([]string(nil), prior.RevisionPlan...)
+		}
+	}
+	// Optional user sampling is exact-payload provenance, not a chapter-lifetime
+	// contract. Start a fresh identity set for each sampled body. The append-only
+	// detection log retains history without making an old detector/mode or its
+	// revision wording a requirement for the replacement hash.
+	if !priorIsAutomatedHard {
+		// This function is the user-sampling bridge. A sampled detector remains
+		// provenance only and must never be promoted into an unrelated deployment's
+		// explicit automated_hard identity set.
+		requirement.RequiredExternalRetests = appendRegisteredExternalRetestIdentity(requirement.RequiredExternalRetests, DraftExternalRetestIdentity{
+			Detector: detection.Detector, Mode: detection.Mode, TriggerBodySHA256: detection.BodySHA256,
+		})
 	}
 	return &requirement
 }
 
-// SetRegisteredExternalRerenderRequirement persists the named-detector
-// contract so changing the prose hash cannot silently fall back to the
-// independent model judge.
+// SetRegisteredExternalRerenderRequirement persists one user-reported sampling
+// failure as a rewrite trigger. The detector identity remains auditable, but
+// the replacement hash is released by automated local/DeepSeek/consistency
+// gates and does not wait for another human-operated platform result.
 func SetRegisteredExternalRerenderRequirement(projectDir string, detection reviewreport.RegisteredExternalDetection) error {
 	if detection.Chapter <= 0 || strings.TrimSpace(detection.Detector) == "" || strings.TrimSpace(detection.Mode) == "" || !validExternalBodySHA256(detection.BodySHA256) {
 		return fmt.Errorf("registered external detection requires chapter, non-empty detector/mode, and a 64-hex body SHA")
@@ -761,7 +974,7 @@ func RequireDraftExternalApprovalWithStore(st *store.Store, chapter int) error {
 		return nil
 	case DraftExternalGateApproved:
 		if RequiresRegisteredExternalRetest(inspection.Requirement) && !inspection.CurrentHashNamedRetestsPassed {
-			return fmt.Errorf("第 %d 章命名外部检测义务尚未对当前精确哈希全部达到严格 <%.0f%%；Approved 状态本身不能替代 fixed-threshold named receipt，禁止提交: %w",
+			return fmt.Errorf("第 %d 章显式配置的自动外部门禁尚未对当前精确哈希全部达到严格 <%.0f%%；用户手工抽查不会创建该义务，禁止提交: %w",
 				chapter, aigc.PassExclusivePercent, errs.ErrToolPrecondition)
 		}
 		return nil
@@ -774,7 +987,7 @@ func RequireDraftExternalApprovalWithStore(st *store.Store, chapter int) error {
 			return fmt.Errorf("第 %d 章当前哈希已通过 DeepSeek，但本地非结构性 AIGC 门禁仍未通过；只允许按 rewrite_focus 定向 edit_chapter 一次，提交继续保持关闭，编辑后必须复判新哈希: %w", chapter, errs.ErrToolPrecondition)
 		}
 		if inspection.RequiresRegisteredRetest && inspection.Requirement != nil {
-			return fmt.Errorf("第 %d 章草稿已产生新哈希，尚未完成 %s 的同 payload 外部复测，禁止继续修改或提交: %w",
+			return fmt.Errorf("第 %d 章草稿已产生新哈希，显式自动外部门禁尚未完成 %s 的同 payload 复测，禁止继续修改或提交: %w",
 				chapter, strings.Join(RegisteredExternalRetestLabels(inspection.Requirement), ", "), errs.ErrToolPrecondition)
 		}
 		managedPending, pendingErr := pipelineManagedCurrentDraftNeedsDeepSeekJudge(st, chapter, inspection.CurrentBodySHA256)
@@ -800,7 +1013,7 @@ func draftExternalRerenderInstruction(requirement *DraftExternalRerenderRequirem
 		source = "本地整章机械门禁"
 	} else if requirement.Source == "deepseek_ai_judge" {
 		source = "DeepSeek 当前哈希外判"
-	} else if RequiresRegisteredExternalRetest(requirement) {
+	} else if isRegisteredExternalSamplingTrigger(requirement) {
 		source = fmt.Sprintf("注册外部检测 %s", strings.Join(RegisteredExternalRetestLabels(requirement), ", "))
 	}
 	instruction := fmt.Sprintf(

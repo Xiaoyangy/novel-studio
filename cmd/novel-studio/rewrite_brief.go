@@ -422,7 +422,7 @@ func renderRevisionBrief(plan revisionPlan, reviewMarkdown string) string {
 	b.WriteString("## 门禁结论\n\n")
 	fmt.Fprintf(&b, "- 红旗阻断：%t\n", plan.HasRed)
 	fmt.Fprintf(&b, "- 黄旗存在：%t\n", plan.HasYellow)
-	b.WriteString("- AI率目标：本地与外部均严格 <4%（4% 也失败）；不得追求 0% 而牺牲正文质量\n")
+	b.WriteString("- 自动 AI 门禁目标：本地与 DeepSeek 当前哈希均严格 <4%（4% 也失败）；不得追求 0% 而牺牲正文质量。外部平台只由用户抽查，高分否决所绑定的当前 SHA，但缺少抽查结果不阻塞生产\n")
 	if len(plan.Sources) > 0 {
 		fmt.Fprintf(&b, "- 汇总来源：%s\n", strings.Join(plan.Sources, "、"))
 	}
@@ -432,7 +432,7 @@ func renderRevisionBrief(plan revisionPlan, reviewMarkdown string) string {
 	b.WriteString("- 黄旗只在能提升人物、节奏、信息清晰度或语言质感时采用；若只是为了指标换词，保留原文。\n")
 	b.WriteString("- 禁止注水、乱码、OCR 脏码、随机汉字、冷僻词堆砌、无信息清单、拟声长串或刻意错别字。\n")
 	b.WriteString("- 不新增改变主线事实的人名、组织、合同、授权、证据或能力。\n")
-	b.WriteString("- 注册外部 detector/mode 必须对改后正式正文的精确 SHA 完成同 payload 复测，并严格 `<4%`；另一平台、旧 draft 或旧 SHA 的低分不能替代。\n")
+	b.WriteString("- 用户报告的 detector/mode 结果必须绑定精确 SHA；高分只触发该 SHA 的整章返工。改后正文通过本地、DeepSeek 与一致性门禁即可继续，不要求逐章人工复测，也不得把旧 draft 或旧 SHA 的低分冒充新稿通过。\n")
 
 	b.WriteString("\n## 必须修正\n\n")
 	writeStringList(&b, plan.RedReasons)

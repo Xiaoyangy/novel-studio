@@ -210,6 +210,9 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	existingPending, err := t.store.Signals.LoadPendingCommit()
 	if err != nil {
 		return nil, fmt.Errorf("load pending commit: %w: %w", errs.ErrStoreRead, err)
@@ -1957,8 +1960,8 @@ func (t *CommitChapterTool) rollingVolumeOutlineSignals(chapter int) (due string
 	}
 	currentIdx := -1
 	firstChapter := 0
-	for i, vol := range volumes {
-		lo, hi := volumeChapterRange(vol)
+	for i := range volumes {
+		lo, hi := volumeChapterRange(volumes, i)
 		if lo == 0 {
 			continue
 		}
@@ -2004,20 +2007,26 @@ func (t *CommitChapterTool) rollingVolumeOutlineSignals(chapter int) (due string
 	return due, review
 }
 
-// volumeChapterRange 返回一卷覆盖的章号区间；卷未详细展开时返回 (0,0)。
-func volumeChapterRange(vol domain.VolumeOutline) (lo, hi int) {
-	for _, arc := range vol.Arcs {
-		for _, ch := range arc.Chapters {
-			if ch.Chapter <= 0 {
-				continue
-			}
-			if lo == 0 || ch.Chapter < lo {
-				lo = ch.Chapter
-			}
-			if ch.Chapter > hi {
-				hi = ch.Chapter
-			}
-		}
+// volumeChapterRange 返回目标卷在稳定全局章号空间中的覆盖区间。
+// 分层大纲中的 OutlineEntry.Chapter 通常为零，因此不能读取条目自带章号；
+// 尚未展开的骨架弧也必须按 EstimatedChapters 占位。
+func volumeChapterRange(volumes []domain.VolumeOutline, target int) (lo, hi int) {
+	if target < 0 || target >= len(volumes) {
+		return 0, 0
 	}
-	return lo, hi
+	cursor := 1
+	for i, vol := range volumes {
+		span := 0
+		for _, arc := range vol.Arcs {
+			span += arc.ChapterSpan()
+		}
+		if i == target {
+			if span <= 0 {
+				return 0, 0
+			}
+			return cursor, cursor + span - 1
+		}
+		cursor += span
+	}
+	return 0, 0
 }

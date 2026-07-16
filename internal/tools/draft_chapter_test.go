@@ -260,7 +260,7 @@ func TestDraftChapterConsumesExactlyOneExternalRerenderToken(t *testing.T) {
 	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.Requirement == nil {
 		t.Fatalf("gate after full write = %+v, err=%v", inspection, err)
 	}
-	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "必须先运行外部草稿复判") {
+	if _, err := NewDraftChapterTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "必须先运行 DeepSeek provider judge") {
 		t.Fatalf("expected second rerender rejection, got %v", err)
 	}
 }

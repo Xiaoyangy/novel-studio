@@ -22,4 +22,5 @@
 //   - WritingAssetStore: 可启用/停用/组合的长期写法资产
 //   - ResourceLedgerStore: 已入账资源与待确认提案
 //   - RAGStore: RAG 索引状态与 retrieval trace
+//   - PlanningStore: 非 canonical 的全书/卷因果骨架与分章 projected 计划链
 package store

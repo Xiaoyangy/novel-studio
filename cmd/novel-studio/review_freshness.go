@@ -105,14 +105,14 @@ func inspectCurrentChapterReview(projectDir string, chapter int) currentChapterR
 		}
 	}
 
-	// A human-triggered detector result can be registered after an otherwise
-	// current review was produced. Bind every still-blocking detector/mode
-	// identity to the mechanical gate, checkpoint journal and unified report so
-	// appending one low result from another identity cannot revive that review.
+	// A user-reported high sample can be registered after an otherwise current
+	// review was produced. Bind every readable, still-blocking identity to the
+	// mechanical gate, checkpoint journal and unified report so a low result from
+	// another identity cannot revive that review. The sampling journal is not a
+	// production dependency: if it is unreadable, registration remains fail
+	// closed but chapter review freshness continues on automated evidence.
 	registered, registeredErr := reviewreport.LatestRegisteredExternalDetections(projectDir, chapter, result.BodySHA256)
-	if registeredErr != nil {
-		result.Issues = append(result.Issues, "meta/external_detection_log.jsonl (registered external detection unreadable)")
-	} else {
+	if registeredErr == nil {
 		checkpoints := store.NewStore(projectDir).Checkpoints.All()
 		for _, detection := range registered {
 			if detection.NormalizedScorePercent < aigc.PassExclusivePercent {
@@ -200,9 +200,9 @@ func hasRegisteredExternalDetectionCheckpoint(checkpoints []domain.Checkpoint, c
 }
 
 // currentRegisteredExternalDeliveryIssues is deliberately delivery-only. A
-// blocking current-hash result is a valid completed review and must be allowed
-// to enter rewrite, while an unresolved named-platform rerender/retest contract
-// must never coexist with a delivery snapshot.
+// user-reported high result bound to the exact current hash requires a rewrite;
+// absence of a spot-check result never blocks. Missing identities can only come
+// from an explicitly configured automated external gate.
 func currentRegisteredExternalDeliveryIssues(projectDir string, chapter int) []string {
 	chapterPath := filepath.Join(projectDir, "chapters", fmt.Sprintf("%02d.md", chapter))
 	body, readErr := os.ReadFile(chapterPath)
@@ -218,12 +218,18 @@ func currentRegisteredExternalDeliveryIssues(projectDir string, chapter int) []s
 	if !inspection.Required || inspection.Approved {
 		return nil
 	}
-	details := append([]string(nil), inspection.Blocking...)
+	if len(inspection.Blocking) > 0 {
+		return []string{fmt.Sprintf(
+			"reviews/drafts/%02d current exact-hash external sampling result requires rewrite (%s)",
+			chapter, strings.Join(inspection.Blocking, "; "),
+		)}
+	}
+	details := make([]string, 0, len(inspection.Missing))
 	if len(inspection.Missing) > 0 {
 		details = append(details, "missing="+strings.Join(inspection.Missing, ","))
 	}
 	return []string{fmt.Sprintf(
-		"reviews/drafts/%02d registered external gate unresolved (required exact-payload retest: %s)",
+		"reviews/drafts/%02d explicit automated external gate unresolved (required exact-payload retest: %s)",
 		chapter, strings.Join(details, "; "),
 	)}
 }

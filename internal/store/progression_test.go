@@ -9,6 +9,50 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
 
+func TestChapterOutlineMapsReserveSkeletonArcChapterNumbers(t *testing.T) {
+	s := NewStore(t.TempDir())
+	volumes := []domain.VolumeOutline{
+		{
+			Index: 1,
+			Title: "第一卷",
+			Arcs: []domain.ArcOutline{
+				{Index: 1, Chapters: []domain.OutlineEntry{{Title: "一"}, {Title: "二"}}},
+				{Index: 2, EstimatedChapters: 3},
+			},
+		},
+		{
+			Index: 2,
+			Title: "第二卷",
+			Arcs: []domain.ArcOutline{{
+				Index:    1,
+				Title:    "后续弧",
+				Goal:     "承接前卷投射状态",
+				Chapters: []domain.OutlineEntry{{Title: "六"}, {Title: "七"}},
+			}},
+		},
+	}
+	if err := s.Outline.SaveLayeredOutline(volumes); err != nil {
+		t.Fatalf("SaveLayeredOutline: %v", err)
+	}
+	if err := s.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	outline, positions, err := s.chapterOutlineMaps()
+	if err != nil {
+		t.Fatalf("chapterOutlineMaps: %v", err)
+	}
+	if _, exists := outline[3]; exists {
+		t.Fatalf("unexpanded skeleton chapter must stay unresolved: %+v", outline[3])
+	}
+	if got := outline[6]; got.Chapter != 6 || got.Title != "六" {
+		t.Fatalf("later detailed arc shifted across skeleton reservation: %+v", got)
+	}
+	if got := positions[6]; got.Volume != 2 || got.Arc != 1 {
+		t.Fatalf("later detailed chapter position drifted: %+v", got)
+	}
+}
+
 func TestRefreshChapterProgressLedgerBuildsReadableHandoff(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)

@@ -141,12 +141,13 @@ func TestRegisteredExternalHighOverridesPassingIndependentJudge(t *testing.T) {
 	}
 	inspection, err := InspectDraftExternalGate(dir, 1)
 	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized ||
-		inspection.Requirement == nil || !RequiresRegisteredExternalRetest(inspection.Requirement) {
+		inspection.Requirement == nil || !isRegisteredExternalSamplingTrigger(inspection.Requirement) ||
+		RequiresRegisteredExternalRetest(inspection.Requirement) {
 		t.Fatalf("registered high score was diluted by model pass: inspection=%+v err=%v", inspection, err)
 	}
 }
 
-func TestRegisteredExternalHighRequiresSameDetectorRetestAfterRerender(t *testing.T) {
+func TestRegisteredExternalHighDoesNotRequireRetestAfterReplacementPassesAutomatedGates(t *testing.T) {
 	dir := t.TempDir()
 	oldBody := "第二章\n\n旧正文。"
 	newBody := "第二章\n\n新正文把人物选择写进现场后果。"
@@ -176,17 +177,87 @@ func TestRegisteredExternalHighRequiresSameDetectorRetestAfterRerender(t *testin
 		t.Fatal(err)
 	}
 	inspection, err := InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest {
-		t.Fatalf("new hash escaped named detector retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest ||
+		inspection.CurrentHashNamedRetestsPassed {
+		t.Fatalf("replacement hash still waited for a sampling retest: inspection=%+v err=%v", inspection, err)
 	}
 	appendRegisteredExternalDetection(t, dir, 2, newBody, "zhuque", "whole-single-segment", 3)
 	inspection, err = InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateApproved {
-		t.Fatalf("same-detector current-hash pass did not approve both gates: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.CurrentHashNamedRetestsPassed {
+		t.Fatalf("optional low sample unexpectedly changed production state: inspection=%+v err=%v", inspection, err)
 	}
 }
 
-func TestLegacyLooseNamedThresholdCannotApproveOrCommitAtFivePercent(t *testing.T) {
+func TestOptionalSamplingMarkerResetsCrossBodyContractAndLaterLowClearsLegacyHistory(t *testing.T) {
+	dir := t.TempDir()
+	body := "第二章\n\n新正文把人物的选择和现场后果写在一起。"
+	oldSHA := reviewreport.BodySHA256("第二章\n\n旧正文。")
+	bodySHA := reviewreport.BodySHA256(body)
+	if err := os.MkdirAll(filepath.Join(dir, "drafts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "drafts", "02.draft.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDraftExternalJudgeStatus(t, dir, 2, draftExternalJudgeStatus{
+		BodySHA256: bodySHA, AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+
+	legacyPrior := &DraftExternalRerenderRequirement{
+		Chapter: 2, EvaluatedBodySHA256: oldSHA,
+		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+		RequiredDetector: "other", RequiredMode: "whole",
+		RequiredExternalRetests: []DraftExternalRetestIdentity{
+			{Detector: "zhuque", Mode: "whole", TriggerBodySHA256: oldSHA},
+			{Detector: "other", Mode: "whole", TriggerBodySHA256: oldSHA},
+		},
+		RevisionPlan:   []string{"旧策略要求所有平台对新哈希复测。"},
+		AdviceComplete: true,
+	}
+	high := appendRegisteredExternalDetection(t, dir, 2, body, "zhuque", "whole", 83)
+	requirement := registeredExternalRerenderRequirement(high, legacyPrior)
+	identities := registeredExternalRetestIdentities(requirement)
+	if requirement.ExternalRetestPolicy != DraftExternalRetestPolicySamplingOptional ||
+		requirement.BlockUntilExternalRetest || RequiresRegisteredExternalRetest(requirement) ||
+		len(identities) != 1 || identities[0].Detector != "zhuque" ||
+		identities[0].TriggerBodySHA256 != bodySHA {
+		t.Fatalf("optional sampling inherited an old-body identity contract: %+v", requirement)
+	}
+	if strings.Contains(strings.Join(requirement.RevisionPlan, "\n"), "所有平台") {
+		t.Fatalf("optional sampling inherited an old-body revision plan: %+v", requirement.RevisionPlan)
+	}
+
+	// Emulate an already-persisted legacy marker that accumulated another
+	// detector on an older body. A later low result for the current zhuque sample
+	// must clear the current-body rewrite trigger without requiring "other".
+	requirement.RequiredExternalRetests = append(requirement.RequiredExternalRetests, DraftExternalRetestIdentity{
+		Detector: "other", Mode: "whole", TriggerBodySHA256: oldSHA,
+	})
+	if err := SetDraftExternalRerenderRequirement(dir, *requirement); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(draftExternalRerenderRequirementPath(dir, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"external_retest_policy": "sampling_optional"`) {
+		t.Fatalf("persisted marker omitted explicit optional policy: %s", raw)
+	}
+	appendRegisteredExternalDetection(t, dir, 2, body, "zhuque", "whole", 2)
+	inspection, err := InspectDraftExternalGate(dir, 2)
+	if err != nil || inspection.Status != DraftExternalGateApproved ||
+		inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("same-SHA low did not clear marker because an old identity was missing: inspection=%+v err=%v", inspection, err)
+	}
+	bodyGate, err := InspectRegisteredExternalRetestsForBody(dir, 2, bodySHA)
+	if err != nil || !bodyGate.Approved || bodyGate.Required ||
+		len(bodyGate.Missing) != 0 || len(bodyGate.Blocking) != 0 {
+		t.Fatalf("same-SHA low did not clear the delivery gate: inspection=%+v err=%v", bodyGate, err)
+	}
+}
+
+func TestCurrentHashSamplingHighBlocksEvenWhenLegacyMarkerThresholdWasLoose(t *testing.T) {
 	dir := t.TempDir()
 	oldBody := "第一章\n\n旧正文触发命名平台返工。"
 	newBody := "第一章\n\n新正文把人物选择放回现场。"
@@ -223,8 +294,8 @@ func TestLegacyLooseNamedThresholdCannotApproveOrCommitAtFivePercent(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inspection.Status == DraftExternalGateApproved || inspection.CurrentHashNamedRetestsPassed {
-		t.Fatalf("legacy 10%% marker approved a fixed-gate 5%% named result: %+v", inspection)
+	if inspection.Status != DraftExternalGateRerenderAuthorized || inspection.CurrentHashNamedRetestsPassed {
+		t.Fatalf("legacy 10%% marker approved a current 5%% sampling result: %+v", inspection)
 	}
 	if err := RequireDraftExternalApproval(dir, 1); err == nil {
 		t.Fatal("legacy 10% marker allowed commit with a 5% named result")
@@ -232,8 +303,8 @@ func TestLegacyLooseNamedThresholdCannotApproveOrCommitAtFivePercent(t *testing.
 
 	appendRegisteredExternalDetection(t, dir, 1, newBody, "zhuque", "whole-single-segment", 2)
 	inspection, err = InspectDraftExternalGate(dir, 1)
-	if err != nil || inspection.Status != DraftExternalGateApproved || !inspection.CurrentHashNamedRetestsPassed {
-		t.Fatalf("strict 2%% named result did not approve current hash: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.CurrentHashNamedRetestsPassed {
+		t.Fatalf("latest 2%% sample did not supersede the same-hash high event: inspection=%+v err=%v", inspection, err)
 	}
 	if err := RequireDraftExternalApproval(dir, 1); err != nil {
 		t.Fatalf("strict 2%% named result did not allow commit approval: %v", err)
@@ -294,7 +365,7 @@ func TestLegacyLooseDeepSeekThresholdCannotApproveFivePercent(t *testing.T) {
 	}
 }
 
-func TestRegisteredRetestStaysDeferredUntilCurrentHashPassesDeepSeek(t *testing.T) {
+func TestSampleTriggeredRewriteWaitsForDeepSeekButNotAnotherPlatformResult(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
@@ -314,11 +385,11 @@ func TestRegisteredRetestStaysDeferredUntilCurrentHashPassesDeepSeek(t *testing.
 		t.Fatal(err)
 	}
 	inspection, err := InspectDraftExternalGate(dir, 1)
-	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || !inspection.RegisteredRetestDeferred ||
-		inspection.RequiresRegisteredRetest || !RequiresRegisteredExternalRetest(inspection.Requirement) ||
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || inspection.RegisteredRetestDeferred ||
+		inspection.RequiresRegisteredRetest || RequiresRegisteredExternalRetest(inspection.Requirement) ||
 		inspection.Requirement == nil || inspection.Requirement.Source != "local_mechanical_gate" ||
 		inspection.Requirement.EvaluatedBodySHA256 != reviewreport.BodySHA256(intermediate) {
-		t.Fatalf("locally blocked intermediate hash should defer, not erase, named retest: inspection=%+v err=%v", inspection, err)
+		t.Fatalf("locally blocked intermediate hash should retain automated gates without a platform wait: inspection=%+v err=%v", inspection, err)
 	}
 
 	// Replacing the locally blocked bytes first creates a current-hash DeepSeek
@@ -328,20 +399,20 @@ func TestRegisteredRetestStaysDeferredUntilCurrentHashPassesDeepSeek(t *testing.
 		t.Fatal(err)
 	}
 	inspection, err = InspectDraftExternalGate(dir, 1)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.RequiresRegisteredRetest || !inspection.RegisteredRetestDeferred {
-		t.Fatalf("replacement hash did not wait for DeepSeek before named retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("replacement hash did not wait for DeepSeek: inspection=%+v err=%v", inspection, err)
 	}
 	writeDraftExternalJudgeStatus(t, dir, 1, draftExternalJudgeStatus{
 		BodySHA256: reviewreport.BodySHA256(candidate), AdviceComplete: true,
 		AIProbabilityPercent: 2, PassExclusivePercent: 4,
 	})
 	inspection, err = InspectDraftExternalGate(dir, 1)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
-		t.Fatalf("DeepSeek-passing hash did not advance to named-platform retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("DeepSeek-passing hash still waited for a platform sample: inspection=%+v err=%v", inspection, err)
 	}
 }
 
-func TestDeepSeekBlockingHashAuthorizesRerenderWithoutErasingNamedRetest(t *testing.T) {
+func TestDeepSeekBlockingReplacementAuthorizesAnotherRerenderWithoutPlatformWait(t *testing.T) {
 	dir := t.TempDir()
 	oldBody := "第二章\n\n旧平台阻断正文。"
 	candidate := "第二章\n\n林澈抬手拦住送货车，先让摊主把账本翻到昨晚。"
@@ -367,12 +438,12 @@ func TestDeepSeekBlockingHashAuthorizesRerenderWithoutErasingNamedRetest(t *test
 	})
 
 	inspection, err := InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || !inspection.RegisteredRetestDeferred ||
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || inspection.RegisteredRetestDeferred ||
 		inspection.RequiresRegisteredRetest || inspection.Requirement == nil ||
 		inspection.Requirement.Source != "deepseek_ai_judge" || inspection.Requirement.Evaluator != "deepseek" ||
 		inspection.Requirement.EvaluatedBodySHA256 != reviewreport.BodySHA256(candidate) ||
-		!RequiresRegisteredExternalRetest(inspection.Requirement) {
-		t.Fatalf("DeepSeek blocker did not authorize one rerender while retaining named obligation: inspection=%+v err=%v", inspection, err)
+		RequiresRegisteredExternalRetest(inspection.Requirement) {
+		t.Fatalf("DeepSeek blocker did not authorize one rerender under sampling policy: inspection=%+v err=%v", inspection, err)
 	}
 }
 
@@ -420,12 +491,13 @@ func TestRegisteredExternalHighUpgradesExistingIndependentMarker(t *testing.T) {
 	}
 	appendRegisteredExternalDetection(t, dir, 1, body, "zhuque", "whole", 86)
 	inspection, err := InspectDraftExternalGate(dir, 1)
-	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || !RequiresRegisteredExternalRetest(inspection.Requirement) {
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized ||
+		!isRegisteredExternalSamplingTrigger(inspection.Requirement) || RequiresRegisteredExternalRetest(inspection.Requirement) {
 		t.Fatalf("registered high did not upgrade independent marker: inspection=%+v err=%v", inspection, err)
 	}
 }
 
-func TestRegisteredExternalRetestRequiresEveryBlockingIdentity(t *testing.T) {
+func TestMultipleSamplingIdentitiesDoNotBecomeReplacementObligations(t *testing.T) {
 	dir := t.TempDir()
 	oldBody := "第二章\n\n旧正文。"
 	newBody := "第二章\n\n新正文保留事实并重建人物选择。"
@@ -439,8 +511,9 @@ func TestRegisteredExternalRetestRequiresEveryBlockingIdentity(t *testing.T) {
 	appendRegisteredExternalDetection(t, dir, 2, oldBody, "zhuque", "whole", 83)
 	appendRegisteredExternalDetection(t, dir, 2, oldBody, "other", "whole", 70)
 	inspection, err := InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || len(registeredExternalRetestIdentities(inspection.Requirement)) != 2 {
-		t.Fatalf("multiple platform blockers were not retained: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized ||
+		len(registeredExternalRetestIdentities(inspection.Requirement)) != 1 {
+		t.Fatalf("optional sampling marker accumulated chapter-lifetime identities: inspection=%+v err=%v", inspection, err)
 	}
 	if err := SetDraftExternalRerenderRequirement(dir, *inspection.Requirement); err != nil {
 		t.Fatal(err)
@@ -454,15 +527,15 @@ func TestRegisteredExternalRetestRequiresEveryBlockingIdentity(t *testing.T) {
 		AIProbabilityPercent: 3, PassExclusivePercent: 4,
 	})
 	inspection, err = InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest ||
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest ||
 		inspection.CurrentHashNamedRetestsPassed || draftCurrentHashNamedPassFrozen(inspection) {
-		t.Fatalf("one platform pass incorrectly cleared every identity: inspection=%+v err=%v", inspection, err)
+		t.Fatalf("sample identities became replacement obligations: inspection=%+v err=%v", inspection, err)
 	}
 	appendRegisteredExternalDetection(t, dir, 2, newBody, "zhuque", "whole", 2)
 	inspection, err = InspectDraftExternalGate(dir, 2)
 	if err != nil || inspection.Status != DraftExternalGateApproved ||
-		!inspection.CurrentHashNamedRetestsPassed || !draftCurrentHashNamedPassFrozen(inspection) {
-		t.Fatalf("all platform passes plus model pass should approve: inspection=%+v err=%v", inspection, err)
+		inspection.CurrentHashNamedRetestsPassed || draftCurrentHashNamedPassFrozen(inspection) {
+		t.Fatalf("optional platform passes should remain observations: inspection=%+v err=%v", inspection, err)
 	}
 
 	// Both passing rows remain valid evidence for newBody only. If the prose is
@@ -477,13 +550,13 @@ func TestRegisteredExternalRetestRequiresEveryBlockingIdentity(t *testing.T) {
 		AIProbabilityPercent: 2, PassExclusivePercent: 4,
 	})
 	inspection, err = InspectDraftExternalGate(dir, 2)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest ||
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest ||
 		inspection.CurrentHashNamedRetestsPassed || draftCurrentHashNamedPassFrozen(inspection) {
-		t.Fatalf("old-hash named passes froze a different current draft: inspection=%+v err=%v", inspection, err)
+		t.Fatalf("old-hash sampling rows affected a different current draft: inspection=%+v err=%v", inspection, err)
 	}
 }
 
-func TestLocalBlockCannotEraseRegisteredRetestObligation(t *testing.T) {
+func TestLocalBlockSupersedesSamplingTriggerWithoutCreatingPlatformObligation(t *testing.T) {
 	dir := t.TempDir()
 	oldBody := "第三章\n\n旧正文。"
 	firstRewrite := "第三章\n\n第一轮重写正文。"
@@ -515,8 +588,8 @@ func TestLocalBlockCannotEraseRegisteredRetestObligation(t *testing.T) {
 		t.Fatal(err)
 	}
 	inspection, err := InspectDraftExternalGate(dir, 3)
-	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || !RequiresRegisteredExternalRetest(inspection.Requirement) {
-		t.Fatalf("local blocker erased registered contract: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateRerenderAuthorized || RequiresRegisteredExternalRetest(inspection.Requirement) {
+		t.Fatalf("local blocker did not remain the active automated gate: inspection=%+v err=%v", inspection, err)
 	}
 	if err := os.WriteFile(draftPath, []byte(secondRewrite), 0o644); err != nil {
 		t.Fatal(err)
@@ -526,8 +599,8 @@ func TestLocalBlockCannotEraseRegisteredRetestObligation(t *testing.T) {
 		AIProbabilityPercent: 2, PassExclusivePercent: 4,
 	})
 	inspection, err = InspectDraftExternalGate(dir, 3)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest {
-		t.Fatalf("second rewrite escaped platform retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest {
+		t.Fatalf("second rewrite still waited for a platform sample: inspection=%+v err=%v", inspection, err)
 	}
 }
 
@@ -547,7 +620,7 @@ func TestRegisteredExternalHighUsesCommittedChapterWhenDraftMissing(t *testing.T
 	}
 }
 
-func TestRegisteredFinalHighWithStaleDraftAllowsOneRewriteThenRequiresRetest(t *testing.T) {
+func TestRegisteredFinalHighWithStaleDraftAllowsOneRewriteThenAutomatedApproval(t *testing.T) {
 	dir := t.TempDir()
 	finalBody := "第五章\n\n已经提交检测的正式章节。"
 	staleDraft := "第五章\n\n正式章节之前遗留的旧草稿。"
@@ -587,16 +660,16 @@ func TestRegisteredFinalHighWithStaleDraftAllowsOneRewriteThenRequiresRetest(t *
 		t.Fatal(err)
 	}
 	inspection, err = InspectDraftExternalGate(dir, 5)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.RequiresRegisteredRetest || !inspection.RegisteredRetestDeferred {
-		t.Fatalf("replacement draft did not wait for DeepSeek before named-platform retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateRejudgePending || inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("replacement draft did not wait for DeepSeek: inspection=%+v err=%v", inspection, err)
 	}
 	writeDraftExternalJudgeStatus(t, dir, 5, draftExternalJudgeStatus{
 		BodySHA256: reviewreport.BodySHA256(newDraft), AdviceComplete: true,
 		AIProbabilityPercent: 2, PassExclusivePercent: 4,
 	})
 	inspection, err = InspectDraftExternalGate(dir, 5)
-	if err != nil || inspection.Status != DraftExternalGateRejudgePending || !inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
-		t.Fatalf("DeepSeek-passing replacement did not advance to named-platform retest: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("DeepSeek-passing replacement still waited for a platform sample: inspection=%+v err=%v", inspection, err)
 	}
 }
 
@@ -639,6 +712,276 @@ func TestSetRegisteredExternalRequirementRejectsBlankIdentity(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("blank detector created a named external contract")
+	}
+}
+
+func TestAutomatedHardPolicyRejectsMissingOrMalformedIdentity(t *testing.T) {
+	for name, requirement := range map[string]DraftExternalRerenderRequirement{
+		"missing identity": {
+			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
+			ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+		},
+		"incomplete legacy pair": {
+			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
+			BlockUntilExternalRetest: true, RequiredDetector: "automated-detector",
+		},
+		"invalid trigger sha": {
+			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
+			ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+			RequiredExternalRetests: []DraftExternalRetestIdentity{{
+				Detector: "automated-detector", Mode: "whole", TriggerBodySHA256: "not-a-sha",
+			}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := SetDraftExternalRerenderRequirement(t.TempDir(), requirement); err == nil {
+				t.Fatalf("malformed automated_hard marker was accepted: %+v", requirement)
+			}
+		})
+	}
+}
+
+func TestUserSamplingDoesNotJoinExistingAutomatedHardIdentitySet(t *testing.T) {
+	prior := &DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
+		ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+		RequiredExternalRetests: []DraftExternalRetestIdentity{{
+			Detector: "automated-detector", Mode: "whole", TriggerBodySHA256: strings.Repeat("a", 64),
+		}},
+		RevisionPlan:   []string{"自动 detector 必须对替换稿复判。"},
+		AdviceComplete: true,
+	}
+	sampled := reviewreport.RegisteredExternalDetection{
+		Chapter: 1, Detector: "zhuque", Mode: "user-whole",
+		BodySHA256: strings.Repeat("b", 64), NormalizedScorePercent: 86,
+	}
+	requirement := registeredExternalRerenderRequirement(sampled, prior)
+	labels := strings.Join(RegisteredExternalRetestLabels(requirement), ",")
+	if !RequiresRegisteredExternalRetest(requirement) || !strings.Contains(labels, "automated-detector/whole") {
+		t.Fatalf("existing automated_hard contract was lost: %+v", requirement)
+	}
+	if strings.Contains(labels, "zhuque/user-whole") {
+		t.Fatalf("user sampling identity was promoted into automated_hard: %+v", requirement)
+	}
+}
+
+func TestLocalStructuralMarkerDoesNotCarryOptionalSamplingIdentity(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	base := &DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(body),
+		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+		RequiredExternalRetests: []DraftExternalRetestIdentity{{
+			Detector: "zhuque", Mode: "whole", TriggerBodySHA256: reviewreport.BodySHA256(body),
+		}},
+		ExternalRetestPolicy: DraftExternalRetestPolicySamplingOptional,
+	}
+	requirement, blocked := currentDraftLocalStructuralRerenderRequirement(st, 1, base)
+	if !blocked || requirement == nil {
+		t.Fatal("fixture did not produce a local structural marker")
+	}
+	if labels := RegisteredExternalRetestLabels(requirement); len(labels) != 0 || RequiresRegisteredExternalRetest(requirement) {
+		t.Fatalf("local marker carried optional sampling identity: requirement=%+v labels=%v", requirement, labels)
+	}
+}
+
+func TestLegacyBlockFlagLoadsAsAutomatedHardPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := draftExternalRerenderRequirementPath(dir, 1)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := fmt.Sprintf(`{
+  "chapter": 1,
+  "evaluated_body_sha256": %q,
+  "source": "registered_external_detection",
+  "evaluator": "registered_external_detector",
+  "required_external_retests": [{"detector":"automated-detector","mode":"whole"}],
+  "block_until_external_retest": true,
+  "revision_plan": ["整章重渲染"],
+  "advice_complete": true
+}`, strings.Repeat("a", 64))
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadDraftExternalRerenderRequirement(dir, 1)
+	if err != nil || got == nil ||
+		got.ExternalRetestPolicy != DraftExternalRetestPolicyAutomatedHard ||
+		!got.BlockUntilExternalRetest || !RequiresRegisteredExternalRetest(got) {
+		t.Fatalf("legacy hard marker did not normalize safely: requirement=%+v err=%v", got, err)
+	}
+	if err := SetDraftExternalRerenderRequirement(dir, *got); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"external_retest_policy": "automated_hard"`) {
+		t.Fatalf("rewritten legacy marker omitted explicit hard policy: %s", raw)
+	}
+}
+
+func TestOptionalSamplingCorruptLogDoesNotBlockDraftOrBodyGate(t *testing.T) {
+	dir := t.TempDir()
+	currentBody := "第一章\n\n替换稿已经通过自动门禁。"
+	currentSHA := reviewreport.BodySHA256(currentBody)
+	if err := os.MkdirAll(filepath.Join(dir, "drafts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "drafts", "01.draft.md"), []byte(currentBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(dir, DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: strings.Repeat("b", 64),
+		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+		RequiredDetector: "zhuque", RequiredMode: "whole",
+		RequiredExternalRetests: []DraftExternalRetestIdentity{{
+			Detector: "zhuque", Mode: "whole", TriggerBodySHA256: strings.Repeat("b", 64),
+		}},
+		RevisionPlan:   []string{"整章重渲染"},
+		AdviceComplete: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeDraftExternalJudgeStatus(t, dir, 1, draftExternalJudgeStatus{
+		BodySHA256: currentSHA, AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta", "external_detection_log.jsonl"), []byte("{not-json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inspection, err := InspectDraftExternalGate(dir, 1)
+	if err != nil || inspection.Status != DraftExternalGateApproved ||
+		inspection.RequiresRegisteredRetest || inspection.RegisteredRetestDeferred {
+		t.Fatalf("optional sampling journal error blocked draft: inspection=%+v err=%v", inspection, err)
+	}
+	bodyGate, err := InspectRegisteredExternalRetestsForBody(dir, 1, currentSHA)
+	if err != nil || !bodyGate.Approved || bodyGate.Required ||
+		len(bodyGate.Missing) != 0 || len(bodyGate.Blocking) != 0 {
+		t.Fatalf("optional sampling journal error blocked body gate: inspection=%+v err=%v", bodyGate, err)
+	}
+}
+
+func TestCurrentSamplingMarkerBlocksExactBodyWhenJournalIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		corruptLog bool
+	}{
+		{name: "missing journal"},
+		{name: "corrupt journal", corruptLog: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := "第一章\n\n用户已经抽查并明确报告当前正文偏高。"
+			bodySHA := reviewreport.BodySHA256(body)
+			if err := SetDraftExternalRerenderRequirement(dir, DraftExternalRerenderRequirement{
+				Chapter: 1, EvaluatedBodySHA256: bodySHA,
+				Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+				RequiredDetector: "zhuque", RequiredMode: "whole",
+				RequiredExternalRetests: []DraftExternalRetestIdentity{{
+					Detector: "zhuque", Mode: "whole", TriggerBodySHA256: bodySHA,
+				}},
+				AIProbabilityPercent: 86, PassExclusivePercent: 4,
+				RevisionPlan: []string{"整章重渲染"}, AdviceComplete: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.corruptLog {
+				if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "meta", "external_detection_log.jsonl"), []byte("{not-json\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			bodyGate, err := InspectRegisteredExternalRetestsForBody(dir, 1, bodySHA)
+			if err != nil || bodyGate.Approved || !bodyGate.Required || len(bodyGate.Blocking) == 0 {
+				t.Fatalf("persisted current-body high marker was lost with an unavailable journal: inspection=%+v err=%v", bodyGate, err)
+			}
+			if len(bodyGate.Missing) != 0 {
+				t.Fatalf("optional sampling became a mandatory follow-up retest: inspection=%+v", bodyGate)
+			}
+		})
+	}
+}
+
+func TestAutomatedHardCorruptLogRemainsFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	body := "第一章\n\n自动外部门禁正文。"
+	bodySHA := reviewreport.BodySHA256(body)
+	if err := os.MkdirAll(filepath.Join(dir, "drafts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "drafts", "01.draft.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraftExternalRerenderRequirement(dir, DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: bodySHA,
+		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+		RequiredExternalRetests: []DraftExternalRetestIdentity{{
+			Detector: "automated-detector", Mode: "whole", TriggerBodySHA256: bodySHA,
+		}},
+		ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+		RevisionPlan:         []string{"整章重渲染"},
+		AdviceComplete:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta", "external_detection_log.jsonl"), []byte("{not-json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InspectDraftExternalGate(dir, 1); err == nil {
+		t.Fatal("automated-hard draft gate ignored a corrupt external journal")
+	}
+	if _, err := InspectRegisteredExternalRetestsForBody(dir, 1, bodySHA); err == nil {
+		t.Fatal("automated-hard body gate ignored a corrupt external journal")
+	}
+}
+
+func TestExplicitAutomatedExternalRetestOptInRemainsDurableAcrossNewGateReason(t *testing.T) {
+	dir := t.TempDir()
+	initial := DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
+		Source: "registered_external_detection", Evaluator: draftExternalEvaluatorRegistered,
+		RequiredExternalRetests: []DraftExternalRetestIdentity{{
+			Detector: "automated-detector", Mode: "whole", TriggerBodySHA256: strings.Repeat("a", 64),
+		}},
+		BlockUntilExternalRetest: true,
+		AdviceComplete:           true,
+		RevisionPlan:             []string{"整章重渲染"},
+	}
+	if err := SetDraftExternalRerenderRequirement(dir, initial); err != nil {
+		t.Fatal(err)
+	}
+	local := DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: strings.Repeat("b", 64),
+		Source: "local_mechanical_gate", AdviceComplete: true,
+		RevisionPlan: []string{"按本地结构证据重渲染"},
+	}
+	if err := SetDraftExternalRerenderRequirement(dir, local); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadDraftExternalRerenderRequirement(dir, 1)
+	if err != nil || !RequiresRegisteredExternalRetest(got) ||
+		got.ExternalRetestPolicy != DraftExternalRetestPolicyAutomatedHard ||
+		!strings.Contains(strings.Join(RegisteredExternalRetestLabels(got), ","), "automated-detector/whole") {
+		t.Fatalf("explicit automated opt-in was not durable: requirement=%+v err=%v", got, err)
 	}
 }
 

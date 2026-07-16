@@ -1,23 +1,23 @@
-# 外部检测器人工抽检与同稿复测协议
+# 外部检测器人工抽查与精确登记协议
 
-朱雀等检测器是网页工具，**只人工触发、人工登记，不做自动化提交**。外部结果是“某个 detector/mode 对某组精确字节的事件”，不是章节永久属性；没有精确 payload SHA 的结果不能放行或阻断当前正文。
+朱雀等检测器是网页工具，**只由用户手工打开、提交检测并告知结果**。系统与助手绝不打开、粘贴、提交或操作朱雀网页，也不识别、处理或提交验证码；任何此前或临时许可都不构成网页自动化授权。系统只校验用户报告的 detector、mode、分值、证据与精确 payload SHA，并把通过校验的报告登记为抽查事件。外部结果不是生产必填项，也不是章节永久属性：未抽查应标记为 `not_sampled / unknown`，不能伪造成“已通过”，但不会阻塞生产；若用户报告并登记的当前精确 SHA 分值达到 `4%`，则只阻断该版正文并触发一次整章返工。替换稿取得新 SHA 后不继承旧分数，也不要求用户复测；它只需通过本地 AIGC、当前 SHA 的 DeepSeek、Editor / review 与 exact-body hard consistency 自动门禁。
 
 ## 标准流程
 
-1. 初次抽检先冻结 `chapters/NN.md` 这份正式正文。整篇单段检测时，不要在计算 SHA 后再删除标题、改变换行或改字。
-2. 先计算正式正文 SHA-256，再把同一组字节整篇提交到网页检测器，并保存截图或报告。
-3. 用显式分值尺度、detector、mode、payload 和预期 SHA 登记。脚本只登记，不会替你提交正文。
-4. 当前 SHA 的任一注册平台结果达到 `4%` 就会使旧 review/delivery 失效；重跑 review，生成 `external_aigc_ratio`、语义 checkpoint 和持久复测合同。
-5. 按 review 做整章重渲染。若精确新 SHA 仍被本地确定性 whole-text/segment 门禁判为结构失败，先按有界预算继续整章重渲染或重做因果计划，不浪费一次网页复测；这个本地失败必须绑定当前字节并可重复计算，不能靠手工改 marker 跳过平台。
-6. 本地结构门禁干净后，先完成同 SHA 的 DeepSeek 裸正文独立判定；必须 `blocking=false` 且分值严格 `<4%`。这一步先于人工网页复测，避免把仍被异模型阻断的中间稿送进平台。
-7. DeepSeek 通过后，再对最终候选 SHA 按合同中的每个 detector/mode 提交精确 payload；另一平台或另一模式的低分不能替代。全部命名 identity 都严格 `<4%` 后，完成同 SHA 的正式 review；只有统一 gate 为 `approved` 才能交付。
-8. 全部命名平台已对当前 SHA 通过后进入 named freeze。除新的显式整章重渲染请求或新的确定性 blocking 事件外，只允许继续 consistency / commit / deliver，不得再“顺手润色”并作废复测。
+1. 抽查某章时先冻结实际 payload。整篇单段检测不要在计算 SHA 后再删除标题、改变换行或改字；可以抽查正式章 `chapters/NN.md`，也可以抽查受 checkpoint 管理的候选 `drafts/NN.draft.md`。
+2. 先计算 payload SHA-256；用户再把同一组字节整篇手工提交到网页检测器，并保存截图或报告。系统与助手不打开或操作该网页。
+3. 用户告知结果后，用显式分值尺度、`--result-source user_reported`、detector、mode、payload 和预期 SHA 校验并登记。脚本只处理用户报告，不会访问平台或替用户提交正文。
+4. 若用户报告的抽查分值在当前精确 SHA 上达到 `4%`，该事件触发一次整章返工。登记脚本只追加审计事件；下一次正常 `--stages write` 或 `--stages rewrite` 会在目标完成早退之前自动扫描当前正式字节，并把高分章节幂等合入 `pending_rewrites`，不需要用户另跑 review、逐章复测或重复提醒。返工会保留旧事实结果并重做正文；同一触发事件不会反复消耗渲染预算。
+5. 正文换成新 SHA 后，旧抽查结果只保留为历史触发证据，不产生 detector/mode 复测义务，也不要求用户再次访问平台。
+6. 新 SHA 依靠自动门禁闭环：本地 AIGC、DeepSeek 裸正文严格 `<4%` 且 `blocking=false`、Editor / review，以及 exact-body hard consistency。全部自动证据通过即可 consistency / commit / deliver。
+7. 平台结果缺失保持 `not_sampled / unknown`；低分只是一条抽查记录，不能替代自动门禁；身份不齐也不会形成 named freeze 或 `rejudge_pending`。
+8. 用户后来若主动抽查新 SHA 并报告新的高分，它是一个新的精确字节事件，可再触发一次整章返工；系统仍只登记，不调用网页。
 
 ## 当前青山县运行快照（2026-07-16）
 
-第一章 active candidate 是实际文件 `drafts/01.draft.md`，SHA-256 为 `c2c1c36243c086a296aec6d8ca5eef7c35e6072f6b33087f1bd87f9307587a0f`。该同稿在运行时 edit gate 中得到 `raw_local_gate_percent=2.54%`，当前 Python 审计入口独立复算为 `2.75%`，两者都严格 `<4%`；DeepSeek 裸正文结果为 `human_like / low / 2%`、`blocking=false`。这些证据只说明候选已经到达命名平台复测边界，不能替代朱雀。
+第一章 active candidate 是实际文件 `drafts/01.draft.md`，SHA-256 为 `c2c1c36243c086a296aec6d8ca5eef7c35e6072f6b33087f1bd87f9307587a0f`。该同稿在运行时 edit gate 中得到 `raw_local_gate_percent=2.54%`，当前 Python 审计入口独立复算为 `2.75%`，两者都严格 `<4%`；DeepSeek 裸正文结果为 `human_like / low / 2%`、`blocking=false`。自动 AIGC 门禁已经通过，可继续为当前 SHA 生成 exact-body hard consistency receipt，随后 commit。
 
-当前 `zhuque/novel-whole-text-single-segment` 的同哈希结果尚未取得或登记，网页流程停在验证码许可边界。未经用户明确许可，不处理或提交验证码；因此本候选仍为 `rejudge_pending`，不得写成“朱雀已通过”，也不得 commit / deliver。现有 `drafts/01.hard_consistency.json` 仍绑定上一版 `d723...` 失败稿，不能跨 body epoch 复用；只有当前 SHA 的朱雀结果通过并登记后，才能重跑 consistency 生成 `c2c1...` 的 passed receipt。旧第一章 `0.86` 与第二章 `0.83` 只绑定各自旧正式正文 SHA，继续作为返工触发证据，不是这个候选的分数。
+当前 `zhuque/novel-whole-text-single-segment` 同哈希状态是“未抽查 / 未知”，不是“已通过”，也不是生产阻塞。系统与助手绝不调用朱雀网页或处理验证码，即使此前取得过许可也不自动化；只校验和登记用户主动报告的结果。现有 `drafts/01.hard_consistency.json` 仍绑定上一版 `d723...` 失败稿，不能跨 body epoch 复用，因此下一步是直接为 `c2c1...` 重跑 consistency，而不是等待朱雀。旧第一章 `0.86` 与第二章 `0.83` 只绑定各自旧正式正文 SHA，继续作为一次返工触发证据，不是这个候选的分数。
 
 ## 登记命令
 
@@ -31,6 +31,7 @@ python3 quality/audit/scripts/register_external_detection.py \
   --project "$PROJECT" --chapter 1 \
   --detector zhuque --mode novel-whole-text-single-segment \
   --score 0.86 --score-scale probability --verdict ai_like \
+  --result-source user_reported \
   --payload-file chapters/01.md \
   --expected-sha256 e3b1ef178aebf1f822a7a15a6a746cec84d28028900b848e9093905c09131399 \
   --note '2026-07-15 用户整篇单段检测 0.86'
@@ -39,50 +40,50 @@ python3 quality/audit/scripts/register_external_detection.py \
   --project "$PROJECT" --chapter 2 \
   --detector zhuque --mode novel-whole-text-single-segment \
   --score 0.83 --score-scale probability --verdict ai_like \
+  --result-source user_reported \
   --payload-file chapters/02.md \
   --expected-sha256 b798734cc0c5e932162b4d6d77b6dacc18188f220d3020e868b6225a429fc74c \
   --note '2026-07-15 用户整篇单段检测 0.83'
 ~~~
 
-正式稿因高分完成整章重渲染后，不要先把候选提交成正式章。平台复测可以直接登记当前候选，但 payload 必须就是实际 `drafts/NN.draft.md`：
+用户也可以主动抽查当前候选；这不是 commit 前置步骤。登记候选时，payload 必须就是实际 `drafts/NN.draft.md`：
 
 ~~~bash
 DRAFT_SHA=$(shasum -a 256 "$PROJECT/drafts/01.draft.md" | awk '{print $1}')
 
-# 下面的 0.02 只演示登记格式，不是当前候选的朱雀结果；没有网页真实分数与证据时不得运行。
+# 下面的 0.02 只演示登记格式，不是当前候选的朱雀结果；没有用户告知的真实分数与证据时不得运行。
 python3 quality/audit/scripts/register_external_detection.py \
   --project "$PROJECT" --chapter 1 \
   --detector zhuque --mode novel-whole-text-single-segment \
   --score 0.02 --score-scale probability --verdict human_like \
+  --result-source user_reported \
   --payload-file drafts/01.draft.md \
   --expected-sha256 "$DRAFT_SHA" \
-  --note '格式示例：整章重渲染候选，同一 detector/mode 真实复测'
+  --note '格式示例：整章重渲染候选，同一 detector/mode 真实抽查'
 ~~~
 
-候选草稿登记是一个严格桥接，不是任意文件入口。脚本会 fail closed 地同时验证：
+候选草稿登记是严格的抽查证据入口，不是任意文件入口。脚本会 fail closed 地验证：
 
-- `reviews/drafts/NN_full_rerender_required.json` 是命名平台注册合同，并且明确包含本次完全相同的 detector/mode；
-- marker 建议完整、指向旧 SHA，当前状态处于 `rejudge_pending` 边界，而不是旧稿仍可重渲染的 `rerender_authorized`；
-- 当前候选由精确 `draft` checkpoint 绑定；若它来自“已通过哈希后仅允许一次”的定点打磨，也可由精确 `edit` checkpoint 绑定。两种情况下，之后都不能再有 `draft-structural-block`；
-- `drafts/NN.draft_write_intent.json` 不存在，写入 saga 已完整收口；
-- 当前 SHA 尚无该 detector/mode 的登记结果，也没有会把门禁重新切回 `rerender_authorized` 的平台高分。
+- `--result-source` 必须显式为 `user_reported` 或 `manual`，不会接受浏览器/自动化来源；
+- payload 是实际 `drafts/NN.draft.md`，并与登记时计算的 SHA 逐字节一致；
+- 当前候选由最新 `draft` 或 `edit` checkpoint 精确绑定；
+- `drafts/NN.draft_write_intent.json` 不存在，写入 saga 已完整收口。
 
-因此，草稿复制品、手改但没有 checkpoint 的草稿、身份不匹配的 marker、本地仍阻断的中间稿和写入中的草稿都会被拒绝。不要手工伪造或改写 marker/checkpoint 来绕门禁。
+它不要求 named marker、`rejudge_pending` 或同 detector/mode 复测合同，也允许抽查仍被本地门禁阻断的受管草稿；抽查结果永远不能覆盖本地、DeepSeek 或 consistency 结论。草稿复制品、手改但没有 checkpoint 的草稿和写入中的草稿仍会被拒绝。
 
-有截图或 PDF 时追加 `--evidence <文件路径>`。脚本会记录证据路径和 SHA；不要再把截图路径仅写进 `--note`。正式稿登记仍允许使用提交副本，但副本必须与 `chapters/NN.md` 逐字节一致；候选稿登记只接受实际 `drafts/NN.draft.md` 路径，不接受复制品。若网页必须使用去标题、改换行或其他转换后的文本，应先让那组字节成为受门禁管理的正式正文或候选正文，再按新 SHA 检测；转换副本不能登记成当前正文的硬门禁结果。
+有截图或 PDF 时追加 `--evidence <文件路径>`。脚本会记录证据路径和 SHA；不要再把截图路径仅写进 `--note`。正式稿登记仍允许使用提交副本，但副本必须与 `chapters/NN.md` 逐字节一致；候选稿登记只接受实际 `drafts/NN.draft.md` 路径，不接受复制品。若用户在网页使用了去标题、改换行或其他转换后的文本，那组字节不能登记成受管正文的抽查结果，除非它先成为实际正式正文或候选正文并取得自己的 SHA。
 
 `--score-scale` 不可省略：`--score 0.86 --score-scale probability` 表示 `86%`，而 `--score 0.86 --score-scale percent` 表示 `0.86%`。新登记还会拒绝空 detector/mode、非 64 位十六进制 SHA、`human_like >=4%`、`ai_like <4%`、损坏的既有日志和不一致的 `score_percent`。历史无 `score_scale` 行只保留读取兼容，不应继续照旧格式写入。
 
-## 多平台与事件覆盖规则
+## 多平台抽查与事件覆盖规则
 
-- 日志按 `(detector, mode)` 分组；同一正文 SHA 下，每组只由该组后续结果覆盖。
-- `zhuque/whole=86%` 后追加 `other/paragraph=2%`，朱雀高分仍然阻断。
-- 只有同 SHA 的后续 `zhuque/whole <4%` 才能解除该 identity 的当前高分。
-- 多个 identity 同时高分时，`required_external_retests` 会全部保留；换稿后缺任意一项复测都不能交付。
-- 本地 whole-text/segment 结构阻断只能把注册复测延后到可用候选，不能删除 identity、替代平台分数或批准提交；中间稿一旦不再复现该阻断，所有缺失复测立即恢复为 `rejudge_pending`。
-- 正文一旦改变，旧事件保留为返工证据，但不再是新正文分数。
+- 日志按 `(detector, mode)` 和正文 SHA 保存；另一平台或另一模式的低分不会改写朱雀原始抽查记录。
+- 当前精确 SHA 的任一用户报告高分都可触发一次整章返工；同一事件重复登记保持幂等。
+- 正文一旦改变，旧事件只保留为返工证据，不再是新正文分数，也不会生成逐 identity 复测义务。
+- 单纯缺少某个平台结果、只有部分 identity、或所有平台都未抽查，不会形成阻塞；若已登记当前精确 SHA 的高分，则仍按上条阻断该版并触发一次整章返工。
+- 平台低分只表示该次抽查未触发返工，不能把本地或 DeepSeek 的 blocking 结果改成通过。
 
-## 抽检与校准
+## 抽查与校准
 
 每卷可抽 3—5 章，至少包含 1 章返工稿。登记后运行：
 
@@ -91,9 +92,9 @@ python3 quality/audit/scripts/calibration_report.py \
   --external-log "$PROJECT/meta/external_detection_log.jsonl"
 ~~~
 
-相关性报告用于发现本地代理漂移，只提供校准建议，不会自动降低当前严格 `<4%` 门槛。
+相关性报告用于发现本地代理漂移，只提供校准建议，不会自动降低本地或 DeepSeek 的严格 `<4%` 自动门槛。
 
-DeepSeek 和每个命名 detector/mode 的运行门槛固定为严格 `<4%`；旧 review、marker 或配置中持久化的 threshold 字段只用于诊断兼容，不能把门槛改成 5%、10% 或其他值。本地 raw whole-text gate 是独立证据，也不会因为 DeepSeek 或平台低分自动降级。
+DeepSeek 的生产门槛固定为严格 `<4%`；本地 raw whole-text gate 是另一份独立自动证据。人工平台用 `4%` 作为用户报告 verdict 的一致性边界和一次性返工触发线，不是逐 detector 的交付门槛；平台低分不会自动降低本地或 DeepSeek 门禁，平台缺失也不会阻塞生产。
 
 ## 平台证据保留
 

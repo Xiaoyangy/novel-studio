@@ -2129,7 +2129,7 @@ func TestFinalizedChapterOneRealShapeProfilesFitPreferredBudgetAndKeepAuthority(
 				t.Fatalf("%s formal plan receipt is not source-bound: %#v", profile, receipt)
 			}
 			renderReceipt := receipt["render_contract"].(map[string]any)
-			if renderReceipt["authority_path"] != "working_memory.render_packet" || renderReceipt["preserve_fact_count"] == nil || len(renderReceipt["preserve_facts_sha256"].(string)) != 64 {
+			if renderReceipt["authority_path"] != "working_memory.render_packet" || renderReceipt["prose_fact_count"] == nil || len(renderReceipt["prose_facts_sha256"].(string)) != 64 {
 				t.Fatalf("%s render contract receipt is not canonical: %#v", profile, renderReceipt)
 			}
 			sources := stringSliceFromAny(receipt["context_sources"])
@@ -2140,7 +2140,7 @@ func TestFinalizedChapterOneRealShapeProfilesFitPreferredBudgetAndKeepAuthority(
 			}
 
 			source := keptWorking["rewrite_source"].(map[string]any)
-			if source["authority_receipt"] != "formal_plan_receipt.rewrite_source" || source["preserve_facts_authority"] != "working_memory.render_packet.preserve_facts" {
+			if source["authority_receipt"] != "formal_plan_receipt.rewrite_source" || source["preserve_facts_authority"] != "formal_plan_receipt.rewrite_source.fact_authority" {
 				t.Fatalf("%s rewrite source was not folded to the canonical receipt: %#v", profile, source)
 			}
 			sourceReceipt := receipt["rewrite_source"].(map[string]any)
@@ -2355,15 +2355,16 @@ func TestFinalizedDraftContextCompactsRepeatedPreserveAuthoritiesUnder64KiB(t *t
 			t.Fatalf("craft method %q missing: %s", want, craftJSON)
 		}
 	}
-	antiAIJSON, _ := json.Marshal(packet["anti_ai_execution_plan"])
-	for _, want := range []string{"饭桌对白压住人物犹疑", "让林澈先误判", "绑定、拒付和主动结算", "饭桌对白只制造关系压力"} {
-		if !strings.Contains(string(antiAIJSON), want) {
-			t.Fatalf("qualitative anti-AI contract %q missing: %s", want, antiAIJSON)
+	timingJSON, _ := json.Marshal(packet["event_timing_safeguards"])
+	for _, want := range []string{"绑定、拒付和主动结算", "饭桌对白只制造关系压力"} {
+		if !strings.Contains(string(timingJSON), want) {
+			t.Fatalf("story timing safeguard %q missing: %s", want, timingJSON)
 		}
 	}
-	for _, forbidden := range []string{"CV", "0.62", "每三句", "检测概率", "4%"} {
-		if strings.Contains(string(antiAIJSON), forbidden) {
-			t.Fatalf("metric recipe %q leaked into prose contract: %s", forbidden, antiAIJSON)
+	packetJSON, _ := json.Marshal(packet)
+	for _, forbidden := range []string{"CV", "0.62", "每三句", "检测概率", "4%", "饭桌对白压住人物犹疑", "让林澈先误判", "anti_ai_execution_plan"} {
+		if strings.Contains(string(packetJSON), forbidden) {
+			t.Fatalf("planning/review recipe %q leaked into prose contract: %s", forbidden, packetJSON)
 		}
 	}
 	receipt := payload["formal_plan_receipt"].(map[string]any)

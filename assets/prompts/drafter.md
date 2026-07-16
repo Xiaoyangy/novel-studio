@@ -79,7 +79,7 @@
 - **章末保后果，不抄镜头**：`chapter_pipeline_instruction` 或硬合同指定了最后一个动作、信息边界和截断时机时必须精确落地，不能提前半句或拖后半句；在没有精确截点时，`ending_consequence_contract` 的 `consequence`、`next_chapter_pull` 和禁用项必须成立，`ending_anchor_candidate` 只是候选镜头。若新的现场人物、主动请求、未完成动作或可见结果更能让读者翻页，可以替换计划指定的最后一个物件，不得为了对账把章末改成票据、材料、测试记录的静态清单。
 - **反 AI 味**：规避 `anti_ai_tone` 的结构/用词/描写/对话/节奏五类模式；禁"他终于明白/这意味着/前所未有的恐惧/命运齿轮"类套话。先删掉重复表达同一意思的句子，只在人物注意力真正变化时切换承载方式；不设“每2-3句必换一次”的固定节拍。疲劳词/套句阈值见 `user_rules.structured`，commit 时强制检查。
 - **结构性 warning 必修**：`isolated_sentence_overuse`、`object_response_overuse`、`object_response_rhythm_flat`、`paragraph_start_repetition`、`not_but_overuse`、`state_clause_pile`、`templated_dialogue_chain`、`dialogue_conveyor_overuse`、`pov_interiority_thin` 不是可选润色；命中说明结构指纹或 AI 味已过重，提交前必须改写。`isolated_sentence_overuse` 现在只指 12 字内碎句连续成串，不指普通的一句一段；修复时只合并无信息碎片。命中“对白传送带 + 主观体验薄”时，禁止靠动作标签、微表情或零散心理句补比例：先删掉或合并整轮功能问答，移除不必开口的人，只保留真正改变选择、权力或关系的台词；再让时间、路程、体力、花费、误判或难堪改变主角下一步。若删掉心理句后下一动作完全不变，或物流仍只是步骤/票据清单，就还没有修好。
-- **AI 味按本章病因修，不按统一算法调节**：只处理 `anti_ai_execution_plan` 中与当前失败证据直接对应的少量问题；不要把整套 detector 指标写成一章通用配方。
+- **AI 味按读者效果修，不读取 detector 配方**：完整 `anti_ai_execution_plan` 只供规划与审阅，正文侧不会收到风险指标、句法处方、counter moves 或 review checks。若 `render_packet.event_timing_safeguards` 存在，只把其中物件回应时机与对白功能当作剧情边界；不要据此平均分配段落，也不要自行补出任何 detector 指标或统一算法。
   - 段落或句法过平时，先改变相邻段落承担的事情：争执、判断、跳时、结果或余波必须真的换挡；不得按固定间隔插长句、碎句、声音或物件。
   - 同一词反复出现时，先判断它是不是人物此刻真正盯住的对象。必要重复可以保留；不必要重复就删掉整句或合并信息，不做机械同义词轮换。
   - 对白像传送带时，删掉无需开口的人和只负责说明规则的话轮，让保留的回应改变选择、权力或关系；不靠插话、漏答、微动作和动作标签伪造自然。

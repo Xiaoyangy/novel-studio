@@ -102,7 +102,7 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 0 {
 		t.Fatalf("mandatory/optional = %#v / %#v", packet.MandatoryBeats, packet.OptionalStyleBeats)
 	}
-	if packet.Version != 9 || packet.Heading != "第1章 回县城的第一顿饭" || packet.WordBudget == nil || packet.WordBudget.HardMin != 2100 || packet.WordBudget.HardMax != 3000 ||
+	if packet.Version != 11 || packet.Heading != "第1章 回县城的第一顿饭" || packet.WordBudget == nil || packet.WordBudget.HardMin != 2100 || packet.WordBudget.HardMax != 3000 ||
 		packet.WordBudget.TargetMin != 2400 || packet.WordBudget.TargetMax != 2700 || !packet.WordBudget.ExactBoundary {
 		t.Fatalf("exact prose word budget missing from render packet: %#v", packet.WordBudget)
 	}
@@ -113,17 +113,30 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 		t.Fatalf("hard project prohibitions must survive render projection: %#v", packet.ForbiddenMoves)
 	}
 	for _, policy := range []string{
-		packet.PlanTranslationPolicy,
-		packet.ReaderRegisterPolicy,
-		packet.InterfaceCompression,
-		packet.ScenePurposePolicy,
-		packet.SpokenLanguagePolicy,
-		packet.EmotionalRenderPolicy,
-		packet.ProofFocusPolicy,
+		packet.HardContractPolicy,
+		packet.SoftMaterialPolicy,
+		packet.SelectionPolicy,
+		packet.DialogueTopologyPolicy,
+		packet.SystemVoicePolicy,
 		packet.CharacterEntrancePolicy,
 	} {
 		if strings.TrimSpace(policy) == "" {
-			t.Fatalf("render translation policy missing: %#v", packet)
+			t.Fatalf("lean render policy missing: %#v", packet)
+		}
+	}
+	for name, policy := range map[string]string{
+		"plan_translation": packet.PlanTranslationPolicy,
+		"reader_register":  packet.ReaderRegisterPolicy,
+		"interface":        packet.InterfaceCompression,
+		"scene_purpose":    packet.ScenePurposePolicy,
+		"spoken_language":  packet.SpokenLanguagePolicy,
+		"emotional":        packet.EmotionalRenderPolicy,
+		"proof_focus":      packet.ProofFocusPolicy,
+		"named_role":       packet.NamedRolePolicy,
+		"relationship":     packet.RelationshipPriority,
+	} {
+		if strings.TrimSpace(policy) != "" {
+			t.Fatalf("v11 should not duplicate prompt-level %s policy in every packet: %q", name, policy)
 		}
 	}
 	if len(packet.VisualCards) != 2 || !packet.VisualCards[0].FirstAppearance || packet.VisualCards[1].FaceAndHair == "" {
@@ -132,22 +145,19 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	if !strings.Contains(packet.CharacterEntrancePolicy, "视觉锚点") || !strings.Contains(packet.CharacterEntrancePolicy, "禁止证件照式罗列") {
 		t.Fatalf("character entrance policy must require selective POV-grounded appearance: %q", packet.CharacterEntrancePolicy)
 	}
-	if strings.Contains(packet.ProofFocusPolicy, "完整看价、付款") || !strings.Contains(packet.ProofFocusPolicy, "不强制跟拍") {
-		t.Fatalf("proof policy must not force a repeated customer verification chain: %q", packet.ProofFocusPolicy)
+	if !strings.Contains(packet.SelectionPolicy, "手续") || !strings.Contains(packet.SelectionPolicy, "压缩或离屏") {
+		t.Fatalf("selection policy must keep proof-chain compression without a separate dossier: %q", packet.SelectionPolicy)
 	}
 	serializedPolicies := strings.Join([]string{
-		packet.ReaderRegisterPolicy,
-		packet.ProofFocusPolicy,
-		packet.NamedRolePolicy,
-		packet.RelationshipPriority,
+		packet.SelectionPolicy,
+		packet.DialogueTopologyPolicy,
+		packet.SystemVoicePolicy,
+		packet.CharacterEntrancePolicy,
 	}, "\n")
 	for _, projectSpecific := range []string{"青山县", "县城居民", "林澈", "摊主", "男女主"} {
 		if strings.Contains(serializedPolicies, projectSpecific) {
 			t.Fatalf("render policy leaked project-specific assumption %q: %s", projectSpecific, serializedPolicies)
 		}
-	}
-	if strings.Contains(packet.EmotionalRenderPolicy, "必须改变紧接着的选择") || !strings.Contains(packet.EmotionalRenderPolicy, "暂时没有结论") {
-		t.Fatalf("emotion policy must allow human hesitation without instant utility: %q", packet.EmotionalRenderPolicy)
 	}
 	if len(packet.EmotionalLenses) != 1 || packet.EmotionalLenses[0].Character != "林澈" ||
 		packet.EmotionalLenses[0].EmotionLedAction != "不炫耀额度，离席验证" {
@@ -169,14 +179,17 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	serialized := string(raw)
 	for _, forbidden := range []string{
 		"turn_progression", "action_beat", "proof_on_page", "latent_context", "hidden_pressures", "每句先夹菜",
-		"scene_objective", "candidate_beats", "饭桌压力", "饭桌受压", "当场炫耀", "先点按钮再付款",
+		"scene_objective", "饭桌受压", "当场炫耀", "先点按钮再付款",
 	} {
 		if strings.Contains(serialized, forbidden) {
 			t.Fatalf("draft render packet leaked %q: %s", forbidden, serialized)
 		}
 	}
-	if len(raw) > 9000 {
+	if len(raw) > 7000 {
 		t.Fatalf("prose-facing packet regrew into a planning dossier: %d bytes", len(raw))
+	}
+	if len(packet.CandidateBeats) != 3 || packet.CandidateBeats[0].Event != "饭桌压力" {
+		t.Fatalf("selected reader-facing beats did not reach prose as bounded candidates: %#v", packet.CandidateBeats)
 	}
 	if _, exists := result["causal_simulation"]; exists {
 		t.Fatal("draft profile must hide full causal_simulation")
@@ -189,8 +202,8 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 		t.Fatal("draft profile must not duplicate the protagonist projection after render_packet absorbed it")
 	}
 	projection := packet.ProtagonistProjection
-	if len(projection.ObservableEffects) != 1 {
-		t.Fatalf("observable effects lost: %#v", projection)
+	if len(projection.ObservableEffects) != 0 {
+		t.Fatalf("duplicate observable effects leaked beside mandatory outcomes: %#v", projection)
 	}
 	if len(projection.CausalChain) != 0 || len(projection.AvailableOptions) != 0 || len(projection.PlanConstraints) != 0 || projection.DecisionReason != "不想继续被比较" {
 		t.Fatalf("draft projection still carries planning choreography: %#v", projection)
@@ -274,30 +287,50 @@ func TestDraftProfileHidesRewriteBodyButKeepsImmutableSourceContract(t *testing.
 	}
 }
 
-func TestDraftRenderPacketMaterializesAntiAIResponseTiming(t *testing.T) {
+func TestDraftRenderPacketKeepsEventTimingWithoutAntiAIRecipe(t *testing.T) {
 	objectTiming := "系统绑定只回应一次；旧债操作后必须留出可感知等待，再给拒绝；首次结算只能由主角在巡查结束后主动查看。"
 	rhythmTiming := "饭桌长问短答，风险发现处收短，电话等待各自成段。"
 	dialogueFunction := "饭桌对白承担权力博弈，不能让人物轮流说明规则。"
+	pollutedObjectTiming := "每3句插一次物件回应；" + objectTiming
+	pollutedDialogueFunction := "句长CV低于0.62；" + dialogueFunction
 	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
 		AntiAIPlan: domain.AntiAIExecutionPlan{
 			RiskSignals:          []string{"物件回应等距", "对白传送带"},
 			CounterMoves:         []string{"三次反馈由人物行动和场景切换错开"},
 			SentenceRhythmPolicy: rhythmTiming,
-			ObjectResponseBudget: objectTiming,
-			DialogueFunctionPlan: dialogueFunction,
+			ObjectResponseBudget: pollutedObjectTiming,
+			DialogueFunctionPlan: pollutedDialogueFunction,
 			ReviewChecks:         []string{"旧债前是否真的留下等待空白？"},
 		},
 	}}
 
 	packet := newDraftRenderPacket(plan)
-	got := packet.AntiAIExecutionPlan
-	if got.ObjectResponseBudget != objectTiming || got.SentenceRhythmPolicy != rhythmTiming ||
-		got.DialogueFunctionPlan != dialogueFunction || len(got.ReviewChecks) != 1 {
-		t.Fatalf("anti-AI execution timing did not reach render packet exactly: %#v", got)
+	got := packet.EventTimingSafeguards
+	if got == nil ||
+		!strings.Contains(got.ObjectResponseBudget, "系统绑定只回应一次") ||
+		!strings.Contains(got.ObjectResponseBudget, "旧债操作后必须留出可感知等待") ||
+		!strings.Contains(got.ObjectResponseBudget, "首次结算只能由主角在巡查结束后主动查看") ||
+		!strings.Contains(got.DialogueFunctionPlan, "饭桌对白承担权力博弈") {
+		t.Fatalf("story timing safeguards did not reach prose packet: %#v", got)
+	}
+	if plan.CausalSimulation.AntiAIPlan.ObjectResponseBudget != pollutedObjectTiming ||
+		plan.CausalSimulation.AntiAIPlan.SentenceRhythmPolicy != rhythmTiming ||
+		plan.CausalSimulation.AntiAIPlan.DialogueFunctionPlan != pollutedDialogueFunction ||
+		len(plan.CausalSimulation.AntiAIPlan.ReviewChecks) != 1 {
+		t.Fatalf("formal plan lost anti-AI review authority: %#v", plan.CausalSimulation.AntiAIPlan)
+	}
+	raw, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"anti_ai_execution_plan", "risk_signals", "counter_moves", "sentence_rhythm_policy", "review_checks", rhythmTiming} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("planning/review recipe %q leaked into prose packet: %s", forbidden, raw)
+		}
 	}
 }
 
-func TestDraftRenderPacketKeepsQualitativeAntiAIAdviceWithoutMetricRecipes(t *testing.T) {
+func TestDraftRenderPacketHidesQualitativeAndMetricAntiAIRecipesButKeepsStoryTiming(t *testing.T) {
 	objectTiming := "旧债拒付后系统静默；人物完成选择后才允许一次结算回应。"
 	dialogueFunction := "饭桌对白承担权力博弈，不能让人物轮流说明规则。"
 	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
@@ -324,30 +357,37 @@ func TestDraftRenderPacketKeepsQualitativeAntiAIAdviceWithoutMetricRecipes(t *te
 		},
 	}}
 
-	got := newDraftRenderPacket(plan).AntiAIExecutionPlan
-	raw, err := json.Marshal(got)
+	packet := newDraftRenderPacket(plan)
+	got := packet.EventTimingSafeguards
+	raw, err := json.Marshal(packet)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"CV", "TTR", "0.62", "0.72", "4%", "每三句", "每五句", "检测概率"} {
+	for _, forbidden := range []string{
+		"CV", "TTR", "0.62", "0.72", "4%", "每三句", "每五句", "检测概率",
+		"饭桌保留长问短答", "让主角先误判", "risk_signals", "counter_moves",
+	} {
 		if strings.Contains(string(raw), forbidden) {
-			t.Fatalf("metric recipe %q leaked into prose-facing anti-AI plan: %s", forbidden, raw)
+			t.Fatalf("anti-AI recipe %q leaked into prose-facing packet: %s", forbidden, raw)
 		}
 	}
-	if got.SentenceRhythmPolicy != "饭桌保留长问短答；风险发现处自然收短" {
-		t.Fatalf("qualitative rhythm repair was not retained: %#v", got)
+	if got == nil || got.ObjectResponseBudget != objectTiming || got.DialogueFunctionPlan != dialogueFunction {
+		t.Fatalf("concrete story timing was lost with detector recipe: %#v", got)
 	}
-	if got.ObjectResponseBudget != objectTiming || got.DialogueFunctionPlan != dialogueFunction {
-		t.Fatalf("exact event/dialogue timing changed: %#v", got)
+}
+
+func TestProseTimingSanitizerKeepsDomainDetectionAndBusinessPercentage(t *testing.T) {
+	value := "漏电检测通过后才结算；抽成5%确认后才回应；每3句插一次物件；AIGC检测概率低于4%"
+	got := sanitizeProseTimingText(value)
+	for _, want := range []string{"漏电检测通过后才结算", "抽成5%确认后才回应"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("story timing %q was mistaken for detector recipe: %q", want, got)
+		}
 	}
-	if !reflect.DeepEqual(got.CounterMoves, []string{
-		"让主角先误判，再由眼前安全后果迫使他改口",
-		"让父亲的护场改变主角随后保密的选择",
-	}) {
-		t.Fatalf("qualitative causal repairs were not retained and capped: %#v", got.CounterMoves)
-	}
-	if len(got.RiskSignals) != 2 || len(got.ReviewChecks) != 2 {
-		t.Fatalf("anti-AI prose projection should stay compact: %#v", got)
+	for _, forbidden := range []string{"每3句", "AIGC", "低于4%"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("detector/cadence recipe %q survived timing sanitizer: %q", forbidden, got)
+		}
 	}
 }
 
@@ -362,15 +402,10 @@ func TestDraftRenderPacketKeepsEveryRewritePreserveFact(t *testing.T) {
 	}}
 
 	packet := newDraftRenderPacket(plan)
-	if len(packet.PreserveFacts) != len(facts) {
-		t.Fatalf("rewrite preserve facts were sampled or dropped: %#v", packet.PreserveFacts)
+	if !reflect.DeepEqual(packet.PreserveFacts, facts) {
+		t.Fatalf("rewrite preserve facts were sampled, dropped, or changed: got=%#v want=%#v", packet.PreserveFacts, facts)
 	}
-	for i, fact := range facts {
-		if packet.PreserveFacts[i] != fact {
-			t.Fatalf("preserve fact %d changed: got %q want %q", i, packet.PreserveFacts[i], fact)
-		}
-	}
-	if !strings.Contains(packet.HardContractPolicy, "准确金额与数量") || !strings.Contains(packet.HardContractPolicy, "不是场景或句序清单") {
+	if !strings.Contains(packet.HardContractPolicy, "锁定结果") || !strings.Contains(packet.HardContractPolicy, "不得为每项单独分配段落") {
 		t.Fatalf("preserve-fact render policy is ambiguous: %q", packet.HardContractPolicy)
 	}
 }
@@ -530,7 +565,7 @@ func TestDraftRenderPacketProjectsExplicitLiteraryContractWithProvenance(t *test
 
 	packet := newDraftRenderPacket(plan)
 	contract := packet.LiteraryRenderContract
-	if packet.Version != 9 || contract.Source != "explicit_plan" {
+	if packet.Version != 11 || contract.Source != "explicit_plan" {
 		t.Fatalf("explicit literary contract was not versioned/projected: %#v", contract)
 	}
 	if contract.Focalizer != "许闻溪" || contract.NarrativeAccess != "internal" || len(contract.SceneModes) != 1 || len(contract.ActiveLenses) != 1 {
@@ -585,12 +620,12 @@ func TestDraftRenderPacketProjectsLegacyPlanIntoLiteraryContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(serialized)
-	for _, want := range []string{"literary-rendering#focalization-boundary", "literary-rendering#emotion-appraisal", "literary-rendering#syntax-rhythm", "literary-rendering#scene-summary", "literary-rendering#dialogue-subtext"} {
+	for _, want := range []string{"literary-rendering#focalization-boundary", "literary-rendering#emotion-appraisal", "literary-rendering#scene-summary", "literary-rendering#dialogue-subtext"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("legacy projection missing source %q: %s", want, text)
 		}
 	}
-	for _, leaked := range []string{"legacy-evidence-must-not-leak", "legacy-risk-list-must-not-leak"} {
+	for _, leaked := range []string{"legacy-evidence-must-not-leak", "legacy-risk-list-must-not-leak", "literary-rendering#syntax-rhythm"} {
 		if strings.Contains(text, leaked) {
 			t.Fatalf("legacy projection leaked planning dossier field %q: %s", leaked, text)
 		}
@@ -675,8 +710,26 @@ func TestDraftRenderPacketSamplesCandidateBeatsAcrossChapterArc(t *testing.T) {
 	}}
 
 	packet := newDraftRenderPacket(plan)
-	if len(packet.CandidateBeats) != 0 {
-		t.Fatalf("candidate menu duplicates mandatory outcomes and should stay out of prose context: %#v", packet.CandidateBeats)
+	if len(packet.CandidateBeats) != 3 ||
+		packet.CandidateBeats[0].Event != "opening" ||
+		packet.CandidateBeats[1].Event != "obstacle" ||
+		packet.CandidateBeats[2].Event != "payoff" {
+		t.Fatalf("reader-selected page arc was not sampled across opening/turn/payoff: %#v", packet.CandidateBeats)
+	}
+}
+
+func TestDraftRenderPacketDropsSurfaceBeatExplicitlyProjectedFromRequiredOutcome(t *testing.T) {
+	plan := domain.ChapterPlan{
+		Contract: domain.ChapterContract{RequiredBeats: []string{"母子完成两碗豆腐脑合计12元真实付款"}},
+		CausalSimulation: domain.ChapterCausalSimulation{
+			ReaderRetentionPlan: domain.ReaderRetentionPlan{SurfaceBeats: []domain.RetentionSurfaceBeat{{
+				PlanSource: "required_beats[1]",
+				MustShow:   "母子买两碗豆腐脑并完成12元付款",
+			}}},
+		},
+	}
+	if got := newDraftRenderPacket(plan).CandidateBeats; len(got) != 0 {
+		t.Fatalf("surface beat explicitly derived from a hard outcome was duplicated: %#v", got)
 	}
 }
 
@@ -734,7 +787,7 @@ func TestDraftRenderPacketV7SeparatesHardContractFromSoftMaterials(t *testing.T)
 	}
 
 	packet := newDraftRenderPacket(plan)
-	if packet.Version != 9 || len(packet.MandatoryBeats) != 1 || !strings.Contains(packet.MandatoryBeats[0], "100万元") {
+	if packet.Version != 11 || len(packet.MandatoryBeats) != 1 || !strings.Contains(packet.MandatoryBeats[0], "100万元") {
 		t.Fatalf("hard amount outcome was weakened: %+v", packet)
 	}
 	if len(packet.ForbiddenMoves) != 2 || len(packet.ContinuityChecks) != 4 ||
@@ -931,6 +984,16 @@ func TestRenderRequiredOutcomesKeepsEventWhenTrendLiteralIsEmbedded(t *testing.T
 	}
 }
 
+func TestRenderRequiredOutcomesKeepsHardTerminologyBoundary(t *testing.T) {
+	hard := "额度必须说成专项额度而不是个人存款"
+	got := RenderRequiredOutcomes(domain.ChapterPlan{
+		Contract: domain.ChapterContract{RequiredBeats: []string{hard}},
+	})
+	if !reflect.DeepEqual(got, []string{hard}) {
+		t.Fatalf("hard terminology boundary was mistaken for optional style: %#v", got)
+	}
+}
+
 func TestRenderRequiredOutcomesKeepsEveryDistinctLegacyHardBeat(t *testing.T) {
 	want := []string{
 		"开场结果", "运输结果", "摊主甲结果", "系统奖励到账并推动关系变化", "逐笔票据核查", "章末结果",
@@ -939,6 +1002,51 @@ func TestRenderRequiredOutcomesKeepsEveryDistinctLegacyHardBeat(t *testing.T) {
 	got := RenderRequiredOutcomes(plan)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("legacy hard beats were sampled or reordered: got %#v want %#v", got, want)
+	}
+}
+
+func TestRenderRequiredOutcomesDoesNotMergeConflictingCountOrOrder(t *testing.T) {
+	want := []string{
+		"必须完成五个摊位的安全改造",
+		"必须完成六个摊位的安全改造",
+		"老丁必须在沈知遥到场前完成退线",
+		"老丁必须在沈知遥到场后完成退线",
+		"不得提前施工",
+		"允许提前施工",
+	}
+	got := RenderRequiredOutcomes(domain.ChapterPlan{
+		Contract: domain.ChapterContract{RequiredBeats: want},
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("conflicting quantity/order facts were fuzzy-deduplicated: got=%#v want=%#v", got, want)
+	}
+}
+
+func TestRenderRequiredOutcomesUnwrapsOnlyExactGoalAndHookDuplicates(t *testing.T) {
+	goal := "完整兑现本章大纲核心事件：林澈回到青山县"
+	hook := "电话接通，答案还没来"
+	plan := domain.ChapterPlan{
+		Goal: goal,
+		Hook: hook,
+		Contract: domain.ChapterContract{RequiredBeats: []string{
+			"必须完整兑现大纲核心事件：林澈回到青山县",
+			"必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末：电话接通，答案还没来",
+			"必须完整兑现大纲核心事件：林澈回到青山县，并保留4280元电子票",
+		}},
+	}
+	got := RenderRequiredOutcomes(plan)
+	if !reflect.DeepEqual(got, []string{"林澈回到青山县，并保留4280元电子票"}) {
+		t.Fatalf("wrapped hard suffix was deleted with the exact outline duplicate: %#v", got)
+	}
+}
+
+func TestRenderContinuityChecksKeepsQuoteConfirmedOrder(t *testing.T) {
+	hard := "付款必须位于报价确认后，不能先付后补"
+	got := RenderContinuityChecks(domain.ChapterPlan{
+		Contract: domain.ChapterContract{ContinuityChecks: []string{hard}},
+	})
+	if !reflect.DeepEqual(got, []string{hard}) {
+		t.Fatalf("hard quote/payment order was mistaken for presentation advice: %#v", got)
 	}
 }
 

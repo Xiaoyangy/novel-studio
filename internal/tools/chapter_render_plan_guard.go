@@ -70,6 +70,9 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 				chapter, err)
 		}
 	}
+	if err := ValidateRAGFactPlanCurrent(st, *plan); err != nil {
+		return guard, fmt.Errorf("第 %d 章正文写入前普通事实 RAG receipt 复验失败：%w", chapter, err)
+	}
 	if guard.RenderOnly {
 		if err := ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
 			return guard, fmt.Errorf("第 %d 章显式 render-only 复用门禁失败: %w", chapter, err)
@@ -83,6 +86,16 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 		}
 	}
 	return guard, nil
+}
+
+// ValidateCurrentChapterRenderPlanForExecution exposes the complete render
+// freshness gate to outer pipeline orchestration without exposing its internal
+// receipt bundle. Split plan/render mode must freeze only a plan that has
+// consumed the current simulation, rewrite source, selected RAG facts and
+// chapter-scoped constraints.
+func ValidateCurrentChapterRenderPlanForExecution(st *store.Store, chapter int) error {
+	_, err := validateCurrentChapterRenderPlan(st, chapter)
+	return err
 }
 
 func pipelineWritingManaged(st *store.Store) bool {

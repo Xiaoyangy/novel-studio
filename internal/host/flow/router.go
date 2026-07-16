@@ -68,7 +68,8 @@ type State struct {
 	NextActionPlanPartial    bool
 	NextActionPlanRepairTask string
 	// 当前 plan 之后已经生成过 draft 时，恢复流程只做局部验收与提交，
-	// 不应再次整章抽样覆盖；外部草稿审核明确要求结构级重渲染时例外。
+	// 不应再次整章抽样覆盖；DeepSeek provider judge 或用户当前哈希抽查高分
+	// 明确要求结构级重渲染时例外。
 	NextActionDraftReady                    bool
 	NextActionExplicitRerender              bool
 	NextActionReviewRerenderRequired        bool
@@ -78,13 +79,11 @@ type State struct {
 	NextActionDraftExternalRejudgePending bool
 	// DeepSeek passed the exact hash, but the effective local gate still has a
 	// non-structural failure. Host may dispatch one targeted edit; that edit must
-	// stop immediately so the changed hash returns to DeepSeek before commit or a
-	// named-platform retest.
+	// stop immediately so the changed hash returns to the DeepSeek provider judge
+	// before commit or an explicitly configured automated hard-gate retest.
 	NextActionDraftLocalSoftEditPending bool
-	// Every named detector/mode required for the exact current draft hash has
-	// passed the strict <4% gate. The submitted payload is immutable: finalizer
-	// may inspect and commit it, but must not edit or regenerate prose unless a
-	// later explicit rerender/blocking event changes routing first.
+	// An explicitly configured automated detector/mode gate has passed for the
+	// exact current draft hash. User-reported spot checks never set this state.
 	NextActionDraftNamedPassFrozen bool
 
 	// 当前写作目标的大纲锚点。LoadState 读取后随 Host 指令直达 planner，
@@ -133,11 +132,12 @@ func Route(s State) *Instruction {
 	if len(p.PendingRewrites) > 0 {
 		ch := p.PendingRewrites[0]
 		if s.NextActionDraftExternalRejudgePending && s.NextActionPlanReady && s.NextActionDraftReady && !s.NextActionExplicitRerender && !s.NextActionStructuralReplanRequired {
-			// The outer pipeline owns provider-backed draft judgment. Returning nil
+			// The outer pipeline owns the DeepSeek provider judge. Returning nil
 			// lets the current headless run finish instead of dispatching another
 			// prose agent against an unreviewed hash. A stale causal plan must take
-			// the simulation/planning branch below first: its retained platform
-			// obligation applies to the eventual replacement, not obsolete bytes.
+			// the simulation/planning branch below first: an explicitly configured
+			// automated_hard obligation applies to the eventual replacement, not
+			// obsolete bytes. User-reported platform samples create no such duty.
 			// A newer explicit rerender request has already superseded that hash and
 			// may proceed directly.
 			return nil
@@ -215,14 +215,14 @@ func Route(s State) *Instruction {
 			if s.NextActionDraftExternalRerenderRequired {
 				return &Instruction{
 					Agent:   "drafter",
-					Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", ch, ch),
-					Reason:  fmt.Sprintf("第 %d 章外部草稿审核要求结构级重渲染", ch),
+					Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先用 DeepSeek provider judge 复判新哈希，用户外部平台不要求跟随复测", ch, ch),
+					Reason:  fmt.Sprintf("第 %d 章当前哈希的 DeepSeek provider judge 或用户抽查高分要求结构级重渲染", ch),
 					Chapter: ch,
 				}
 			}
 			return &Instruction{
 				Agent:   "draft_finalizer",
-				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获外判严格 <4%% 且一致性门禁通过，可对该哈希调用 commit_chapter 一次；软概率诊断本身不授权润色，但 commit_chapter 返回的 whole_text/segment、corroboration blocker 或确定性 AIGC 门禁属于结构级阻断。任何 commit_chapter 失败后必须立即结束子任务，禁止再次 commit、check、read 或 edit，外层 pipeline 会保存阻断证据并整章重渲染。只有在第一次提交前，rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；一旦编辑只允许一处并立即结束，交外层复判新哈希。禁止重新整章生成", ch, ch),
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过，可对该哈希调用 commit_chapter 一次；用户外部平台只抽查，不要求替换稿跟随复测。软概率诊断本身不授权润色，但 commit_chapter 返回的 whole_text/segment、corroboration blocker 或确定性 AIGC 门禁属于结构级阻断。任何 commit_chapter 失败后必须立即结束子任务，禁止再次 commit、check、read 或 edit，外层 pipeline 会保存阻断证据并整章重渲染。只有在第一次提交前，rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；一旦编辑只允许一处并立即结束，交外层 DeepSeek provider judge 复判新哈希。禁止重新整章生成", ch, ch),
 				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
 				Chapter: ch,
 			}
@@ -231,7 +231,7 @@ func Route(s State) *Instruction {
 			return &Instruction{
 				Agent: "drafter",
 				Task: fmt.Sprintf(
-					"正式复审要求第 %d 章产生新稿：只调用一次 novel_context(chapter=%d, profile=draft)，复用已批准的 world simulation 与 POV plan，逐条落实当前 rewrite_brief；不得读取旧 draft/final 或复用旧稿表面。随后调用 draft_chapter(mode=write) 一次整章覆盖；禁止 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。写入新哈希后立即结束，交外层 pipeline 做完整裸正文外判",
+					"正式复审要求第 %d 章产生新稿：只调用一次 novel_context(chapter=%d, profile=draft)，复用已批准的 world simulation 与 POV plan，逐条落实当前 rewrite_brief；不得读取旧 draft/final 或复用旧稿表面。随后调用 draft_chapter(mode=write) 一次整章覆盖；禁止 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。写入新哈希后立即结束，交外层 pipeline 做 DeepSeek provider judge 裸正文判定",
 					ch, ch,
 				),
 				Reason:  fmt.Sprintf("第 %d 章正式 rewrite 结论仍对应当前终稿，必须先生成不同哈希的新草稿", ch),
@@ -242,7 +242,7 @@ func Route(s State) *Instruction {
 			return &Instruction{
 				Agent: "drafter",
 				Task: fmt.Sprintf(
-					"显式整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，复用已经批准的 world simulation 与 POV plan；忽略其中已声明为 source-version-only 的旧正文/brief 哈希差，不得读取旧 draft/final 或复用旧稿表面。随后必须调用 draft_chapter(mode=write) 一次覆盖旧草稿，禁止调用 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。新草稿写入后立即结束，交由外层 pipeline 做同哈希外判",
+					"显式整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，复用已经批准的 world simulation 与 POV plan；忽略其中已声明为 source-version-only 的旧正文/brief 哈希差，不得读取旧 draft/final 或复用旧稿表面。随后必须调用 draft_chapter(mode=write) 一次覆盖旧草稿，禁止调用 simulate_chapter_world、plan_structure、plan_details、edit_chapter、check_consistency 或 commit_chapter。新草稿写入后立即结束，交由外层 pipeline 做 DeepSeek provider judge 同哈希判定",
 					ch, ch,
 				),
 				Reason:  fmt.Sprintf("第 %d 章收到显式 render-only 请求，旧草稿已失效", ch),
@@ -382,14 +382,14 @@ func Route(s State) *Instruction {
 		if s.NextActionDraftExternalRerenderRequired {
 			return &Instruction{
 				Agent:   "drafter",
-				Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先复判新哈希", next, next),
-				Reason:  "外部草稿审核要求结构级重渲染",
+				Task:    fmt.Sprintf("整章重渲染第 %d 章：只调用一次 novel_context(chapter=%d, profile=draft)，从净化后的 draft_external_ai_review 与 rewrite_brief 落实旧稿失败证据，不得读取旧 draft/final；其中示例场景、示例动作和示例台词不是剧情指令，禁止照搬或换皮复现。必须调用 draft_chapter(mode=write) 覆盖旧草稿，禁止 edit_chapter 局部贴补。写入成功后立即结束本次子任务，禁止 read_chapter、check_consistency、edit_chapter、commit_chapter 或再次生成；外层 pipeline 将先用 DeepSeek provider judge 复判新哈希，用户外部平台不要求跟随复测", next, next),
+				Reason:  "当前哈希的 DeepSeek provider judge 或用户抽查高分要求结构级重渲染",
 				Chapter: next,
 			}
 		}
 		return &Instruction{
 			Agent:   "draft_finalizer",
-			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft) 和 check_consistency。当前哈希已获外判严格 <4%% 且一致性门禁通过时直接 commit_chapter，不得按概率代理提示继续润色。只对确定性事实/范围/高置信模板硬伤使用 edit_chapter；外判通过稿一旦编辑，只允许一处并立即结束子任务，先复判新哈希。禁止重新整章生成", next),
+			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft) 和 check_consistency。当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过时直接 commit_chapter；用户外部平台只抽查，不要求替换稿跟随复测。不得按概率代理提示继续润色。只对确定性事实/范围/高置信模板硬伤使用 edit_chapter；DeepSeek provider judge 通过稿一旦编辑，只允许一处并立即结束子任务，先交外层 DeepSeek provider judge 复判新哈希。禁止重新整章生成", next),
 			Reason:  "已有绑定当前 plan 的草稿，恢复时只需验收提交",
 			Chapter: next,
 		}
@@ -406,10 +406,10 @@ func draftLocalSoftEditInstruction(chapter int) *Instruction {
 	return &Instruction{
 		Agent: "draft_finalizer",
 		Task: fmt.Sprintf(
-			"第 %d 章当前精确哈希已通过 DeepSeek，但本地有效 AIGC 门禁仍有非结构性失败：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 并运行 check_consistency，严格依据 aigc_gate_check.rewrite_focus 只选择一处可验证的局部硬伤。最多调用一次 edit_chapter；不得整章重写、不得调用 commit_chapter。edit 一旦落盘必须立即结束子任务，禁止再次 read/check/edit；外层 pipeline 将先对新哈希重跑 DeepSeek，已有注册 detector/mode 复测义务继续暂缓到本地门禁与 DeepSeek 均通过后",
+			"第 %d 章当前精确哈希已通过 DeepSeek provider judge，但本地有效 AIGC 门禁仍有非结构性失败：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 并运行 check_consistency，严格依据 aigc_gate_check.rewrite_focus 只选择一处可验证的局部硬伤。最多调用一次 edit_chapter；不得整章重写、不得调用 commit_chapter。edit 一旦落盘必须立即结束子任务，禁止再次 read/check/edit；外层 pipeline 将先用 DeepSeek provider judge 判定新哈希。用户外部抽查不作为后续放行前置",
 			chapter, chapter,
 		),
-		Reason:  fmt.Sprintf("第 %d 章 DeepSeek 已通过，允许消费一次本地软门禁编辑", chapter),
+		Reason:  fmt.Sprintf("第 %d 章 DeepSeek provider judge 已通过，允许消费一次本地软门禁编辑", chapter),
 		Chapter: chapter,
 	}
 }
@@ -418,10 +418,10 @@ func draftNamedPassCommitInstruction(chapter int) *Instruction {
 	return &Instruction{
 		Agent: "draft_finalizer",
 		Task: fmt.Sprintf(
-			"第 %d 章当前精确哈希已通过 requirement 的全部注册 detector/mode 严格 <4%% 复测，送检正文已经冻结。只可 read_chapter(source=draft)、novel_context(chapter=%d, profile=draft) 与 check_consistency 核验同一载荷；全部门禁通过后最多调用一次 commit_chapter。禁止 edit_chapter、draft_chapter 或任何正文改写。若 consistency/commit 暴露新的确定性阻断，立即结束子任务并交外层产生新的显式整章重渲染授权；不得在已通过的 named payload 上就地修补",
+			"第 %d 章当前精确哈希已通过显式配置 automated_hard 的自动 detector/mode 严格 <4%% 门禁，载荷已经冻结。只可 read_chapter(source=draft)、novel_context(chapter=%d, profile=draft) 与 check_consistency 核验同一载荷；全部门禁通过后最多调用一次 commit_chapter。禁止 edit_chapter、draft_chapter 或任何正文改写。用户手工抽查不会进入此状态。若 consistency/commit 暴露新的确定性阻断，立即结束子任务并交外层产生新的显式整章重渲染授权",
 			chapter, chapter,
 		),
-		Reason:  fmt.Sprintf("第 %d 章当前送检哈希已通过全部注册平台门禁，只允许原样提交", chapter),
+		Reason:  fmt.Sprintf("第 %d 章当前哈希已通过显式 automated_hard 自动门禁，只允许原样提交", chapter),
 		Chapter: chapter,
 	}
 }

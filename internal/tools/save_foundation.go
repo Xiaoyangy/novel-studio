@@ -70,6 +70,9 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 }
 
 func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if err := guardPipelineGlobalPlanningExecution(t.store, t.Name()); err != nil {
+		return nil, err
+	}
 	var a struct {
 		Type           string          `json:"type"`
 		Content        json.RawMessage `json:"content"`

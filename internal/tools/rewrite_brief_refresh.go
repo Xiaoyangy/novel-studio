@@ -32,9 +32,19 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 	if strings.TrimSpace(body) != "" {
 		bodySHA256 = reviewreport.BodySHA256(body)
 	}
+	externalRequirement, requirementErr := loadDraftExternalRerenderRequirement(s.Dir(), review.Chapter)
+	if requirementErr != nil {
+		return "", fmt.Errorf("load external rerender policy for rewrite brief: %w", requirementErr)
+	}
 	registeredDetections, err := reviewreport.LatestRegisteredExternalDetections(s.Dir(), review.Chapter, bodySHA256)
 	if err != nil {
-		return "", fmt.Errorf("load current registered external detections for rewrite brief: %w", err)
+		if externalRequirement != nil && externalRequirement.BlockUntilExternalRetest {
+			return "", fmt.Errorf("load current registered external detections for rewrite brief: %w", err)
+		}
+		// User-operated external detections are sampling-only. A damaged optional
+		// log must not prevent save_review from refreshing the canonical brief;
+		// only an explicitly automated hard policy keeps fail-closed behavior.
+		registeredDetections = nil
 	}
 	pendingSteer := ""
 	if meta, loadErr := s.RunMeta.Load(); loadErr != nil {
@@ -99,7 +109,7 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		fmt.Fprintf(&b, "\n## 最新整篇单段门禁（%s）\n\n", latestRegisteredDetectionDate(blockingRegistered))
 		for _, detection := range blockingRegistered {
 			identity := strings.TrimSpace(detection.Detector) + "/" + strings.TrimSpace(detection.Mode)
-			fmt.Fprintf(&b, "- `%s` 对当前正文 SHA `%s` 的整篇单段结果为 `%.2f%%`；必须保留既定事实后整章重渲染，新 SHA 用同 detector/mode 精确 payload 复测，严格 `<4%%` 才能交付。\n",
+			fmt.Fprintf(&b, "- `%s` 对当前正文 SHA `%s` 的用户抽查整篇结果为 `%.2f%%`；该结果否决当前字节并触发一次整章重渲染。新 SHA 通过本地 AIGC、DeepSeek 与事实一致性门禁后即可继续生产，不等待人工复测；后续抽查若再次绑定新 SHA 且高分，再独立触发返工。\n",
 				identity, bodySHA256, detection.NormalizedScorePercent)
 		}
 	}

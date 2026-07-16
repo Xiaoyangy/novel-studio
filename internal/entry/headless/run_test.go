@@ -3,11 +3,38 @@ package headless
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestInspectRenderOnlyReplanStopRejectsExhaustedCausalEpoch(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "plan", "drafts/01.plan.json", "plan-epoch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectRenderOnlyReplanStop(dir, 1); err != nil {
+		t.Fatalf("fresh plan should still have render attempts: %v", err)
+	}
+	for _, digest := range []string{"body-a", "body-b", "body-c"} {
+		if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "draft-structural-block", "drafts/01.draft.md", digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := inspectRenderOnlyReplanStop(dir, 1)
+	if err == nil || !strings.Contains(err.Error(), "禁止自动回到 World Simulator/Planner") {
+		t.Fatalf("exhausted render epoch did not request immediate stop: %v", err)
+	}
+	if cp := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "plan"); cp == nil || cp.Digest != "plan-epoch" {
+		t.Fatalf("stop inspection mutated frozen plan: %+v", cp)
+	}
+}
 
 func TestShouldStopAfterChapterWaitsForPendingRewrite(t *testing.T) {
 	dir := t.TempDir()
@@ -135,6 +162,33 @@ func TestShouldStopAfterChapterCommitRequiresNewCheckpoint(t *testing.T) {
 	}
 	if !shouldStopAfterChapterCommit(dir, 1, initial) {
 		t.Fatal("new commit checkpoint should return control to pipeline review")
+	}
+}
+
+func TestShouldStopAfterChapterPlanRequiresNewFormalPlanCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 3, Title: "旧计划"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(3), "plan", "drafts/03.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	initial := latestChapterPlanSeq(dir, 3)
+	if shouldStopAfterChapterPlan(dir, 3, initial) {
+		t.Fatal("existing formal plan checkpoint must not stop a resumed planner")
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 3, Title: "新计划"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(domain.ChapterScope(3), "plan", "drafts/03.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterChapterPlan(dir, 3, initial) {
+		t.Fatal("new formal plan checkpoint should return control to the pipeline")
 	}
 }
 

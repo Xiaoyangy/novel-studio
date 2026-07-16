@@ -710,7 +710,11 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		st.Dir(), chapter, reviewreport.BodySHA256(body),
 	)
 	if registeredErr != nil {
-		return nil, fmt.Errorf("load registered external detection: %w", registeredErr)
+		// User-platform sampling is optional production evidence. A damaged
+		// sampling journal must still reject future registrations, but it cannot
+		// prevent local/DeepSeek/Editor review of the chapter already on disk.
+		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d 用户抽查日志不可读，已忽略该可选证据：%v\n", chapter, registeredErr)
+		registeredRows = nil
 	}
 	blockingRegistered := make([]reviewreport.RegisteredExternalDetection, 0, len(registeredRows))
 	for _, registeredExternal := range registeredRows {

@@ -23,7 +23,9 @@ import (
 type Options struct {
 	Prompt                    string
 	StopAfterChapter          int
+	StopAfterPlanChapter      int
 	StopAfterRewriteCommit    int
+	StopOnRenderReplanChapter int
 	StopAfterFoundation       bool
 	StopAfterFoundationChange bool
 	StopAfterInitialWorldTick bool
@@ -55,12 +57,19 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if opts.StopOnRenderReplanChapter > 0 {
+		if stopErr := inspectRenderOnlyReplanStop(eng.Dir(), opts.StopOnRenderReplanChapter); stopErr != nil {
+			eng.Close()
+			return stopErr
+		}
+	}
 	eng.AskUser().SetHandler(newTerminalAskUser(stdin, stderr).handle)
 	foundationDigest := ""
 	if opts.StopAfterFoundationChange {
 		foundationDigest = foundationRevisionDigest(eng.Dir())
 	}
 	rewriteCommitSeq := latestChapterCommitSeq(eng.Dir(), opts.StopAfterRewriteCommit)
+	planSeq := latestChapterPlanSeq(eng.Dir(), opts.StopAfterPlanChapter)
 	cleanup := logger.SetupFile(eng.Dir(), "headless.log", false)
 	defer cleanup()
 	defer eng.Close()
@@ -110,13 +119,13 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return fmt.Errorf("headless 模式需要 --prompt，或输出目录 %q 下已有可恢复会话", eng.Dir())
 		}
 		fmt.Fprintf(stderr, "headless 恢复: %s (%s)\n", eng.Dir(), label)
-		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
+		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopOnRenderReplanChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
+	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopOnRenderReplanChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
 }
 
-func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool) error {
+func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopOnRenderReplanChapter int, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool) error {
 	stopRequested := false
 	for {
 		select {
@@ -130,10 +139,21 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 				fmt.Fprintf(stderr, "[headless] 已完成到第 %d 章，按 --write-to 暂停写作\n", stopAfterChapter)
 				eng.Abort()
 			}
+			if !stopRequested && shouldStopAfterChapterPlan(eng.Dir(), stopAfterPlanChapter, initialPlanSeq) {
+				stopRequested = true
+				fmt.Fprintf(stderr, "[headless] 第 %d 章正式 plan 已新增，按 pipeline 推演阶段暂停\n", stopAfterPlanChapter)
+				eng.Abort()
+			}
 			if !stopRequested && shouldStopAfterChapterCommit(eng.Dir(), stopAfterRewriteCommit, initialRewriteCommitSeq) {
 				stopRequested = true
 				fmt.Fprintf(stderr, "[headless] 第 %d 章返工正文已 commit，交还 pipeline 复审\n", stopAfterRewriteCommit)
 				eng.Abort()
+			}
+			if !stopRequested && stopOnRenderReplanChapter > 0 {
+				if stopErr := inspectRenderOnlyReplanStop(eng.Dir(), stopOnRenderReplanChapter); stopErr != nil {
+					eng.Abort()
+					return stopErr
+				}
 			}
 			if !stopRequested && stopAfterFoundation && shouldStopAfterFoundationReady(eng.Dir()) {
 				stopRequested = true
@@ -179,6 +199,24 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 	}
 }
 
+func inspectRenderOnlyReplanStop(dir string, chapter int) error {
+	escalation := tools.InspectRenderOnlyReplanEscalation(store.NewStore(dir), chapter)
+	if !escalation.Required {
+		return nil
+	}
+	return renderOnlyReplanStopError(chapter, escalation)
+}
+
+func renderOnlyReplanStopError(chapter int, escalation tools.RenderOnlyReplanEscalation) error {
+	return fmt.Errorf(
+		"第 %d 章 render-only 已有 %d 个不同整章哈希触发结构阻断（上限 %d）；冻结计划保持不变，render 阶段立即停止，禁止自动回到 World Simulator/Planner：%s",
+		chapter,
+		escalation.Attempts,
+		escalation.Limit,
+		escalation.Reason,
+	)
+}
+
 func shouldStopAfterFoundationReady(dir string) bool {
 	return tools.FoundationCoreComplete(dir)
 }
@@ -196,6 +234,21 @@ func latestChapterCommitSeq(dir string, chapter int) int64 {
 
 func shouldStopAfterChapterCommit(dir string, chapter int, initialSeq int64) bool {
 	return chapter > 0 && latestChapterCommitSeq(dir, chapter) > initialSeq
+}
+
+func latestChapterPlanSeq(dir string, chapter int) int64 {
+	if chapter <= 0 {
+		return 0
+	}
+	cp := store.NewStore(dir).Checkpoints.LatestByStep(domain.ChapterScope(chapter), "plan")
+	if cp == nil {
+		return 0
+	}
+	return cp.Seq
+}
+
+func shouldStopAfterChapterPlan(dir string, chapter int, initialSeq int64) bool {
+	return chapter > 0 && latestChapterPlanSeq(dir, chapter) > initialSeq
 }
 
 func shouldStopAfterFoundationChanged(dir, initialDigest string) bool {

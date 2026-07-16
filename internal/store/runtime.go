@@ -112,6 +112,12 @@ func (s *RuntimeStore) Reset() error {
 	if err := os.RemoveAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks")); err != nil {
 		errs = append(errs, err.Error())
 	}
+	pipelineExecutionProcessMu.Lock()
+	executionRemoveErr := os.Remove(filepath.Join(s.io.dir, pipelineExecutionPath))
+	pipelineExecutionProcessMu.Unlock()
+	if executionRemoveErr != nil && !os.IsNotExist(executionRemoveErr) {
+		errs = append(errs, executionRemoveErr.Error())
+	}
 	if err := os.MkdirAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks"), 0o755); err != nil {
 		errs = append(errs, err.Error())
 	}

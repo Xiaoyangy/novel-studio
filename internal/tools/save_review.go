@@ -920,7 +920,7 @@ func (t *SaveReviewTool) isMidVolume(chapter int) bool {
 	for _, v := range volumes {
 		count := 0
 		for _, a := range v.Arcs {
-			count += len(a.Chapters)
+			count += a.ChapterSpan()
 		}
 		if count == 0 {
 			continue

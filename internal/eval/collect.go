@@ -225,16 +225,10 @@ func chapterTitle(s *store.Store, chapter int, text string, check func(string, e
 			return entry.Title
 		}
 	}
-	volumes, err := s.Outline.LoadLayeredOutline()
+	entry, err := s.Outline.GetChapterFromLayered(chapter)
 	check("layered_outline", err)
-	for _, v := range volumes {
-		for _, a := range v.Arcs {
-			for _, entry := range a.Chapters {
-				if entry.Chapter == chapter && strings.TrimSpace(entry.Title) != "" {
-					return entry.Title
-				}
-			}
-		}
+	if entry != nil && strings.TrimSpace(entry.Title) != "" {
+		return entry.Title
 	}
 	return firstMarkdownTitle(text)
 }

@@ -326,13 +326,14 @@ type RetrievalTrace struct {
 }
 
 type RetrievalTraceHit struct {
-	ChunkID    string   `json:"chunk_id"`
-	Score      float64  `json:"score"`
-	Reasons    []string `json:"reasons,omitempty"`
-	SourcePath string   `json:"source_path,omitempty"`
-	Facet      string   `json:"facet,omitempty"`
-	SourceKind string   `json:"source_kind,omitempty"`
-	Context    string   `json:"context,omitempty"`
+	ChunkID       string   `json:"chunk_id"`
+	ContentSHA256 string   `json:"content_sha256,omitempty"`
+	Score         float64  `json:"score"`
+	Reasons       []string `json:"reasons,omitempty"`
+	SourcePath    string   `json:"source_path,omitempty"`
+	Facet         string   `json:"facet,omitempty"`
+	SourceKind    string   `json:"source_kind,omitempty"`
+	Context       string   `json:"context,omitempty"`
 }
 
 // RAGVectorStore 是本地持久化向量索引。它不是最终后端抽象，

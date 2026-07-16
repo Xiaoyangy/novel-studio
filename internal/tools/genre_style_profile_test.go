@@ -93,8 +93,8 @@ func TestDraftProfileProjectsCompactStyleContractAndDropsRawAssets(t *testing.T)
 	applyChapterContextProfile(result, "draft")
 
 	packet, ok := working["render_packet"].(draftRenderPacket)
-	if !ok || packet.Version != 9 || packet.StyleContract == nil {
-		t.Fatalf("style contract was not projected into v9 packet: %#v", working["render_packet"])
+	if !ok || packet.Version != 11 || packet.StyleContract == nil {
+		t.Fatalf("style contract was not projected into v11 packet: %#v", working["render_packet"])
 	}
 	if _, mirrored := result["render_packet"]; mirrored {
 		t.Fatal("draft profile duplicated render_packet outside canonical working_memory")

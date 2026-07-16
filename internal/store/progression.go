@@ -200,18 +200,21 @@ func (s *Store) chapterOutlineMaps() (map[int]domain.OutlineEntry, map[int]domai
 	ch := 1
 	for _, v := range volumes {
 		for _, a := range v.Arcs {
-			for _, e := range a.Chapters {
-				e.Chapter = ch
-				outlineByChapter[ch] = e
-				positionByChapter[ch] = domain.ChapterPosition{
+			for i, e := range a.Chapters {
+				globalChapter := ch + i
+				e.Chapter = globalChapter
+				outlineByChapter[globalChapter] = e
+				positionByChapter[globalChapter] = domain.ChapterPosition{
 					Volume:      v.Index,
 					VolumeTitle: v.Title,
 					Arc:         a.Index,
 					ArcTitle:    a.Title,
 					ArcGoal:     a.Goal,
 				}
-				ch++
 			}
+			// 尚未展开的骨架弧同样占用稳定的全局章号区间。
+			// 否则后方已展开弧会在前方骨架展开后整体漂移。
+			ch += a.ChapterSpan()
 		}
 	}
 	return outlineByChapter, positionByChapter, nil

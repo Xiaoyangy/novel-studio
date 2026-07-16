@@ -40,6 +40,12 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		return verifyPipelineArchitectStage(outputDir, evidence)
 	case "zero-init":
 		return verifyPipelineZeroInitStage(outputDir, evidence)
+	case "preplan":
+		return verifyPipelinePreplanStage(outputDir, evidence)
+	case "plan":
+		return verifyPipelinePlanStage(outputDir, evidence)
+	case "render":
+		return verifyPipelineRenderStage(outputDir, evidence)
 	case "write":
 		return verifyPipelineWriteStage(outputDir, flags, evidence)
 	case "review":

@@ -33,7 +33,7 @@ type draftRenderPacket struct {
 	ContinuityChecks        []string                         `json:"continuity_checks,omitempty"`
 	PayoffPoints            []string                         `json:"soft_payoff_directions,omitempty"`
 	SceneAnchors            []string                         `json:"soft_scene_anchors,omitempty"`
-	CandidateBeats          []draftCandidateBeat             `json:"candidate_beats,omitempty"`
+	CandidateBeats          []draftCandidateBeat             `json:"soft_candidate_beats,omitempty"`
 	RevealBudget            []string                         `json:"reveal_budget,omitempty"`
 	CutOrCompress           []string                         `json:"cut_or_compress,omitempty"`
 	PageTurnQuestions       []string                         `json:"page_turn_questions,omitempty"`
@@ -41,7 +41,7 @@ type draftRenderPacket struct {
 	EntertainmentPlan       draftEntertainmentPlan           `json:"reader_entertainment_plan,omitempty"`
 	TrendLanguagePlan       []draftTrendLanguagePlan         `json:"trend_language_plan,omitempty"`
 	LongformOpening         draftLongformOpening             `json:"longform_opening,omitempty"`
-	AntiAIExecutionPlan     draftAntiAIPlan                  `json:"anti_ai_execution_plan,omitempty"`
+	EventTimingSafeguards   *draftEventTimingSafeguards      `json:"event_timing_safeguards,omitempty"`
 	VoiceCards              []draftVoiceCard                 `json:"voice_cards,omitempty"`
 	VisualCards             []draftVisualCard                `json:"visual_cards,omitempty"`
 	DialogueScenes          []draftDialogueScene             `json:"dialogue_scenes,omitempty"`
@@ -52,6 +52,7 @@ type draftRenderPacket struct {
 	VisibleCharacters       []string                         `json:"visible_characters,omitempty"`
 	ExcludedNamedCharacters []string                         `json:"excluded_named_characters,omitempty"`
 	GroundingDetails        []domain.GroundingDetailPlan     `json:"grounding_details,omitempty"`
+	FactAnchors             []draftFactAnchor                `json:"fact_anchors,omitempty"`
 	CraftMethods            []draftCraftMethod               `json:"craft_methods,omitempty"`
 	EnvironmentSignals      []draftEnvironmentSignal         `json:"environment_signals,omitempty"`
 	EndingContract          domain.EndingConsequenceContract `json:"ending_consequence_contract,omitempty"`
@@ -59,22 +60,23 @@ type draftRenderPacket struct {
 	HardContractPolicy      string                           `json:"hard_contract_policy"`
 	SoftMaterialPolicy      string                           `json:"soft_material_policy"`
 	SelectionPolicy         string                           `json:"selection_policy"`
-	SceneBridgePolicy       string                           `json:"scene_bridge_policy"`
-	DialogueTopologyPolicy  string                           `json:"dialogue_topology_policy"`
-	SystemVoicePolicy       string                           `json:"system_voice_policy"`
-	JargonPolicy            string                           `json:"jargon_policy"`
-	PlanTranslationPolicy   string                           `json:"plan_translation_policy"`
-	ReaderRegisterPolicy    string                           `json:"reader_register_policy"`
-	InterfaceCompression    string                           `json:"interface_compression_policy"`
-	ScenePurposePolicy      string                           `json:"scene_purpose_policy"`
-	SpokenLanguagePolicy    string                           `json:"spoken_language_policy"`
-	EmotionalRenderPolicy   string                           `json:"emotional_render_policy"`
-	GroupCompressionPolicy  string                           `json:"group_compression_policy"`
-	ChronologyPolicy        string                           `json:"chronology_policy"`
-	ProofFocusPolicy        string                           `json:"proof_focus_policy"`
-	NamedRolePolicy         string                           `json:"named_role_policy"`
-	RelationshipPriority    string                           `json:"relationship_priority_policy"`
-	CharacterEntrancePolicy string                           `json:"character_entrance_policy"`
+	SceneBridgePolicy       string                           `json:"scene_bridge_policy,omitempty"`
+	DialogueTopologyPolicy  string                           `json:"dialogue_topology_policy,omitempty"`
+	SystemVoicePolicy       string                           `json:"system_voice_policy,omitempty"`
+	JargonPolicy            string                           `json:"jargon_policy,omitempty"`
+	PlanTranslationPolicy   string                           `json:"plan_translation_policy,omitempty"`
+	ReaderRegisterPolicy    string                           `json:"reader_register_policy,omitempty"`
+	InterfaceCompression    string                           `json:"interface_compression_policy,omitempty"`
+	ScenePurposePolicy      string                           `json:"scene_purpose_policy,omitempty"`
+	SpokenLanguagePolicy    string                           `json:"spoken_language_policy,omitempty"`
+	EmotionalRenderPolicy   string                           `json:"emotional_render_policy,omitempty"`
+	GroupCompressionPolicy  string                           `json:"group_compression_policy,omitempty"`
+	ChronologyPolicy        string                           `json:"chronology_policy,omitempty"`
+	ProofFocusPolicy        string                           `json:"proof_focus_policy,omitempty"`
+	NamedRolePolicy         string                           `json:"named_role_policy,omitempty"`
+	RelationshipPriority    string                           `json:"relationship_priority_policy,omitempty"`
+	CharacterEntrancePolicy string                           `json:"character_entrance_policy,omitempty"`
+	FactAnchorPolicy        string                           `json:"fact_anchor_policy,omitempty"`
 }
 
 // draftWordBudget turns the delivery boundary into a prose-facing writing
@@ -113,13 +115,12 @@ type draftLongformOpening struct {
 	RetentionRisks    []string `json:"retention_risks,omitempty"`
 }
 
-type draftAntiAIPlan struct {
-	RiskSignals          []string `json:"risk_signals,omitempty"`
-	CounterMoves         []string `json:"counter_moves,omitempty"`
-	SentenceRhythmPolicy string   `json:"sentence_rhythm_policy,omitempty"`
-	ObjectResponseBudget string   `json:"object_response_budget,omitempty"`
-	DialogueFunctionPlan string   `json:"dialogue_function_plan,omitempty"`
-	ReviewChecks         []string `json:"review_checks,omitempty"`
+// draftEventTimingSafeguards carries only story timing that may be unique to
+// the upstream anti-AI plan. Detector diagnoses, sentence recipes, counter-move
+// lists and review checks stay in planning/review and never enter prose.
+type draftEventTimingSafeguards struct {
+	ObjectResponseBudget string `json:"object_response_budget,omitempty"`
+	DialogueFunctionPlan string `json:"dialogue_function_plan,omitempty"`
 }
 
 // draftCraftMethod is the prose-safe projection of a receipt-backed external
@@ -128,11 +129,22 @@ type draftAntiAIPlan struct {
 type draftCraftMethod struct {
 	ReceiptID          string   `json:"receipt_id"`
 	Need               string   `json:"need"`
+	Risk               string   `json:"risk"`
+	PersonCausalGoal   string   `json:"person_causal_goal"`
 	Moves              []string `json:"candidate_moves"`
 	TransformationRule string   `json:"transformation_rule"`
 	Avoid              []string `json:"hard_avoid"`
 	SourceRefs         []string `json:"source_refs"`
 	UsagePolicy        string   `json:"usage_policy"`
+}
+
+type draftFactAnchor struct {
+	Kind          string `json:"kind"`
+	Fact          string `json:"fact"`
+	TransformedAs string `json:"transformed_as,omitempty"`
+	SceneAnchor   string `json:"scene_anchor,omitempty"`
+	SourceRef     string `json:"source_ref,omitempty"`
+	Authority     string `json:"authority"`
 }
 
 type draftProtagonistProjection struct {
@@ -366,12 +378,16 @@ func applyDraftContextProfile(result map[string]any) {
 	plan := chapterPlanFromContext(result, working)
 	if plan != nil {
 		packet := newDraftRenderPacket(*plan)
-		packet.PreserveFacts = canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts)
+		packet.PreserveFacts = proseFacingPreserveFacts(
+			canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts),
+		)
+		compactDraftPacketForProse(&packet)
 		packet.WordBudget = draftWordBudgetFromContext(result)
 		packet.StyleContract = newDraftStyleContract(result)
 		if simulation, ok := result["chapter_world_simulation"].(map[string]any); ok {
 			if projection, ok := draftProjectionFromAny(simulation["protagonist_projection"]); ok {
 				packet.ProtagonistProjection = leanDraftProjection(projection)
+				packet.ProtagonistProjection.ObservableEffects = nil
 			}
 			packet.VisibleCharacters, packet.ExcludedNamedCharacters = draftVisibilityFromSimulation(simulation)
 		}
@@ -390,9 +406,9 @@ func applyDraftContextProfile(result map[string]any) {
 			receipt := finalizedPlanReceipt(*plan)
 			enrichDraftAuthorityReceipt(receipt, result, working, packet)
 			result["formal_plan_receipt"] = receipt
-			compactDraftRewriteAuthority(result, "formal_plan_receipt.rewrite_source", draftRenderPacketAuthorityPath(working))
+			compactDraftRewriteAuthority(result, "formal_plan_receipt.rewrite_source")
 			if working != nil {
-				compactDraftRewriteAuthority(working, "formal_plan_receipt.rewrite_source", draftRenderPacketAuthorityPath(working))
+				compactDraftRewriteAuthority(working, "formal_plan_receipt.rewrite_source")
 			}
 		}
 
@@ -465,11 +481,15 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 	}
 	sourcePreserveFacts := draftRewriteSourcePreserveFacts(result, working)
 	packet := newDraftRenderPacket(*plan)
-	packet.PreserveFacts = canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts)
+	packet.PreserveFacts = proseFacingPreserveFacts(
+		canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts),
+	)
+	compactDraftPacketForProse(&packet)
 	packet.StyleContract = newDraftStyleContract(result)
 	if simulation, ok := result["chapter_world_simulation"].(map[string]any); ok {
 		if projection, ok := draftProjectionFromAny(simulation["protagonist_projection"]); ok {
 			packet.ProtagonistProjection = leanDraftProjection(projection)
+			packet.ProtagonistProjection.ObservableEffects = nil
 		}
 		packet.VisibleCharacters, packet.ExcludedNamedCharacters = draftVisibilityFromSimulation(simulation)
 	}
@@ -508,9 +528,9 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 		compactDraftRewriteSource(working)
 		compactDraftRewriteBrief(working)
 	}
-	compactDraftRewriteAuthority(result, "formal_plan_receipt.rewrite_source", draftRenderPacketAuthorityPath(working))
+	compactDraftRewriteAuthority(result, "formal_plan_receipt.rewrite_source")
 	if working != nil {
-		compactDraftRewriteAuthority(working, "formal_plan_receipt.rewrite_source", draftRenderPacketAuthorityPath(working))
+		compactDraftRewriteAuthority(working, "formal_plan_receipt.rewrite_source")
 	}
 	sanitizeDraftExternalReview(result)
 	sanitizeDraftWorldSimulation(result, true, true, draftRenderPacketAuthorityPath(working))
@@ -542,6 +562,13 @@ func finalizedPlanReceipt(plan domain.ChapterPlan) map[string]any {
 		"protagonist_decision":     strings.TrimSpace(plan.CausalSimulation.ProtagonistDecision),
 		"context_sources":          compactStrings(plan.CausalSimulation.ContextSources),
 		"policy":                   "artifact+digest 绑定完整 plan；context_sources 绑定 rewrite/instruction/world/craft 消费链。",
+	}
+	if id, factsSHA, count, err := ragFactReceiptIdentityFromSources(plan.CausalSimulation.ContextSources); err == nil && count == 1 {
+		receipt["rag_fact_receipt"] = map[string]any{
+			"receipt_id":            id,
+			"selected_facts_sha256": factsSHA,
+			"policy":                "只绑定 Planner 已转化并选择的项目事实；raw RAG 不进入正文上下文。",
+		}
 	}
 	return receipt
 }
@@ -601,10 +628,13 @@ func draftFactListSHA256(facts []string) string {
 	return fmt.Sprintf("%x", digest[:])
 }
 
-// enrichDraftAuthorityReceipt binds the single prose-facing hard contract to
-// every durable upstream artifact. Full preserve facts live only in
-// render_packet; rewrite_source and world-simulation coverage become
-// path+digest receipts so the same 4-8 KiB list is not replayed three times.
+// enrichDraftAuthorityReceipt keeps two identities separate:
+//   - render_contract describes the deliberately lean prose projection;
+//   - rewrite_source/world coverage describe the complete immutable fact set
+//     that remains authoritative on disk and is enforced after drafting.
+//
+// This prevents the Drafter from receiving the same ledger as several parallel
+// checklists without weakening the formal-plan or commit-time fact boundary.
 func enrichDraftAuthorityReceipt(receipt map[string]any, result, working map[string]any, packet draftRenderPacket) {
 	if receipt == nil {
 		return
@@ -615,9 +645,9 @@ func enrichDraftAuthorityReceipt(receipt map[string]any, result, working map[str
 		"authority_path":           draftRenderPacketAuthorityPath(working),
 		"canonical_content_sha256": fmt.Sprintf("%x", packetDigest[:]),
 		"version":                  packet.Version,
-		"preserve_fact_count":      len(packet.PreserveFacts),
-		"preserve_facts_sha256":    draftFactListSHA256(packet.PreserveFacts),
-		"policy":                   "此路径是 Drafter 唯一完整硬事实投影；receipt 只证明来源和完整性，不是第二份事实文本。",
+		"prose_fact_count":         len(packet.PreserveFacts),
+		"prose_facts_sha256":       draftFactListSHA256(packet.PreserveFacts),
+		"policy":                   "此路径是 Drafter 的精简事实投影，不是完整正史账本；完整事实以正式 plan、rewrite_source 与 world coverage 回执为准，并由正文提交门禁校验。",
 	}
 
 	for _, container := range []map[string]any{working, result} {
@@ -636,7 +666,8 @@ func enrichDraftAuthorityReceipt(receipt map[string]any, result, working map[str
 		facts := canonicalPreserveFacts(chapter.PreserveFacts, nil)
 		binding["preserve_fact_count"] = len(facts)
 		binding["preserve_facts_sha256"] = draftFactListSHA256(facts)
-		binding["fact_authority"] = draftRenderPacketAuthorityPath(working) + ".preserve_facts"
+		binding["fact_authority"] = fmt.Sprintf("drafts/%02d.plan.json#causal_simulation.review_refinement.preserve_constraints", packet.Chapter)
+		binding["fact_authority_policy"] = "完整 preserve_facts 由 rewrite_source 及其 body/brief/canonical-state 哈希绑定；Drafter 只消费精简投影，提交校验仍消费完整事实集。"
 		receipt["rewrite_source"] = binding
 		break
 	}
@@ -659,7 +690,8 @@ func enrichDraftAuthorityReceipt(receipt map[string]any, result, working map[str
 		"canonical_content_sha256": fmt.Sprintf("%x", coverageDigest[:]),
 		"fact_count":               len(coverageFacts),
 		"facts_sha256":             draftFactListSHA256(coverageFacts),
-		"fact_authority":           draftRenderPacketAuthorityPath(working) + ".preserve_facts",
+		"fact_authority":           fmt.Sprintf("drafts/%02d.plan.json#causal_simulation.review_refinement.preserve_constraints", packet.Chapter),
+		"fact_authority_policy":    "world simulation 已逐条覆盖完整 preserve fact；prose packet 的精简不改变正式计划与提交校验的权威集合。",
 	}
 }
 
@@ -684,7 +716,7 @@ func draftRewriteCoverageFacts(raw any) []string {
 	return nil
 }
 
-func compactDraftRewriteAuthority(container map[string]any, receiptPath, packetPath string) {
+func compactDraftRewriteAuthority(container map[string]any, receiptPath string) {
 	if container == nil {
 		return
 	}
@@ -695,7 +727,7 @@ func compactDraftRewriteAuthority(container map[string]any, receiptPath, packetP
 	policy, _ := source["source_body_policy"].(string)
 	container["rewrite_source"] = map[string]any{
 		"authority_receipt":        receiptPath,
-		"preserve_facts_authority": packetPath + ".preserve_facts",
+		"preserve_facts_authority": receiptPath + ".fact_authority",
 		"source_body_policy":       policy,
 		"policy":                   "正文源、brief、canonical state、字数及 preserve fact count/SHA 均在 authority_receipt；此处不重复事实正文。",
 	}
@@ -703,9 +735,10 @@ func compactDraftRewriteAuthority(container map[string]any, receiptPath, packetP
 
 // These artifacts are planning inputs. Once a formal source-bound plan exists,
 // replaying them beside the render projection duplicates world facts and method
-// instructions. Current-chapter fact text lives once in render_packet; source,
-// coverage and plan identity remain auditable through formal_plan_receipt, while
-// the full chapter_pipeline_instruction stays visible as the user contract.
+// instructions. The prose-safe fact projection lives once in render_packet;
+// complete source/coverage facts remain on disk and are bound through
+// formal_plan_receipt, while the full chapter_pipeline_instruction stays visible
+// as the user contract.
 func compactFinalizedContextBackground(result map[string]any) {
 	for _, key := range []string{
 		"simulation_restart_policy", "simulation_restart_policy_note", "legacy_state_policy",
@@ -1382,6 +1415,9 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 	mandatoryBeats := RenderRequiredOutcomes(plan)
 	softPayoffDirections, promotedPayoffFacts := splitHardRenderMaterials(plan.Contract.PayoffPoints)
 	softSceneAnchors, promotedAnchorFacts := splitHardRenderMaterials(renderSceneAnchors(plan.Contract.SceneAnchors))
+	preserveFacts := proseFacingPreserveFacts(
+		canonicalPreserveFacts(nil, sim.ReviewRefinement.PreserveConstraints),
+	)
 	continuityChecks := RenderContinuityChecks(plan)
 	continuityChecks = compactStrings(append(continuityChecks, promotedPayoffFacts...))
 	continuityChecks = compactStrings(append(continuityChecks, promotedAnchorFacts...))
@@ -1441,14 +1477,16 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		ChosenDecision:  sim.ProtagonistDecision,
 		DecisionReason:  plan.Goal,
 		PlanConstraints: sim.SceneConstraints,
-		// Reuse the sanitized hard projection. Reading raw required_beats here
-		// would reintroduce a trend-language candidate that was deliberately
-		// excluded from mandatory_beats.
-		ObservableEffects: append([]string(nil), mandatoryBeats...),
+		// mandatory_beats already carries the exact result contract. Repeating
+		// it as observable effects made the Drafter see the same checklist twice
+		// and encouraged evenly spaced proof scenes. A finalized world
+		// simulation may still replace this lean projection with genuinely
+		// observable protagonist effects in applyDraftContextProfile.
+		ObservableEffects: nil,
 	})
 	literaryContract := newDraftLiteraryRenderContract(plan, protagonist)
-	return draftRenderPacket{
-		Version:        9,
+	packet := draftRenderPacket{
+		Version:        11,
 		Chapter:        plan.Chapter,
 		Heading:        strings.TrimSpace(fmt.Sprintf("第%d章 %s", plan.Chapter, strings.TrimSpace(plan.Title))),
 		Title:          plan.Title,
@@ -1457,16 +1495,21 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		Hook:           plan.Hook,
 		EmotionArc:     firstRenderClause(plan.EmotionArc),
 		MandatoryBeats: mandatoryBeats,
-		// Every rewrite preserve constraint is a result-level invariant, not an
-		// optional scene candidate. Keep the complete list while the packet policy
-		// prevents the renderer from replaying it as a checklist.
-		PreserveFacts:         canonicalPreserveFacts(nil, sim.ReviewRefinement.PreserveConstraints),
+		// Rewrite facts are hard outcomes. Keep the exact canonical list in prose;
+		// optional dossiers and detector recipes are compacted elsewhere.
+		PreserveFacts:         preserveFacts,
 		ForbiddenMoves:        compactStrings(plan.Contract.ForbiddenMoves),
 		ContinuityChecks:      continuityChecks,
 		PayoffPoints:          limitRenderStrings(softPayoffDirections, 2),
 		SceneAnchors:          sampleRenderStrings(softSceneAnchors, 2),
+		CandidateBeats:        draftRetentionCandidateBeats(sim.ReaderRetentionPlan.SurfaceBeats, mandatoryBeats),
+		RevealBudget:          limitRenderStrings(compactStrings(sim.ReaderRetentionPlan.RevealBudget), 3),
+		CutOrCompress:         limitRenderStrings(compactStrings(sim.ReaderRetentionPlan.CutOrCompress), 3),
+		PageTurnQuestions:     sampleRenderStrings(sim.ReaderRetentionPlan.PageTurnQuestions, 1),
 		ProtagonistProjection: projection,
-		AntiAIExecutionPlan:   leanAntiAIPlan(sim.AntiAIPlan),
+		// The full anti_ai_execution_plan remains mandatory upstream. Only story
+		// event timing that may not exist elsewhere crosses the prose boundary.
+		EventTimingSafeguards: proseEventTimingSafeguards(sim.AntiAIPlan),
 		VoiceCards:            selectEssentialVoiceCards(voices),
 		// A first chapter can introduce the protagonist, love interest, parents,
 		// pressure character and two or three local anchors in one continuous
@@ -1477,32 +1520,92 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		EmotionalLenses:        leanDraftEmotionalLenses(sim, protagonist),
 		RelationshipLenses:     sampleRenderValues(relationshipLenses, 1),
 		LiteraryRenderContract: literaryContract,
-		CraftMethods:           draftCraftMethods(sim.ExternalRefs),
+		FactAnchors:            sampleRenderValues(draftFactAnchors(sim), 3),
+		CraftMethods:           sampleRenderValues(draftCraftMethods(sim.ExternalRefs), 2),
 		// The ending is an on-page consequence contract, not hidden world state or
 		// an optional shot suggestion. Preserve it byte-for-byte at the field level
 		// so exact cut timing, audible anchors and forbidden answer semantics cannot
 		// disappear during the finalized-plan -> prose-context projection.
 		EndingContract:          sim.EndingContract,
-		HardContractPolicy:      "mandatory_beats 的结果、preserve_facts、forbidden_moves、事实连续性、准确金额与数量、人物知识边界、授权边界、安全后果与 ending_consequence_contract 的截断时机/禁止结局是硬合同；preserve_facts 只锁结果，不是场景或句序清单，不得因删减写法素材而删改、合并成不同数量或模糊。",
-		SoftMaterialPolicy:      "所有 soft_* 字段、文学镜头候选、笑点候选、示例措辞与 craft candidate_moves 都只是可替换素材。全章通常合计择取0—2项，允许重排、合并、换成现场自然细节或全部省略；未出现不算漏项，禁止为逐项验收另造场景。",
-		SelectionPolicy:         "mandatory_beats 只是终局事实，不是镜头清单；只挑最有情绪、笑点或关系变化的场面写，其余允许离屏成立。",
-		SceneBridgePolicy:       "转场服从人物注意力；能自然跳过就跳过，不为解释时间和因果另写汇报段。",
-		DialogueTopologyPolicy:  "先朗读再保留台词；人物只说此刻会说的话，不替作者补全背景、规则和步骤，也不强制轮流发言。普通平静口述按完整气口说完，同一意思不得切成连续2—4汉字句号短句。",
-		SystemVoicePolicy:       "系统只回应具体刺激；章级消息条数与时机优先，不得拆分加条。若只准一条短提示，其余边界靠人物试错和后果显出，不在该条打包规则。",
-		JargonPolicy:            "计划、审核、项目管理和运营复盘语言不得进入叙述或日常对白；事实用生活经验表达。",
-		PlanTranslationPolicy:   "从计划中取事实和人物欲望，重新组织成小说；不得照着 required_beats 的句序逐项证明。",
-		ReaderRegisterPolicy:    "面向本项目约定的读者与题材语域；旁白贴着当前焦点人物当时的好恶、误判和词汇习惯，不替作者总结方法。",
-		InterfaceCompression:    "界面只在惊讶、限制或奖励真正改变当下感受时出现，禁止连续用页面反馈替代人物反应。",
-		ScenePurposePolicy:      "场景可以同时有正事、闲话、尴尬和关系余波；不要求每段都推进指标，也不写成办事过程复盘。",
-		SpokenLanguagePolicy:    "对白服从身份、熟悉程度和现场情绪；普通人口述通常用一个完整气口承载对象、原因或条件，不能把同一判断切成连续2—4汉字句号碎片。短答可以短；连续碎断只用于抢险、打断、惊吓或刻意拒绝且现场有证据。不顺口的整轮推倒重说，不机械补口头禅。",
-		EmotionalRenderPolicy:   "允许情绪在人物身上多停一会儿，也允许暂时没有结论；只写主角真的会注意到的细节，不在动作后逐句解释动机。",
-		GroupCompressionPolicy:  "群体用嘈杂、等待、插话或背景动作形成现场感；只有真正与主角发生关系的人才展开，不能给每个人分配一条功能。",
-		ChronologyPolicy:        "现实耗时要可信，但不按钟点报站；用饭点、天光、库存、疲劳和朋友手头的活自然表现时间过去。",
-		ProofFocusPolicy:        "不强制跟拍看价、付款、取货、登记、测试等完整证明链；结果已由可见后果成立时可以一笔带过，把篇幅留给人物选择与关系余波。",
-		NamedRolePolicy:         "无名功能角色保持无名；不得从角色册借用离屏人物姓名给路人补位，更不得改变已命名人物的职业、关系或当日行踪。",
-		RelationshipPriority:    "核心关系人物同场时，先写他们怎样一起做事、怎样误读或修正对方；关系可以藏在偏心、边界、拒绝和没说完的话里，不靠手续问答或作者判词宣布推进。",
+		HardContractPolicy:      "preserve_facts、mandatory_beats、continuity_checks、forbidden_moves 与 ending_consequence_contract 锁定结果、准确金额与数量、知识/授权边界和安全后果；它们不是场景或句序清单，不得为每项单独分配段落或按清单顺序拍摄。",
+		SoftMaterialPolicy:      "所有 soft_*、文学镜头和 craft candidate_moves 都是可替换素材；全章合计择取0—2项即可，也可全部省略，禁止为消费素材另造场景。",
+		SelectionPolicy:         "只把最能改变人物处境、判断或关系的一两处写成完整现场；多个硬事实可以折叠进同一个动作或余波，手续、重复证明和无人物代价的过程允许压缩或离屏。",
+		DialogueTopologyPolicy:  "人物只说此刻会说的话，不替作者补齐背景与规则，也不强制轮流发言。平静口述按自然完整气口说完；短答可以短，连续碎断必须有现场原因。",
+		SystemVoicePolicy:       "非人物媒介只回应具体刺激；消息条数与时机服从正式合同，不用界面替人物解释或总结。",
 		CharacterEntrancePolicy: "实名角色首次进入读者视野时，在首次动作或对白附近落一个能画出人的视觉锚点：优先轮廓/脸发、穿着/标志物、身体语言三类中最贴 POV 与现场的一项，并让它同时传达身份、状态或关系印象。主配角至少一项，核心角色宜用两项分散落地；禁止证件照式罗列、镜前自检、只写帅美高冷，也禁止人物出场数段后才补长相。非首次出场只在状态变化或识别需要时提醒旧锚点。",
+		FactAnchorPolicy:        "fact_anchors 是 Planner 已从项目事实/RAG/现实支撑转化出的有界现场依据，不是原始召回文本。只在与人物选择和当前场景有关时自然使用；source_ref 只追溯，不得写进正文。required outcomes 仍以 mandatory_beats 为准。",
 	}
+	compactDraftPacketForProse(&packet)
+	return packet
+}
+
+func compactDraftPacketForProse(packet *draftRenderPacket) {
+	if packet == nil {
+		return
+	}
+	packet.PreserveFacts = proseFacingPreserveFacts(packet.PreserveFacts)
+	packet.MandatoryBeats = compactStrings(packet.MandatoryBeats)
+	packet.ContinuityChecks = compactStrings(packet.ContinuityChecks)
+	packet.ForbiddenMoves = compactStrings(packet.ForbiddenMoves)
+	packet.ProtagonistProjection.ObservableEffects = nil
+	packet.EventTimingSafeguards = proseEventTimingSafeguardsFromPacket(packet.EventTimingSafeguards)
+	packet.CandidateBeats = limitCandidateBeats(packet.CandidateBeats, 3)
+	packet.RevealBudget = limitRenderStrings(compactStrings(packet.RevealBudget), 3)
+	packet.CutOrCompress = limitRenderStrings(compactStrings(packet.CutOrCompress), 3)
+	packet.PageTurnQuestions = sampleRenderStrings(packet.PageTurnQuestions, 1)
+	packet.FactAnchors = sampleRenderValues(packet.FactAnchors, 3)
+	packet.CraftMethods = sampleRenderValues(packet.CraftMethods, 2)
+}
+
+func proseFacingPreserveFacts(facts []string) []string {
+	return canonicalPreserveFacts(nil, facts)
+}
+
+func proseEventTimingSafeguards(plan domain.AntiAIExecutionPlan) *draftEventTimingSafeguards {
+	return proseEventTimingSafeguardsFromPacket(&draftEventTimingSafeguards{
+		ObjectResponseBudget: strings.TrimSpace(plan.ObjectResponseBudget),
+		DialogueFunctionPlan: strings.TrimSpace(plan.DialogueFunctionPlan),
+	})
+}
+
+func proseEventTimingSafeguardsFromPacket(safeguards *draftEventTimingSafeguards) *draftEventTimingSafeguards {
+	if safeguards == nil {
+		return nil
+	}
+	out := &draftEventTimingSafeguards{
+		ObjectResponseBudget: sanitizeProseTimingText(safeguards.ObjectResponseBudget),
+		DialogueFunctionPlan: sanitizeProseTimingText(safeguards.DialogueFunctionPlan),
+	}
+	if out.ObjectResponseBudget == "" && out.DialogueFunctionPlan == "" {
+		return nil
+	}
+	return out
+}
+
+var proseTimingMetricRecipePattern = regexp.MustCompile(`(?i)(?:\b(?:cv|ttr|detector)\b|(?:aigc|ai|生成|文本|朱雀).{0,6}(?:检测|概率|阈值|分数)|句长(?:曲线|指标|分布)|段长(?:曲线|指标|分布)|词汇丰富度|每[零〇一二两三四五六七八九十百0-9０-９几]+(?:句|段|字|行)|固定(?:句长|段长|间隔|周期)|周期配方)`)
+
+func sanitizeProseTimingText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !proseTimingMetricRecipePattern.MatchString(value) {
+		return value
+	}
+	clauses := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case '，', ',', '。', '；', ';', '！', '!', '？', '?', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	kept := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || proseTimingMetricRecipePattern.MatchString(clause) {
+			continue
+		}
+		kept = append(kept, clause)
+	}
+	return strings.Join(compactStrings(kept), "；")
 }
 
 func draftWordBudgetFromContext(result map[string]any) *draftWordBudget {
@@ -1579,12 +1682,16 @@ func draftCraftMethods(refs []domain.ExternalReferencePlan) []draftCraftMethod {
 			continue
 		}
 		seenNeeds[needID] = true
+		moves := filterAlgorithmicCraftCandidates(ref.UsableDetails)
+		transformationRule := sanitizeCraftTransformationRule(ref.TransformationRule)
 		methods = append(methods, draftCraftMethod{
 			ReceiptID:          receiptID,
 			Need:               needID,
-			Moves:              compactCraftMethodStrings(ref.UsableDetails, 1),
-			TransformationRule: firstRenderClause(ref.TransformationRule),
-			Avoid:              compactCraftMethodStrings(ref.DoNotUse, 3),
+			Risk:               craftNeedRisk(needID),
+			PersonCausalGoal:   craftPersonCausalGoal(needID, transformationRule, moves),
+			Moves:              compactCraftMethodStrings(moves, 1),
+			TransformationRule: transformationRule,
+			Avoid:              appendCraftAlgorithmicAvoid(ref.DoNotUse),
 			SourceRefs:         limitRenderStrings(sourceRefs, 3),
 			UsagePolicy:        "这是解决诊断的候选方法，不是剧情或句段职责。若适合现场，最多采用一个 candidate_move 并可重排改写；不适合可省略具体 move，但仍须用人物因果解决原诊断。hard_avoid 始终遵守。",
 		})
@@ -1593,6 +1700,150 @@ func draftCraftMethods(refs []domain.ExternalReferencePlan) []draftCraftMethod {
 		}
 	}
 	return methods
+}
+
+var craftAlgorithmicRecipePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bP[1-9]\b`),
+	regexp.MustCompile(`相邻[一二两三四五六七八九十0-9]+段`),
+	regexp.MustCompile(`(?:固定|每隔)[一二两三四五六七八九十0-9]*(?:段|句|行|周期)`),
+	regexp.MustCompile(`每[一二两三四五六七八九十0-9]+段.{0,12}(?:轮换|重复|循环)`),
+	regexp.MustCompile(`(?:逐段|段序|段落轮换|功能轮换|轮换职责|固定句长|固定周期)`),
+	regexp.MustCompile(`(?:观察|判断|动作|后果)(?:→|->)(?:观察|判断|动作|后果)`),
+}
+
+func algorithmicCraftRecipe(text string) bool {
+	text = strings.TrimSpace(text)
+	for _, pattern := range craftAlgorithmicRecipePatterns {
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterAlgorithmicCraftCandidates(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if algorithmicCraftRecipe(value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func sanitizeCraftTransformationRule(value string) string {
+	value = firstRenderClause(value)
+	if value != "" && !algorithmicCraftRecipe(value) {
+		return value
+	}
+	return "围绕当前人物的欲望、误判、关系压力和可见后果解决该诊断；段落与句长只服从现场认知负荷，不采用固定轮换或周期配方。"
+}
+
+func appendCraftAlgorithmicAvoid(values []string) []string {
+	out := compactCraftMethodStrings(values, 8)
+	out = appendUniqueString(out, "不得使用P1/P2/P3、相邻N段轮换、固定句长/周期或逐段功能配方")
+	return out
+}
+
+func craftNeedRisk(need string) string {
+	switch need {
+	case "rewrite-dialogue":
+		return "人物声口同质、台词替作者解释、问答没有关系或现实后果"
+	case "rewrite-scene":
+		return "场景职责整齐、证明链过密、人物选择被流程步骤淹没"
+	default:
+		return "段落职责同构、解释性总结和机械节奏让正文显得按模板生成"
+	}
+}
+
+func craftPersonCausalGoal(need, transformationRule string, moves []string) string {
+	var goal string
+	switch need {
+	case "rewrite-dialogue":
+		goal = "让人物因当下欲望、隐瞒、关系边界和信息差选择说什么或不说什么，并由下一反应留下后果。"
+	case "rewrite-scene":
+		goal = "让场景由人物选择改变处境、判断或关系；无人物代价的流程可以压缩或离屏。"
+	default:
+		goal = "让刺激先改变人物的注意、误判或取舍，再由行动与后果自然改变叙述节奏。"
+	}
+	if transformationRule != "" && !algorithmicCraftRecipe(transformationRule) {
+		goal += " 本章转化边界：" + transformationRule
+	} else if len(moves) > 0 {
+		goal += " 可选方向：" + firstRenderClause(moves[0])
+	}
+	return goal
+}
+
+func draftFactAnchors(sim domain.ChapterCausalSimulation) []draftFactAnchor {
+	out := make([]draftFactAnchor, 0, 6)
+	seen := map[string]struct{}{}
+	add := func(anchor draftFactAnchor) {
+		anchor.Fact = strings.TrimSpace(anchor.Fact)
+		anchor.TransformedAs = firstRenderClause(anchor.TransformedAs)
+		anchor.SceneAnchor = firstRenderClause(anchor.SceneAnchor)
+		anchor.SourceRef = strings.TrimSpace(anchor.SourceRef)
+		if anchor.Fact == "" || len(out) >= 6 {
+			return
+		}
+		key := anchor.Kind + "\x00" + anchor.Fact + "\x00" + anchor.SceneAnchor
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		if strings.HasPrefix(anchor.SourceRef, domain.RAGFactReceiptTokenPrefix) {
+			anchor.Authority = "rag_fact_receipt"
+		}
+		if anchor.Authority == "" {
+			anchor.Authority = "formal_plan"
+		}
+		out = append(out, anchor)
+	}
+	for _, external := range sim.ExternalRefs {
+		sourceType := strings.ToLower(strings.TrimSpace(external.SourceType))
+		if strings.Contains(sourceType, "craft") {
+			continue
+		}
+		sourceRef := ""
+		for _, ref := range external.SourceRefs {
+			ref = strings.TrimSpace(ref)
+			if strings.HasPrefix(ref, domain.RAGFactReceiptTokenPrefix) {
+				sourceRef = ref
+				break
+			}
+		}
+		if sourceRef == "" {
+			continue
+		}
+		for _, detail := range limitRenderStrings(external.UsableDetails, 2) {
+			add(draftFactAnchor{
+				Kind:          "rag_transformed_fact",
+				Fact:          firstRenderClause(detail),
+				TransformedAs: external.TransformationRule,
+				SceneAnchor:   external.QueryOrNeed,
+				SourceRef:     sourceRef,
+			})
+		}
+	}
+	for _, item := range limitGroundingDetails(sim.GroundingDetails, 3) {
+		add(draftFactAnchor{
+			Kind: "grounding_detail", Fact: item.Detail, TransformedAs: item.TransformedAs,
+			SceneAnchor: item.SceneAnchor, SourceRef: item.SourceRef,
+		})
+	}
+	for _, item := range sampleRenderValues(sim.RealitySupport, 2) {
+		add(draftFactAnchor{
+			Kind: "reality_support", Fact: item.UsableDetail, TransformedAs: item.TransformedAs,
+			SceneAnchor: item.ChapterUse, SourceRef: item.SourceRef,
+		})
+	}
+	for _, item := range sampleRenderValues(sim.EnvironmentState, 2) {
+		add(draftFactAnchor{
+			Kind: "environment_signal", Fact: firstNonemptyRenderClause(item.VisibleState, item.InformationCarried),
+			TransformedAs: item.PressureApplied, SceneAnchor: item.Place, Authority: "chapter_world_projection",
+		})
+	}
+	return out
 }
 
 func rewriteCraftNeedID(query string) string {
@@ -1723,17 +1974,6 @@ func newDraftLiteraryRenderContract(plan domain.ChapterPlan, protagonist string)
 			RenderMove:  "概述或直接跳过重复过程，不把手续和验证步骤还原成镜头清单。",
 		})
 		contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#scene-summary")
-	}
-	if rhythm := firstRenderClause(sim.AntiAIPlan.SentenceRhythmPolicy); rhythm != "" {
-		contract.ActiveLenses = append(contract.ActiveLenses, draftLiteraryActiveLens{
-			Kind:       "syntax-rhythm",
-			Target:     "本章压力、犹疑、决定与余波之间的句法换挡",
-			Move:       rhythm,
-			Why:        "让句法结构跟随认知负荷和信息重量，而不是全章维持同一概率分布。",
-			Avoid:      "不随机轮换长短句，不用错字、碎句或冷僻词扰动检测。",
-			SourceRefs: []string{"literary-rendering#syntax-rhythm"},
-		})
-		contract.SourceRefs = append(contract.SourceRefs, "literary-rendering#syntax-rhythm")
 	}
 	contract.SourceRefs = compactLiterarySourceRefs(contract.SourceRefs)
 	return limitDraftLiterarySoftChoices(contract)
@@ -2045,71 +2285,6 @@ func leanLongformOpening(opening domain.LongformOpeningDesign) draftLongformOpen
 	}
 }
 
-func leanAntiAIPlan(plan domain.AntiAIExecutionPlan) draftAntiAIPlan {
-	return draftAntiAIPlan{
-		RiskSignals:          qualitativeAntiAIStrings(plan.RiskSignals, 2),
-		CounterMoves:         qualitativeAntiAIStrings(plan.CounterMoves, 2),
-		SentenceRhythmPolicy: qualitativeAntiAIText(plan.SentenceRhythmPolicy),
-		ObjectResponseBudget: strings.TrimSpace(plan.ObjectResponseBudget),
-		DialogueFunctionPlan: strings.TrimSpace(plan.DialogueFunctionPlan),
-		ReviewChecks:         qualitativeAntiAIStrings(plan.ReviewChecks, 2),
-	}
-}
-
-var antiAIMetricRecipePattern = regexp.MustCompile(`(?i)(?:\b(?:cv|ttr)\b|百分(?:比|之)|[%％]|检测(?:器|分|值|概率)|概率分|阈值|均值|中位数|标准差|方差|分布曲线|句长曲线|段长曲线|节奏曲线|词汇丰富度|每(?:[零〇一二两三四五六七八九十百0-9０-９]+|几)(?:句|段|字|行)|(?:不少于|不低于|不超过|至少|至多|低于|高于|达到|控制在|维持在)[^，。！？；;\n]{0,18}(?:[0-9０-９]+|百分之)|[零〇一二两三四五六七八九十百0-9０-９]+次(?:反馈|回应|显字|换挡|转折|打断))`)
-
-// qualitativeAntiAIText keeps failure-specific scene advice while preventing
-// detector statistics and numeric cadence recipes from becoming prose-facing
-// writing instructions. Exact event timing belongs to ObjectResponseBudget and
-// DialogueFunctionPlan, which leanAntiAIPlan deliberately preserves verbatim.
-func qualitativeAntiAIText(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || !antiAIMetricRecipePattern.MatchString(value) {
-		return value
-	}
-	clauses := strings.FieldsFunc(value, func(r rune) bool {
-		switch r {
-		case '，', ',', '。', '；', ';', '！', '!', '？', '?', '\n', '\r', '—':
-			return true
-		default:
-			return false
-		}
-	})
-	kept := make([]string, 0, len(clauses))
-	for _, clause := range clauses {
-		clause = strings.TrimSpace(clause)
-		if clause == "" || antiAIMetricRecipePattern.MatchString(clause) {
-			continue
-		}
-		kept = append(kept, clause)
-	}
-	return strings.Join(kept, "；")
-}
-
-func qualitativeAntiAIStrings(values []string, maxItems int) []string {
-	if maxItems <= 0 {
-		return nil
-	}
-	out := make([]string, 0, min(maxItems, len(values)))
-	seen := make(map[string]struct{}, maxItems)
-	for _, value := range values {
-		clean := qualitativeAntiAIText(value)
-		if clean == "" {
-			continue
-		}
-		key := clean
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, clean)
-		if len(out) >= maxItems {
-			break
-		}
-	}
-	return out
-}
-
 // draftPlanFocalizer resolves the one character whose private appraisal may
 // cross into the prose packet. Explicit literary POV wins; legacy plans fall
 // back to the first simulation state, then the first emotional/voice card.
@@ -2256,6 +2431,38 @@ func containsAnyRenderPhrase(text string, phrases []string) bool {
 	return false
 }
 
+func draftRetentionCandidateBeats(values []domain.RetentionSurfaceBeat, mandatory []string) []draftCandidateBeat {
+	candidates := make([]draftCandidateBeat, 0, len(values))
+	for _, value := range values {
+		event := strings.TrimSpace(value.MustShow)
+		if event == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(value.PlanSource), "required_beats") {
+			// Planner explicitly says this surface beat is only a reader-facing
+			// projection of an already present hard outcome.
+			continue
+		}
+		duplicate := false
+		for _, outcome := range mandatory {
+			if renderOutcomesEquivalent(event, outcome) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		candidates = append(candidates, draftCandidateBeat{
+			Event:         firstRenderClause(event),
+			ReaderPayoff:  firstRenderClause(value.ReaderPayoff),
+			SceneVehicle:  firstRenderClause(value.SceneVehicle),
+			FunctionShift: firstRenderClause(value.FunctionShift),
+		})
+	}
+	return limitCandidateBeats(candidates, 3)
+}
+
 func limitCandidateBeats(values []draftCandidateBeat, limit int) []draftCandidateBeat {
 	return sampleRenderValues(values, limit)
 }
@@ -2333,7 +2540,7 @@ func RenderRequiredOutcomes(plan domain.ChapterPlan) []string {
 	beats, _ := splitOptionalStyleBeats(plan.Contract.RequiredBeats, plan.CausalSimulation.TrendLanguage)
 	out := make([]string, 0, len(beats))
 	for _, raw := range beats {
-		beat := unwrapRenderOutcome(raw)
+		beat := unwrapRenderOutcome(raw, plan.Goal, plan.Hook)
 		beat = stripEmbeddedOptionalStyleMaterial(beat, plan.CausalSimulation.TrendLanguage)
 		beat = strings.TrimSpace(beat)
 		if beat == "" {
@@ -2377,7 +2584,7 @@ func renderOnlyContinuityCheck(text string) bool {
 	}
 	for _, marker := range []string{
 		"章末具体锚点", "短消息分开发送", "颜文字", "拟声", "吐槽的起头",
-		"每次只承担拒绝", "不能连续用界面", "必须位于报价确认后", "台词原句",
+		"每次只承担拒绝", "不能连续用界面", "台词原句",
 	} {
 		if strings.Contains(text, marker) {
 			return true
@@ -2396,16 +2603,39 @@ func RenderEndingContract(plan domain.ChapterPlan) domain.EndingConsequenceContr
 	return contract
 }
 
-func unwrapRenderOutcome(text string) string {
+func unwrapRenderOutcome(text, goal, hook string) string {
 	text = strings.TrimSpace(text)
-	for _, prefix := range []string{
-		"必须完整兑现大纲核心事件：",
-		"必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末：",
+	for _, wrapper := range []struct {
+		prefix    string
+		reference string
+	}{
+		{"必须完整兑现大纲核心事件：", goal},
+		{"必须兑现大纲钩子；若现有章节契约已将其前移，则作为中段转折而非强行改写章末：", hook},
 	} {
-		if strings.HasPrefix(text, prefix) {
-			// goal / hook already carry these outline anchors in render_packet.
+		if !strings.HasPrefix(text, wrapper.prefix) {
+			continue
+		}
+		unwrapped := strings.TrimSpace(strings.TrimPrefix(text, wrapper.prefix))
+		reference := unwrapOutlineReference(wrapper.reference)
+		if normalizeRenderOutcome(unwrapped) == normalizeRenderOutcome(reference) {
+			// goal / hook already carry this exact outline anchor in the packet.
 			return ""
 		}
+		// A wrapped beat may contain extra amount, order, or limitation facts.
+		// Strip only the presentation wrapper and retain the complete hard result.
+		return unwrapped
+	}
+	return text
+}
+
+func unwrapOutlineReference(text string) string {
+	text = strings.TrimSpace(text)
+	for _, prefix := range []string{
+		"完整兑现本章大纲核心事件：",
+		"本章大纲核心事件：",
+		"本章大纲钩子：",
+	} {
+		text = strings.TrimSpace(strings.TrimPrefix(text, prefix))
 	}
 	return text
 }
@@ -2414,6 +2644,10 @@ func renderOutcomesEquivalent(a, b string) bool {
 	a = normalizeRenderOutcome(a)
 	b = normalizeRenderOutcome(b)
 	if a == "" || b == "" {
+		return false
+	}
+	if !renderConstraintSetsNested(renderOutcomeNumberSet(a), renderOutcomeNumberSet(b)) ||
+		!renderConstraintSetsNested(renderOutcomePolaritySet(a), renderOutcomePolaritySet(b)) {
 		return false
 	}
 	shorter, longer := a, b
@@ -2458,6 +2692,22 @@ func renderOutcomeBigrams(text string) map[string]struct{} {
 }
 
 func preferRenderOutcome(candidate, current string) bool {
+	candidateNumbers := renderOutcomeNumberSet(candidate)
+	currentNumbers := renderOutcomeNumberSet(current)
+	if renderStringSetStrictSuperset(candidateNumbers, currentNumbers) {
+		return true
+	}
+	if renderStringSetStrictSuperset(currentNumbers, candidateNumbers) {
+		return false
+	}
+	candidatePolarity := renderOutcomePolaritySet(candidate)
+	currentPolarity := renderOutcomePolaritySet(current)
+	if renderStringSetStrictSuperset(candidatePolarity, currentPolarity) {
+		return true
+	}
+	if renderStringSetStrictSuperset(currentPolarity, candidatePolarity) {
+		return false
+	}
 	candidateLen := utf8.RuneCountInString(candidate)
 	currentLen := utf8.RuneCountInString(current)
 	if candidateLen < 8 {
@@ -2470,6 +2720,56 @@ func preferRenderOutcome(candidate, current string) bool {
 	// contract. Choosing the shorter wording can silently erase a later amount,
 	// sequence condition or prohibition.
 	return candidateLen > currentLen
+}
+
+var renderOutcomeNumberTokenPattern = regexp.MustCompile(draftHardFactNumberPattern)
+
+func renderOutcomeNumberSet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, token := range renderOutcomeNumberTokenPattern.FindAllString(text, -1) {
+		if value, ok := parseDraftHardFactInteger(token); ok {
+			out[fmt.Sprint(value)] = struct{}{}
+		}
+	}
+	return out
+}
+
+func renderOutcomePolaritySet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, marker := range []string{
+		"不得", "禁止", "不能", "拒绝", "尚未", "未确认", "待确认", "未答复",
+		"已经", "已确认", "获准", "同意", "答应", "允许", "可以", "准许", "只允许", "仅限",
+	} {
+		if strings.Contains(text, marker) {
+			out[marker] = struct{}{}
+		}
+	}
+	runes := []rune(text)
+	for i, r := range runes {
+		if r != '前' && r != '后' {
+			continue
+		}
+		start := max(0, i-8)
+		out["时序:"+string(runes[start:i+1])] = struct{}{}
+	}
+	return out
+}
+
+func renderConstraintSetsNested(a, b map[string]struct{}) bool {
+	return renderStringSetContains(a, b) || renderStringSetContains(b, a)
+}
+
+func renderStringSetContains(container, subset map[string]struct{}) bool {
+	for value := range subset {
+		if _, ok := container[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func renderStringSetStrictSuperset(candidate, current map[string]struct{}) bool {
+	return len(candidate) > len(current) && renderStringSetContains(candidate, current)
 }
 
 func splitOptionalStyleBeats(beats []string, trends []domain.TrendLanguagePlan) ([]string, []string) {
@@ -2494,7 +2794,7 @@ func optionalStyleText(text string, trends []domain.TrendLanguagePlan) bool {
 	if strings.ContainsAny(compound, "；;。") {
 		return false
 	}
-	for _, marker := range []string{"热梗", "颜文字", "台词原句", "原样使用", "必须说成", "句式槽位"} {
+	for _, marker := range []string{"热梗", "颜文字", "台词原句", "句式槽位"} {
 		if strings.Contains(text, marker) {
 			return true
 		}

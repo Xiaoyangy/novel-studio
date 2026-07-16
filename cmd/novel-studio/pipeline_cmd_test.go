@@ -142,13 +142,13 @@ func TestPipelineJudgePendingDraftHashSkipsNamedRetestForExplicitlySupersededDra
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !tools.RequiresRegisteredExternalRetest(inspection.Requirement) ||
+	if tools.RequiresRegisteredExternalRetest(inspection.Requirement) ||
 		!slices.Contains(tools.RegisteredExternalRetestLabels(inspection.Requirement), "zhuque/novel-whole-text-single-segment") {
-		t.Fatalf("explicit rerender erased the detector/mode obligation for the replacement: %+v", inspection.Requirement)
+		t.Fatalf("explicit rerender lost sampling provenance or created a hard obligation: %+v", inspection.Requirement)
 	}
 }
 
-func TestRegisteredRetestSurvivesEarlierPendingRewriteAndBecomesNextDeepSeekGate(t *testing.T) {
+func TestSampleTriggeredRewriteSurvivesQueueAndBecomesNextDeepSeekGate(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
@@ -182,8 +182,8 @@ func TestRegisteredRetestSurvivesEarlierPendingRewriteAndBecomesNextDeepSeekGate
 	}
 
 	before, err := tools.InspectDraftExternalGateWithStore(st, 2)
-	if err != nil || before.Status != tools.DraftExternalGateRejudgePending || !before.RegisteredRetestDeferred || before.RequiresRegisteredRetest {
-		t.Fatalf("chapter 2 should retain its named obligation but wait for DeepSeek while chapter 1 leads: inspection=%+v err=%v", before, err)
+	if err != nil || before.Status != tools.DraftExternalGateRejudgePending || before.RegisteredRetestDeferred || before.RequiresRegisteredRetest {
+		t.Fatalf("chapter 2 should wait for DeepSeek without a platform obligation while chapter 1 leads: inspection=%+v err=%v", before, err)
 	}
 	if err := st.Progress.CompleteRewrite(1); err != nil {
 		t.Fatal(err)
@@ -193,9 +193,9 @@ func TestRegisteredRetestSurvivesEarlierPendingRewriteAndBecomesNextDeepSeekGate
 		t.Fatalf("chapter 2 did not become queue head after chapter 1 completed: progress=%+v err=%v", progress, err)
 	}
 	after, err := tools.InspectDraftExternalGateWithStore(st, progress.PendingRewrites[0])
-	if err != nil || !after.RegisteredRetestDeferred || !tools.RequiresRegisteredExternalRetest(after.Requirement) ||
+	if err != nil || after.RegisteredRetestDeferred || tools.RequiresRegisteredExternalRetest(after.Requirement) ||
 		!pipelineDraftNeedsExternalJudgeForChapterWithStore(st, 2, after) {
-		t.Fatalf("chapter 2 lost its named obligation or failed to enter DeepSeek-first preflight: inspection=%+v err=%v", after, err)
+		t.Fatalf("chapter 2 failed to enter DeepSeek-first sampling recovery: inspection=%+v err=%v", after, err)
 	}
 }
 
@@ -1165,6 +1165,126 @@ func TestMergePendingRewriteChaptersPreservesOutOfRangeFailures(t *testing.T) {
 	got = mergePendingRewriteChapters([]int{2, 4}, []int{3, 2, 1})
 	if !slices.Equal(got, []int{1, 2, 3, 4}) {
 		t.Fatalf("merged queue = %v", got)
+	}
+}
+
+func TestPipelineQueueCurrentExternalSamplingFailuresQueuesExactHighIdempotently(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("抽查自动返工", 2); err != nil {
+		t.Fatal(err)
+	}
+	const body = "第一章当前正式正文"
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, len([]rune(body)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	appendRegisteredExternalFreshnessRow(t, dir, reviewreport.RegisteredExternalDetection{
+		Chapter: 1, Detector: "zhuque", Mode: "novel-whole-text-single-segment",
+		Score: 0.86, ScoreScale: "probability", Verdict: "ai_like",
+		BodySHA256: reviewreport.BodySHA256(body), NormalizedScorePercent: 86,
+		CheckedAt: "2026-07-16T10:00:00+08:00",
+	})
+
+	queued, err := pipelineQueueCurrentExternalSamplingFailures(st, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(queued, []int{1}) {
+		t.Fatalf("queued = %v, want [1]", queued)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(progress.PendingRewrites, []int{1}) ||
+		progress.Flow != domain.FlowRewriting ||
+		progress.RewriteReason != pipelineExternalSamplingRewriteReason {
+		t.Fatalf("unexpected reconciled progress: %+v", progress)
+	}
+	if pipelineWriteGoalReached(progress, 1) {
+		t.Fatal("write goal must not return early while an exact-hash sampling failure is queued")
+	}
+
+	progressPath := filepath.Join(dir, "meta", "progress.json")
+	before, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err = pipelineQueueCurrentExternalSamplingFailures(st, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(queued, []int{1}) {
+		t.Fatalf("second reconciliation queued = %v, want [1]", queued)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("idempotent reconciliation rewrote progress:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestPipelineQueueCurrentExternalSamplingFailuresIgnoresOldHashAndUnknown(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("抽查非阻塞", 3); err != nil {
+		t.Fatal(err)
+	}
+	for chapter, body := range map[int]string{
+		1: "第一章当前正式正文",
+		2: "第二章未抽查正文",
+		3: "第三章显式自动门禁正文",
+	} {
+		if err := st.Drafts.SaveFinalChapter(chapter, body); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Progress.MarkChapterComplete(chapter, len([]rune(body)), "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRegisteredExternalFreshnessRow(t, dir, reviewreport.RegisteredExternalDetection{
+		Chapter: 1, Detector: "zhuque", Mode: "novel-whole-text-single-segment",
+		Score: 0.83, ScoreScale: "probability", Verdict: "ai_like",
+		BodySHA256: reviewreport.BodySHA256("第一章已经被替换的旧正文"), NormalizedScorePercent: 83,
+		CheckedAt: "2026-07-16T10:00:00+08:00",
+	})
+	chapter3SHA := reviewreport.BodySHA256("第三章显式自动门禁正文")
+	if err := tools.SetDraftExternalRerenderRequirement(dir, tools.DraftExternalRerenderRequirement{
+		Chapter:              3,
+		EvaluatedBodySHA256:  chapter3SHA,
+		ExternalRetestPolicy: tools.DraftExternalRetestPolicyAutomatedHard,
+		RequiredExternalRetests: []tools.DraftExternalRetestIdentity{{
+			Detector: "internal-detector", Mode: "whole", TriggerBodySHA256: chapter3SHA,
+		}},
+		AdviceComplete: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	queued, err := pipelineQueueCurrentExternalSamplingFailures(st, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("old hash, unknown sampling, and automated_hard missing must not enter rewrite queue: %v", queued)
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.PendingRewrites) != 0 {
+		t.Fatalf("pending rewrites = %v, want empty", progress.PendingRewrites)
 	}
 }
 

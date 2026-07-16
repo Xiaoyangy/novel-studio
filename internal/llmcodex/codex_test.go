@@ -523,6 +523,29 @@ func TestBuildProsePromptDoesNotForceGenericSystemRefusal(t *testing.T) {
 	}
 }
 
+func TestBuildProsePromptKeepsOneLeanHumanFacingBrief(t *testing.T) {
+	prompt := buildProsePrompt(nil)
+	if got := len([]rune(prompt)); got > 2600 {
+		t.Fatalf("static prose brief regrew into a second planning dossier: %d runes", got)
+	}
+	for _, forbidden := range []string{
+		"P1", "P2", "P3", "相邻三段轮换", "固定句长", "固定周期",
+		"每 2-3 句", "逐段功能", "句长 CV", "TTR",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("static prose brief contains algorithmic writing recipe %q: %s", forbidden, prompt)
+		}
+	}
+	for _, want := range []string{
+		"先写人，再写事", "不是必须逐项拍出来的镜头", "不要把结果写成验收录像",
+		"允许感受多停一会儿", "不要为了“像人”强加",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("lean prose brief lost human-facing boundary %q", want)
+		}
+	}
+}
+
 func TestBuildProsePromptHasNoProjectGenreHardcoding(t *testing.T) {
 	prompt := buildProsePrompt([]agentcore.Message{{
 		Role:    agentcore.RoleUser,

@@ -30,6 +30,7 @@ type Store struct {
 	Sessions       *SessionStore
 	Usage          *UsageStore
 	Simulation     *SimulationStore
+	Planning       *PlanningStore
 	AIVoice        *AIVoiceStore
 	Methodology    *MethodologyStore
 	WorldSim       *WorldSimStore
@@ -61,6 +62,7 @@ func NewStore(dir string) *Store {
 		Sessions:       NewSessionStore(newIO(dir)),
 		Usage:          NewUsageStore(newIO(dir)),
 		Simulation:     NewSimulationStore(newIO(dir)),
+		Planning:       NewPlanningStore(newIO(dir)),
 		AIVoice:        NewAIVoiceStore(newIO(dir)),
 		Methodology:    NewMethodologyStore(newIO(dir)),
 		WorldSim:       NewWorldSimStore(newIO(dir)),
@@ -140,6 +142,7 @@ func (s *Store) Init() error {
 	return s.Progress.io.EnsureDirs([]string{
 		"chapters", "summaries", "drafts", "reviews", "meta", "meta/rag", "meta/runtime", "meta/runtime/tasks", "meta/sessions", "meta/sessions/agents",
 		"meta/chapter_metrics", "meta/sampling", "meta/characters", "meta/side_character_journeys", "meta/character_stage", "meta/chapter_world_deltas",
+		"meta/planning", "meta/planning/volumes", "meta/planning/chapters",
 	})
 }
 

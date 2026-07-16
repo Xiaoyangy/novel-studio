@@ -98,7 +98,7 @@ func TestBuildRevisionPlanAggregatesRedFlagsAndSuggestions(t *testing.T) {
 	if !plan.HasRed {
 		t.Fatalf("expected red plan, got %+v", plan)
 	}
-	for _, want := range []string{"## 验收条件", "## 必须修正", "catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "AI率目标：本地与外部均严格 <4%", "禁止注水", "改成交易动作和可见事实"} {
+	for _, want := range []string{"## 验收条件", "## 必须修正", "catalog_stuffing", "结构化评审 verdict=rewrite", "机械门禁阻断 warning: aigc_ratio", "自动 AI 门禁目标：本地与 DeepSeek 当前哈希均严格 <4%", "缺少抽查结果不阻塞生产", "禁止注水", "改成交易动作和可见事实"} {
 		if !strings.Contains(plan.Brief, want) {
 			t.Fatalf("brief missing %q:\n%s", want, plan.Brief)
 		}
@@ -347,19 +347,41 @@ func TestValidateRewriteChapterTitleUsesOutlineTitle(t *testing.T) {
 }
 
 func TestLookupOutlineEntryAssignsGlobalChapterNumbers(t *testing.T) {
-	volumes := []domain.VolumeOutline{{
-		Index: 1,
-		Arcs: []domain.ArcOutline{{
+	volumes := []domain.VolumeOutline{
+		{
 			Index: 1,
-			Chapters: []domain.OutlineEntry{
-				{Title: "刚被催着找工作，一百万到账了"},
-				{Title: "皮卡一到，五个摊主点头了"},
+			Arcs: []domain.ArcOutline{
+				{
+					Index: 1,
+					Chapters: []domain.OutlineEntry{
+						{Title: "刚被催着找工作，一百万到账了"},
+						{Title: "皮卡一到，五个摊主点头了"},
+					},
+				},
+				{Index: 2, EstimatedChapters: 3},
 			},
-		}},
-	}}
+		},
+		{
+			Index: 2,
+			Arcs: []domain.ArcOutline{{
+				Index: 1,
+				Chapters: []domain.OutlineEntry{
+					{Title: "老街第一盏灯"},
+					{Title: "铺门终于开了"},
+				},
+			}},
+		},
+	}
 	entry := lookupOutlineEntry(volumes, 2)
 	if entry == nil || entry.Chapter != 2 || entry.Title != "皮卡一到，五个摊主点头了" {
 		t.Fatalf("layered entries with zero stored chapter must resolve by global order: %+v", entry)
+	}
+	entry = lookupOutlineEntry(volumes, 6)
+	if entry == nil || entry.Chapter != 6 || entry.Title != "老街第一盏灯" {
+		t.Fatalf("skeleton arc reservation must keep later volume chapter number stable: %+v", entry)
+	}
+	if entry := lookupOutlineEntry(volumes, 3); entry != nil {
+		t.Fatalf("unexpanded skeleton chapter must not resolve to a later detailed entry: %+v", entry)
 	}
 }
 

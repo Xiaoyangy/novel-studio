@@ -132,6 +132,25 @@ func TestSaveMechanicalGateMultiDetectorCheckpointsAreIdempotentAcrossReviews(t 
 	}
 }
 
+func TestSaveMechanicalGateIgnoresUnreadableOptionalSamplingJournal(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the journal path makes the sampling reader fail on Unix.
+	// Local/DeepSeek/Editor production evidence must remain available; a later
+	// registration attempt will still fail closed until the journal is repaired.
+	if err := os.Mkdir(filepath.Join(dir, "meta", "external_detection_log.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := saveMechanicalGateForExistingChapter(
+		st, 1, "第一章\n\n林澈把票据翻到背面，先核对摊主刚才说的数。",
+	); err != nil || payload == nil {
+		t.Fatalf("optional sampling journal blocked mechanical review: payload=%+v err=%v", payload, err)
+	}
+}
+
 func TestParseReviewIssuesSkipsNonActionablePraiseAndOptionalAdvice(t *testing.T) {
 	md := `# ch01 评审
 

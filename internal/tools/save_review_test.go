@@ -16,6 +16,35 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
+func TestSaveReviewMidVolumeUsesReservedSkeletonSpans(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	volumes := []domain.VolumeOutline{
+		{
+			Index: 1,
+			Arcs: []domain.ArcOutline{
+				{Index: 1, Chapters: []domain.OutlineEntry{{Title: "一"}, {Title: "二"}}},
+				{Index: 2, EstimatedChapters: 3},
+			},
+		},
+		{
+			Index: 2,
+			Arcs: []domain.ArcOutline{{
+				Index:    1,
+				Chapters: []domain.OutlineEntry{{Title: "六"}, {Title: "七"}},
+			}},
+		},
+	}
+	if err := s.Outline.SaveLayeredOutline(volumes); err != nil {
+		t.Fatalf("SaveLayeredOutline: %v", err)
+	}
+	if !NewSaveReviewTool(s).isMidVolume(6) {
+		t.Fatal("chapter 6 should be the midpoint of volume 2 after reserving chapters 3-5")
+	}
+	if NewSaveReviewTool(s).isMidVolume(4) {
+		t.Fatal("reserved chapter 4 is late in volume 1 and must not be attributed to volume 2")
+	}
+}
+
 func TestSaveReviewPersistsContractAssessment(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
@@ -207,8 +236,8 @@ func TestSaveReviewProjectsCurrentRegisteredExternalGateIntoRewriteBrief(t *test
 		"zhuque/novel-whole-text-single-segment",
 		row.BodySHA256,
 		"86.00%",
-		"严格 `<4%`",
-		"同 detector/mode 精确 payload 复测",
+		"否决当前字节并触发一次整章重渲染",
+		"不等待人工复测",
 	} {
 		if !strings.Contains(brief, want) {
 			t.Fatalf("rewrite brief missing registered external contract %q:\n%s", want, brief)

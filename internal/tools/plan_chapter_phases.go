@@ -72,6 +72,13 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
 	chapter := intFromAny(structure["chapter"])
+	executionTarget := chapter
+	if executionTarget <= 0 {
+		executionTarget = inProgressChapterOf(t.store)
+	}
+	if err := guardPipelinePlanningExecution(t.store, executionTarget, t.Name()); err != nil {
+		return nil, err
+	}
 	skipped, isRewritePlan, err := ensureChapterPlannable(t.store, chapter)
 	if err != nil || skipped != nil {
 		return skipped, err
@@ -286,6 +293,9 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter 缺失且无法从进度推断当前章：请显式传 chapter: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelinePlanningExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	partial, err := t.store.Drafts.LoadChapterPlanPartial(a.Chapter)
 	if err != nil {
 		return nil, fmt.Errorf("load chapter plan partial: %w: %w", errs.ErrStoreRead, err)
@@ -322,7 +332,9 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		)
 	}
 	mergeCausalSimulationPatch(merged, a.CausalSimulation)
-	applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt)
+	if err := applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt); err != nil {
+		return nil, err
+	}
 	normalizations := normalizePartialVisibleCharacterScope(t.store, a.Chapter, merged)
 	partial["causal_simulation"] = merged
 	if len(normalizations) > 0 {
@@ -474,9 +486,9 @@ func mergeUniqueStringArrays(existing, incoming any) ([]any, bool) {
 	return out, true
 }
 
-func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation, craftReceipt *domain.CraftRecallReceipt) {
+func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation, craftReceipt *domain.CraftRecallReceipt) error {
 	if st == nil || chapter <= 0 || merged == nil {
-		return
+		return nil
 	}
 	contextSources := stringSliceFromAny(merged["context_sources"])
 	withoutStaleCraftReceipt := contextSources[:0]
@@ -487,6 +499,14 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 		withoutStaleCraftReceipt = append(withoutStaleCraftReceipt, source)
 	}
 	contextSources = withoutStaleCraftReceipt
+	withoutStaleFactReceipt := contextSources[:0]
+	for _, source := range contextSources {
+		if strings.HasPrefix(strings.TrimSpace(source), domain.RAGFactReceiptTokenPrefix) {
+			continue
+		}
+		withoutStaleFactReceipt = append(withoutStaleFactReceipt, source)
+	}
+	contextSources = withoutStaleFactReceipt
 	if simulation != nil {
 		merged["world_simulation_id"] = simulation.SimulationID
 		merged["protagonist_decision"] = simulation.ProtagonistProjection.ChosenDecision
@@ -512,11 +532,22 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 	if craftReceipt != nil {
 		contextSources = appendUniqueString(contextSources, craftReceiptSourceToken(craftReceipt.ID))
 	}
+	factReceipt, err := st.RAG.LoadLatestRAGFactReceipt(chapter)
+	if err != nil {
+		return fmt.Errorf("load current RAG fact receipt: %w", err)
+	}
+	if factReceipt != nil {
+		if err := validateRAGFactReceiptCurrent(st, *factReceipt); err != nil {
+			return err
+		}
+		contextSources = appendUniqueString(contextSources, factReceipt.SourceToken())
+	}
 	normalizePartialCraftReferenceAliases(merged, craftReceipt)
 	removeStalePartialCraftReferences(merged, craftReceipt)
 	if len(contextSources) > 0 {
 		merged["context_sources"] = contextSources
 	}
+	return nil
 }
 
 // plan_details partial writes are intentionally patch-friendly, so a model can

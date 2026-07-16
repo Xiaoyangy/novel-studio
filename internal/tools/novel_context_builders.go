@@ -1337,7 +1337,8 @@ func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *
 	if len(state.storyThreads) > 0 {
 		envelope.Selected["story_threads"] = state.storyThreads
 	}
-	if ragItems, trace, cacheHit := t.selectRAGRecall(ctx, state); len(ragItems) > 0 {
+	ragItems, trace, cacheHit := t.selectRAGRecall(ctx, state)
+	if len(ragItems) > 0 {
 		envelope.Selected["rag_recall"] = ragItems
 		envelope.References["retrieval_trace"] = trace
 		if trace != nil && !cacheHit {
@@ -1348,6 +1349,11 @@ func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *
 		if !cacheHit {
 			_ = t.store.RAG.AppendTrace(*trace)
 		}
+	}
+	if receipt, err := persistChapterRAGFactReceipt(t.store, state, trace); err != nil {
+		warn("rag_fact_receipt", err)
+	} else if receipt != nil {
+		envelope.References["rag_fact_receipt"] = ragFactReceiptContext(receipt)
 	}
 	if lessons := t.selectReviewLessons(state.chapter, warn); len(lessons) > 0 {
 		envelope.Selected["review_lessons"] = lessons
@@ -1430,7 +1436,7 @@ func (t *ContextTool) buildChapterEpisodicMemory(envelope *chapterContextEnvelop
 							pos["arc_chapter_index"] = state.chapter - globalCh + 1
 						}
 					}
-					globalCh += len(arc.Chapters)
+					globalCh += arc.ChapterSpan()
 				}
 			}
 		} else {
@@ -2341,13 +2347,14 @@ func finishRAGRecall(scoredByID map[string]*ragScored, focus string, terms []str
 			Summary: summary,
 		})
 		trace.Matches = append(trace.Matches, domain.RetrievalTraceHit{
-			ChunkID:    item.chunk.ID,
-			Score:      item.score,
-			Reasons:    item.reasons,
-			SourcePath: item.chunk.SourcePath,
-			Facet:      item.chunk.Facet,
-			SourceKind: item.chunk.SourceKind,
-			Context:    item.chunk.Context,
+			ChunkID:       item.chunk.ID,
+			ContentSHA256: rag.RehashChunk(item.chunk).Hash,
+			Score:         item.score,
+			Reasons:       item.reasons,
+			SourcePath:    item.chunk.SourcePath,
+			Facet:         item.chunk.Facet,
+			SourceKind:    item.chunk.SourceKind,
+			Context:       item.chunk.Context,
 		})
 	}
 	return items, trace

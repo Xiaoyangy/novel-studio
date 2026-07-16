@@ -34,7 +34,7 @@ func TestRegisteredExternalHighInvalidatesExistingReviewAndDelivery(t *testing.T
 		t.Fatalf("review verification accepted a pre-registration review: %v", err)
 	}
 	if err := settlePipelineDelivery(dir, pipelineFlags{Start: 1, End: 1}); err == nil ||
-		(!strings.Contains(err.Error(), "registered external detection") && !strings.Contains(err.Error(), "registered external gate unresolved")) {
+		(!strings.Contains(err.Error(), "registered external detection") && !strings.Contains(err.Error(), "external sampling result requires rewrite")) {
 		t.Fatalf("delivery accepted a pre-registration review: %v", err)
 	}
 }
@@ -126,7 +126,7 @@ func TestRegisteredExternalHighAllowsFreshBlockingReview(t *testing.T) {
 	}
 }
 
-func TestRegisteredExternalLogReadFailureInvalidatesReview(t *testing.T) {
+func TestOptionalSamplingLogReadFailureDoesNotInvalidateReview(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "chapters", "01.md"), "第一章正文")
 	mustWriteCurrentReviewArtifacts(t, dir, 1)
@@ -135,12 +135,12 @@ func TestRegisteredExternalLogReadFailureInvalidatesReview(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "meta", "external_detection_log.jsonl"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(inspectCurrentChapterReview(dir, 1).Issues, "\n"); !strings.Contains(got, "registered external detection unreadable") {
-		t.Fatalf("external detection journal read failure did not fail closed: %s", got)
+	if current := inspectCurrentChapterReview(dir, 1); len(current.Issues) != 0 {
+		t.Fatalf("optional sampling journal read failure blocked automated review evidence: %+v", current.Issues)
 	}
 }
 
-func TestRegisteredExternalRetestPendingBlocksDeliveryOnly(t *testing.T) {
+func TestMissingFollowupSampleDoesNotBlockDelivery(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
@@ -167,22 +167,12 @@ func TestRegisteredExternalRetestPendingBlocksDeliveryOnly(t *testing.T) {
 	if current := inspectCurrentChapterReview(dir, 1); len(current.Issues) != 0 {
 		t.Fatalf("draft retest pending should not invalidate final review artifacts: %+v", current.Issues)
 	}
-	issues := currentRegisteredExternalDeliveryIssues(dir, 1)
-	if got := strings.Join(issues, "\n"); !strings.Contains(got, "zhuque/novel-whole-text-single-segment") ||
-		!strings.Contains(got, "missing=") {
-		t.Fatalf("named detector pending retest not exposed: %+v", issues)
-	}
-	if err := settlePipelineDelivery(dir, pipelineFlags{Start: 1, End: 1}); err == nil ||
-		!strings.Contains(err.Error(), "registered external gate unresolved") {
-		t.Fatalf("settle delivery accepted pending registered retest: %v", err)
-	}
-	if _, err := verifyPipelineStage("deliver", dir, pipelineFlags{Start: 1, End: 1}, &domain.PipelineState{}); err == nil ||
-		!strings.Contains(err.Error(), "registered external gate unresolved") {
-		t.Fatalf("delivery verification accepted pending registered retest: %v", err)
+	if issues := currentRegisteredExternalDeliveryIssues(dir, 1); len(issues) != 0 {
+		t.Fatalf("missing optional sample blocked delivery: %+v", issues)
 	}
 }
 
-func TestRegisteredExternalDeliveryChecksFinalBodyNotRetainedDraft(t *testing.T) {
+func TestOldBodySamplingRowsDoNotCreateFinalBodyDeliveryRequirement(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
@@ -209,14 +199,15 @@ func TestRegisteredExternalDeliveryChecksFinalBodyNotRetainedDraft(t *testing.T)
 	})
 
 	// 模拟绕过 draft 路径直接改正式终稿，并把本地/DeepSeek/review 全部刷新。
-	// 旧草稿仍有平台低分，但它绝不能替新终稿放行交付。
+	// 旧草稿仍有平台低分；它既不能替新终稿背书，也不能制造新终稿的
+	// 人工复测义务。新终稿仍由本地、DeepSeek、review 与一致性门禁负责。
 	const finalBody = "直接修改后的正式终稿"
 	if err := st.Drafts.SaveFinalChapter(1, finalBody); err != nil {
 		t.Fatal(err)
 	}
 	mustWriteCurrentReviewArtifacts(t, dir, 1)
-	if got := strings.Join(currentRegisteredExternalDeliveryIssues(dir, 1), "\n"); !strings.Contains(got, "missing=zhuque/novel-whole-text-single-segment") {
-		t.Fatalf("delivery reused a retained draft's platform pass for a different final body: %s", got)
+	if issues := currentRegisteredExternalDeliveryIssues(dir, 1); len(issues) != 0 {
+		t.Fatalf("old-body sampling row created a new-body delivery requirement: %+v", issues)
 	}
 
 	finalHash := reviewreport.BodySHA256(finalBody)
@@ -226,7 +217,7 @@ func TestRegisteredExternalDeliveryChecksFinalBodyNotRetainedDraft(t *testing.T)
 		CheckedAt: "2026-07-15T20:02:00+08:00",
 	})
 	if issues := currentRegisteredExternalDeliveryIssues(dir, 1); len(issues) != 0 {
-		t.Fatalf("same-platform pass on the exact final body should clear delivery issues: %+v", issues)
+		t.Fatalf("optional low sample on the exact final body changed delivery state: %+v", issues)
 	}
 }
 

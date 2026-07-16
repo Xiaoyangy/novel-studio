@@ -387,8 +387,9 @@ func TestCommitChapterRecomputesHardFactAnchorsAfterAllExactEvidencePasses(t *te
 		t.Fatalf("short exact-body fixture unexpectedly failed local gate: %+v", gate)
 	}
 	inspection, err := InspectDraftExternalGateWithStore(st, 1)
-	if err != nil || inspection.Status != DraftExternalGateApproved || !inspection.CurrentHashNamedRetestsPassed {
-		t.Fatalf("DeepSeek/named exact-hash evidence is not approved: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != DraftExternalGateApproved || inspection.RequiresRegisteredRetest ||
+		inspection.CurrentHashNamedRetestsPassed {
+		t.Fatalf("DeepSeek exact-hash evidence is not approved under sampling policy: inspection=%+v err=%v", inspection, err)
 	}
 	if _, err := NewCheckConsistencyTool(st).Execute(context.Background(), mustJSON(t, map[string]any{"chapter": 1})); err != nil {
 		t.Fatal(err)

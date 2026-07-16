@@ -111,6 +111,9 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter 缺失且无法推断当前章: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelinePlanningExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	if len(a.CharacterDecisions)+len(a.AuthorityCharacters) > chapterWorldSimulationBatchLimit {
 		return nil, fmt.Errorf("simulate_chapter_world 单批最多提交%d名角色，当前 character_decisions=%d authority_contract_characters=%d；请按 gaps 分批: %w", chapterWorldSimulationBatchLimit, len(a.CharacterDecisions), len(a.AuthorityCharacters), errs.ErrToolArgs)
 	}

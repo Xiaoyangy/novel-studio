@@ -93,14 +93,14 @@ func TestPipelineStaleCausalCandidateSkipsJudgeAndDispatchesWorldResimulation(t 
 		t.Fatalf("quarantine did not record exact stale causal evidence: %+v", manifest)
 	}
 
-	// The platform obligation is deliberately outside the quarantine set. It
-	// must survive and remain deferred until the replacement hash first passes
-	// local+DeepSeek gates.
+	// Sampling provenance is deliberately outside the quarantine set. It must
+	// survive as the rewrite reason without becoming a replacement-hash retest
+	// obligation.
 	requirementRaw, err := os.ReadFile(filepath.Join(st.Dir(), "reviews", "drafts", "01_full_rerender_required.json"))
 	var requirement tools.DraftExternalRerenderRequirement
-	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil ||
+	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil || tools.RequiresRegisteredExternalRetest(&requirement) ||
 		!strings.Contains(strings.Join(tools.RegisteredExternalRetestLabels(&requirement), ","), "zhuque/novel-whole-text-single-segment") {
-		t.Fatalf("named detector obligation was lost: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
+		t.Fatalf("sampling trigger provenance was lost or became a hard obligation: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
 	}
 
 	// A retained external-rejudge requirement must not mask the now-missing
@@ -184,8 +184,10 @@ func TestPipelineOrdinaryNextChapterStaleBodyEpochNeverReachesJudge(t *testing.T
 	}
 	requirementRaw, err := os.ReadFile(filepath.Join(st.Dir(), "reviews", "drafts", "01_full_rerender_required.json"))
 	var requirement tools.DraftExternalRerenderRequirement
-	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil || !tools.RequiresRegisteredExternalRetest(&requirement) {
-		t.Fatalf("ordinary preflight lost named requirement: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
+	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil ||
+		tools.RequiresRegisteredExternalRetest(&requirement) || requirement.Source != "registered_external_detection" ||
+		!strings.Contains(strings.Join(tools.RegisteredExternalRetestLabels(&requirement), ","), "zhuque/novel-whole-text-single-segment") {
+		t.Fatalf("ordinary preflight lost sampling trigger provenance or created a hard requirement: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
 	}
 	next := flow.Route(flow.LoadState(st))
 	if next == nil || next.Agent != "writer" || next.Chapter != 1 {
@@ -261,8 +263,10 @@ func TestPipelineStaticBodyPreflightBlocksHardFactsTitleAndWordsBeforeJudge(t *t
 	}
 	requirementRaw, err := os.ReadFile(filepath.Join(st.Dir(), "reviews", "drafts", "01_full_rerender_required.json"))
 	var requirement tools.DraftExternalRerenderRequirement
-	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil || !tools.RequiresRegisteredExternalRetest(&requirement) {
-		t.Fatalf("static body failure lost named requirement: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
+	if err != nil || json.Unmarshal(requirementRaw, &requirement) != nil ||
+		tools.RequiresRegisteredExternalRetest(&requirement) || requirement.Source != "registered_external_detection" ||
+		!strings.Contains(strings.Join(tools.RegisteredExternalRetestLabels(&requirement), ","), "zhuque/novel-whole-text-single-segment") {
+		t.Fatalf("static body failure lost sampling trigger provenance or created a hard requirement: requirement=%+v err=%v body=%s", requirement, err, requirementRaw)
 	}
 	next := flow.Route(flow.LoadState(st))
 	if next == nil || next.Agent != "drafter" || next.Chapter != 1 {

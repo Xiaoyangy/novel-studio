@@ -94,7 +94,8 @@ func (t *ContextTool) completionSignals(layered []domain.VolumeOutline, compass 
 		signals["phase"] = string(progress.Phase)
 	}
 	if len(layered) > 0 {
-		signals["planned_chapters"] = len(domain.FlattenOutline(layered))
+		signals["planned_chapters"] = domain.TotalChapters(layered)
+		signals["detailed_chapters"] = len(domain.FlattenOutline(layered))
 		signals["volumes_total"] = len(layered)
 	}
 	if compass != nil {

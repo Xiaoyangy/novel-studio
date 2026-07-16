@@ -58,6 +58,9 @@ func (t *DraftChapterPartTool) Execute(_ context.Context, args json.RawMessage) 
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	if err := validateChapterPartArgs(a.Chapter, a.Part, a.TotalParts, a.Content); err != nil {
 		return nil, err
 	}
@@ -146,6 +149,9 @@ func (t *MergeChapterPartsTool) Execute(_ context.Context, args json.RawMessage)
 	}
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
+	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
 	}
 	if a.ExpectedParts <= 0 {
 		return nil, fmt.Errorf("expected_parts must be > 0: %w", errs.ErrToolArgs)

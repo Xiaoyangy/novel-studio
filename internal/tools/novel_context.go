@@ -132,6 +132,7 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 			if err := t.addChapterPipelineInstructionContext(staged, a.Chapter); err != nil {
 				return nil, fmt.Errorf("load chapter pipeline instruction: %w", err)
 			}
+			sanitizeExternalSamplingPolicyContext(t.store, a.Chapter, staged)
 			return finalizeContextResult(staged, a.Chapter, a.Profile)
 		}
 	}
@@ -201,6 +202,7 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	}
 
 	t.buildUserRules(result)
+	sanitizeExternalSamplingPolicyContext(t.store, a.Chapter, result)
 	if a.Profile == "draft" && a.Chapter > 0 {
 		plan, err := t.store.Drafts.LoadChapterPlan(a.Chapter)
 		if err != nil {
@@ -209,6 +211,9 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		if plan != nil {
 			if err := validateRewriteCraftConsumption(t.store, *plan); err != nil {
 				return nil, fmt.Errorf("第 %d 章 draft render_packet 的 craft receipt 已失效，必须重新规划：%w", a.Chapter, err)
+			}
+			if err := ValidateRAGFactPlanCurrent(t.store, *plan); err != nil {
+				return nil, fmt.Errorf("第 %d 章 draft render_packet 的普通事实 RAG receipt 已失效，必须重新规划：%w", a.Chapter, err)
 			}
 		}
 	}

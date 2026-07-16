@@ -124,12 +124,12 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		case DraftExternalGateRerenderAuthorized:
 			hardGateViolations = append(hardGateViolations, draftExternalRerenderInstruction(externalGate.Requirement))
 		case DraftExternalGateAdviceIncomplete:
-			hardGateViolations = append(hardGateViolations, "外判修改建议不完整；先重新外判，禁止盲目改写")
+			hardGateViolations = append(hardGateViolations, "DeepSeek provider judge 修改建议不完整；先重新运行该 provider judge，禁止盲目改写")
 		default:
 			if externalGate.LocalSoftEditPending {
-				hardGateViolations = append(hardGateViolations, "当前哈希已通过 DeepSeek，但本地非结构性 AIGC 门禁仍未通过；只允许一次定向 edit_chapter，随后立即停止并复判新哈希，注册平台复测继续暂缓")
+				hardGateViolations = append(hardGateViolations, "当前哈希已通过 DeepSeek provider judge，但本地非结构性 AIGC 门禁仍未通过；只允许一次定向 edit_chapter，随后立即停止并由 DeepSeek provider judge 判定新哈希。用户外部抽查不参与这条自动放行链")
 			} else {
-				hardGateViolations = append(hardGateViolations, "整章重渲染已产生新哈希；先停止正文修改并运行外部草稿复判")
+				hardGateViolations = append(hardGateViolations, "整章重渲染已产生新哈希；先停止正文修改并运行 DeepSeek provider judge")
 			}
 		}
 	}
@@ -138,9 +138,9 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		if externalGate.Status == DraftExternalGateRerenderAuthorized {
 			nextAction = "按 draft_external_ai_review 使用 draft_chapter(mode=write) 整章覆盖；禁止局部 edit"
 		} else if externalGate.LocalSoftEditPending {
-			nextAction = "当前哈希已通过 DeepSeek，只按 rewrite_focus 使用 edit_chapter 定向修改一次，落盘后立即停止并交外层复判新哈希"
+			nextAction = "当前哈希已通过 DeepSeek provider judge，只按 rewrite_focus 使用 edit_chapter 定向修改一次，落盘后立即停止并交外层 DeepSeek provider judge 判定新哈希"
 		} else if externalGate.Status == DraftExternalGateRejudgePending || externalGate.Status == DraftExternalGateAdviceIncomplete {
-			nextAction = "停止正文修改，先运行外部草稿复判"
+			nextAction = "停止正文修改，先运行 DeepSeek provider judge"
 		}
 		hardGateViolations = append(hardGateViolations, fmt.Sprintf(
 			"aigc_ratio: actual=%.2f%%, required=<%.0f%%；%s，当前不可 commit_chapter",

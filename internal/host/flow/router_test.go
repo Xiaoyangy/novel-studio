@@ -128,7 +128,9 @@ func TestRoute_ExistingDraftUsesRestrictedFinalizer(t *testing.T) {
 	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
 	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") ||
 		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") || !strings.Contains(got.Task, "人工验收补充属于确定性约束") ||
-		!strings.Contains(got.Task, "任何 commit_chapter 失败后必须立即结束") {
+		!strings.Contains(got.Task, "任何 commit_chapter 失败后必须立即结束") ||
+		!strings.Contains(got.Task, "DeepSeek provider judge 严格 <4%") ||
+		!strings.Contains(got.Task, "用户外部平台只抽查，不要求替换稿跟随复测") {
 		t.Fatalf("existing draft should use restricted finalizer, got %+v", got)
 	}
 }
@@ -141,7 +143,8 @@ func TestRoute_ExplicitRerenderUsesDrafterWithoutReplanning(t *testing.T) {
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "profile=draft") ||
 		!strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止调用 simulate_chapter_world") ||
-		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") ||
+		!strings.Contains(got.Task, "DeepSeek provider judge 同哈希判定") {
 		t.Fatalf("explicit rerender must bypass replanning and force one full draft, got %+v", got)
 	}
 }
@@ -154,7 +157,8 @@ func TestRoute_BlockingFormalReviewRequiresFreshWholeDraft(t *testing.T) {
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") ||
 		!strings.Contains(got.Task, "正式复审要求") || !strings.Contains(got.Task, "禁止 simulate_chapter_world") ||
-		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") ||
+		!strings.Contains(got.Task, "DeepSeek provider judge 裸正文判定") {
 		t.Fatalf("same-hash blocking formal review must create a fresh whole draft, got %+v", got)
 	}
 }
@@ -168,7 +172,9 @@ func TestRoute_BlockingExternalDraftReviewUsesDrafterForWholeChapter(t *testing.
 	})
 	if got == nil || got.Agent != "drafter" || !strings.Contains(got.Task, "draft_chapter(mode=write)") || !strings.Contains(got.Task, "禁止 edit_chapter") ||
 		!strings.Contains(got.Task, "rewrite_brief") || !strings.Contains(got.Task, "profile=draft") || !strings.Contains(got.Task, "写入成功后立即结束") ||
-		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") {
+		strings.Contains(got.Task, "read_chapter(") || !strings.Contains(got.Task, "不得读取旧 draft/final") ||
+		!strings.Contains(got.Task, "DeepSeek provider judge 复判新哈希") ||
+		!strings.Contains(got.Task, "用户外部平台不要求跟随复测") {
 		t.Fatalf("blocking external review must route to full drafter, got %+v", got)
 	}
 }
@@ -216,8 +222,8 @@ func TestRoute_LocalSoftGateDispatchesExactlyOneEdit(t *testing.T) {
 			if got == nil || got.Agent != "draft_finalizer" || got.Chapter != test.chapter ||
 				!strings.Contains(got.Task, "最多调用一次 edit_chapter") ||
 				!strings.Contains(got.Task, "不得调用 commit_chapter") ||
-				!strings.Contains(got.Task, "外层 pipeline 将先对新哈希重跑 DeepSeek") ||
-				!strings.Contains(got.Task, "注册 detector/mode 复测义务继续暂缓") {
+				!strings.Contains(got.Task, "DeepSeek provider judge 判定新哈希") ||
+				!strings.Contains(got.Task, "用户外部抽查不作为后续放行前置") {
 				t.Fatalf("local soft route must permit one edit and then stop fail-closed, got %+v", got)
 			}
 		})
@@ -253,7 +259,8 @@ func TestRoute_NamedPassFrozenDispatchesCommitOnlyFinalizer(t *testing.T) {
 				NextActionDraftNamedPassFrozen: true,
 			})
 			if got == nil || got.Agent != "draft_finalizer" || got.Chapter != test.chapter ||
-				!strings.Contains(got.Task, "送检正文已经冻结") ||
+				!strings.Contains(got.Task, "显式配置 automated_hard 的自动 detector/mode") ||
+				!strings.Contains(got.Task, "载荷已经冻结") ||
 				!strings.Contains(got.Task, "最多调用一次 commit_chapter") ||
 				!strings.Contains(got.Task, "禁止 edit_chapter、draft_chapter") ||
 				!strings.Contains(got.Task, "新的显式整章重渲染授权") {

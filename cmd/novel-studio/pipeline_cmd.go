@@ -2,6 +2,7 @@ package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
 // 阶段：cocreate → architect → zero-init → write → review → rewrite → deliver（默认不含 cocreate）。
+// 可选的拆分写作路径为 preplan → plan → render；它不会改变上述默认阶段序列。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
 // 设计：流水线只做"阶段编排 + 断点续跑"，每个阶段复用已有子命令逻辑（headless.Run /
@@ -31,7 +32,9 @@ import (
 var defaultPipelineStages = []string{"architect", "zero-init", "write", "review", "rewrite", "deliver"}
 
 var knownPipelineStages = map[string]bool{
-	"cocreate": true, "architect": true, "zero-init": true, "write": true, "review": true, "rewrite": true, "deliver": true,
+	"cocreate": true, "architect": true, "zero-init": true,
+	"preplan": true, "plan": true, "render": true,
+	"write": true, "review": true, "rewrite": true, "deliver": true,
 }
 
 type pipelineFlags struct {
@@ -52,6 +55,7 @@ type pipelineFlags struct {
 	NewNovel         bool
 	RefreshArchitect bool
 	RefreshZeroInit  bool
+	RenderOnly       bool
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -59,7 +63,8 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / zero-init / write / review / rewrite / deliver（默认 %s）\n\n选项：\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / zero-init / preplan / plan / render / write / review / rewrite / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "拆分写作：preplan 生成非正史全书投影，plan 只冻结当前章正式计划，render 只按冻结计划写正文。\n\n选项：\n")
 		fs.PrintDefaults()
 	}
 	var f pipelineFlags
@@ -67,8 +72,8 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.StringVar(&f.Prompt, "prompt", "", "创作指令（write 阶段用）")
 	fs.StringVar(&f.PromptFile, "prompt-file", "", "从文件读创作指令，'-' 表示 stdin")
 	fs.BoolVar(&f.Restart, "restart", false, "清空已保存的流水线状态，从头重跑")
-	fs.IntVar(&f.Start, "from", 0, "review/rewrite 阶段起始章号（含），0 = 自动")
-	fs.IntVar(&f.End, "to", 0, "review/rewrite 阶段结束章号（含），0 = 自动")
+	fs.IntVar(&f.Start, "from", 0, "preplan/plan/render/review/rewrite 阶段起始章号（含），0 = 自动")
+	fs.IntVar(&f.End, "to", 0, "preplan/plan/render/review/rewrite 阶段结束章号（含），0 = 自动")
 	fs.IntVar(&f.WriteTo, "write-to", 0, "write 阶段写到指定章节后暂停；0 = 写到全书完结")
 	fs.DurationVar(&f.Budget, "budget", 0, "review/rewrite 阶段每章 LLM 调用硬时间预算，0 = 使用阶段默认")
 	fs.StringVar(&f.Role, "role", "", "rewrite 阶段调用的模型角色，空 = writer")
@@ -181,10 +186,12 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	if err != nil {
 		return err
 	}
-	if enabled, err := bootstrap.EnsureRAGQdrant(context.Background(), cfg); err != nil {
-		return fmt.Errorf("pipeline 启动 Qdrant 失败: %w", err)
-	} else if enabled {
-		fmt.Fprintf(os.Stderr, "[pipeline] Qdrant 已就绪\n")
+	if pipelineStagesNeedQdrant(stages) {
+		if enabled, err := bootstrap.EnsureRAGQdrant(context.Background(), cfg); err != nil {
+			return fmt.Errorf("pipeline 启动 Qdrant 失败: %w", err)
+		} else if enabled {
+			fmt.Fprintf(os.Stderr, "[pipeline] Qdrant 已就绪\n")
+		}
 	}
 	ensureDashboardServiceForRun(cfg.OutputDir)
 	statePath := filepath.Join(cfg.OutputDir, "meta", "pipeline.json")
@@ -278,6 +285,21 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 
 	fmt.Fprintln(os.Stderr, "\n[pipeline] 全部阶段完成 ✓")
 	return nil
+}
+
+// pipelineStagesNeedQdrant keeps the phase boundary honest. A standalone
+// preplan pass only derives prose-free causal projections from versioned local
+// artifacts, so it must remain runnable without an embedding service or vector
+// database. Every other stage preserves the existing Qdrant startup behavior;
+// in particular, formal plan and render still fail closed when their RAG
+// dependencies are unavailable.
+func pipelineStagesNeedQdrant(stages []string) bool {
+	for _, stage := range stages {
+		if normalizePipelineStageName(stage) != "preplan" {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyStoredPipelineArtifactDigests(outputDir string, evidence domain.PipelineStageEvidence) error {
@@ -378,6 +400,12 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		return pipelineArchitect(opts, flags, state)
 	case "zero-init":
 		return pipelineZeroInit(opts, flags, state)
+	case "preplan":
+		return pipelinePreplan(opts, flags)
+	case "plan":
+		return pipelinePlan(opts, flags)
+	case "render":
+		return pipelineRender(opts, flags, state)
 	case "write":
 		return pipelineWrite(opts, flags, state)
 	case "review":

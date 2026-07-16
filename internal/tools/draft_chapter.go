@@ -29,7 +29,7 @@ func NewDraftChapterTool(store *store.Store) *DraftChapterTool {
 
 func (t *DraftChapterTool) Name() string { return "draft_chapter" }
 func (t *DraftChapterTool) Description() string {
-	return "写入章节正文。mode=write 覆盖写入整章，mode=append 追加到现有草稿（续写/修改）。当前精确哈希通过全部注册 detector/mode 后正文冻结；只有更新的整章重渲染授权或新的阻断要求可允许换稿。"
+	return "写入章节正文。mode=write 覆盖写入整章，mode=append 追加到现有草稿（续写/修改）。用户报告的外部平台结果只用于抽查：当前哈希高分会触发返工，替换哈希不等待人工复测。仅显式配置 automated_hard 的自动外部门禁通过后才会冻结精确载荷。"
 }
 func (t *DraftChapterTool) Label() string { return "写入章节" }
 
@@ -68,6 +68,9 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	if a.Content == "" {
 		return nil, fmt.Errorf("content must not be empty: %w", errs.ErrToolArgs)
 	}
@@ -80,18 +83,18 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	explicitRerender := ExplicitRerenderRequestActive(t.store, a.Chapter)
 	externalGate, requirementErr := InspectDraftExternalGateWithStore(t.store, a.Chapter)
 	if requirementErr != nil {
-		return nil, fmt.Errorf("读取草稿外审门禁: %w: %w", requirementErr, errs.ErrStoreRead)
+		return nil, fmt.Errorf("读取草稿 AIGC 门禁: %w: %w", requirementErr, errs.ErrStoreRead)
 	}
 	requirement := externalGate.Requirement
 	candidateSHA := reviewreport.BodySHA256(a.Content)
 	if draftCurrentHashNamedPassFrozen(externalGate) && !explicitRerender {
-		return nil, fmt.Errorf("第 %d 章当前草稿精确哈希已通过全部注册 detector/mode 的严格 <4%% 复测，正文已冻结；普通 draft_chapter 不得改变送检载荷，只允许继续 check_consistency/commit_chapter。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", a.Chapter, errs.ErrToolPrecondition)
+		return nil, fmt.Errorf("第 %d 章当前草稿精确哈希已通过显式配置 automated_hard 的自动 detector/mode 严格 <4%% 门禁，正文已冻结；普通 draft_chapter 不得改变该载荷，只允许继续 check_consistency/commit_chapter。用户手工抽查不会进入此状态。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if externalGate.Status == DraftExternalGateRejudgePending && !explicitRerender {
-		return nil, fmt.Errorf("第 %d 章上一轮整章重渲染已产生新哈希，必须先运行外部草稿复判；复判前禁止再次 draft_chapter: %w", a.Chapter, errs.ErrToolPrecondition)
+		return nil, fmt.Errorf("第 %d 章上一轮整章重渲染已产生新哈希，必须先运行 DeepSeek provider judge；该判定完成前禁止再次 draft_chapter: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if externalGate.Status == DraftExternalGateAdviceIncomplete && !explicitRerender {
-		return nil, fmt.Errorf("第 %d 章外判阻断但修改建议不完整，必须先重新外判；禁止盲目重渲染: %w", a.Chapter, errs.ErrToolPrecondition)
+		return nil, fmt.Errorf("第 %d 章 DeepSeek provider judge 阻断但修改建议不完整，必须先重新运行该 provider judge；禁止盲目重渲染: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if a.Mode == "append" && (requirement != nil || explicitRerender) {
 		if requirement != nil {
@@ -101,21 +104,21 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	}
 	if requirement != nil {
 		if candidateSHA == requirement.EvaluatedBodySHA256 {
-			return nil, fmt.Errorf("第 %d 章整章重渲染结果与外判阻断版本哈希相同，未产生有效新稿: %w", a.Chapter, errs.ErrToolPrecondition)
+			return nil, fmt.Errorf("第 %d 章整章重渲染结果与当前 AIGC 阻断版本（DeepSeek provider judge 或用户抽查高分）哈希相同，未产生有效新稿: %w", a.Chapter, errs.ErrToolPrecondition)
 		}
 		wordContract := inspectChapterWordContract(t.store, a.Content)
 		if !wordContract.Passed {
 			return nil, fmt.Errorf(
-				"第 %d 章外审要求整章重渲染，但候选正文仅 %d 字，未满足 %d-%d 字合同；旧草稿与重渲染标记均保持不变，必须一次提交完整小说正文: %w",
+				"第 %d 章当前 AIGC 阻断要求整章重渲染，但候选正文仅 %d 字，未满足 %d-%d 字合同；旧草稿与重渲染标记均保持不变，必须一次提交完整小说正文: %w",
 				a.Chapter, wordContract.Actual, wordContract.Min, wordContract.Max, errs.ErrToolPrecondition,
 			)
 		}
 		// A current-hash registered platform result can synthesize its marker at
 		// inspection time. Persist it before replacing the judged bytes so the
 		// new hash cannot later be approved by the independent model alone.
-		if RequiresRegisteredExternalRetest(requirement) {
+		if RequiresRegisteredExternalRetest(requirement) || isRegisteredExternalSamplingTrigger(requirement) {
 			if err := SetDraftExternalRerenderRequirement(t.store.Dir(), *requirement); err != nil {
-				return nil, fmt.Errorf("persist registered external retest requirement: %w: %w", err, errs.ErrStoreWrite)
+				return nil, fmt.Errorf("persist registered external rewrite trigger: %w: %w", err, errs.ErrStoreWrite)
 			}
 		}
 	}
@@ -326,18 +329,21 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		registeredRetestDeferred := RequiresRegisteredExternalRetest(requirement)
 		if localStructuralRerender {
 			nextStep = "停止本次正文修改；当前哈希仍触发本地 whole-text/segment 结构阻断，外层 pipeline 将在有界次数内先整章重渲染或重做因果计划。"
-			if labels := RegisteredExternalRetestLabels(requirement); len(labels) > 0 {
+			if labels := RegisteredExternalRetestLabels(requirement); RequiresRegisteredExternalRetest(requirement) && len(labels) > 0 {
 				nextStep += strings.Join(labels, ", ") + " 的同哈希复测义务保留到本地结构门禁与 DeepSeek 当前哈希判断均通过的候选稿"
 			}
 			hardGatePassed = false
 		} else if managedJudgePending {
-			nextStep = fmt.Sprintf("停止正文修改；当前 pipeline 新稿 drafts/%02d.draft.md 尚无可批准当前哈希的 DeepSeek 裸正文结论，立即把控制权交还外层 pipeline 复判；复判前禁止 check_consistency、edit 或 commit", a.Chapter)
-			if labels := RegisteredExternalRetestLabels(requirement); len(labels) > 0 {
+			nextStep = fmt.Sprintf("停止正文修改；当前 pipeline 新稿 drafts/%02d.draft.md 尚无可批准当前哈希的 DeepSeek provider judge 裸正文结论，立即把控制权交还外层 pipeline 运行该判定；判定前禁止 check_consistency、edit 或 commit", a.Chapter)
+			if labels := RegisteredExternalRetestLabels(requirement); RequiresRegisteredExternalRetest(requirement) && len(labels) > 0 {
 				nextStep += "；" + strings.Join(labels, ", ") + " 的注册平台同哈希复测暂缓，只有本地门禁与 DeepSeek 都通过后才可执行"
 			}
 			hardGatePassed = false
 		} else if externalRejudgeRequired {
-			nextStep = fmt.Sprintf("停止正文修改；先对 drafts/%02d.draft.md 的新哈希运行外部草稿复判，只有结果严格低于 %.0f%% 才能检查并提交", a.Chapter, aigcGate.PassExclusivePercent)
+			nextStep = fmt.Sprintf("停止正文修改；先由外层 pipeline 对 drafts/%02d.draft.md 的新哈希运行 DeepSeek provider judge，只有结果严格低于 %.0f%% 才能检查并提交。用户外部平台不要求跟随复测", a.Chapter, aigcGate.PassExclusivePercent)
+			if labels := RegisteredExternalRetestLabels(requirement); RequiresRegisteredExternalRetest(requirement) && len(labels) > 0 {
+				nextStep += "；显式 automated_hard 还要求自动 detector/mode 完成同哈希门禁：" + strings.Join(labels, ", ")
+			}
 			hardGatePassed = false
 		}
 		return json.Marshal(map[string]any{

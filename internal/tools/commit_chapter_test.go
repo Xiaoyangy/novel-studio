@@ -16,6 +16,31 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
+func TestVolumeChapterRangeReservesSkeletonArcs(t *testing.T) {
+	volumes := []domain.VolumeOutline{
+		{
+			Index: 1,
+			Arcs: []domain.ArcOutline{
+				{Index: 1, Chapters: []domain.OutlineEntry{{Title: "一"}, {Title: "二"}}},
+				{Index: 2, EstimatedChapters: 3},
+			},
+		},
+		{
+			Index: 2,
+			Arcs: []domain.ArcOutline{{
+				Index:    1,
+				Chapters: []domain.OutlineEntry{{Title: "六"}, {Title: "七"}},
+			}},
+		},
+	}
+	if lo, hi := volumeChapterRange(volumes, 0); lo != 1 || hi != 5 {
+		t.Fatalf("volume 1 range = %d-%d, want 1-5", lo, hi)
+	}
+	if lo, hi := volumeChapterRange(volumes, 1); lo != 6 || hi != 7 {
+		t.Fatalf("volume 2 range = %d-%d, want 6-7", lo, hi)
+	}
+}
+
 func testCharacterStageRecords(protagonist string, sideCharacters ...string) []domain.CharacterStageRecord {
 	if protagonist == "" {
 		protagonist = "主角"

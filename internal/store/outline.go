@@ -101,18 +101,11 @@ func (s *OutlineStore) GetChapterFromLayered(chapter int) (*domain.OutlineEntry,
 	if err != nil {
 		return nil, err
 	}
-	ch := 1
-	for _, v := range volumes {
-		for _, a := range v.Arcs {
-			for i := range a.Chapters {
-				if ch == chapter {
-					e := a.Chapters[i]
-					e.Chapter = ch
-					return &e, nil
-				}
-				ch++
-			}
-		}
+	pos := findLayeredChapter(volumes, chapter)
+	if pos != nil {
+		e := volumes[pos.volIdx].Arcs[pos.arcIdx].Chapters[pos.chInArc]
+		e.Chapter = chapter
+		return &e, nil
 	}
 	return nil, fmt.Errorf("chapter %d not found in layered outline", chapter)
 }
@@ -123,18 +116,42 @@ func (s *OutlineStore) LocateChapter(chapter int) (volume, arc int, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	ch := 1
-	for _, v := range volumes {
-		for _, a := range v.Arcs {
-			for range a.Chapters {
-				if ch == chapter {
-					return v.Index, a.Index, nil
-				}
-				ch++
-			}
-		}
+	pos := findLayeredChapter(volumes, chapter)
+	if pos != nil {
+		return pos.volume, pos.arc, nil
 	}
 	return 0, 0, fmt.Errorf("chapter %d not found in layered outline", chapter)
+}
+
+type layeredChapterPosition struct {
+	volIdx, arcIdx int
+	volume, arc    int
+	chInArc        int
+}
+
+// findLayeredChapter 是分层大纲全局章号的唯一游标实现。骨架弧虽没有
+// OutlineEntry，仍按 EstimatedChapters 占位；落在预留区间内的章返回 nil，
+// 直到对应弧被展开。
+func findLayeredChapter(volumes []domain.VolumeOutline, chapter int) *layeredChapterPosition {
+	if chapter <= 0 {
+		return nil
+	}
+	cursor := 1
+	for vi, v := range volumes {
+		for ai, a := range v.Arcs {
+			if a.IsExpanded() && chapter >= cursor && chapter < cursor+len(a.Chapters) {
+				return &layeredChapterPosition{
+					volIdx:  vi,
+					arcIdx:  ai,
+					volume:  v.Index,
+					arc:     a.Index,
+					chInArc: chapter - cursor,
+				}
+			}
+			cursor += a.ChapterSpan()
+		}
+	}
+	return nil
 }
 
 // ArcBoundary 弧边界信息。
@@ -161,32 +178,7 @@ func (s *OutlineStore) CheckArcBoundary(chapter int) (*ArcBoundary, error) {
 		return nil, err
 	}
 
-	type arcPos struct {
-		volIdx, arcIdx int
-		volume, arc    int
-		chInArc        int
-		arcLen         int
-	}
-
-	ch := 1
-	var cur *arcPos
-	for vi, v := range volumes {
-		for ai, a := range v.Arcs {
-			for ci := range a.Chapters {
-				if ch == chapter {
-					cur = &arcPos{
-						volIdx:  vi,
-						arcIdx:  ai,
-						volume:  v.Index,
-						arc:     a.Index,
-						chInArc: ci,
-						arcLen:  len(a.Chapters),
-					}
-				}
-				ch++
-			}
-		}
-	}
+	cur := findLayeredChapter(volumes, chapter)
 	if cur == nil {
 		return nil, nil
 	}
@@ -196,7 +188,7 @@ func (s *OutlineStore) CheckArcBoundary(chapter int) (*ArcBoundary, error) {
 		Arc:    cur.arc,
 	}
 
-	isLastChInArc := cur.chInArc == cur.arcLen-1
+	isLastChInArc := cur.chInArc == len(volumes[cur.volIdx].Arcs[cur.arcIdx].Chapters)-1
 	isLastArcInVol := cur.arcIdx == len(volumes[cur.volIdx].Arcs)-1
 
 	// Next*/NeedsExpansion/NeedsNewVolume 只在弧末才有意义，否则会让协调者误以为要提前展开下一弧。
@@ -240,6 +232,7 @@ func (s *OutlineStore) expandArcUnlocked(volumeIdx, arcIdx int, chapters []domai
 	if err := s.io.ReadJSONUnlocked("layered_outline.json", &volumes); err != nil {
 		return nil, fmt.Errorf("load layered_outline: %w", err)
 	}
+	beforePositions := expandedArcStartPositions(volumes)
 	found := false
 	for vi := range volumes {
 		if volumes[vi].Index != volumeIdx {
@@ -248,6 +241,20 @@ func (s *OutlineStore) expandArcUnlocked(volumeIdx, arcIdx int, chapters []domai
 		for ai := range volumes[vi].Arcs {
 			if volumes[vi].Arcs[ai].Index != arcIdx {
 				continue
+			}
+			target := &volumes[vi].Arcs[ai]
+			if target.IsExpanded() {
+				return nil, fmt.Errorf("arc already expanded: volume=%d, arc=%d", volumeIdx, arcIdx)
+			}
+			if target.EstimatedChapters <= 0 {
+				return nil, fmt.Errorf(
+					"cannot expand arc without a positive estimated_chapters reservation: volume=%d, arc=%d",
+					volumeIdx, arcIdx)
+			}
+			if len(chapters) != target.EstimatedChapters {
+				return nil, fmt.Errorf(
+					"expanded chapter count %d must equal reserved estimated_chapters %d for volume=%d, arc=%d; refusing to shift existing global chapter numbers",
+					len(chapters), target.EstimatedChapters, volumeIdx, arcIdx)
 			}
 			volumes[vi].Arcs[ai].Chapters = chapters
 			volumes[vi].Arcs[ai].EstimatedChapters = 0
@@ -260,6 +267,9 @@ func (s *OutlineStore) expandArcUnlocked(volumeIdx, arcIdx int, chapters []domai
 	}
 	if !found {
 		return nil, fmt.Errorf("arc not found: volume=%d, arc=%d", volumeIdx, arcIdx)
+	}
+	if err := ensureExpandedArcPositionsStable(beforePositions, volumes); err != nil {
+		return nil, err
 	}
 	if err := s.io.WriteJSONUnlocked("layered_outline.json", volumes); err != nil {
 		return nil, err
@@ -286,7 +296,11 @@ func (s *OutlineStore) appendVolumeUnlocked(vol domain.VolumeOutline) ([]domain.
 	if err := validateAppendVolume(volumes, vol); err != nil {
 		return nil, err
 	}
+	beforePositions := expandedArcStartPositions(volumes)
 	volumes = append(volumes, vol)
+	if err := ensureExpandedArcPositionsStable(beforePositions, volumes); err != nil {
+		return nil, err
+	}
 	if err := s.io.WriteJSONUnlocked("layered_outline.json", volumes); err != nil {
 		return nil, err
 	}
@@ -301,6 +315,53 @@ func (s *OutlineStore) appendVolumeUnlocked(vol domain.VolumeOutline) ([]domain.
 		return nil, err
 	}
 	return volumes, nil
+}
+
+type layeredArcKey struct {
+	volIdx int
+	arcIdx int
+}
+
+type expandedArcPosition struct {
+	start  int
+	volume int
+	arc    int
+}
+
+func expandedArcStartPositions(volumes []domain.VolumeOutline) map[layeredArcKey]expandedArcPosition {
+	positions := make(map[layeredArcKey]expandedArcPosition)
+	cursor := 1
+	for vi, v := range volumes {
+		for ai, a := range v.Arcs {
+			if a.IsExpanded() {
+				positions[layeredArcKey{volIdx: vi, arcIdx: ai}] = expandedArcPosition{
+					start:  cursor,
+					volume: v.Index,
+					arc:    a.Index,
+				}
+			}
+			cursor += a.ChapterSpan()
+		}
+	}
+	return positions
+}
+
+func ensureExpandedArcPositionsStable(before map[layeredArcKey]expandedArcPosition, after []domain.VolumeOutline) error {
+	afterPositions := expandedArcStartPositions(after)
+	for key, oldPosition := range before {
+		newPosition, ok := afterPositions[key]
+		if !ok {
+			return fmt.Errorf(
+				"expanded arc disappeared while regenerating outline: volume=%d, arc=%d",
+				oldPosition.volume, oldPosition.arc)
+		}
+		if newPosition.start != oldPosition.start {
+			return fmt.Errorf(
+				"expanded arc global chapter start would shift from %d to %d: volume=%d, arc=%d",
+				oldPosition.start, newPosition.start, oldPosition.volume, oldPosition.arc)
+		}
+	}
+	return nil
 }
 
 func validateAppendVolume(existing []domain.VolumeOutline, vol domain.VolumeOutline) error {
@@ -351,6 +412,7 @@ func renderLayeredOutline(volumes []domain.VolumeOutline) string {
 			fmt.Fprintf(&b, "**目标**：%s\n\n", a.Goal)
 			if !a.IsExpanded() {
 				fmt.Fprintf(&b, "*（待展开，预估 %d 章）*\n\n", a.EstimatedChapters)
+				ch += a.ChapterSpan()
 				continue
 			}
 			for _, e := range a.Chapters {

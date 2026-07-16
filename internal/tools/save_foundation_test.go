@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -243,6 +244,67 @@ func TestSaveFoundationAppendVolume(t *testing.T) {
 	}
 	if volumes[1].Title != "第二卷" {
 		t.Fatalf("expected title '第二卷', got %q", volumes[1].Title)
+	}
+}
+
+func TestSaveFoundationExpandArcRejectsChapterCountThatWouldShiftLaterArc(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := st.Progress.Init("test", 7); err != nil {
+		t.Fatalf("Progress.Init: %v", err)
+	}
+	volumes := []domain.VolumeOutline{{
+		Index: 1,
+		Arcs: []domain.ArcOutline{
+			{
+				Index: 1,
+				Chapters: []domain.OutlineEntry{
+					{Title: "前一"},
+					{Title: "前二"},
+				},
+			},
+			{Index: 2, EstimatedChapters: 3},
+			{
+				Index: 3,
+				Chapters: []domain.OutlineEntry{
+					{Title: "后一"},
+					{Title: "后二"},
+				},
+			},
+		},
+	}}
+	if err := st.Outline.SaveLayeredOutline(volumes); err != nil {
+		t.Fatalf("SaveLayeredOutline: %v", err)
+	}
+	if err := st.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	args, err := json.Marshal(map[string]any{
+		"type":   "expand_arc",
+		"volume": 1,
+		"arc":    2,
+		"content": []map[string]any{
+			{"title": "中一"},
+			{"title": "中二"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if _, err := NewSaveFoundationTool(st).Execute(context.Background(), args); err == nil ||
+		!strings.Contains(err.Error(), "must equal reserved estimated_chapters 3") {
+		t.Fatalf("expected stable chapter reservation guard, got %v", err)
+	}
+
+	flat, err := st.Outline.LoadOutline()
+	if err != nil {
+		t.Fatalf("LoadOutline: %v", err)
+	}
+	if len(flat) != 4 || flat[2].Chapter != 6 || flat[2].Title != "后一" {
+		t.Fatalf("rejected tool call changed later arc mapping: %+v", flat)
 	}
 }
 

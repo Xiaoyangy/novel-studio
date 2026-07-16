@@ -1272,6 +1272,11 @@ func pipelineCausalRewrite(opts cliOptions, flags pipelineFlags, state *domain.P
 		maxRounds = 3
 	}
 	st := store.NewStore(cfg.OutputDir)
+	if queued, queueErr := pipelineQueueCurrentExternalSamplingFailures(st, flags.Start, flags.End); queueErr != nil {
+		return queueErr
+	} else if len(queued) > 0 {
+		fmt.Fprintf(os.Stderr, "[pipeline:rewrite] 已发现当前精确 SHA 的用户外部抽查高分并送入整章返工队列：%v\n", queued)
+	}
 	if flags.ForceRerender {
 		progress, loadErr := st.Progress.Load()
 		if loadErr != nil {
@@ -1407,6 +1412,80 @@ func mergePendingRewriteChapters(existing, requested []int) []int {
 	}
 	sort.Ints(merged)
 	return merged
+}
+
+const pipelineExternalSamplingRewriteReason = "用户报告的当前精确 SHA 外部抽查高分；整章返工后只走自动门禁"
+
+// pipelineQueueCurrentExternalSamplingFailures reconciles the append-only
+// user sampling journal into normal production routing. Only a blocking result
+// bound to the exact current final body is actionable. Missing/unknown samples
+// and unresolved identities from an explicit automated_hard contract are left
+// to their own gate and never manufacture a rewrite request here.
+func pipelineQueueCurrentExternalSamplingFailures(st *store.Store, start, end int) ([]int, error) {
+	if st == nil {
+		return nil, nil
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil || len(progress.CompletedChapters) == 0 {
+		return nil, nil
+	}
+	chapters := append([]int(nil), progress.CompletedChapters...)
+	chapters = filterChaptersForPipelineRange(chapters, pipelineFlags{Start: start, End: end})
+	if len(chapters) == 0 {
+		return nil, nil
+	}
+
+	var blocking []int
+	for _, chapter := range chapters {
+		body, readErr := os.ReadFile(filepath.Join(st.Dir(), "chapters", fmt.Sprintf("%02d.md", chapter)))
+		if os.IsNotExist(readErr) {
+			continue
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("读取第 %d 章当前终稿以核对外部抽查失败: %w", chapter, readErr)
+		}
+		if strings.TrimSpace(string(body)) == "" {
+			continue
+		}
+		inspection, inspectErr := tools.InspectRegisteredExternalRetestsForBody(
+			st.Dir(), chapter, reviewreport.BodySHA256(string(body)),
+		)
+		if inspectErr != nil {
+			return nil, fmt.Errorf("核对第 %d 章当前终稿的外部抽查记录失败: %w", chapter, inspectErr)
+		}
+		if len(inspection.Blocking) > 0 {
+			blocking = append(blocking, chapter)
+		}
+	}
+	if len(blocking) == 0 {
+		return nil, nil
+	}
+
+	merged := mergePendingRewriteChapters(progress.PendingRewrites, blocking)
+	unchanged := progress.Flow == domain.FlowRewriting &&
+		progress.RewriteReason == pipelineExternalSamplingRewriteReason &&
+		len(progress.PendingRewrites) == len(merged)
+	if unchanged {
+		for i := range merged {
+			if progress.PendingRewrites[i] != merged[i] {
+				unchanged = false
+				break
+			}
+		}
+	}
+	if !unchanged {
+		if err := st.Progress.SetPendingRewritesAndFlow(
+			merged,
+			pipelineExternalSamplingRewriteReason,
+			domain.FlowRewriting,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return blocking, nil
 }
 
 type pipelineRerenderRequest = domain.ChapterRerenderRequest
@@ -1606,9 +1685,20 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 	if err := pipelineRequirePrewritingReady(cfg.OutputDir); err != nil {
 		return err
 	}
+	if queued, queueErr := pipelineQueueCurrentExternalSamplingFailures(store.NewStore(cfg.OutputDir), 0, 0); queueErr != nil {
+		return queueErr
+	} else if len(queued) > 0 {
+		fmt.Fprintf(os.Stderr, "[pipeline:write] 已发现当前精确 SHA 的用户外部抽查高分并送入整章返工队列：%v\n", queued)
+	}
 	const maxWriteRuns = 4
 	for run := 1; run <= maxWriteRuns; run++ {
-		prog, _ := store.NewStore(cfg.OutputDir).Progress.Load()
+		currentStore := store.NewStore(cfg.OutputDir)
+		if flags.RenderOnly && flags.StopAfterCommit > 0 {
+			if err := pipelineRequireRenderAttemptAvailable(currentStore, flags.StopAfterCommit); err != nil {
+				return err
+			}
+		}
+		prog, _ := currentStore.Progress.Load()
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
 			return nil
 		}
@@ -1652,11 +1742,16 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 			}
 		}
 		commitSeqBefore := latestPipelineChapterCommitSeq(cfg.OutputDir, flags.StopAfterCommit)
+		stopOnRenderReplan := 0
+		if flags.RenderOnly {
+			stopOnRenderReplan = flags.StopAfterCommit
+		}
 		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                 prompt,
-			StopAfterChapter:       flags.WriteTo,
-			StopAfterRewriteCommit: flags.StopAfterCommit,
-			SkipQueueReplay:        true,
+			Prompt:                    prompt,
+			StopAfterChapter:          flags.WriteTo,
+			StopAfterRewriteCommit:    flags.StopAfterCommit,
+			StopOnRenderReplanChapter: stopOnRenderReplan,
+			SkipQueueReplay:           true,
 		}); err != nil {
 			return err
 		}
@@ -1672,6 +1767,24 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+// pipelineRequireRenderAttemptAvailable must run before pending-draft judging
+// or causal quarantine. Once a frozen plan has exhausted its render budget, the
+// split pipeline stops with every planning artifact intact; only an explicit
+// plan stage may create a new causal epoch.
+func pipelineRequireRenderAttemptAvailable(st *store.Store, chapter int) error {
+	escalation := tools.InspectRenderOnlyReplanEscalation(st, chapter)
+	if !escalation.Required {
+		return nil
+	}
+	return fmt.Errorf(
+		"第 %d 章 render-only 已有 %d 个不同整章哈希触发结构阻断（上限 %d）；冻结计划和 world simulation 保持不变，必须先单独执行 plan，禁止 judge/quarantine/自动重规划：%s",
+		chapter,
+		escalation.Attempts,
+		escalation.Limit,
+		escalation.Reason,
+	)
 }
 
 type pipelineDraftAIJudgeFunc func(cliOptions, []string) error
@@ -1763,7 +1876,7 @@ func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, p
 		return false, nil
 	}
 	if inspection.RequiresRegisteredRetest && inspection.Requirement != nil {
-		return true, fmt.Errorf("第 %d 章新草稿必须先用 %s 对精确 payload 做同哈希复测；DeepSeek 不能代替这些外部平台结果",
+		return true, fmt.Errorf("第 %d 章启用了显式自动外部门禁，必须先用 %s 对精确 payload 做同哈希复测；用户手工抽查不会进入此分支",
 			chapter, strings.Join(tools.RegisteredExternalRetestLabels(inspection.Requirement), ", "))
 	}
 	if !pipelineDraftNeedsExternalJudgeForChapterWithStore(st, chapter, inspection) {
@@ -1786,7 +1899,7 @@ func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, p
 		return true, nil
 	}
 	if after.RequiresRegisteredRetest && after.Requirement != nil {
-		return true, fmt.Errorf("第 %d 章已通过本地门禁与 DeepSeek，必须再用 %s 对精确 payload 做同哈希复测；未登记结果前流水线保持 fail-closed",
+		return true, fmt.Errorf("第 %d 章已通过本地门禁与 DeepSeek，但显式自动外部门禁仍要求 %s 对精确 payload 复测；用户手工抽查不会进入此分支",
 			chapter, strings.Join(tools.RegisteredExternalRetestLabels(after.Requirement), ", "))
 	}
 	if after.Status == tools.DraftExternalGateRejudgePending || after.Status == tools.DraftExternalGateAdviceIncomplete {
@@ -2390,7 +2503,7 @@ func resolveStages(raw string) ([]string, error) {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / zero-init / write / review / rewrite / deliver）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / zero-init / preplan / plan / render / write / review / rewrite / deliver）", s)
 		}
 		stages = append(stages, s)
 	}
@@ -2404,6 +2517,8 @@ func normalizePipelineStageName(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "zeroinit", "zero_init":
 		return "zero-init"
+	case "batch-plan", "batch_plan", "pre-plan":
+		return "preplan"
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
 	}

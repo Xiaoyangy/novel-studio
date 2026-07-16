@@ -216,7 +216,7 @@ func TestEditChapterApprovedHashAllowsOneEditThenRequiresExternalRejudge(t *test
 		"chapter": 1, "old_string": "一旁", "new_string": "旁边",
 	})
 	_, err = tool.Execute(context.Background(), args)
-	if err == nil || !errors.Is(err, errs.ErrToolPrecondition) || !strings.Contains(err.Error(), "尚未外判") {
+	if err == nil || !errors.Is(err, errs.ErrToolPrecondition) || !strings.Contains(err.Error(), "尚未获得 DeepSeek provider judge 结论") {
 		t.Fatalf("second edit before rejudge must be blocked: %v", err)
 	}
 }

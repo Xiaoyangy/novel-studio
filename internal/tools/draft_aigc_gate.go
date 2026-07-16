@@ -197,10 +197,9 @@ func CurrentDraftHasLocalStructuralBlock(st *store.Store, chapter int) bool {
 }
 
 // currentDraftLocalStructuralRerenderRequirement synthesizes an exact-hash
-// local marker from the current bytes while carrying forward every named
-// detector identity from base. Inspectors use the in-memory value so an older
-// registered marker can recover automatically; DraftChapter persists it before
-// replacing the bytes, preserving crash safety and the final retest contract.
+// local marker from the current bytes. Only an explicitly configured
+// automated_hard detector contract is carried forward. User sampling identity
+// remains in the append-only log and never becomes a replacement-body duty.
 func currentDraftLocalStructuralRerenderRequirement(st *store.Store, chapter int, base *DraftExternalRerenderRequirement) (*DraftExternalRerenderRequirement, bool) {
 	if st == nil || chapter <= 0 {
 		return nil, false
@@ -215,11 +214,15 @@ func currentDraftLocalStructuralRerenderRequirement(st *store.Store, chapter int
 	}
 	requirement := draftAIGCRerenderRequirement(chapter, content, draftAIGCRawLocalGateResult(report, gate))
 	if base != nil {
-		for _, identity := range registeredExternalRetestIdentities(base) {
-			requirement.RequiredExternalRetests = appendRegisteredExternalRetestIdentity(requirement.RequiredExternalRetests, identity)
+		if RequiresRegisteredExternalRetest(base) {
+			for _, identity := range registeredExternalRetestIdentities(base) {
+				requirement.RequiredExternalRetests = appendRegisteredExternalRetestIdentity(requirement.RequiredExternalRetests, identity)
+			}
+			requirement.RequiredDetector = strings.TrimSpace(base.RequiredDetector)
+			requirement.RequiredMode = strings.TrimSpace(base.RequiredMode)
+			requirement.ExternalRetestPolicy = DraftExternalRetestPolicyAutomatedHard
+			requirement.BlockUntilExternalRetest = true
 		}
-		requirement.RequiredDetector = strings.TrimSpace(base.RequiredDetector)
-		requirement.RequiredMode = strings.TrimSpace(base.RequiredMode)
 		requirement.InitialDraftBodySHA256 = strings.TrimSpace(base.InitialDraftBodySHA256)
 	}
 	return &requirement, true

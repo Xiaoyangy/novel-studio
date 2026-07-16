@@ -83,11 +83,14 @@ class RegisterExternalDetectionTests(unittest.TestCase):
         *,
         detector: str = "zhuque",
         mode: str = "whole",
+        score: str = "2",
+        verdict: str = "human_like",
     ) -> list[str]:
         return [
             str(MODULE_PATH), "--project", str(project), "--chapter", "1",
-            "--detector", detector, "--mode", mode, "--score", "2",
-            "--score-scale", "percent", "--verdict", "human_like",
+            "--detector", detector, "--mode", mode, "--score", score,
+            "--score-scale", "percent", "--verdict", verdict,
+            "--result-source", "user_reported",
             "--payload-file", str(draft), "--expected-sha256", draft_sha,
         ]
 
@@ -98,6 +101,20 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             MODULE.normalize_score(86, "probability")
         with self.assertRaises(ValueError):
             MODULE.normalize_score(101, "percent")
+
+    def test_result_source_must_explicitly_be_user_reported_or_manual(self):
+        base = [
+            str(MODULE_PATH), "--project", "/tmp/project", "--chapter", "1",
+            "--detector", "zhuque", "--mode", "whole", "--score", "2",
+            "--score-scale", "percent", "--verdict", "human_like",
+            "--expected-sha256", "a" * 64,
+        ]
+        with mock.patch.object(sys, "argv", base), self.assertRaises(SystemExit):
+            MODULE.parse_args()
+        with mock.patch.object(
+            sys, "argv", base + ["--result-source", "browser"]
+        ), self.assertRaises(SystemExit):
+            MODULE.parse_args()
 
     def test_payload_must_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,13 +140,15 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             canonical.write_bytes("第一章\n\n正文\n".encode("utf-8"))
             submitted = project / "submitted.txt"
             # Visually equivalent text with a missing trailing newline is still
-            # a different detector subject and must not enter the hard gate.
+            # a different detector subject and must not be attributed to the
+            # canonical chapter's sampling history.
             submitted.write_bytes("第一章\n\n正文".encode("utf-8"))
             sha = MODULE.sha256_bytes(submitted.read_bytes())
             argv = [
                 str(MODULE_PATH), "--project", str(project), "--chapter", "1",
                 "--detector", "zhuque", "--mode", "whole", "--score", "86",
                 "--score-scale", "percent", "--verdict", "ai_like",
+                "--result-source", "user_reported",
                 "--payload-file", str(submitted), "--expected-sha256", sha,
             ]
             with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
@@ -151,6 +170,7 @@ class RegisterExternalDetectionTests(unittest.TestCase):
                 str(MODULE_PATH), "--project", str(project), "--chapter", "1",
                 "--detector", "zhuque", "--mode", "whole", "--score", "86",
                 "--score-scale", "percent", "--verdict", "ai_like",
+                "--result-source", "user_reported",
                 "--payload-file", str(submitted), "--expected-sha256", sha,
             ]
             with mock.patch.object(sys, "argv", argv):
@@ -188,30 +208,31 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             self.assertEqual(row["body_sha256"], draft_sha)
             self.assertEqual(row["payload_kind"], "pending_draft")
 
-    def test_arbitrary_draft_without_named_marker_is_rejected(self):
+    def test_exact_managed_draft_without_named_marker_can_be_sampled(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(project)
             (project / "reviews" / "drafts" / "01_full_rerender_required.json").unlink()
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "named draft retest marker does not exist"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
+            row = json.loads((project / "meta" / "external_detection_log.jsonl").read_text())
+            self.assertEqual(row["body_sha256"], draft_sha)
+            self.assertEqual(row["result_source"], "user_reported")
 
-    def test_pending_draft_identity_must_match_requested_detector_and_mode(self):
+    def test_sampling_identity_does_not_need_a_prior_named_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(project)
             argv = self.pending_draft_argv(
                 project, draft, draft_sha, detector="other", mode="whole"
             )
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "does not require this detector/mode"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
+            row = json.loads((project / "meta" / "external_detection_log.jsonl").read_text())
+            self.assertEqual((row["detector"], row["mode"]), ("other", "whole"))
 
-    def test_local_only_marker_cannot_authorize_named_draft_registration(self):
+    def test_local_only_marker_does_not_block_user_sampling_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(project)
@@ -221,12 +242,10 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             value["required_external_retests"] = []
             marker.write_text(json.dumps(value), encoding="utf-8")
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "not a named external-detector contract"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
 
-    def test_existing_current_identity_is_not_pending_again(self):
+    def test_repeated_current_identity_appends_a_new_sampling_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(project)
@@ -242,12 +261,48 @@ class RegisterExternalDetectionTests(unittest.TestCase):
                 "body_sha256": draft_sha,
             }) + "\n", encoding="utf-8")
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "already has a registered result"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[-1]["result_source"], "user_reported")
 
-    def test_formal_high_with_no_initial_hash_keeps_retained_draft_authorized(self):
+    def test_high_after_low_is_appended_even_when_same_high_exists_in_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            draft, draft_sha, _ = self.write_pending_draft(project)
+            high_argv = self.pending_draft_argv(
+                project, draft, draft_sha, score="86", verdict="ai_like"
+            )
+            low_argv = self.pending_draft_argv(project, draft, draft_sha)
+
+            for argv in (high_argv, low_argv, high_argv):
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(MODULE.main(), 0)
+
+            log = project / "meta" / "external_detection_log.jsonl"
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([row["score_percent"] for row in rows], [86, 2, 86])
+            self.assertEqual(rows[-1]["verdict"], "ai_like")
+
+    def test_consecutive_equivalent_event_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            draft, draft_sha, _ = self.write_pending_draft(project)
+            argv = self.pending_draft_argv(
+                project, draft, draft_sha, score="86", verdict="ai_like"
+            )
+
+            for _ in range(2):
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(MODULE.main(), 0)
+
+            log = project / "meta" / "external_detection_log.jsonl"
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["score_percent"], 86)
+
+    def test_formal_high_history_does_not_block_sampling_the_current_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, evaluated_sha = self.write_pending_draft(project)
@@ -263,10 +318,8 @@ class RegisterExternalDetectionTests(unittest.TestCase):
                 "body_sha256": evaluated_sha,
             }) + "\n", encoding="utf-8")
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "marker has no initial draft hash"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
 
     def test_pending_draft_with_write_intent_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,7 +334,7 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             ):
                 MODULE.main()
 
-    def test_current_marker_hash_is_not_a_rejudge_pending_candidate(self):
+    def test_current_marker_hash_can_still_be_recorded_as_sampling_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(project)
@@ -290,22 +343,18 @@ class RegisterExternalDetectionTests(unittest.TestCase):
             value["evaluated_body_sha256"] = draft_sha
             marker.write_text(json.dumps(value), encoding="utf-8")
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "rerender_authorized, not rejudge_pending"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
 
-    def test_structurally_blocked_draft_is_not_ready_for_platform_retest(self):
+    def test_structurally_blocked_draft_can_be_recorded_without_overriding_local_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             draft, draft_sha, _ = self.write_pending_draft(
                 project, structural_block=True
             )
             argv = self.pending_draft_argv(project, draft, draft_sha)
-            with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
-                SystemExit, "current structural-block checkpoint"
-            ):
-                MODULE.main()
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(MODULE.main(), 0)
 
     def test_draft_copy_cannot_use_pending_candidate_bridge(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,6 +378,7 @@ class RegisterExternalDetectionTests(unittest.TestCase):
                 str(MODULE_PATH), "--project", str(project), "--chapter", "1",
                 "--detector", "zhuque", "--mode", "whole", "--score", "86",
                 "--score-scale", "percent", "--verdict", "ai_like",
+                "--result-source", "user_reported",
                 "--payload-file", str(submitted), "--expected-sha256", sha,
             ]
             with mock.patch.object(sys, "argv", argv), self.assertRaisesRegex(
@@ -347,6 +397,7 @@ class RegisterExternalDetectionTests(unittest.TestCase):
                 str(MODULE_PATH), "--project", str(project), "--chapter", "1",
                 "--detector", "   ", "--mode", "whole", "--score", "86",
                 "--score-scale", "percent", "--verdict", "ai_like",
+                "--result-source", "user_reported",
                 "--expected-sha256", sha,
             ]
             with mock.patch.object(sys, "argv", argv), self.assertRaises(SystemExit):

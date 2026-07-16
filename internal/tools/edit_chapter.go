@@ -54,7 +54,7 @@ func (t *EditChapterTool) Description() string {
 	return "对章节草稿做定点字符串替换（打磨场景首选，比 draft_chapter 整章重写省 token）。" +
 		"找到 old_string 并替换为 new_string，要求精确匹配且唯一（多处匹配需 replace_all=true）。" +
 		"写入 drafts/{ch}.draft.md；drafts 不存在时自动从 chapters 播种。" +
-		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。若外部草稿审核要求结构级重渲染，本工具会拒绝，必须先用 draft_chapter(mode=write) 整章覆盖。若仅 DeepSeek 当前哈希已通过，或仍有本地非结构性门禁，本工具只允许改一处，落盘后必须立即停笔并复判新哈希；若当前精确哈希已通过 requirement 的全部注册 detector/mode，则正文冻结，本工具拒绝修改。"
+		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。若 DeepSeek provider judge 或用户当前哈希抽查高分要求结构级重渲染，本工具会拒绝，必须先用 draft_chapter(mode=write) 整章覆盖。若 DeepSeek provider judge 已通过当前哈希，但仍有本地非结构性门禁，本工具只允许改一处，落盘后必须立即停笔并让外层 pipeline 重新判定新哈希。用户报告的平台抽查结果不产生逐章复测义务；只有显式 automated_hard 自动外部门禁通过的载荷会冻结。"
 }
 
 func (t *EditChapterTool) Schema() map[string]any {
@@ -79,6 +79,9 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	if a.OldString == "" {
 		return nil, fmt.Errorf("old_string 不能为空: %w", errs.ErrToolArgs)
 	}
@@ -87,7 +90,7 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	}
 	externalGateBefore, err := InspectDraftExternalGateWithStore(t.store, a.Chapter)
 	if err != nil {
-		return nil, fmt.Errorf("读取草稿外审门禁: %w: %w", err, errs.ErrStoreRead)
+		return nil, fmt.Errorf("读取草稿 AIGC 门禁: %w: %w", err, errs.ErrStoreRead)
 	}
 	if err := draftExternalGateEditPrecondition(a.Chapter, externalGateBefore); err != nil {
 		return nil, err
@@ -188,13 +191,13 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 		passthrough["local_structural_rerender_required"] = true
 		passthrough["registered_external_retest_deferred"] = RequiresRegisteredExternalRetest(externalGateBefore.Requirement)
 		passthrough["stop_prose_modification"] = true
-		passthrough["next_step"] = "立即停止正文修改并把控制权交还外层 pipeline；edit 后的精确整章哈希触发本地 whole-text/segment 结构阻断，不能继续局部打补丁。外层将执行有界整章重渲染或重规划；已有注册 detector/mode 复测义务保持不变。"
+		passthrough["next_step"] = "立即停止正文修改并把控制权交还外层 pipeline；edit 后的精确整章哈希触发本地 whole-text/segment 结构阻断，不能继续局部打补丁。外层将执行有界整章重渲染或重规划；用户外部抽查不作为后续放行前置。"
 	} else if externalGateBefore.Status == DraftExternalGateApproved || externalGateBefore.LocalSoftEditPending {
 		passthrough["external_rejudge_required"] = true
 		passthrough["external_rejudge_required_now"] = true
 		passthrough["registered_external_retest_deferred"] = RequiresRegisteredExternalRetest(externalGateBefore.Requirement)
 		passthrough["stop_prose_modification"] = true
-		passthrough["next_step"] = "edit 已使当前哈希的 DeepSeek 通过结论失效：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，先复判新哈希；注册 detector/mode 复测义务继续暂缓到本地门禁与 DeepSeek 都通过后"
+		passthrough["next_step"] = "edit 已使当前哈希的 DeepSeek provider judge 通过结论失效：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，先由 DeepSeek provider judge 判定新哈希。用户外部抽查不作为后续放行前置"
 	} else {
 		passthrough["next_step"] = "edit 已落盘。仍有硬伤可再次 edit_chapter；否则 check_consistency 后 commit_chapter"
 	}
@@ -203,16 +206,16 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 
 func draftExternalGateEditPrecondition(chapter int, inspection DraftExternalGateInspection) error {
 	if draftCurrentHashNamedPassFrozen(inspection) {
-		return fmt.Errorf("第 %d 章当前草稿精确哈希已通过全部注册 detector/mode 的严格 <4%% 复测，正文已冻结；禁止 edit_chapter 改变送检载荷，只允许继续 check_consistency/commit_chapter。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", chapter, errs.ErrToolPrecondition)
+		return fmt.Errorf("第 %d 章当前草稿精确哈希已通过显式配置 automated_hard 的自动 detector/mode 严格 <4%% 门禁，正文已冻结；禁止 edit_chapter 改变该载荷，只允许继续 check_consistency/commit_chapter。用户手工抽查不会进入此状态。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", chapter, errs.ErrToolPrecondition)
 	}
 	switch inspection.Status {
 	case DraftExternalGateRerenderAuthorized:
 		return fmt.Errorf("%s: %w", draftExternalRerenderInstruction(inspection.Requirement), errs.ErrToolPrecondition)
 	case DraftExternalGateAdviceIncomplete:
-		return fmt.Errorf("第 %d 章外判建议不完整，禁止局部编辑；先重新外判: %w", chapter, errs.ErrToolPrecondition)
+		return fmt.Errorf("第 %d 章 DeepSeek provider judge 建议不完整，禁止局部编辑；先重新运行该 provider judge: %w", chapter, errs.ErrToolPrecondition)
 	case DraftExternalGateRejudgePending:
 		if !inspection.LocalSoftEditPending {
-			return fmt.Errorf("第 %d 章当前草稿哈希尚未外判，禁止继续局部编辑；先停止正文修改并复判: %w", chapter, errs.ErrToolPrecondition)
+			return fmt.Errorf("第 %d 章当前草稿哈希尚未获得 DeepSeek provider judge 结论，禁止继续局部编辑；先停止正文修改并由外层 pipeline 判定该哈希: %w", chapter, errs.ErrToolPrecondition)
 		}
 	}
 	return nil

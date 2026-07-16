@@ -520,13 +520,14 @@ func lookupOutlineEntry(volumes []domain.VolumeOutline, chapter int) *domain.Out
 	for _, v := range volumes {
 		for _, a := range v.Arcs {
 			for i := range a.Chapters {
-				if current == chapter {
+				globalChapter := current + i
+				if globalChapter == chapter {
 					entry := a.Chapters[i]
-					entry.Chapter = current
+					entry.Chapter = globalChapter
 					return &entry
 				}
-				current++
 			}
+			current += a.ChapterSpan()
 		}
 	}
 	return nil

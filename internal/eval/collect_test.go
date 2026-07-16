@@ -108,11 +108,11 @@ func TestChapterTitleUsesLayeredEntryChapter(t *testing.T) {
 		{
 			Index: 1,
 			Arcs: []domain.ArcOutline{
-				{Index: 1}, // 未展开 arc 不应让后续章节位置漂移
+				{Index: 1, EstimatedChapters: 6}, // 骨架弧预留 1-6，不让后续章节位置漂移
 				{
 					Index: 2,
 					Chapters: []domain.OutlineEntry{
-						{Chapter: 7, Title: "第七章 真标题"},
+						{Title: "第七章 真标题"},
 					},
 				},
 			},

@@ -62,6 +62,18 @@ func (t *PlanChapterTool) Schema() map[string]any {
 }
 
 func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var executionTarget struct {
+		Chapter int `json:"chapter"`
+	}
+	if err := unmarshalToolArgs(args, &executionTarget); err != nil {
+		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
+	}
+	if executionTarget.Chapter <= 0 {
+		executionTarget.Chapter = inProgressChapterOf(t.store)
+	}
+	if err := guardPipelinePlanningExecution(t.store, executionTarget.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
 	// 与两阶段互通：若该章已有 plan_details 建立的中间态（partial），把本次 plan_chapter
 	// 的字段合并进 partial 后按同一口径 finalize。这样即使 planner 在单发/两阶段之间
 	// 混用（弱模型在压缩后常"忘了"自己在走两阶段），也能用已累积的字段收口，
@@ -200,6 +212,12 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
 		return nil, err
 	}
+	if err := bindLatestRAGFactReceiptToPlan(s, &plan); err != nil {
+		return nil, fmt.Errorf("bind chapter RAG fact receipt: %w", err)
+	}
+	if err := ValidateRAGFactPlanCurrent(s, plan); err != nil {
+		return nil, err
+	}
 	normalizeRewriteBriefRefinement(s, &plan)
 	normalizeChapterAttractionPlan(s, &plan)
 	plan.Contract.RequiredBeats = compactStrings(plan.Contract.RequiredBeats)
@@ -303,27 +321,26 @@ func normalizeRewriteBriefRefinement(s *store.Store, plan *domain.ChapterPlan) {
 		return
 	}
 	_, _, brief, err := loadChapterRewriteSource(s, plan.Chapter)
-	if err != nil || strings.TrimSpace(brief) == "" {
-		return
-	}
 	refinement := &plan.CausalSimulation.ReviewRefinement
-	for _, item := range rewriteBriefTopLevelBullets(brief, "合同漏项") {
-		refinement.FailureModes = appendUniqueString(refinement.FailureModes, sanitizeProjectDiagnosticForPlan(s, item))
+	if err == nil && strings.TrimSpace(brief) != "" {
+		for _, item := range rewriteBriefTopLevelBullets(brief, "合同漏项") {
+			refinement.FailureModes = appendUniqueString(refinement.FailureModes, sanitizeProjectDiagnosticForPlan(s, item))
+		}
+		for _, item := range rewriteBriefTopLevelBullets(brief, "必须修正", "最新整篇单段门禁") {
+			refinement.LocalizedTargets = appendUniqueString(refinement.LocalizedTargets, sanitizeProjectDiagnosticForPlan(s, item))
+		}
+		for _, item := range rewriteBriefTopLevelBullets(brief, "验收条件") {
+			refinement.AcceptanceChecks = appendUniqueString(refinement.AcceptanceChecks, sanitizeProjectDiagnosticForPlan(s, item))
+		}
 	}
-	for _, item := range rewriteBriefTopLevelBullets(brief, "必须修正", "最新整篇单段门禁") {
-		refinement.LocalizedTargets = appendUniqueString(refinement.LocalizedTargets, sanitizeProjectDiagnosticForPlan(s, item))
-	}
-	for _, item := range rewriteBriefTopLevelBullets(brief, "验收条件") {
-		refinement.AcceptanceChecks = appendUniqueString(refinement.AcceptanceChecks, sanitizeProjectDiagnosticForPlan(s, item))
-	}
-	sanitizeReviewRefinementForPlan(s, refinement)
+	sanitizeReviewRefinementForPlan(s, plan.Chapter, refinement)
 }
 
 // sanitizeReviewRefinementForPlan also covers diagnosis text the model placed
 // in review_refinement before deterministic brief projection. Otherwise the
 // raw negative example can survive next to the sanitized brief item and make
 // the final project-contamination check impossible to pass.
-func sanitizeReviewRefinementForPlan(s *store.Store, refinement *domain.ReviewRefinementLoop) {
+func sanitizeReviewRefinementForPlan(s *store.Store, chapter int, refinement *domain.ReviewRefinementLoop) {
 	if refinement == nil {
 		return
 	}
@@ -334,6 +351,9 @@ func sanitizeReviewRefinementForPlan(s *store.Store, refinement *domain.ReviewRe
 	refinement.ReplanningMoves = sanitizeProjectDiagnosticListForPlan(s, refinement.ReplanningMoves)
 	refinement.AcceptanceChecks = sanitizeProjectDiagnosticListForPlan(s, refinement.AcceptanceChecks)
 	refinement.StopCondition = sanitizeProjectDiagnosticForPlan(s, refinement.StopCondition)
+	if externalSamplingTextPolicyActive(s, chapter) {
+		sanitizeReviewRefinementExternalSampling(refinement)
+	}
 }
 
 func sanitizeProjectDiagnosticListForPlan(s *store.Store, items []string) []string {
@@ -1298,7 +1318,7 @@ func chapterRequiresFocusedAntiAIExecutionPlan(s *store.Store, chapter int, rewr
 			threshold = 4
 		}
 		if RequiresRegisteredExternalRetest(requirement) {
-			return true, "仍有命名外部复测合同：" + strings.Join(RegisteredExternalRetestLabels(requirement), ", "), nil
+			return true, "仍有显式自动外部复测合同：" + strings.Join(RegisteredExternalRetestLabels(requirement), ", "), nil
 		}
 		if requirement.Source == "local_mechanical_gate" || requirement.AIProbabilityPercent >= threshold {
 			return true, "仍有 whole-text AIGC 整章返工合同", nil
@@ -1307,7 +1327,13 @@ func chapterRequiresFocusedAntiAIExecutionPlan(s *store.Store, chapter int, rewr
 	if body, bodyErr := s.Drafts.LoadChapterText(chapter); bodyErr == nil && strings.TrimSpace(body) != "" {
 		rows, rowsErr := reviewreport.LatestRegisteredExternalDetections(s.Dir(), chapter, reviewreport.BodySHA256(body))
 		if rowsErr != nil {
-			return false, "", rowsErr
+			if requirement != nil && requirement.BlockUntilExternalRetest {
+				return false, "", rowsErr
+			}
+			// A human sampling log is optional production evidence. A malformed
+			// row is rejected by the registration path, but cannot stop planning
+			// when no automated external hard gate was explicitly configured.
+			rows = nil
 		}
 		var labels []string
 		for _, row := range rows {

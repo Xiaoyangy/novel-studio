@@ -1,10 +1,35 @@
 package store
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
+
+func stableLayeredFixture() []domain.VolumeOutline {
+	return []domain.VolumeOutline{{
+		Index: 1, Title: "第一卷", Theme: "稳定章号",
+		Arcs: []domain.ArcOutline{
+			{
+				Index: 1, Title: "前弧", Goal: "铺垫",
+				Chapters: []domain.OutlineEntry{
+					{Title: "前一", CoreEvent: "前一事件"},
+					{Title: "前二", CoreEvent: "前二事件"},
+				},
+			},
+			{Index: 2, Title: "中弧", Goal: "待展开", EstimatedChapters: 3},
+			{
+				Index: 3, Title: "后弧", Goal: "承接",
+				Chapters: []domain.OutlineEntry{
+					{Title: "后一", CoreEvent: "后一事件"},
+					{Title: "后二", CoreEvent: "后二事件"},
+				},
+			},
+		},
+	}}
+}
 
 func setupLayered(t *testing.T, volumes []domain.VolumeOutline) *Store {
 	t.Helper()
@@ -103,6 +128,137 @@ func TestCheckArcBoundaryNextArcInSameVolume(t *testing.T) {
 	}
 	if !b.NeedsExpansion {
 		t.Fatal("expected NeedsExpansion=true for skeleton arc")
+	}
+}
+
+func TestLayeredChapterMappingReservesSkeletonSpanAndSurvivesExpansion(t *testing.T) {
+	s := setupLayered(t, stableLayeredFixture())
+
+	if _, err := s.Outline.GetChapterFromLayered(3); err == nil {
+		t.Fatal("reserved skeleton chapter 3 should not be writable before expansion")
+	}
+	entry, err := s.Outline.GetChapterFromLayered(6)
+	if err != nil {
+		t.Fatalf("GetChapterFromLayered(6): %v", err)
+	}
+	if entry.Title != "后一" || entry.Chapter != 6 {
+		t.Fatalf("chapter 6 = %+v, want later expanded arc first chapter", entry)
+	}
+	volume, arc, err := s.Outline.LocateChapter(7)
+	if err != nil {
+		t.Fatalf("LocateChapter(7): %v", err)
+	}
+	if volume != 1 || arc != 3 {
+		t.Fatalf("LocateChapter(7) = volume %d arc %d, want volume 1 arc 3", volume, arc)
+	}
+
+	beforeMiddle, err := s.Outline.CheckArcBoundary(2)
+	if err != nil {
+		t.Fatalf("CheckArcBoundary(2): %v", err)
+	}
+	if beforeMiddle == nil || !beforeMiddle.IsArcEnd ||
+		beforeMiddle.NextVolume != 1 || beforeMiddle.NextArc != 2 ||
+		!beforeMiddle.NeedsExpansion {
+		t.Fatalf("chapter 2 boundary = %+v, want skeleton arc 2 expansion", beforeMiddle)
+	}
+	laterBoundary, err := s.Outline.CheckArcBoundary(7)
+	if err != nil {
+		t.Fatalf("CheckArcBoundary(7): %v", err)
+	}
+	if laterBoundary == nil || !laterBoundary.IsArcEnd || !laterBoundary.IsVolumeEnd || !laterBoundary.NeedsNewVolume {
+		t.Fatalf("chapter 7 boundary = %+v, want final expanded arc boundary", laterBoundary)
+	}
+
+	middle := []domain.OutlineEntry{
+		{Title: "中一", CoreEvent: "中一事件"},
+		{Title: "中二", CoreEvent: "中二事件"},
+		{Title: "中三", CoreEvent: "中三事件"},
+	}
+	if err := s.ExpandArc(1, 2, middle); err != nil {
+		t.Fatalf("ExpandArc exact reservation: %v", err)
+	}
+
+	flat, err := s.Outline.LoadOutline()
+	if err != nil {
+		t.Fatalf("LoadOutline: %v", err)
+	}
+	var chapters []int
+	for _, item := range flat {
+		chapters = append(chapters, item.Chapter)
+	}
+	if want := []int{1, 2, 3, 4, 5, 6, 7}; !reflect.DeepEqual(chapters, want) {
+		t.Fatalf("expanded chapter numbers = %v, want %v", chapters, want)
+	}
+	entry, err = s.Outline.GetChapterFromLayered(6)
+	if err != nil {
+		t.Fatalf("GetChapterFromLayered(6) after expansion: %v", err)
+	}
+	if entry.Title != "后一" {
+		t.Fatalf("later arc shifted after middle expansion: chapter 6 = %q", entry.Title)
+	}
+}
+
+func TestExpandArcRejectsCountMismatchWithoutRenumberingLaterArc(t *testing.T) {
+	volumes := stableLayeredFixture()
+	s := setupLayered(t, volumes)
+	if err := s.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	err := s.ExpandArc(1, 2, []domain.OutlineEntry{
+		{Title: "中一"},
+		{Title: "中二"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must equal reserved estimated_chapters 3") {
+		t.Fatalf("expected explicit reservation mismatch error, got %v", err)
+	}
+
+	layered, loadErr := s.Outline.LoadLayeredOutline()
+	if loadErr != nil {
+		t.Fatalf("LoadLayeredOutline: %v", loadErr)
+	}
+	if layered[0].Arcs[1].IsExpanded() || layered[0].Arcs[1].EstimatedChapters != 3 {
+		t.Fatalf("failed expansion mutated skeleton arc: %+v", layered[0].Arcs[1])
+	}
+	flat, loadErr := s.Outline.LoadOutline()
+	if loadErr != nil {
+		t.Fatalf("LoadOutline: %v", loadErr)
+	}
+	if got := []int{flat[0].Chapter, flat[1].Chapter, flat[2].Chapter, flat[3].Chapter}; !reflect.DeepEqual(got, []int{1, 2, 6, 7}) {
+		t.Fatalf("failed expansion renumbered outline: %v", got)
+	}
+}
+
+func TestAppendVolumeRegenerationPreservesExistingStableChapterNumbers(t *testing.T) {
+	volumes := stableLayeredFixture()
+	s := setupLayered(t, volumes)
+	if err := s.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		t.Fatalf("SaveOutline: %v", err)
+	}
+
+	if err := s.AppendVolume(domain.VolumeOutline{
+		Index: 2, Title: "第二卷", Theme: "追加",
+		Arcs: []domain.ArcOutline{{
+			Index: 1, Title: "新弧", Goal: "继续",
+			Chapters: []domain.OutlineEntry{{Title: "新一", CoreEvent: "新事件"}},
+		}},
+	}); err != nil {
+		t.Fatalf("AppendVolume: %v", err)
+	}
+
+	flat, err := s.Outline.LoadOutline()
+	if err != nil {
+		t.Fatalf("LoadOutline: %v", err)
+	}
+	var chapters []int
+	for _, item := range flat {
+		chapters = append(chapters, item.Chapter)
+	}
+	if want := []int{1, 2, 6, 7, 8}; !reflect.DeepEqual(chapters, want) {
+		t.Fatalf("chapter numbers after append = %v, want %v", chapters, want)
+	}
+	if flat[2].Title != "后一" || flat[4].Title != "新一" {
+		t.Fatalf("append changed existing mapping: %+v", flat)
 	}
 }
 

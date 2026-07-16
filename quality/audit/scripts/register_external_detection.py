@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Register a human-triggered external AIGC result for one exact payload.
+"""Register a user-reported external AIGC sampling result for one exact payload.
 
 This command never submits prose to a detector. It records a result only after
-the caller names the score scale and proves which bytes were submitted.
+the user reports it, the caller names the score scale, and the exact sampled
+bytes are proven. Browser/automated detector sources are intentionally absent.
 """
 
 from __future__ import annotations
@@ -56,9 +57,9 @@ def require_canonical_payload(project: Path, chapter: int, payload: bytes) -> tu
     """Bind registration to the exact committed chapter bytes.
 
     A detector upload may be staged in another file, but it cannot become a
-    current hard-gate result unless those bytes are identical to
-    chapters/NN.md. This prevents newline conversion, copied plain text, or a
-    stale export from being registered against the canonical chapter hash.
+    sampling event for the canonical chapter unless those bytes are identical
+    to chapters/NN.md. This prevents newline conversion, copied plain text, or
+    a stale export from being attributed to the wrong chapter hash.
     """
     canonical_path = canonical_chapter_path(project, chapter)
     canonical = canonical_path.read_bytes()
@@ -82,54 +83,6 @@ def _valid_sha256(value: object) -> bool:
     )
 
 
-def _identity(detector: object, mode: object) -> tuple[str, str]:
-    return str(detector or "").strip().casefold(), str(mode or "").strip().casefold()
-
-
-def _load_json_object(path: Path, label: str) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ValueError(f"{label} does not exist: {path}") from exc
-    except (OSError, TypeError, ValueError) as exc:
-        raise ValueError(f"{label} is unreadable or invalid JSON: {path}") from exc
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} must be a JSON object: {path}")
-    return value
-
-
-def _registered_marker_identities(marker: dict) -> set[tuple[str, str]]:
-    raw_retests = marker.get("required_external_retests", [])
-    if raw_retests is None:
-        raw_retests = []
-    if not isinstance(raw_retests, list):
-        raise ValueError("draft retest marker required_external_retests must be a list")
-
-    identities: set[tuple[str, str]] = set()
-    for item in raw_retests:
-        if not isinstance(item, dict):
-            raise ValueError("draft retest marker contains a malformed detector/mode identity")
-        identity = _identity(item.get("detector"), item.get("mode"))
-        if not all(identity):
-            raise ValueError("draft retest marker contains an empty detector/mode identity")
-        identities.add(identity)
-
-    legacy_detector = str(marker.get("required_detector") or "").strip()
-    legacy_mode = str(marker.get("required_mode") or "").strip()
-    if bool(legacy_detector) != bool(legacy_mode):
-        raise ValueError("draft retest marker has an incomplete required_detector/required_mode pair")
-    if legacy_detector:
-        identities.add(_identity(legacy_detector, legacy_mode))
-
-    named = (
-        str(marker.get("evaluator") or "").strip() == "registered_external_detector"
-        or bool(raw_retests)
-    )
-    if not named:
-        raise ValueError("draft retest marker is not a named external-detector contract")
-    return identities
-
-
 def _matching_chapter_scope(row: dict, chapter: int) -> bool:
     scope = row.get("scope")
     return (
@@ -140,12 +93,12 @@ def _matching_chapter_scope(row: dict, chapter: int) -> bool:
 
 
 def _require_current_draft_checkpoint(project: Path, chapter: int, body_sha256: str) -> None:
-    """Prove these bytes came from a completed whole-draft write.
+    """Prove these bytes came from the latest completed whole-draft write.
 
     A whole render appends ``draft`` after its write saga; one permitted polish
     after an approved external hash appends ``edit``. Both bind the raw-file
-    digest. A later structural-block checkpoint means the same candidate is
-    still in the bounded rerender phase and is not ready for a platform retest.
+    digest. Sampling may record a structurally blocked draft too: the result is
+    evidence and never overrides local/DeepSeek/consistency gates.
     """
     path = project / "meta" / "checkpoints.jsonl"
     try:
@@ -157,7 +110,6 @@ def _require_current_draft_checkpoint(project: Path, chapter: int, body_sha256: 
 
     artifact = f"drafts/{chapter:02d}.draft.md"
     prose_events: list[tuple[int, dict]] = []
-    structural_events: list[int] = []
     for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
@@ -172,12 +124,10 @@ def _require_current_draft_checkpoint(project: Path, chapter: int, body_sha256: 
             raise ValueError(f"checkpoint journal line {line_number} has an invalid seq")
         if row.get("step") in {"draft", "edit"} and row.get("artifact") == artifact:
             prose_events.append((seq, row))
-        if row.get("step") == "draft-structural-block":
-            structural_events.append(seq)
 
     if not prose_events:
         raise ValueError("draft candidate has no completed prose checkpoint")
-    latest_seq, latest = max(prose_events, key=lambda item: item[0])
+    _, latest = max(prose_events, key=lambda item: item[0])
     expected_digest = "sha256:" + body_sha256
     if latest.get("step") not in {"draft", "edit"} or latest.get("digest") != expected_digest:
         raise ValueError(
@@ -185,75 +135,11 @@ def _require_current_draft_checkpoint(project: Path, chapter: int, body_sha256: 
             f"expected={expected_digest} latest_step={latest.get('step')!r} "
             f"latest_digest={latest.get('digest')!r}"
         )
-    if any(seq > latest_seq for seq in structural_events):
-        raise ValueError(
-            "draft candidate still has a current structural-block checkpoint; "
-            "finish bounded local rerender/replan before external registration"
-        )
-
-
-def _normalized_logged_score(row: dict, line_number: int) -> float:
-    try:
-        score = float(row["score"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"external detection log line {line_number} has an invalid score") from exc
-    scale = str(row.get("score_scale") or "").strip().lower()
-    if scale:
-        try:
-            percent = normalize_score(score, scale)
-        except ValueError as exc:
-            raise ValueError(f"external detection log line {line_number} has an invalid score") from exc
-    else:
-        percent = score * 100 if 0 <= score <= 1 else score
-    if not 0 <= percent <= 100:
-        raise ValueError(f"external detection log line {line_number} has an invalid normalized score")
-    if "score_percent" in row:
-        try:
-            stored_percent = float(row["score_percent"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"external detection log line {line_number} has an invalid score_percent") from exc
-        if abs(stored_percent - percent) > 0.0001:
-            raise ValueError(f"external detection log line {line_number} has inconsistent score_percent")
-    verdict = str(row.get("verdict") or "").strip().lower()
-    if verdict not in {"ai_like", "human_like", "mixed"}:
-        raise ValueError(f"external detection log line {line_number} has an invalid verdict")
-    if verdict == "human_like" and percent >= 4:
-        raise ValueError(f"external detection log line {line_number} has a contradictory human_like verdict")
-    if verdict == "ai_like" and percent < 4:
-        raise ValueError(f"external detection log line {line_number} has a contradictory ai_like verdict")
-    return percent
-
-
-def _latest_current_detection_rows(
-    project: Path, chapter: int, body_sha256: str
-) -> dict[tuple[str, str], tuple[dict, float]]:
-    path = project / "meta" / "external_detection_log.jsonl"
-    if not path.exists():
-        return {}
-    latest: dict[tuple[str, str], tuple[dict, float]] = {}
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"external detection log line {line_number} is invalid JSON") from exc
-        if not isinstance(row, dict):
-            raise ValueError(f"external detection log line {line_number} must be a JSON object")
-        if row.get("chapter") != chapter or str(row.get("body_sha256") or "").strip().lower() != body_sha256:
-            continue
-        identity = _identity(row.get("detector"), row.get("mode"))
-        if not all(identity):
-            raise ValueError(f"external detection log line {line_number} has empty detector/mode")
-        latest[identity] = (row, _normalized_logged_score(row, line_number))
-    return latest
 
 
 def require_pending_draft_payload(
     project: Path,
     chapter: int,
-    detector: str,
-    mode: str,
     payload_path: Path,
     payload: bytes,
 ) -> tuple[Path, str]:
@@ -261,7 +147,7 @@ def require_pending_draft_payload(
     if payload_path.resolve() != draft_path:
         raise ValueError(
             "a pending-draft result must use the actual drafts/NN.draft.md path; "
-            "arbitrary copies cannot become hard-gate evidence"
+            "arbitrary copies cannot become exact sampling evidence"
         )
     if not draft_path.is_file():
         raise ValueError(f"pending draft does not exist: {draft_path}")
@@ -276,90 +162,20 @@ def require_pending_draft_payload(
             "draft write intent is still pending; recover/finish the write saga before external registration"
         )
 
-    marker_path = project / "reviews" / "drafts" / f"{chapter:02d}_full_rerender_required.json"
-    marker = _load_json_object(marker_path, "named draft retest marker")
-    if marker.get("chapter") != chapter:
-        raise ValueError("draft retest marker chapter does not match --chapter")
-    identities = _registered_marker_identities(marker)
-    wanted = _identity(detector, mode)
-    if wanted not in identities:
-        labels = ", ".join(f"{item[0]}/{item[1]}" for item in sorted(identities)) or "none"
-        raise ValueError(
-            "draft retest marker does not require this detector/mode: "
-            f"requested={detector}/{mode} required={labels}"
-        )
-    revision_plan = marker.get("revision_plan")
-    if (
-        marker.get("advice_complete") is not True
-        or not isinstance(revision_plan, list)
-        or not revision_plan
-    ):
-        raise ValueError("draft retest marker advice is incomplete; gate is not rejudge_pending")
-    evaluated = str(marker.get("evaluated_body_sha256") or "").strip().lower()
-    if not _valid_sha256(evaluated):
-        raise ValueError("draft retest marker has an invalid evaluated_body_sha256")
-    if evaluated == body_sha256:
-        raise ValueError(
-            "draft marker still evaluates the current hash; gate is rerender_authorized, not rejudge_pending"
-        )
-
-    final_path = project / "chapters" / f"{chapter:02d}.md"
-    final_sha256 = sha256_bytes(final_path.read_bytes()) if final_path.is_file() else ""
-    initial = str(marker.get("initial_draft_body_sha256") or "").strip().lower()
-    if initial and not _valid_sha256(initial):
-        raise ValueError("draft retest marker has an invalid initial_draft_body_sha256")
-    final_rows = (
-        _latest_current_detection_rows(project, chapter, final_sha256)
-        if final_sha256 and final_sha256 != body_sha256
-        else {}
-    )
-    final_blocking = any(score >= 4 for _, score in final_rows.values())
-    if initial == body_sha256 and (final_sha256 == evaluated or final_blocking):
-        raise ValueError(
-            "draft is the retained pre-rerender bridge; gate is rerender_authorized, not rejudge_pending"
-        )
-    if not initial and final_blocking:
-        raise ValueError(
-            "formal chapter has a blocking registered result and the marker has no initial draft hash; "
-            "Inspect would treat this draft as the retained rerender bridge"
-        )
-    if final_sha256 and final_sha256 == body_sha256:
-        raise ValueError("draft is byte-identical to the formal chapter, not a new pending candidate")
-
     _require_current_draft_checkpoint(project, chapter, body_sha256)
-    current_rows = _latest_current_detection_rows(project, chapter, body_sha256)
-    if wanted in current_rows:
-        raise ValueError(
-            "this detector/mode already has a registered result for the current draft hash; "
-            "the identity is not pending"
-        )
-    blocking = [
-        f"{identity[0]}/{identity[1]}={score:.2f}%"
-        for identity, (_, score) in current_rows.items()
-        if score >= 4
-    ]
-    if blocking:
-        raise ValueError(
-            "current draft already has a blocking registered result and is rerender_authorized, "
-            "not rejudge_pending: " + ", ".join(sorted(blocking))
-        )
     return draft_path, body_sha256
 
 
 def require_registration_payload(
     project: Path,
     chapter: int,
-    detector: str,
-    mode: str,
     payload_path: Path,
     payload: bytes,
 ) -> tuple[Path, str, str]:
-    """Resolve the only two subjects permitted to enter the hard gate."""
+    """Resolve the only two subjects permitted as exact sampling evidence."""
     draft_path = (project / "drafts" / f"{chapter:02d}.draft.md").resolve()
     if payload_path.resolve() == draft_path:
-        subject, digest = require_pending_draft_payload(
-            project, chapter, detector, mode, payload_path, payload
-        )
+        subject, digest = require_pending_draft_payload(project, chapter, payload_path, payload)
         return subject, digest, "pending_draft"
     subject, digest = require_canonical_payload(project, chapter, payload)
     return subject, digest, "canonical_chapter"
@@ -375,10 +191,12 @@ def display_path(path: Path, project: Path) -> str:
 def existing_equivalent(log_path: Path, row: dict) -> dict | None:
     if not log_path.exists():
         return None
-    identity_keys = (
+    event_identity_keys = ("chapter", "detector", "mode", "body_sha256")
+    equivalence_keys = (
         "chapter", "detector", "mode", "score_percent", "verdict",
-        "body_sha256", "payload_path", "evidence_sha256",
+        "body_sha256", "payload_path", "evidence_sha256", "result_source",
     )
+    latest_identity_event = None
     for line_number, line in enumerate(log_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -386,8 +204,16 @@ def existing_equivalent(log_path: Path, row: dict) -> dict | None:
             existing = json.loads(line)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"external detection log line {line_number} is invalid JSON") from exc
-        if all(existing.get(key, "") == row.get(key, "") for key in identity_keys):
-            return existing
+        if all(
+            existing.get(key, "") == row.get(key, "")
+            for key in event_identity_keys
+        ):
+            latest_identity_event = existing
+    if latest_identity_event is not None and all(
+        latest_identity_event.get(key, "") == row.get(key, "")
+        for key in equivalence_keys
+    ):
+        return latest_identity_event
     return None
 
 
@@ -400,6 +226,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score", type=float, required=True)
     parser.add_argument("--score-scale", choices=("probability", "percent"), required=True)
     parser.add_argument("--verdict", choices=("ai_like", "human_like", "mixed"), required=True)
+    parser.add_argument(
+        "--result-source", choices=("user_reported", "manual"), required=True,
+        help="attest that the score came from the user's manual sampling, never browser automation",
+    )
     parser.add_argument("--payload-file", default="", help="exact submitted payload; default chapters/NN.md")
     parser.add_argument("--expected-sha256", required=True, help="pre-submission payload SHA-256")
     parser.add_argument("--evidence", default="", help="optional screenshot/report file")
@@ -424,7 +254,7 @@ def main() -> int:
         raise SystemExit(f"external detector payload is empty: {payload_path}")
     try:
         _, body_sha256, payload_kind = require_registration_payload(
-            project, args.chapter, detector, mode, payload_path, payload
+            project, args.chapter, payload_path, payload
         )
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -468,7 +298,9 @@ def main() -> int:
         "payload_kind": payload_kind,
         "evidence_path": evidence_path,
         "evidence_sha256": evidence_sha256,
-        "source": "human_registered_external_detector",
+        "source": "user_reported_external_detector",
+        "result_source": args.result_source,
+        "registration_schema": 2,
         "checked_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     log_path = project / "meta" / "external_detection_log.jsonl"
