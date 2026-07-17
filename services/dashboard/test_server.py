@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from services.dashboard import server
 
@@ -64,6 +66,150 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["runtime"]["status"], "running")
         self.assertEqual(data["words_total"], len(body))
         self.assertEqual(data["health"]["status"], "ok")
+
+    def test_newer_pipeline_activity_recovers_old_failure_event(self):
+        self.seed_progress()
+        now = datetime.now().astimezone()
+        failed_at = now - timedelta(hours=1)
+        self.write_json("meta/pipeline.json", {
+            "stages": ["preplan", "project-all", "seal"],
+            "completed": ["preplan"],
+            "updated_at": now.isoformat(),
+        })
+        event = {
+            "seq": 2,
+            "time": failed_at.isoformat(),
+            "category": "DISPATCH",
+            "summary": "旧的 zero-init 失败",
+            "payload": {
+                "Agent": "architect_long",
+                "Summary": "旧的 zero-init 失败",
+                "FinishedAt": failed_at.isoformat(),
+                "Failed": True,
+                "Level": "error",
+            },
+        }
+        (self.nd / "meta" / "runtime" / "queue.jsonl").write_text(
+            json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        data = server.summarize_run(self.run)
+
+        self.assertEqual(data["runtime"]["status"], "running")
+        self.assertTrue(data["runtime"]["last_event"]["failed"])
+        self.assertFalse(data["runtime"]["last_event_current"])
+        self.assertTrue(data["runtime"]["last_error_recovered"])
+        self.assertEqual(data["runtime"]["current_stage"], "project-all")
+        self.assertEqual(data["working"]["step"], "simulate")
+        self.assertFalse(data["working"]["last_failed"])
+
+    def test_live_project_all_lease_stays_running_beyond_activity_window(self):
+        self.seed_progress()
+        now = datetime.now().astimezone()
+        acquired = now - timedelta(minutes=10)
+        old_failure = now - timedelta(hours=1)
+        progress = json.loads((self.nd / "meta" / "progress.json").read_text(encoding="utf-8"))
+        progress.update({"phase": "planning", "flow": "planning", "pending_rewrites": []})
+        self.write_json("meta/progress.json", progress)
+        self.write_json("meta/pipeline.json", {
+            "stages": ["preplan", "project-all", "seal"],
+            "completed": ["preplan"],
+            "updated_at": acquired.isoformat(),
+        })
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1,
+            "mode": "project_all",
+            "target_chapter": 1,
+            "owner": f"pipeline-project-all-ch000001-pid{os.getpid()}-test",
+            "process_id": os.getpid(),
+            "acquired_at": acquired.isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+        })
+        event = {
+            "seq": 2,
+            "time": old_failure.isoformat(),
+            "category": "DISPATCH",
+            "summary": "旧失败",
+            "payload": {"FinishedAt": old_failure.isoformat(), "Failed": True, "Level": "error"},
+        }
+        (self.nd / "meta" / "runtime" / "queue.jsonl").write_text(
+            json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        stale_ts = acquired.timestamp()
+        for rel in ("meta/progress.json", "meta/pipeline.json"):
+            os.utime(self.nd / rel, (stale_ts, stale_ts))
+
+        data = server.summarize_run(self.run)
+
+        self.assertGreater(data["runtime"]["age_seconds"], server.ACTIVE_WINDOW_SECONDS)
+        self.assertEqual(data["runtime"]["status"], "running")
+        self.assertTrue(data["runtime"]["execution"]["valid"])
+        self.assertTrue(data["runtime"]["execution"]["active"])
+        self.assertTrue(data["runtime"]["execution"]["process_alive"])
+        self.assertEqual(data["runtime"]["current_stage"], "project-all")
+        self.assertEqual(data["working"]["chapter"], 1)
+        self.assertEqual(data["working"]["step"], "simulate")
+        self.assertEqual(data["working"]["last_kind"], "pipeline")
+
+    def test_dead_pipeline_lease_does_not_keep_stale_run_active(self):
+        self.seed_progress()
+        now = datetime.now().astimezone()
+        acquired = now - timedelta(minutes=10)
+        progress = json.loads((self.nd / "meta" / "progress.json").read_text(encoding="utf-8"))
+        progress.update({"phase": "planning", "flow": "planning", "pending_rewrites": []})
+        self.write_json("meta/progress.json", progress)
+        self.write_json("meta/pipeline.json", {
+            "stages": ["preplan", "project-all", "seal"],
+            "completed": ["preplan"],
+            "updated_at": acquired.isoformat(),
+        })
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1,
+            "mode": "project_all",
+            "target_chapter": 1,
+            "owner": "pipeline-project-all-ch000001-pid999999999-test",
+            "process_id": 999999999,
+            "acquired_at": acquired.isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+        })
+        (self.nd / "meta" / "runtime" / "queue.jsonl").unlink(missing_ok=True)
+        stale_ts = acquired.timestamp()
+        for rel in ("meta/progress.json", "meta/pipeline.json"):
+            os.utime(self.nd / rel, (stale_ts, stale_ts))
+
+        with mock.patch.object(server, "process_alive", return_value=False):
+            data = server.summarize_run(self.run)
+
+        self.assertEqual(data["runtime"]["status"], "idle")
+        self.assertTrue(data["runtime"]["execution"]["valid"])
+        self.assertFalse(data["runtime"]["execution"]["active"])
+        self.assertFalse(data["runtime"]["execution"]["process_alive"])
+
+    def test_dispatch_finished_at_can_report_a_current_failure(self):
+        self.seed_progress()
+        now = datetime.now().astimezone()
+        started = now - timedelta(minutes=6)
+        finished = now + timedelta(seconds=1)
+        event = {
+            "seq": 2,
+            "time": started.isoformat(),
+            "category": "DISPATCH",
+            "summary": "长调用最终失败",
+            "payload": {
+                "FinishedAt": finished.isoformat(),
+                "Failed": True,
+                "Level": "error",
+            },
+        }
+        (self.nd / "meta" / "runtime" / "queue.jsonl").write_text(
+            json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        data = server.summarize_run(self.run)
+
+        self.assertEqual(data["runtime"]["status"], "error")
+        self.assertTrue(data["runtime"]["last_event_current"])
+        self.assertFalse(data["runtime"]["last_error_recovered"])
 
     def test_health_reports_real_word_count_drift(self):
         body = self.seed_progress()

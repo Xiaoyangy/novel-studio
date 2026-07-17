@@ -247,6 +247,14 @@ def log_tail(nd: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
 
 
 CHAPTER_STEP_CHAIN = ["simulate", "plan", "draft", "check", "commit", "review", "rewrite", "deliver"]
+PIPELINE_EXECUTION_MODES = {"foundation", "outline_all", "preplan", "project_all", "render"}
+PIPELINE_STAGE_BY_MODE = {
+    "foundation": "foundation",
+    "outline_all": "outline-all",
+    "preplan": "preplan",
+    "project_all": "project-all",
+    "render": "render",
+}
 
 
 def checkpoint_tail(nd: Path, n: int = 60) -> list[dict]:
@@ -257,9 +265,11 @@ def normalize_step(value: str) -> str:
     raw = str(value or "").strip().lower().replace("_", "-")
     if not raw:
         return ""
-    if "simulate-chapter-world" in raw or "chapter-world-simulation" in raw or "world-simulation" in raw:
+    if ("simulate-chapter-world" in raw or "chapter-world-simulation" in raw or
+            "world-simulation" in raw or raw == "project-all"):
         return "simulate"
-    if "plan-structure" in raw or "plan-details" in raw or "plan-chapter" in raw or raw == "plan":
+    if ("plan-structure" in raw or "plan-details" in raw or "plan-chapter" in raw or
+            raw in ("plan", "preplan", "outline-all", "foundation")):
         return "plan"
     if "rewrite" in raw:
         return "rewrite"
@@ -271,8 +281,94 @@ def normalize_step(value: str) -> str:
         return "commit"
     if "deliver" in raw:
         return "deliver"
-    if "draft" in raw or raw == "write" or "draft-chapter" in raw:
+    if "draft" in raw or raw in ("write", "render") or "draft-chapter" in raw:
         return "draft"
+    return ""
+
+
+def process_alive(pid: int) -> bool:
+    """以 signal 0 只读探测本机进程；无权限探测也代表进程仍存在。"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def pipeline_execution_state(nd: Path, now: float | None = None) -> dict:
+    """读取并防御式校验 Go RuntimeStore 写入的 pipeline execution lease。"""
+    state = {
+        "valid": False,
+        "active": False,
+        "mode": "",
+        "stage": "",
+        "target_chapter": 0,
+        "owner": "",
+        "process_id": 0,
+        "process_alive": None,
+        "acquired_at": "",
+        "acquired_timestamp": 0.0,
+        "expires_at": "",
+        "expires_timestamp": 0.0,
+    }
+    raw = read_json(nd / "meta" / "runtime" / "pipeline_execution.json")
+    if not isinstance(raw, dict):
+        return state
+
+    mode = str(raw.get("mode") or "").strip()
+    owner = str(raw.get("owner") or "").strip()
+    target = raw.get("target_chapter")
+    acquired_at = str(raw.get("acquired_at") or "")
+    expires_at = str(raw.get("expires_at") or "")
+    acquired_ts = timestamp(acquired_at)
+    expires_ts = timestamp(expires_at)
+    valid_target = isinstance(target, int) and not isinstance(target, bool) and target > 0
+    valid = (
+        raw.get("version") == 1 and
+        mode in PIPELINE_EXECUTION_MODES and
+        valid_target and
+        bool(owner) and
+        expires_ts > 0 and
+        (mode != "render" or bool(str(raw.get("plan_digest") or "").strip()))
+    )
+
+    pid = raw.get("process_id")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        match = re.search(r"-pid(\d+)", owner)
+        pid = int(match.group(1)) if match else 0
+    alive = process_alive(pid) if pid > 0 else None
+    now = time.time() if now is None else now
+    # RuntimeStore 对没有 PID 的 legacy/custom owner 仍按租约保护；这里保持同一语义。
+    active = valid and expires_ts > now and alive is not False
+    state.update({
+        "valid": valid,
+        "active": active,
+        "mode": mode if valid else "",
+        "stage": PIPELINE_STAGE_BY_MODE.get(mode, "") if valid else "",
+        "target_chapter": target if valid_target else 0,
+        "owner": owner if valid else "",
+        "process_id": pid,
+        "process_alive": alive,
+        "acquired_at": acquired_at if valid else "",
+        "acquired_timestamp": acquired_ts if valid else 0.0,
+        "expires_at": expires_at if valid else "",
+        "expires_timestamp": expires_ts if valid else 0.0,
+    })
+    return state
+
+
+def next_pipeline_stage(pipe: dict) -> str:
+    stages = pipe.get("stages") if isinstance(pipe, dict) else []
+    completed = pipe.get("completed") if isinstance(pipe, dict) else []
+    if not isinstance(stages, list):
+        return ""
+    completed_set = {str(value) for value in completed} if isinstance(completed, list) else set()
+    for value in stages:
+        stage = str(value or "").strip()
+        if stage and stage not in completed_set:
+            return stage
     return ""
 
 
@@ -287,10 +383,16 @@ def runtime_events(nd: Path, n: int = RUNTIME_EVENT_LINES) -> list[dict]:
         summary = str(item.get("summary") or payload.get("Summary") or "")
         chapter_match = re.search(r"第\s*(\d+)\s*章|\bch(?:apter)?[-_ ]?(\d+)\b", summary + " " + detail, re.I)
         event_chapter = int(chapter_match.group(1) or chapter_match.group(2)) if chapter_match else None
+        event_time = str(item.get("time") or payload.get("Time") or "")
+        finished_at = str(item.get("finished_at") or payload.get("FinishedAt") or "")
+        event_ts = timestamp(event_time)
+        finished_ts = timestamp(finished_at)
         events.append({
             "seq": item.get("seq"),
-            "time": str(item.get("time") or payload.get("Time") or ""),
-            "timestamp": timestamp(item.get("time") or payload.get("Time")),
+            "time": event_time,
+            "timestamp": event_ts,
+            "finished_at": finished_at,
+            "activity_timestamp": max(event_ts, finished_ts),
             "category": category,
             "agent": str(item.get("agent") or payload.get("Agent") or ""),
             "summary": clip(summary, 260),
@@ -305,28 +407,53 @@ def runtime_events(nd: Path, n: int = RUNTIME_EVENT_LINES) -> list[dict]:
 def runtime_state(nd: Path, prog: dict) -> dict:
     events = runtime_events(nd)
     run = read_json(nd / "meta" / "run.json") or {}
-    last = events[-1] if events else {}
-    last_error = next((e for e in reversed(events) if e.get("failed")), None)
-    event_ts = max((e.get("timestamp") or 0 for e in events), default=0)
-    file_ts = latest_mtime(
-        nd / "logs" / "headless.log",
-        nd / "meta" / "checkpoints.jsonl",
-        nd / "meta" / "progress.json",
-        nd / "meta" / "pipeline.json",
+    pipe = read_json(nd / "meta" / "pipeline.json") or {}
+    execution = pipeline_execution_state(nd)
+
+    def event_key(event: dict) -> tuple[float, int]:
+        seq = event.get("seq")
+        return event.get("activity_timestamp") or 0, seq if isinstance(seq, int) else 0
+
+    last = max(events, key=event_key) if events else {}
+    failures = [event for event in events if event.get("failed")]
+    last_error = max(failures, key=event_key) if failures else None
+    event_ts = max((e.get("activity_timestamp") or 0 for e in events), default=0)
+    durable_ts = max(
+        timestamp(pipe.get("updated_at")),
+        latest_mtime(
+            nd / "meta" / "checkpoints.jsonl",
+            nd / "meta" / "progress.json",
+            nd / "meta" / "pipeline.json",
+        ),
     )
-    updated = max(event_ts, file_ts)
+    log_ts = latest_mtime(nd / "logs" / "headless.log")
+    execution_ts = (execution.get("acquired_timestamp") or 0) if execution.get("active") else 0
+    updated = max(event_ts, durable_ts, log_ts, execution_ts)
     age = max(0.0, time.time() - updated) if updated else None
     pending = prog.get("pending_rewrites") or []
+    successful_event_ts = max(
+        (event.get("activity_timestamp") or 0 for event in events if not event.get("failed")),
+        default=0,
+    )
+    recovery_ts = max(durable_ts, successful_event_ts, execution_ts)
+    error_ts = (last_error or {}).get("activity_timestamp") or 0
+    current_error = bool(last_error) and error_ts >= recovery_ts
+    last_event_current = bool(last) and (last.get("activity_timestamp") or 0) >= max(durable_ts, execution_ts)
     if prog.get("phase") == "complete":
         status = "complete"
+    elif execution.get("active"):
+        status = "running"
     elif updated and age is not None and age < ACTIVE_WINDOW_SECONDS:
-        status = "error" if last.get("failed") else "running"
+        status = "error" if current_error else "running"
     elif pending or prog.get("flow") == "rewriting":
         status = "attention"
     else:
         status = "idle"
+    pipeline_stage = execution.get("stage") if execution.get("active") else ""
+    if status == "running" and not pipeline_stage and not last_event_current:
+        pipeline_stage = next_pipeline_stage(pipe)
     recent = events[-16:]
-    errors = [e for e in events if e.get("failed")][-8:]
+    errors = failures[-8:]
     return {
         "status": status,
         "active": status in ("running", "error"),
@@ -334,9 +461,13 @@ def runtime_state(nd: Path, prog: dict) -> dict:
         "updated_iso": iso_time(updated),
         "age_seconds": round(age, 1) if age is not None else None,
         "last_event": last,
+        "last_event_current": last_event_current,
         "last_error": last_error,
+        "last_error_recovered": bool(last_error) and not current_error,
         "recent_events": recent,
         "recent_errors": errors,
+        "current_stage": pipeline_stage,
+        "execution": execution,
         "provider": run.get("provider") or "",
         "model": run.get("model") or "",
         "planning_tier": run.get("planning_tier") or "",
@@ -358,6 +489,8 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
     pending = prog.get("pending_rewrites") or []
     if isinstance(pending, int):
         pending = [pending]
+    runtime = runtime or runtime_state(nd, prog)
+    execution = runtime.get("execution") or {}
     cur = prog.get("in_progress_chapter") or 0
     if not cur and prog.get("flow") == "rewriting" and pending:
         cur = pending[0]
@@ -367,11 +500,15 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         cur = max(chapter_steps)
     if not cur:
         cur = (len(prog.get("completed_chapters") or []) or 0) + 1
-    runtime = runtime or runtime_state(nd, prog)
+    if execution.get("active") and execution.get("target_chapter"):
+        cur = execution["target_chapter"]
     live = runtime.get("last_event") or {}
+    if live and not runtime.get("last_event_current"):
+        live = {}
     if live and not runtime.get("active") and live.get("chapter") != cur:
         live = {}
-    step = live.get("step") or chapter_steps.get(cur, "")
+    pipeline_stage = runtime.get("current_stage") or ""
+    step = live.get("step") or normalize_step(pipeline_stage) or chapter_steps.get(cur, "")
     if not step:
         # checkpoint 还没到章级：看 drafts 目录里的最新事实
         if (nd / "drafts" / f"{cur:02d}.draft.md").exists() or (nd / "drafts" / f"{cur:02d}.md").exists():
@@ -379,8 +516,11 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         elif list((nd / "drafts").glob(f"{cur:02d}.plan*")) if (nd / "drafts").is_dir() else []:
             step = "plan"
     last_scope = last.get("scope") or {}
-    last_step = live.get("summary") or str(last.get("step") or "")
-    last_at = live.get("time") or str(last.get("occurred_at") or "")
+    pipeline_summary = f"{pipeline_stage}（第 {cur} 章）" if pipeline_stage else ""
+    last_step = live.get("summary") or pipeline_summary or str(last.get("step") or "")
+    last_at = (live.get("time") or execution.get("acquired_at") or
+               (iso_time(runtime.get("updated_at") or 0) if pipeline_stage else "") or
+               str(last.get("occurred_at") or ""))
     mode = "rewrite" if prog.get("flow") == "rewriting" or cur in pending else "write"
     return {
         "chapter": cur,
@@ -390,10 +530,10 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         "chain": CHAPTER_STEP_CHAIN,
         "chain_pos": CHAPTER_STEP_CHAIN.index(step) if step in CHAPTER_STEP_CHAIN else -1,
         "last_step": last_step,
-        "last_kind": "runtime" if live else str(last_scope.get("kind") or ""),
-        "last_chapter": last_scope.get("chapter"),
+        "last_kind": "runtime" if live else "pipeline" if pipeline_stage else str(last_scope.get("kind") or ""),
+        "last_chapter": cur if pipeline_stage else last_scope.get("chapter"),
         "last_at": last_at,
-        "last_agent": live.get("agent") or "",
+        "last_agent": live.get("agent") or ("pipeline" if pipeline_stage else ""),
         "last_failed": bool(live.get("failed")),
         "last_error": runtime.get("last_error"),
     }
