@@ -40,10 +40,11 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 	if receipt.Status != domain.OutlineAllExecutionComplete || receipt.PendingAction != nil {
 		return nil, fmt.Errorf("outline-all verifier found incomplete execution status=%s", receipt.Status)
 	}
-	if receipt.AttemptID != outlineAllAttemptID(
-		receipt.SourceSnapshotRoot,
-		receipt.ModelIdentityDigest+"\n"+receipt.PromptProtocolDigest,
-	) {
+	expectedAttemptID, err := pipelineOutlineAllAttemptIDFromReceipt(st, receipt)
+	if err != nil {
+		return nil, fmt.Errorf("outline-all replay attempt identity: %w", err)
+	}
+	if receipt.AttemptID != expectedAttemptID {
 		return nil, fmt.Errorf("outline-all attempt id does not match its source/model/prompt identity")
 	}
 	expectedCandidate, err := filepath.Abs(pipelineOutlineAllCandidatePath(outputDir, receipt.AttemptID))
@@ -146,6 +147,11 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 		store.OutlineAllExecutionReceiptPath,
 		"meta/architect_readiness.json", "meta/architect_readiness.md",
 		pipelineOutlineAllRequirementPath,
+	}
+	if repair, err := loadPipelineOutlineRepairEvidence(st, receipt.AttemptID, receipt.SourceSnapshotRoot); err != nil {
+		return nil, err
+	} else if repair != nil {
+		artifacts = append(artifacts, pipelineOutlineRepairIntentPath, pipelineOutlineRepairReceiptPath)
 	}
 	if receipt.CompletedActionCount > 0 {
 		artifacts = append(artifacts,

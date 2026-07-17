@@ -929,6 +929,10 @@ func bindRecoveredPipelineOutlineAllPublish(
 	if receipt.Status != domain.OutlineAllExecutionComplete || receipt.AttemptID != attemptID {
 		return fmt.Errorf("outline-all recovered publish %s execution identity mismatch", attemptID)
 	}
+	expectedAttemptID, err := pipelineOutlineAllAttemptIDFromReceipt(st, receipt)
+	if err != nil || expectedAttemptID != attemptID {
+		return fmt.Errorf("outline-all recovered publish %s deterministic attempt identity mismatch: %v", attemptID, err)
+	}
 	expectedCandidate := filepath.Clean(pipelineOutlineAllCandidatePath(live, attemptID))
 	if filepath.Clean(receipt.CandidateDir) != expectedCandidate ||
 		filepath.Clean(publishReceipt.CandidateDir) != expectedCandidate ||

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ var runPipelineOutlineAllArchitect = func(
 	return agents.RunOutlineAllOperation(context.Background(), cfg, bundle, cfg.OutputDir, prompt)
 }
 
-func pipelineOutlineAll(opts cliOptions, _ pipelineFlags) (returnErr error) {
+func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	outputDir, err := pipelineOutlineAllOutputDirBeforeLoad(opts)
 	if err != nil {
 		return err
@@ -80,15 +81,33 @@ func pipelineOutlineAll(opts cliOptions, _ pipelineFlags) (returnErr error) {
 	if err := live.Init(); err != nil {
 		return err
 	}
+	var outlineRepairManifest *pipelineOutlineRepairManifest
+	if strings.TrimSpace(flags.OutlineRepairFile) != "" {
+		manifest, digest, err := loadPipelineOutlineRepairManifest(flags.OutlineRepairFile)
+		if err != nil {
+			return err
+		}
+		if flags.OutlineRepairDigest == "" || digest != flags.OutlineRepairDigest {
+			return fmt.Errorf("outline repair manifest changed after pipeline run identity was bound")
+		}
+		outlineRepairManifest = &manifest
+	}
 	if completed, err := loadCompletedPipelineOutlineAll(live); err != nil {
 		return err
 	} else if completed {
+		if outlineRepairManifest != nil {
+			return fmt.Errorf("--outline-repair-file requires a fresh outline-all; existing completed outline-all must first be retired with --rebase-all-chapters")
+		}
 		if _, err := verifyPipelineOutlineAllReceiptAndArtifacts(cfg.OutputDir); err != nil {
 			return err
 		}
 		return nil
 	}
-	if err := validatePipelineOutlineAllEntry(live); err != nil {
+	if outlineRepairManifest != nil {
+		if err := validatePipelineOutlineRepairLiveEntry(live); err != nil {
+			return fmt.Errorf("outline repair lock-before entry rejected: %w", err)
+		}
+	} else if err := validatePipelineOutlineAllEntry(live); err != nil {
 		return fmt.Errorf("outline-all lock-before entry rejected: %w", err)
 	}
 
@@ -154,31 +173,64 @@ func pipelineOutlineAll(opts cliOptions, _ pipelineFlags) (returnErr error) {
 		return err
 	}
 	attemptID := outlineAllAttemptID(sourceRoot, executionIdentity)
+	if outlineRepairManifest != nil {
+		attemptID = outlineAllAttemptID(
+			sourceRoot,
+			executionIdentity+"\noutline-repair="+flags.OutlineRepairDigest,
+		)
+	}
 	candidateDir, err := filepath.Abs(pipelineOutlineAllCandidatePath(cfg.OutputDir, attemptID))
 	if err != nil {
 		return err
 	}
-	if err := preparePipelineOutlineAllCandidate(cfg.OutputDir, candidateDir, attemptID); err != nil {
-		return err
+	var candidate *store.Store
+	var outlineRepairReceipt *pipelineOutlineRepairReceipt
+	for preparation := 0; preparation < 2; preparation++ {
+		if err := preparePipelineOutlineAllCandidate(cfg.OutputDir, candidateDir, attemptID); err != nil {
+			return err
+		}
+		candidate = store.NewStore(candidateDir)
+		if err := candidate.Init(); err != nil {
+			return err
+		}
+		if err := validatePipelineOutlineAllEntry(candidate); err != nil {
+			return fmt.Errorf("outline-all candidate entry rejected: %w", err)
+		}
+		if outlineRepairManifest != nil {
+			outlineRepairReceipt, err = applyPipelineOutlineRepairCandidate(
+				candidate, attemptID, sourceRoot, *outlineRepairManifest, flags.OutlineRepairDigest,
+			)
+			if errors.Is(err, errPipelineOutlineRepairCandidateIncomplete) && preparation == 0 {
+				if err := validatePipelineOutlineAllCandidateNamespace(cfg.OutputDir, candidateDir, attemptID, true); err != nil {
+					return err
+				}
+				if err := os.RemoveAll(candidateDir); err != nil {
+					return fmt.Errorf("rebuild interrupted outline repair candidate: %w", err)
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		break
 	}
-	candidate := store.NewStore(candidateDir)
-	if err := candidate.Init(); err != nil {
-		return err
-	}
-	if err := validatePipelineOutlineAllEntry(candidate); err != nil {
-		return fmt.Errorf("outline-all candidate entry rejected: %w", err)
+	if candidate == nil || (outlineRepairManifest != nil && outlineRepairReceipt == nil) {
+		return fmt.Errorf("outline-all failed to prepare outline repair candidate")
 	}
 	existingCandidateReceipt, err := candidate.LoadOutlineAllExecutionReceipt()
 	if err != nil {
 		return err
 	}
 	if existingCandidateReceipt == nil {
-		candidateSourceRoot, err := pipelineOutlineAllSourceSnapshotRoot(candidateDir)
-		if err != nil {
-			return err
-		}
-		if candidateSourceRoot != sourceRoot {
-			return fmt.Errorf("outline-all candidate source snapshot differs from live baseline")
+		if outlineRepairReceipt == nil {
+			candidateSourceRoot, err := pipelineOutlineAllSourceSnapshotRoot(candidateDir)
+			if err != nil {
+				return err
+			}
+			if candidateSourceRoot != sourceRoot {
+				return fmt.Errorf("outline-all candidate source snapshot differs from live baseline")
+			}
 		}
 	} else if existingCandidateReceipt.SourceSnapshotRoot != sourceRoot {
 		return fmt.Errorf("outline-all recovered candidate does not bind the current live baseline")
@@ -231,10 +283,16 @@ func pipelineOutlineAll(opts cliOptions, _ pipelineFlags) (returnErr error) {
 		return err
 	}
 	if receipt.CompletedActionCount == 0 && receipt.PendingAction == nil {
-		if currentSource, err := pipelineOutlineAllSourceSnapshotRoot(candidateDir); err != nil {
-			return err
-		} else if currentSource != sourceRoot {
-			return fmt.Errorf("outline-all zero-operation candidate drifted from source snapshot")
+		if outlineRepairReceipt != nil {
+			if err := validatePipelineOutlineRepairCurrentTail(candidate, *outlineRepairReceipt); err != nil {
+				return err
+			}
+		} else {
+			if currentSource, err := pipelineOutlineAllSourceSnapshotRoot(candidateDir); err != nil {
+				return err
+			} else if currentSource != sourceRoot {
+				return fmt.Errorf("outline-all zero-operation candidate drifted from source snapshot")
+			}
 		}
 	}
 	if err := validatePipelineOutlineAllOperationChain(candidate, receipt); err != nil {

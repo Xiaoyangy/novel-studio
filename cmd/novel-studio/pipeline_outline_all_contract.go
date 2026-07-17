@@ -432,6 +432,13 @@ func validatePipelineOutlineAllOperationChain(
 		return fmt.Errorf("outline-all operation chain requires store and receipt")
 	}
 	previousAfter := ""
+	if repair, err := loadPipelineOutlineRepairEvidence(
+		st, receipt.AttemptID, receipt.SourceSnapshotRoot,
+	); err != nil {
+		return fmt.Errorf("outline-all operation 0 repair chain invalid: %w", err)
+	} else if repair != nil {
+		previousAfter = repair.AfterLayeredDigest
+	}
 	for operation := 1; operation <= receipt.CompletedActionCount; operation++ {
 		var intent pipelineOutlineAllOperationIntent
 		if err := readPipelinePlanningJSON(
@@ -489,7 +496,7 @@ func validatePipelineOutlineAllOperationChain(
 		return err
 	}
 	if receipt.PendingAction == nil {
-		if receipt.CompletedActionCount > 0 && currentDigest != previousAfter {
+		if previousAfter != "" && currentDigest != previousAfter {
 			return fmt.Errorf("outline-all candidate layered digest is not the completed operation chain tail")
 		}
 		return nil

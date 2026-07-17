@@ -201,6 +201,11 @@ func requirePublishedOutlineAllWithControlHeld(liveDir string) error {
 	if !strings.HasPrefix(receipt.AttemptID, "oa-") {
 		return fmt.Errorf("outline-all published attempt_id=%q is outside the outline-all namespace", receipt.AttemptID)
 	}
+	expectedAttemptID, err := pipelineOutlineAllAttemptIDFromReceipt(st, receipt)
+	if err != nil || expectedAttemptID != receipt.AttemptID {
+		return fmt.Errorf("outline-all published attempt identity cannot be replayed: got=%s want=%s err=%v",
+			receipt.AttemptID, expectedAttemptID, err)
+	}
 	expectedCandidate, err := filepath.Abs(pipelineOutlineAllCandidatePath(liveDir, receipt.AttemptID))
 	if err != nil {
 		return fmt.Errorf("outline-all published gate resolve candidate directory: %w", err)

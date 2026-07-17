@@ -255,6 +255,8 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 func pipelineChapterZeroHasRestartState(outputDir string) (bool, error) {
 	for _, rel := range []string{
 		"meta/planning/v2",
+		store.OutlineAllExecutionReceiptPath,
+		pipelineOutlineRepairReceiptPath,
 		"meta/planning/preplan_receipt.json",
 		"meta/planning/book_causal_skeleton.json",
 		"meta/pipeline.json",

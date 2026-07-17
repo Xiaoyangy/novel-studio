@@ -45,25 +45,27 @@ var knownPipelineStages = map[string]bool{
 }
 
 type pipelineFlags struct {
-	Stages            string
-	Prompt            string
-	PromptFile        string
-	Restart           bool
-	Start             int
-	End               int
-	WriteTo           int
-	StopAfterCommit   int
-	Budget            time.Duration
-	Role              string
-	MaxRewriteRounds  int
-	PolishWarnings    bool
-	RewriteBriefOnly  bool
-	ForceRerender     bool
-	NewNovel          bool
-	RefreshArchitect  bool
-	RefreshZeroInit   bool
-	RenderOnly        bool
-	RebaseAllChapters bool
+	Stages              string
+	Prompt              string
+	PromptFile          string
+	Restart             bool
+	Start               int
+	End                 int
+	WriteTo             int
+	StopAfterCommit     int
+	Budget              time.Duration
+	Role                string
+	MaxRewriteRounds    int
+	PolishWarnings      bool
+	RewriteBriefOnly    bool
+	ForceRerender       bool
+	NewNovel            bool
+	RefreshArchitect    bool
+	RefreshZeroInit     bool
+	RenderOnly          bool
+	RebaseAllChapters   bool
+	OutlineRepairFile   string
+	OutlineRepairDigest string
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -96,6 +98,7 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.BoolVar(&f.RefreshArchitect, "refresh-architect", false, "已有 foundation 仍强制 Architect 按本次 prompt 重规划开篇/大纲；只在 architect 阶段生效")
 	fs.BoolVar(&f.RefreshZeroInit, "refresh-zero-init", false, "已有正文时安全刷新 zero-init 开篇计划和 RAG，不覆盖活动资源/关系台账")
 	fs.BoolVar(&f.RebaseAllChapters, "rebase-all-chapters", false, "将现有正文和活动台账完整归档后，把正史安全回到第0章，再按逐弧闭环重推")
+	fs.StringVar(&f.OutlineRepairFile, "outline-repair-file", "", "fresh outline-all 前在隔离候选中应用 chapter-zero 定向大纲修复 manifest")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
 	}
@@ -128,6 +131,21 @@ func pipelinePipeline(opts cliOptions, args []string) error {
 	stages, err := resolveStages(flags.Stages)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(flags.OutlineRepairFile) != "" {
+		if !slices.Contains(stages, "outline-all") {
+			return fmt.Errorf("--outline-repair-file 仅可用于包含 outline-all 的 pipeline")
+		}
+		path, err := filepath.Abs(flags.OutlineRepairFile)
+		if err != nil {
+			return fmt.Errorf("解析 outline repair manifest 路径: %w", err)
+		}
+		_, digest, err := loadPipelineOutlineRepairManifest(path)
+		if err != nil {
+			return err
+		}
+		flags.OutlineRepairFile = path
+		flags.OutlineRepairDigest = digest
 	}
 
 	prompt, err := resolvePipelinePrompt(flags, opts)
@@ -442,17 +460,19 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 
 func pipelineRunIdentityDigest(flags pipelineFlags) string {
 	payload, _ := json.Marshal(struct {
-		Schema            string `json:"schema"`
-		From              int    `json:"from"`
-		To                int    `json:"to"`
-		WriteTo           int    `json:"write_to"`
-		BudgetNanoseconds int64  `json:"budget_nanoseconds"`
+		Schema              string `json:"schema"`
+		From                int    `json:"from"`
+		To                  int    `json:"to"`
+		WriteTo             int    `json:"write_to"`
+		BudgetNanoseconds   int64  `json:"budget_nanoseconds"`
+		OutlineRepairDigest string `json:"outline_repair_digest,omitempty"`
 	}{
-		Schema:            "pipeline-run-identity.v1",
-		From:              flags.Start,
-		To:                flags.End,
-		WriteTo:           flags.WriteTo,
-		BudgetNanoseconds: int64(flags.Budget),
+		Schema:              "pipeline-run-identity.v1",
+		From:                flags.Start,
+		To:                  flags.End,
+		WriteTo:             flags.WriteTo,
+		BudgetNanoseconds:   int64(flags.Budget),
+		OutlineRepairDigest: flags.OutlineRepairDigest,
 	})
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
