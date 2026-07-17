@@ -11,6 +11,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
+	"github.com/voocel/agentcore"
 )
 
 func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T) {
@@ -21,6 +22,8 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 	prompt := projectAllWorldSimulationPrompt(boundary, 1, 2, []string{
 		"missing character decision: 马玉芬",
 		"grounded protagonist projection available_options omit chosen decision",
+	}, []string{
+		`"decision_reason 缺少当前可见证据"`,
 	})
 	for _, required := range []string{
 		"第 2/3 个有界 world-simulation 会话",
@@ -31,6 +34,9 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 		"已失败或已过期动作",
 		"planning_context_access_receipt.source_token",
 		"gaps 清零后立即单独 finalize",
+		"上一有界会话最近的 simulate_chapter_world 工具错误",
+		"decision_reason 缺少当前可见证据",
+		"禁止再次提交同一失败参数",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("recovery prompt missing %q:\n%s", required, prompt)
@@ -69,6 +75,61 @@ func TestProjectAllWorldSimulationTurnBudgetDistinguishesFreshAndRecovery(t *tes
 	if projectAllWorldSimulationStartsFresh([]string{"missing character decision: 马玉芬"}) ||
 		projectAllWorldSimulationStartsFresh(nil) {
 		t.Fatal("partial/finalize recovery must use the short turn budget")
+	}
+	if got := projectAllWorldSimulationTurnCeiling(1, true); got != 12 {
+		t.Fatalf("fresh turn ceiling=%d want 12", got)
+	}
+	for _, tc := range []struct {
+		pass        int
+		startsFresh bool
+	}{
+		{pass: 1, startsFresh: false},
+		{pass: 2, startsFresh: true},
+		{pass: 3, startsFresh: false},
+	} {
+		if got := projectAllWorldSimulationTurnCeiling(tc.pass, tc.startsFresh); got != 6 {
+			t.Fatalf("recovery turn ceiling pass=%d fresh=%v: got %d want 6", tc.pass, tc.startsFresh, got)
+		}
+	}
+}
+
+func TestRecentProjectAllSimulationToolErrorsFiltersDeduplicatesAndBounds(t *testing.T) {
+	toolResult := func(callID, toolName, content string, isError bool) agentcore.Message {
+		msg := agentcore.ToolResultMsg(callID, json.RawMessage(content), isError)
+		msg.Metadata["tool_name"] = toolName
+		return msg
+	}
+	longError := strings.Repeat("错", projectAllWorldSimulationToolErrorRuneLimit+20)
+	messages := []agentcore.AgentMessage{
+		toolResult("context-error", "novel_context", `"context should be ignored"`, true),
+		toolResult("old-sim", "simulate_chapter_world", `"old simulation error"`, true),
+		toolResult("success-sim", "simulate_chapter_world", `"successful result"`, false),
+		toolResult("multiline", "simulate_chapter_world", `"line one\nline two"`, true),
+		toolResult("latest-long", "simulate_chapter_world", fmt.Sprintf("%q", longError), true),
+		toolResult("duplicate-1", "simulate_chapter_world", `"duplicate simulation error"`, true),
+		toolResult("duplicate-2", "simulate_chapter_world", `"duplicate simulation error"`, true),
+	}
+
+	errors := recentProjectAllSimulationToolErrors(messages)
+	if len(errors) != projectAllWorldSimulationToolErrorLimit {
+		t.Fatalf("recent simulation errors=%#v", errors)
+	}
+	if errors[0] != "duplicate simulation error" {
+		t.Fatalf("duplicate recent error was not kept once: %#v", errors)
+	}
+	if !strings.HasPrefix(errors[1], strings.Repeat("错", 20)) || !strings.HasSuffix(errors[1], "…") {
+		t.Fatalf("latest long error was not kept and bounded: %q", errors[1])
+	}
+	if got := len([]rune(strings.TrimSuffix(errors[1], "…"))); got != projectAllWorldSimulationToolErrorRuneLimit {
+		t.Fatalf("bounded error runes=%d want %d", got, projectAllWorldSimulationToolErrorRuneLimit)
+	}
+	if errors[2] != "line one line two" {
+		t.Fatalf("errors are not newest-first or normalized: %#v", errors)
+	}
+	for _, forbidden := range []string{"context should be ignored", "successful result", "old simulation error"} {
+		if strings.Contains(strings.Join(errors, "|"), forbidden) {
+			t.Fatalf("unexpected error %q in %#v", forbidden, errors)
+		}
 	}
 }
 

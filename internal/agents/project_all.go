@@ -49,7 +49,13 @@ type ProjectedArcBoundary struct {
 // projection fields are submitted. Project-Arc resumes that partial in a fresh
 // context instead of making the operator rerun the whole pipeline. The bound
 // remains small so a model that makes no progress still fails closed.
-const projectAllWorldSimulationPassLimit = 3
+const (
+	projectAllWorldSimulationPassLimit           = 3
+	projectAllWorldSimulationInitialTurnCeiling  = 12
+	projectAllWorldSimulationRecoveryTurnCeiling = 6
+	projectAllWorldSimulationToolErrorLimit      = 3
+	projectAllWorldSimulationToolErrorRuneLimit  = 480
+)
 
 const projectAllAuthorityPrefillBatchLimit = 8
 
@@ -209,12 +215,13 @@ func projectAllWorldSimulationPrompt(
 	chapter int,
 	pass int,
 	gaps []string,
+	recentToolErrors []string,
 ) string {
 	gapSummary := "missing chapter world simulation"
 	if compact := compactProjectAllPromptGaps(gaps); len(compact) > 0 {
 		gapSummary = strings.Join(compact, "；")
 	}
-	return fmt.Sprintf(
+	prompt := fmt.Sprintf(
 		"Project-Arc 正在隔离工作区推演 V%dA%d《%s》（第%d-%d章），本弧目标：%s。当前只处理第 %d 章，这是本次进程第 %d/%d 个有界 world-simulation 会话。先调用 novel_context(chapter=%d, profile=world_simulation)，并把本轮 planning_context_access_receipt.source_token 放入随后第一次 simulate_chapter_world.sources；若已有 partial，只补 durable gaps，禁止重发 locked/already_present 角色。当前缺口：%s。随后只调用 simulate_chapter_world，每批在不超过8名的前提下尽量填满；project_all_grounded 只由服务端绑定主角 chosen_decision，模型必须自行补齐决定当下仍真正可用的 available_options、可见证据支持的 decision_reason、可见影响、隐藏压力、计划边界与因果链，不得把已失败或已过期动作当作当前选项。gaps 清零后立即单独 finalize；若本轮只需 finalize，也必须提交本轮唯一 access token，禁止沿用旧 sources。不得写正文、不得修改设定或进度、不得处理其他弧。若本章是本弧末章，必须闭合本弧内部因果并把跨弧影响明确标为 carried-forward；只有第%d章才是全书末章。",
 		arcBoundary.Volume,
 		arcBoundary.Arc,
@@ -229,6 +236,11 @@ func projectAllWorldSimulationPrompt(
 		gapSummary,
 		arcBoundary.BookLastChapter,
 	)
+	if toolErrors := compactProjectAllSimulationToolErrors(recentToolErrors); len(toolErrors) > 0 {
+		prompt += " 上一有界会话最近的 simulate_chapter_world 工具错误（按顺序逐项修正，保留已落盘 partial，禁止再次提交同一失败参数）：" +
+			strings.Join(toolErrors, "；") + "。"
+	}
+	return prompt
 }
 
 func compactProjectAllPromptGaps(gaps []string) []string {
@@ -252,6 +264,62 @@ func compactProjectAllPromptGaps(gaps []string) []string {
 
 func projectAllWorldSimulationStartsFresh(gaps []string) bool {
 	return len(gaps) == 1 && strings.TrimSpace(gaps[0]) == "missing chapter world simulation"
+}
+
+func projectAllWorldSimulationTurnCeiling(pass int, startsFresh bool) int {
+	if pass == 1 && startsFresh {
+		// One context read, up to two full actor batches, projection/finalize,
+		// and several correction turns fit comfortably without keeping a stale
+		// failing conversation alive for the previous 20-turn ceiling.
+		return projectAllWorldSimulationInitialTurnCeiling
+	}
+	return projectAllWorldSimulationRecoveryTurnCeiling
+}
+
+func recentProjectAllSimulationToolErrors(messages []agentcore.AgentMessage) []string {
+	var errorsNewestFirst []string
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(agentcore.Message)
+		if !ok || msg.Role != agentcore.RoleTool || msg.Metadata == nil {
+			continue
+		}
+		isError, _ := msg.Metadata["is_error"].(bool)
+		toolName, _ := msg.Metadata["tool_name"].(string)
+		if !isError || strings.TrimSpace(toolName) != "simulate_chapter_world" {
+			continue
+		}
+		errorsNewestFirst = append(errorsNewestFirst, msg.TextContent())
+	}
+	return compactProjectAllSimulationToolErrors(errorsNewestFirst)
+}
+
+func compactProjectAllSimulationToolErrors(toolErrors []string) []string {
+	compact := make([]string, 0, min(len(toolErrors), projectAllWorldSimulationToolErrorLimit))
+	seen := make(map[string]struct{}, len(toolErrors))
+	for _, raw := range toolErrors {
+		raw = strings.TrimSpace(raw)
+		var decoded string
+		if raw != "" && json.Unmarshal([]byte(raw), &decoded) == nil {
+			raw = decoded
+		}
+		raw = strings.Join(strings.Fields(raw), " ")
+		if raw == "" {
+			continue
+		}
+		runes := []rune(raw)
+		if len(runes) > projectAllWorldSimulationToolErrorRuneLimit {
+			raw = string(runes[:projectAllWorldSimulationToolErrorRuneLimit]) + "…"
+		}
+		if _, duplicate := seen[raw]; duplicate {
+			continue
+		}
+		seen[raw] = struct{}{}
+		compact = append(compact, raw)
+		if len(compact) == projectAllWorldSimulationToolErrorLimit {
+			break
+		}
+	}
+	return compact
 }
 
 func projectAllWorldSimulationContextError(ctx context.Context, chapter int, stage string) error {
@@ -431,6 +499,7 @@ func RunProjectedChapterPlanning(
 	if simulation == nil {
 		var lastSimulatorError string
 		var lastHostFinalizeError string
+		var recentSimulatorToolErrors []string
 		for pass := 1; pass <= projectAllWorldSimulationPassLimit && simulation == nil; pass++ {
 			if err := projectAllWorldSimulationContextError(ctx, chapter, "before recovery session"); err != nil {
 				return nil, err
@@ -504,10 +573,7 @@ func RunProjectedChapterPlanning(
 					}
 				}
 			}
-			turnCeiling := 20
-			if pass > 1 || !startsFresh {
-				turnCeiling = 6
-			}
+			turnCeiling := projectAllWorldSimulationTurnCeiling(pass, startsFresh)
 			simulator := agentcore.NewAgent(
 				agentcore.WithModel(model),
 				agentcore.WithSystemPrompt(worldSimulatorSystemPrompt+projectAllSimulationBoundary),
@@ -528,6 +594,7 @@ func RunProjectedChapterPlanning(
 				chapter,
 				pass,
 				gaps,
+				recentSimulatorToolErrors,
 			)); err != nil {
 				return nil, fmt.Errorf("project-all world simulation chapter %d pass %d: %w", chapter, pass, err)
 			}
@@ -535,8 +602,14 @@ func RunProjectedChapterPlanning(
 			if err := projectAllWorldSimulationContextError(ctx, chapter, "after simulator session"); err != nil {
 				return nil, err
 			}
-			if state := simulator.State(); strings.TrimSpace(state.Error) != "" {
+			state := simulator.State()
+			if strings.TrimSpace(state.Error) != "" {
 				lastSimulatorError = strings.TrimSpace(state.Error)
+			}
+			if toolErrors := recentProjectAllSimulationToolErrors(state.Messages); len(toolErrors) > 0 {
+				// A session that merely stops without another tool call must not erase
+				// the last concrete validator feedback before the final recovery pass.
+				recentSimulatorToolErrors = toolErrors
 			}
 			simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
 			if err != nil {
@@ -578,6 +651,9 @@ func RunProjectedChapterPlanning(
 			}
 			if lastHostFinalizeError != "" {
 				diagnostics += "; host finalize error: " + lastHostFinalizeError
+			}
+			if len(recentSimulatorToolErrors) > 0 {
+				diagnostics += "; recent simulate_chapter_world errors: " + strings.Join(recentSimulatorToolErrors, " | ")
 			}
 			return nil, fmt.Errorf(
 				"project-all world simulation chapter %d did not finalize after %d bounded sessions; remaining gaps: %s%s",
