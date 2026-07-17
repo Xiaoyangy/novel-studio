@@ -866,13 +866,14 @@ func validateProjectAllGroundedDecision(
 	if err := validateGroundedDecisionSentinelFree(decision); err != nil {
 		return err
 	}
+	var violations []string
 	if strings.TrimSpace(decision.CurrentGoal) != strings.TrimSpace(entry.CurrentGoal) {
-		return fmt.Errorf("current_goal must equal grounded authority")
+		violations = append(violations, "current_goal must equal grounded authority")
 	}
 	switch entry.CurrentPressurePolicy {
 	case "exact_continuity":
 		if strings.TrimSpace(decision.Pressure) != strings.TrimSpace(entry.CurrentPressure) {
-			return fmt.Errorf("pressure must equal projected continuity authority")
+			violations = append(violations, "pressure must equal projected continuity authority")
 		}
 	case "outline_authorized_concise":
 		if !projectAllGroundedPressureAuthorized(
@@ -881,13 +882,14 @@ func validateProjectAllGroundedDecision(
 			entry.CurrentPressure,
 			decision.Pressure,
 		) {
-			return fmt.Errorf("pressure must be a concise current-outline-authorized pressure")
+			violations = append(violations, "pressure must be a concise current-outline-authorized pressure")
 		}
 	default:
-		return fmt.Errorf("grounded authority has no pressure policy")
+		violations = append(violations, "grounded authority has no pressure policy")
 	}
-	if !sameAuthorityStringSet(decision.Resources, entry.Resources) {
-		return fmt.Errorf("resources must equal the grounded authority set")
+	resourcesAuthorized := sameAuthorityStringSet(decision.Resources, entry.Resources)
+	if !resourcesAuthorized {
+		violations = append(violations, "resources must equal the grounded authority set")
 	}
 	expectedBoundary := mergedAuthorityKnowledgeBoundary(
 		strings.TrimSpace(entry.KnowledgeBoundary),
@@ -895,28 +897,43 @@ func validateProjectAllGroundedDecision(
 	)
 	if rewriteFactIdentity(decision.KnowledgeBoundary) !=
 		rewriteFactIdentity(expectedBoundary) {
-		return fmt.Errorf("knowledge_boundary must exactly equal grounded authority plus required locks")
+		violations = append(violations, "knowledge_boundary must exactly equal grounded authority plus required locks")
 	}
 	if !projectAllGroundedLocationAuthorized(st, chapter, entry, decision.Location) {
-		return fmt.Errorf("location is not authorized by prior state, current outline, or book world")
+		violations = append(violations, "location is not an exact compact anchor from prior state, current outline, or book world")
 	}
 	if strings.TrimSpace(decision.Decision) == strings.TrimSpace(decision.CurrentGoal) ||
 		strings.TrimSpace(decision.Action) == strings.TrimSpace(decision.CurrentGoal) {
-		return fmt.Errorf("decision/action must be a concrete current move, not a copy of current_goal")
+		violations = append(violations, "decision/action must be a concrete current move, not a copy of current_goal")
 	}
-	if !projectAllGroundedActionAuthorized(st, chapter, entry, decision.Decision) ||
-		!projectAllGroundedActionAuthorized(st, chapter, entry, decision.Action) {
-		return fmt.Errorf("decision/action is not an exact grounded input")
+	decisionAuthorized := projectAllGroundedActionAuthorized(st, chapter, entry, decision.Decision)
+	actionAuthorized := projectAllGroundedActionAuthorized(st, chapter, entry, decision.Action)
+	if !decisionAuthorized || !actionAuthorized {
+		violations = append(violations, "decision/action is not an exact grounded input; copy a concrete substring from current_action or the current chapter outline")
+	}
+	// Downstream projected-output checks may only derive authority from fields
+	// that already passed their exact-input guards. Otherwise an invented action
+	// could smuggle the same invented target into the temporary corpus and hide a
+	// second actionable error until the next model turn.
+	groundedCorpusDecision := decision
+	if !decisionAuthorized {
+		groundedCorpusDecision.Decision = ""
+	}
+	if !actionAuthorized {
+		groundedCorpusDecision.Action = ""
+	}
+	if !resourcesAuthorized {
+		groundedCorpusDecision.Resources = append([]string(nil), entry.Resources...)
 	}
 	if err := validateProjectAllGroundedProjectedOutput(
 		st,
 		chapter,
 		entry,
-		decision,
+		groundedCorpusDecision,
 		"decision_reason",
 		decision.DecisionReason,
 	); err != nil {
-		return err
+		violations = append(violations, err.Error())
 	}
 	for i, option := range decision.AvailableOptions {
 		if option == decision.Decision {
@@ -926,11 +943,11 @@ func validateProjectAllGroundedDecision(
 			st,
 			chapter,
 			entry,
-			decision,
+			groundedCorpusDecision,
 			fmt.Sprintf("available_options[%d]", i),
 			option,
 		); err != nil {
-			return err
+			violations = append(violations, err.Error())
 		}
 	}
 	for _, output := range []struct {
@@ -944,11 +961,11 @@ func validateProjectAllGroundedDecision(
 			st,
 			chapter,
 			entry,
-			decision,
+			groundedCorpusDecision,
 			output.path,
 			output.text,
 		); err != nil {
-			return err
+			violations = append(violations, err.Error())
 		}
 	}
 	for i, effect := range decision.ButterflyEffects {
@@ -956,37 +973,40 @@ func validateProjectAllGroundedDecision(
 			st,
 			chapter,
 			entry,
-			decision,
+			groundedCorpusDecision,
 			fmt.Sprintf("butterfly_effects[%d].effect", i),
 			effect.Effect,
 		); err != nil {
-			return err
+			violations = append(violations, err.Error())
 		}
 		if err := validateProjectAllGroundedProjectedOutput(
 			st,
 			chapter,
 			entry,
-			decision,
+			groundedCorpusDecision,
 			fmt.Sprintf("butterfly_effects[%d].protagonist_impact", i),
 			effect.ProtagonistImpact,
 		); err != nil {
-			return err
+			violations = append(violations, err.Error())
 		}
 		for _, target := range effect.Targets {
 			if !projectAllGroundedOutputTargetAuthorized(
 				st,
 				chapter,
 				entry,
-				decision,
+				groundedCorpusDecision,
 				target,
 			) {
-				return fmt.Errorf(
+				violations = append(violations, fmt.Sprintf(
 					"butterfly_effects[%d].targets contains unauthorized target %q",
 					i,
 					target,
-				)
+				))
 			}
 		}
+	}
+	if len(violations) > 0 {
+		return fmt.Errorf("%s", strings.Join(compactStrings(violations), "; "))
 	}
 	return nil
 }

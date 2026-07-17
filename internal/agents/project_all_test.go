@@ -26,10 +26,12 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 		`"decision_reason 缺少当前可见证据"`,
 	})
 	for _, required := range []string{
-		"第 2/3 个有界 world-simulation 会话",
+		"第 2/8 个有界 world-simulation 会话",
 		"missing character decision: 马玉芬",
 		"available_options omit chosen decision",
 		"禁止重发 locked/already_present 角色",
+		"只有 blocking=true 才放入 authority_contract_characters",
+		"project_all_grounded/blocking=false 必须放入 character_decisions",
 		"只由服务端绑定主角 chosen_decision",
 		"已失败或已过期动作",
 		"planning_context_access_receipt.source_token",
@@ -87,9 +89,174 @@ func TestProjectAllWorldSimulationTurnBudgetDistinguishesFreshAndRecovery(t *tes
 		{pass: 2, startsFresh: true},
 		{pass: 3, startsFresh: false},
 	} {
-		if got := projectAllWorldSimulationTurnCeiling(tc.pass, tc.startsFresh); got != 6 {
-			t.Fatalf("recovery turn ceiling pass=%d fresh=%v: got %d want 6", tc.pass, tc.startsFresh, got)
+		if got := projectAllWorldSimulationTurnCeiling(tc.pass, tc.startsFresh); got != 8 {
+			t.Fatalf("recovery turn ceiling pass=%d fresh=%v: got %d want 8", tc.pass, tc.startsFresh, got)
 		}
+	}
+	if projectAllWorldSimulationPassLimit != 8 || projectAllWorldSimulationStagnantPassLimit != 3 {
+		t.Fatalf(
+			"world simulation recovery bounds drifted: total=%d stagnant=%d",
+			projectAllWorldSimulationPassLimit,
+			projectAllWorldSimulationStagnantPassLimit,
+		)
+	}
+}
+
+func TestProjectAllWorldSimulationProgressRequiresDurablePartialAdvance(t *testing.T) {
+	base := projectAllWorldSimulationProgress{
+		CharacterDecisions: 14,
+		ProjectionFields:   2,
+		HasTimeWindow:      true,
+		GapCount:           5,
+		ContentDigest:      "sha256:before",
+	}
+	for name, current := range map[string]projectAllWorldSimulationProgress{
+		"character": {
+			CharacterDecisions: 15,
+			ProjectionFields:   2,
+			HasTimeWindow:      true,
+			GapCount:           4,
+			ContentDigest:      "sha256:character",
+		},
+		"coverage": {
+			CharacterDecisions: 14,
+			RewriteCoverage:    1,
+			ProjectionFields:   2,
+			HasTimeWindow:      true,
+			GapCount:           4,
+			ContentDigest:      "sha256:coverage",
+		},
+		"projection": {
+			CharacterDecisions: 14,
+			ProjectionFields:   8,
+			HasTimeWindow:      true,
+			GapCount:           4,
+			ContentDigest:      "sha256:projection",
+		},
+		"same-shape correction": {
+			CharacterDecisions: 14,
+			ProjectionFields:   2,
+			HasTimeWindow:      true,
+			GapCount:           5,
+			ContentDigest:      "sha256:corrected-content",
+		},
+		"gap reduction": {
+			CharacterDecisions: 14,
+			ProjectionFields:   2,
+			HasTimeWindow:      true,
+			GapCount:           4,
+			ContentDigest:      "sha256:before",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !current.advancedFrom(base) {
+				t.Fatalf("durable %s progress was not detected: before=%+v after=%+v", name, base, current)
+			}
+		})
+	}
+	if base.advancedFrom(base) {
+		t.Fatal("unchanged partial reset the stagnant-session budget")
+	}
+	regressed := base
+	regressed.CharacterDecisions--
+	regressed.GapCount++
+	regressed.ContentDigest = "sha256:regressed-content"
+	if regressed.advancedFrom(base) {
+		t.Fatal("a regressed partial counted as progress")
+	}
+	withoutTime := base
+	withoutTime.HasTimeWindow = false
+	if !base.advancedFrom(withoutTime) {
+		t.Fatal("first durable time window was not detected as progress")
+	}
+}
+
+func TestProjectAllWorldSimulationProgressDigestIgnoresLeaseNoiseButTracksCorrections(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	partial := domain.ChapterWorldSimulation{
+		Version:     1,
+		Chapter:     1,
+		TimeWindow:  "当晚",
+		Sources:     []string{"context-access:first"},
+		GeneratedAt: "2026-07-17T00:00:00Z",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:    "林澈",
+			ChosenDecision: "先核验",
+			DecisionReason: "先看第一份现场证据",
+		},
+	}
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+	first, err := loadProjectAllWorldSimulationProgress(st, 1)
+	if err != nil || first.ContentDigest == "" {
+		t.Fatalf("load first progress: progress=%+v err=%v", first, err)
+	}
+	partial.Sources = []string{"context-access:second"}
+	partial.GeneratedAt = "2026-07-17T00:01:00Z"
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+	leaseRotated, err := loadProjectAllWorldSimulationProgress(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseRotated.ContentDigest != first.ContentDigest {
+		t.Fatalf("source/time noise changed durable digest: first=%s second=%s", first.ContentDigest, leaseRotated.ContentDigest)
+	}
+	partial.ProtagonistProjection.DecisionReason = "先看第二份现场证据"
+	if err := st.SaveChapterWorldSimulationPartial(partial); err != nil {
+		t.Fatal(err)
+	}
+	corrected, err := loadProjectAllWorldSimulationProgress(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if corrected.ProjectionFields != leaseRotated.ProjectionFields ||
+		corrected.ContentDigest == leaseRotated.ContentDigest {
+		t.Fatalf("same-shape semantic correction was not detected: before=%+v after=%+v", leaseRotated, corrected)
+	}
+}
+
+func TestLoadCurrentProjectedSimulationFailsClosedOnUncheckpointedArtifact(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Version:      1,
+		Chapter:      1,
+		SimulationID: "uncheckpointed",
+		TimeWindow:   "当天",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if simulation, checkpoint, err := loadCurrentProjectedSimulation(st, 1); err == nil {
+		t.Fatalf(
+			"uncheckpointed formal simulation was treated as absent: simulation=%+v checkpoint=%+v",
+			simulation,
+			checkpoint,
+		)
+	}
+}
+
+func TestLoadCurrentProjectedPlanDistinguishesFreshFromUncheckpointedArtifact(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if plan, checkpoint, err := loadCurrentProjectedPlan(st, 1); err != nil ||
+		plan != nil || checkpoint != nil {
+		t.Fatalf("fresh chapter must remain plannable: plan=%+v checkpoint=%+v err=%v", plan, checkpoint, err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "未完成 checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if plan, checkpoint, err := loadCurrentProjectedPlan(st, 1); err == nil {
+		t.Fatalf("uncheckpointed plan was treated as absent: plan=%+v checkpoint=%+v", plan, checkpoint)
 	}
 }
 

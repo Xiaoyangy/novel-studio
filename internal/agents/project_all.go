@@ -2,8 +2,11 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -47,12 +50,14 @@ type ProjectedArcBoundary struct {
 // durably stages a partial. A large cast plus strict authority contracts can
 // legitimately consume one agent's turn budget before the final two actors or
 // projection fields are submitted. Project-Arc resumes that partial in a fresh
-// context instead of making the operator rerun the whole pipeline. The bound
-// remains small so a model that makes no progress still fails closed.
+// context instead of making the operator rerun the whole pipeline. Total
+// sessions stay bounded, while three consecutive sessions without a durable
+// partial advance fail closed instead of penalizing sessions that did progress.
 const (
-	projectAllWorldSimulationPassLimit           = 3
+	projectAllWorldSimulationPassLimit           = 8
+	projectAllWorldSimulationStagnantPassLimit   = 3
 	projectAllWorldSimulationInitialTurnCeiling  = 12
-	projectAllWorldSimulationRecoveryTurnCeiling = 6
+	projectAllWorldSimulationRecoveryTurnCeiling = 8
 	projectAllWorldSimulationToolErrorLimit      = 3
 	projectAllWorldSimulationToolErrorRuneLimit  = 480
 )
@@ -222,7 +227,7 @@ func projectAllWorldSimulationPrompt(
 		gapSummary = strings.Join(compact, "；")
 	}
 	prompt := fmt.Sprintf(
-		"Project-Arc 正在隔离工作区推演 V%dA%d《%s》（第%d-%d章），本弧目标：%s。当前只处理第 %d 章，这是本次进程第 %d/%d 个有界 world-simulation 会话。先调用 novel_context(chapter=%d, profile=world_simulation)，并把本轮 planning_context_access_receipt.source_token 放入随后第一次 simulate_chapter_world.sources；若已有 partial，只补 durable gaps，禁止重发 locked/already_present 角色。当前缺口：%s。随后只调用 simulate_chapter_world，每批在不超过8名的前提下尽量填满；project_all_grounded 只由服务端绑定主角 chosen_decision，模型必须自行补齐决定当下仍真正可用的 available_options、可见证据支持的 decision_reason、可见影响、隐藏压力、计划边界与因果链，不得把已失败或已过期动作当作当前选项。gaps 清零后立即单独 finalize；若本轮只需 finalize，也必须提交本轮唯一 access token，禁止沿用旧 sources。不得写正文、不得修改设定或进度、不得处理其他弧。若本章是本弧末章，必须闭合本弧内部因果并把跨弧影响明确标为 carried-forward；只有第%d章才是全书末章。",
+		"Project-Arc 正在隔离工作区推演 V%dA%d《%s》（第%d-%d章），本弧目标：%s。当前只处理第 %d 章，这是本次进程第 %d/%d 个有界 world-simulation 会话。先调用 novel_context(chapter=%d, profile=world_simulation)，并把本轮 planning_context_access_receipt.source_token 放入随后第一次 simulate_chapter_world.sources；若已有 partial，只补 durable gaps，禁止重发 locked/already_present 角色。当前缺口：%s。随后只调用 simulate_chapter_world，每批在不超过8名的前提下尽量填满；严格按每个 authority entry 分流：只有 blocking=true 才放入 authority_contract_characters，project_all_grounded/blocking=false 必须放入 character_decisions 并严格执行 grounded DecisionPolicy。project_all_grounded 只由服务端绑定主角 chosen_decision，模型必须自行补齐决定当下仍真正可用的 available_options、可见证据支持的 decision_reason、可见影响、隐藏压力、计划边界与因果链，不得把已失败或已过期动作当作当前选项。gaps 清零后立即单独 finalize；若本轮只需 finalize，也必须提交本轮唯一 access token，禁止沿用旧 sources。不得写正文、不得修改设定或进度、不得处理其他弧。若本章是本弧末章，必须闭合本弧内部因果并把跨弧影响明确标为 carried-forward；只有第%d章才是全书末章。",
 		arcBoundary.Volume,
 		arcBoundary.Arc,
 		arcBoundary.Title,
@@ -274,6 +279,101 @@ func projectAllWorldSimulationTurnCeiling(pass int, startsFresh bool) int {
 		return projectAllWorldSimulationInitialTurnCeiling
 	}
 	return projectAllWorldSimulationRecoveryTurnCeiling
+}
+
+type projectAllWorldSimulationProgress struct {
+	CharacterDecisions int
+	RewriteCoverage    int
+	ProjectionFields   int
+	HasTimeWindow      bool
+	GapCount           int
+	ContentDigest      string
+}
+
+func loadProjectAllWorldSimulationProgress(
+	st *store.Store,
+	chapter int,
+) (projectAllWorldSimulationProgress, error) {
+	var result projectAllWorldSimulationProgress
+	if st == nil || chapter <= 0 {
+		return result, nil
+	}
+	_, _, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+	result.GapCount = len(gaps)
+	partial, err := st.LoadChapterWorldSimulationPartial(chapter)
+	if err != nil || partial == nil {
+		return result, err
+	}
+	result.CharacterDecisions = len(partial.CharacterDecisions)
+	result.RewriteCoverage = len(partial.RewriteFactCoverage)
+	result.ProjectionFields = projectAllProjectionProgressFields(
+		partial.ProtagonistProjection,
+	)
+	result.HasTimeWindow = strings.TrimSpace(partial.TimeWindow) != ""
+	if result.CharacterDecisions > 0 || result.RewriteCoverage > 0 ||
+		result.ProjectionFields > 0 || result.HasTimeWindow {
+		durable, marshalErr := json.Marshal(struct {
+			TimeWindow            string                               `json:"time_window"`
+			CharacterDecisions    []domain.CharacterWorldDecision      `json:"character_decisions"`
+			ProtagonistProjection domain.ProtagonistDecisionProjection `json:"protagonist_projection"`
+			RewriteFactCoverage   []domain.ChapterRewriteFactCoverage  `json:"rewrite_fact_coverage"`
+		}{
+			TimeWindow:            partial.TimeWindow,
+			CharacterDecisions:    partial.CharacterDecisions,
+			ProtagonistProjection: partial.ProtagonistProjection,
+			RewriteFactCoverage:   partial.RewriteFactCoverage,
+		})
+		if marshalErr != nil {
+			return result, marshalErr
+		}
+		result.ContentDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(durable))
+	}
+	return result, nil
+}
+
+func projectAllProjectionProgressFields(
+	projection domain.ProtagonistDecisionProjection,
+) int {
+	fields := 0
+	if strings.TrimSpace(projection.Protagonist) != "" {
+		fields++
+	}
+	if len(projection.ObservableEffects) > 0 {
+		fields++
+	}
+	if len(projection.HiddenPressures) > 0 {
+		fields++
+	}
+	if len(projection.AvailableOptions) > 0 {
+		fields++
+	}
+	if strings.TrimSpace(projection.ChosenDecision) != "" {
+		fields++
+	}
+	if strings.TrimSpace(projection.DecisionReason) != "" {
+		fields++
+	}
+	if len(projection.PlanConstraints) > 0 {
+		fields++
+	}
+	if len(projection.CausalChain) > 0 {
+		fields++
+	}
+	return fields
+}
+
+func (current projectAllWorldSimulationProgress) advancedFrom(
+	previous projectAllWorldSimulationProgress,
+) bool {
+	shapeAdvanced := current.CharacterDecisions > previous.CharacterDecisions ||
+		current.RewriteCoverage > previous.RewriteCoverage ||
+		current.ProjectionFields > previous.ProjectionFields ||
+		(current.HasTimeWindow && !previous.HasTimeWindow)
+	gapsReduced := previous.GapCount > 0 && current.GapCount < previous.GapCount
+	contentCorrected := current.ContentDigest != "" &&
+		current.ContentDigest != previous.ContentDigest &&
+		current.GapCount <= previous.GapCount
+	return shapeAdvanced || gapsReduced || contentCorrected
 }
 
 func recentProjectAllSimulationToolErrors(messages []agentcore.AgentMessage) []string {
@@ -500,7 +600,12 @@ func RunProjectedChapterPlanning(
 		var lastSimulatorError string
 		var lastHostFinalizeError string
 		var recentSimulatorToolErrors []string
-		for pass := 1; pass <= projectAllWorldSimulationPassLimit && simulation == nil; pass++ {
+		sessionsUsed := 0
+		stagnantSessions := 0
+		for pass := 1; pass <= projectAllWorldSimulationPassLimit &&
+			simulation == nil &&
+			stagnantSessions < projectAllWorldSimulationStagnantPassLimit; pass++ {
+			sessionsUsed = pass
 			if err := projectAllWorldSimulationContextError(ctx, chapter, "before recovery session"); err != nil {
 				return nil, err
 			}
@@ -573,6 +678,15 @@ func RunProjectedChapterPlanning(
 					}
 				}
 			}
+			progressBefore, progressErr := loadProjectAllWorldSimulationProgress(st, chapter)
+			if progressErr != nil {
+				return nil, fmt.Errorf(
+					"project-all world simulation chapter %d read progress before pass %d: %w",
+					chapter,
+					pass,
+					progressErr,
+				)
+			}
 			turnCeiling := projectAllWorldSimulationTurnCeiling(pass, startsFresh)
 			simulator := agentcore.NewAgent(
 				agentcore.WithModel(model),
@@ -637,6 +751,22 @@ func RunProjectedChapterPlanning(
 						}
 					}
 				}
+				if simulation == nil {
+					progressAfter, progressErr := loadProjectAllWorldSimulationProgress(st, chapter)
+					if progressErr != nil {
+						return nil, fmt.Errorf(
+							"project-all world simulation chapter %d read progress after pass %d: %w",
+							chapter,
+							pass,
+							progressErr,
+						)
+					}
+					if progressAfter.advancedFrom(progressBefore) {
+						stagnantSessions = 0
+					} else {
+						stagnantSessions++
+					}
+				}
 			}
 		}
 		if simulation == nil || simulationCP == nil {
@@ -655,10 +785,16 @@ func RunProjectedChapterPlanning(
 			if len(recentSimulatorToolErrors) > 0 {
 				diagnostics += "; recent simulate_chapter_world errors: " + strings.Join(recentSimulatorToolErrors, " | ")
 			}
+			if stagnantSessions >= projectAllWorldSimulationStagnantPassLimit {
+				diagnostics += fmt.Sprintf(
+					"; stopped after %d consecutive sessions without durable partial progress",
+					stagnantSessions,
+				)
+			}
 			return nil, fmt.Errorf(
 				"project-all world simulation chapter %d did not finalize after %d bounded sessions; remaining gaps: %s%s",
 				chapter,
-				projectAllWorldSimulationPassLimit,
+				sessionsUsed,
 				remaining,
 				diagnostics,
 			)
@@ -853,7 +989,10 @@ func loadCurrentProjectedSimulation(
 	chapter int,
 ) (*domain.ChapterWorldSimulation, *domain.Checkpoint, error) {
 	cp, err := tools.CurrentChapterWorldSimulationCheckpoint(st, chapter)
-	if err != nil || cp == nil {
+	if err != nil {
+		return nil, nil, err
+	}
+	if cp == nil {
 		return nil, nil, nil
 	}
 	simulation, err := st.LoadChapterWorldSimulation(chapter)
@@ -868,7 +1007,13 @@ func loadCurrentProjectedPlan(
 	chapter int,
 ) (*domain.ChapterPlan, *domain.Checkpoint, error) {
 	cp, err := tools.CurrentChapterPlanCausalCheckpoint(st, chapter)
-	if err != nil || cp == nil {
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	if cp == nil {
 		return nil, nil, nil
 	}
 	plan, err := st.Drafts.LoadChapterPlan(chapter)

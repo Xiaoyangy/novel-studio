@@ -421,6 +421,48 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 			break
 		}
 	}
+	t.Run("grounded diagnostics report every actionable field without blocking advice", func(t *testing.T) {
+		candidate := grounded
+		candidate.Location = "未授权地点"
+		candidate.Decision = "操控未授权对象"
+		candidate.Action = candidate.Decision
+		candidate.AvailableOptions = []string{"暂缓夜市试验", candidate.Decision}
+		candidate.ButterflyEffects = append(
+			[]domain.DecisionButterflyEffect(nil),
+			grounded.ButterflyEffects...,
+		)
+		candidate.ButterflyEffects[0].Targets = []string{"未授权对象"}
+		err := validateIncomingSimulationCharacterAuthority(
+			st,
+			1,
+			[]domain.CharacterWorldDecision{candidate},
+		)
+		if err == nil {
+			t.Fatal("invalid grounded decision passed authority guard")
+		}
+		for _, required := range []string{
+			"project_all_grounded 角色必须放入 character_decisions",
+			"林澈[project_all_grounded]",
+			"location is not an exact compact anchor",
+			"decision/action is not an exact grounded input",
+			"targets contains unauthorized target",
+		} {
+			if !strings.Contains(err.Error(), required) {
+				t.Fatalf("grounded aggregate diagnostic missing %q: %v", required, err)
+			}
+		}
+		if strings.Contains(err.Error(), "blocking 角色禁止补猜") {
+			t.Fatalf("grounded diagnostic incorrectly advised blocking materialization: %v", err)
+		}
+		if _, materializeErr := materializeSimulationAuthorityContracts(
+			st,
+			1,
+			[]string{"林澈"},
+		); materializeErr == nil ||
+			!strings.Contains(materializeErr.Error(), "authority_mode=project_all_grounded") {
+			t.Fatalf("grounded role was incorrectly materializable: %v", materializeErr)
+		}
+	})
 	for name, mutate := range map[string]func(*domain.CharacterWorldDecision){
 		"scene synopsis used as location": func(decision *domain.CharacterWorldDecision) {
 			decision.Location = "林澈在青山县河畔夜市先核验专项额度，再完成一笔可撤回的小额县内试验"
@@ -939,7 +981,11 @@ func TestSimulationAuthorityPinsPreserveFactKnowledgeBoundaryIndependentlyOfMode
 	}
 	decision := simulatedDecision("贺骁", "接起电话", true)
 	decision.KnowledgeBoundary = "只知道亲历与明确通信"
-	if err := validateIncomingSimulationCharacterAuthority(st, 1, []domain.CharacterWorldDecision{decision}); err == nil || !strings.Contains(err.Error(), "required_preserve_clause[0]") {
+	if err := validateIncomingSimulationCharacterAuthority(st, 1, []domain.CharacterWorldDecision{decision}); err == nil ||
+		!strings.Contains(err.Error(), "required_preserve_clause[0]") ||
+		!strings.Contains(err.Error(), "贺骁[authoritative]") ||
+		!strings.Contains(err.Error(), "authoritative/non-blocking 角色") ||
+		strings.Contains(err.Error(), "blocking 角色禁止补猜") {
 		t.Fatalf("model-deleted preserve knowledge boundary passed: %v", err)
 	}
 	decision.KnowledgeBoundary += "；" + locked
@@ -1086,7 +1132,11 @@ func TestHoldBaselineAuthorityGuardRejectsNarrativeGuessing(t *testing.T) {
 	}
 	guessed := holdBaselineDecisionForTest("许牧", 1)
 	guessed.DecisionReason = "人在外地，尚未收到主角消息"
-	if err := validateIncomingSimulationCharacterAuthority(st, 1, []domain.CharacterWorldDecision{guessed}); err == nil || !strings.Contains(err.Error(), "decision_reason") || !strings.Contains(err.Error(), "hold_baseline_contract") {
+	if err := validateIncomingSimulationCharacterAuthority(st, 1, []domain.CharacterWorldDecision{guessed}); err == nil ||
+		!strings.Contains(err.Error(), "decision_reason") ||
+		!strings.Contains(err.Error(), "hold_baseline_contract") ||
+		!strings.Contains(err.Error(), "blocking 角色禁止补猜") ||
+		!strings.Contains(err.Error(), "许牧[hold_baseline]") {
 		t.Fatalf("narrative guess passed hold-baseline guard: %v", err)
 	}
 	exact := holdBaselineDecisionForTest("许牧", 1)

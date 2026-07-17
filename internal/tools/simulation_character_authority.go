@@ -513,7 +513,9 @@ func validateIncomingSimulationCharacterAuthority(st *store.Store, chapter int, 
 		byName[entry.Character] = entry
 	}
 	var resubmissions []string
-	var violations []string
+	var groundedViolations []string
+	var contractViolations []string
+	var directViolations []string
 	for _, decision := range decisions {
 		entry, ok := byName[strings.TrimSpace(decision.Character)]
 		if !ok {
@@ -524,31 +526,68 @@ func validateIncomingSimulationCharacterAuthority(st *store.Store, chapter int, 
 			continue
 		}
 		if err := validateRequiredKnowledgeBoundaries(decision, entry.RequiredKnowledgeBoundary); err != nil {
-			violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))
+			violation := fmt.Sprintf("%s[%s]: %v", decision.Character, entry.AuthorityMode, err)
+			switch {
+			case entry.AuthorityMode == "project_all_grounded":
+				groundedViolations = append(groundedViolations, violation)
+			case entry.Blocking:
+				contractViolations = append(contractViolations, violation)
+			default:
+				directViolations = append(directViolations, violation)
+			}
 			continue
 		}
 		switch entry.AuthorityMode {
 		case "project_all_grounded":
 			if err := validateProjectAllGroundedDecision(st, chapter, entry, decision); err != nil {
-				violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))
+				groundedViolations = append(
+					groundedViolations,
+					fmt.Sprintf("%s[project_all_grounded]: %v", decision.Character, err),
+				)
 			}
 		case "hold_baseline":
 			if err := validateHoldBaselineDecision(chapter, decision, entry.RequiredKnowledgeBoundary); err != nil {
-				violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))
+				contractViolations = append(
+					contractViolations,
+					fmt.Sprintf("%s[hold_baseline]: %v", decision.Character, err),
+				)
 			}
 		case "rewrite_source_only":
 			if err := validateRewriteSourceOnlyDecision(chapter, decision, entry.RewriteSourceEvidence, entry.RequiredKnowledgeBoundary); err != nil {
-				violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))
+				contractViolations = append(
+					contractViolations,
+					fmt.Sprintf("%s[rewrite_source_only]: %v", decision.Character, err),
+				)
 			}
 		}
 	}
 	if len(resubmissions) > 0 {
 		return fmt.Errorf("simulation authority guard: already_present 角色禁止重发或覆盖：%s", strings.Join(compactStrings(resubmissions), "、"))
 	}
-	if len(violations) == 0 {
+	if len(groundedViolations) == 0 && len(contractViolations) == 0 &&
+		len(directViolations) == 0 {
 		return nil
 	}
-	return fmt.Errorf("blocking 角色禁止补猜，必须原样使用对应 authority contract：%s", strings.Join(violations, "；"))
+	var groups []string
+	if len(groundedViolations) > 0 {
+		groups = append(groups,
+			"project_all_grounded 角色必须放入 character_decisions 并严格按 authority entry 推演，不能改用 authority_contract_characters："+
+				strings.Join(groundedViolations, "；"),
+		)
+	}
+	if len(contractViolations) > 0 {
+		groups = append(groups,
+			"blocking 角色禁止补猜，必须把实名放入 authority_contract_characters 由服务端物化 exact contract："+
+				strings.Join(contractViolations, "；"),
+		)
+	}
+	if len(directViolations) > 0 {
+		groups = append(groups,
+			"authoritative/non-blocking 角色必须保留在 character_decisions 中并按 authority entry 修正，不得使用 authority_contract_characters："+
+				strings.Join(directViolations, "；"),
+		)
+	}
+	return fmt.Errorf("simulation character authority guard：%s", strings.Join(groups, "；"))
 }
 
 func preserveKnowledgeBoundaryClauses(st *store.Store, chapter int, character string) []string {
