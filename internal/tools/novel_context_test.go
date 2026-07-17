@@ -1689,7 +1689,7 @@ func TestWorldSimulationProfileLayersInvalidNineteenCharacterAuthority(t *testin
 	}
 }
 
-func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudget(t *testing.T) {
+func TestWorldSimulationProfileKeepsActiveGroundedAuthorityVisibleAfterCodexMiddleClip(t *testing.T) {
 	const codexPerMessageTextRuneBudget = 45_000
 	const (
 		groundedCharacter = "梁广财"
@@ -1709,6 +1709,10 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 		present = append(present, name)
 		authority = append(authority, simulationCharacterAuthority{
 			Character:        name,
+			Role:             "已完成当前章决定的项目角色",
+			Tier:             "secondary",
+			Aliases:          []string{name + "别名"},
+			AuthoritySources: []string{"meta/characters/" + name + "/" + strings.Repeat("source-anchor-", 12)},
 			AuthorityMode:    "reuse_saved_decision",
 			SimulationStatus: "already_present",
 			Blocking:         false,
@@ -1744,6 +1748,12 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 	result := map[string]any{
 		"simulation_characters":          characters,
 		"simulation_character_authority": authority,
+		// This precedes simulation_character_authority in marshalOrderedContext,
+		// reproducing the substantial project state ahead of the real authority
+		// roster instead of testing the packet in isolation.
+		"project_all_state": map[string]any{
+			"continuity_evidence": strings.Repeat("project-state-anchor|", 760),
+		},
 		"simulation_character_authority_policy": map[string]any{
 			"required_count": 16,
 			"blocking_count": 0,
@@ -1759,24 +1769,18 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 				"scenes":  []string{"返乡接风饭上，梁广财一边夹菜一边追问下一份工作。"},
 			},
 		},
-	}
-	before, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := utf8.RuneCount(before); got <= codexPerMessageTextRuneBudget {
-		t.Fatalf("fixture must reproduce the old per-message middle-clipping risk: got=%d", got)
+		// Unknown top-level context is deliberately retained and ordered after the
+		// critical-first packet. It brings the complete tool result into the same
+		// 53k+ rune range observed in the production Codex session.
+		"zz_realistic_tool_tail": strings.Repeat("tail-context-anchor|", 1_700),
 	}
 
 	raw, err := finalizeContextResult(result, 1, "world_simulation")
 	if err != nil {
 		t.Fatalf("grounded repair context failed to finalize: %v", err)
 	}
-	if got := utf8.RuneCount(raw); got > codexPerMessageTextRuneBudget {
-		t.Fatalf("grounded repair context would still trigger Codex middle clipping: got=%d budget=%d", got, codexPerMessageTextRuneBudget)
-	}
-	if strings.Contains(string(raw), "Codex 入参压缩") {
-		t.Fatal("grounded repair context already contains a middle-clipping marker")
+	if got := utf8.RuneCount(raw); got <= 53_000 {
+		t.Fatalf("fixture must reproduce the 53k+ production tool result: got=%d", got)
 	}
 
 	var payload map[string]any
@@ -1788,7 +1792,17 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 	if len(entries) != 16 {
 		t.Fatalf("authority roster changed during compaction: %d", len(entries))
 	}
-	grounded := entries[len(entries)-1].(map[string]any)
+	grounded := entries[0].(map[string]any)
+	if grounded["character"] != groundedCharacter {
+		t.Fatalf("required-missing grounded entry was not moved to the active prefix: %#v", grounded)
+	}
+	for i, rawEntry := range entries[1:] {
+		entry := rawEntry.(map[string]any)
+		want := fmt.Sprintf("已落盘角色%02d", i+1)
+		if entry["character"] != want {
+			t.Fatalf("already-present relative order drifted at %d: want=%q got=%#v", i, want, entry["character"])
+		}
+	}
 	for key, want := range map[string]string{
 		"authority_mode":          domain.SimulationAuthorityModeGrounded,
 		"current_goal":            currentGoal,
@@ -1797,6 +1811,7 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 		"current_pressure_policy": "outline_authorized_concise",
 		"knowledge_boundary":      knowledgeBoundary,
 		"decision_model":          decisionModel,
+		"decision_policy":         projectAllGroundedDecisionPolicy,
 	} {
 		if got := strings.TrimSpace(fmt.Sprint(grounded[key])); got != want {
 			t.Fatalf("grounded compact entry lost %s:\nwant=%q\ngot=%q", key, want, got)
@@ -1808,7 +1823,7 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 	if locks, ok := grounded["required_knowledge_boundaries"].([]any); !ok || len(locks) != 0 {
 		t.Fatalf("empty grounded knowledge-lock set must remain explicit: %#v", grounded["required_knowledge_boundaries"])
 	}
-	for _, removed := range []string{"arc", "decision_policy", "traits", "desires", "boundaries"} {
+	for _, removed := range []string{"arc", "traits", "desires", "boundaries"} {
 		if _, leaked := grounded[removed]; leaked {
 			t.Fatalf("grounded compact entry retained duplicated/non-current field %q: %#v", removed, grounded)
 		}
@@ -1817,6 +1832,48 @@ func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudge
 	if got := fmt.Sprint(modePolicies[domain.SimulationAuthorityModeGrounded]); got != projectAllGroundedDecisionPolicy {
 		t.Fatalf("grounded shared mode policy was lost or changed: %q", got)
 	}
+
+	visible := compactCodexTextEquivalentForTest(string(raw), codexPerMessageTextRuneBudget)
+	if got := utf8.RuneCountInString(visible); got != codexPerMessageTextRuneBudget {
+		t.Fatalf("Codex-equivalent clipping returned %d runes, want %d", got, codexPerMessageTextRuneBudget)
+	}
+	if !strings.Contains(visible, "Codex 入参压缩") {
+		t.Fatal("53k+ fixture did not exercise Codex-equivalent middle clipping")
+	}
+	encodedGrounded, err := json.Marshal(grounded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(visible, string(encodedGrounded)) {
+		t.Fatalf("complete Liang grounded contract is not model-visible after clipping: %s", encodedGrounded)
+	}
+}
+
+// compactCodexTextEquivalentForTest intentionally mirrors llmcodex.compactCodexText.
+// Keep this local copy exact so the regression tests the transport boundary the
+// model actually sees rather than only novel_context's larger byte budget.
+func compactCodexTextEquivalentForTest(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if limit <= 0 || utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	if limit < 128 {
+		limit = 128
+	}
+	runes := []rune(s)
+	marker := fmt.Sprintf("\n\n[... Codex 入参压缩：省略 %d 字；保留首尾以维持上下文 ...]\n\n", len(runes)-limit)
+	markerRunes := []rune(marker)
+	available := limit - len(markerRunes)
+	if available < 32 {
+		available = 32
+		markerRunes = []rune("\n\n[...省略...]\n\n")
+	}
+	head := available / 2
+	tail := available - head
+	if head+tail > len(runes) {
+		return s
+	}
+	return string(runes[:head]) + string(markerRunes) + string(runes[len(runes)-tail:])
 }
 
 func TestRestartedWorldSimulationProfileFitsWithoutDroppingAuthorityOrFactGaps(t *testing.T) {

@@ -1216,8 +1216,24 @@ func compactWorldSimulationAuthority(result map[string]any) {
 	if !ok || len(authority) == 0 {
 		return
 	}
-	entries := make([]map[string]any, 0, len(authority))
+	// Codex preserves the head and tail when one tool message exceeds its text
+	// budget. Keep every still-active actor at the head of this otherwise stable
+	// roster so an already-present prefix cannot hide the only decisions the
+	// model is currently allowed to submit.
+	ordered := make([]simulationCharacterAuthority, 0, len(authority))
 	for _, item := range authority {
+		if item.SimulationStatus != "already_present" {
+			ordered = append(ordered, item)
+		}
+	}
+	for _, item := range authority {
+		if item.SimulationStatus == "already_present" {
+			ordered = append(ordered, item)
+		}
+	}
+
+	entries := make([]map[string]any, 0, len(ordered))
+	for _, item := range ordered {
 		entry := map[string]any{
 			"character":                  item.Character,
 			"authority_mode":             item.AuthorityMode,
@@ -1248,9 +1264,9 @@ func compactWorldSimulationAuthority(result map[string]any) {
 			entry["locked_policy"] = "决定已在 partial 落盘；不得重发、改写或从旧正文重建。"
 		case domain.SimulationAuthorityModeGrounded:
 			// Grounded actors must expose the exact server-validated inputs, but the
-			// long shared decision policy belongs at mode level. Falling through to
-			// the full-struct fallback repeats dossier/arc/policy prose and can push
-			// the one still-missing actor into Codex's middle-clipped message region.
+			// active entry also carries its complete decision policy. mode_policies is
+			// still useful shared documentation, but it follows entries in serialized
+			// JSON and may land inside Codex's middle-clipped region.
 			add("description", item.Description, strings.TrimSpace(item.Description) != "")
 			entry["current_location"] = item.CurrentLocation
 			entry["current_status"] = item.CurrentStatus
@@ -1268,6 +1284,7 @@ func compactWorldSimulationAuthority(result map[string]any) {
 			add("relationships", item.Relationships, len(item.Relationships) > 0)
 			add("knowledge_boundary", item.KnowledgeBoundary, strings.TrimSpace(item.KnowledgeBoundary) != "")
 			add("decision_model", item.DecisionModel, strings.TrimSpace(item.DecisionModel) != "")
+			entry["decision_policy"] = item.DecisionPolicy
 			entry["communication_boundary"] = item.CommunicationBoundary
 		case "authoritative":
 			// Only current causal inputs belong here. Arc is deliberately omitted:
