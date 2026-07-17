@@ -5,8 +5,10 @@
 //   - State 由 LoadState（非纯）从 Store 构造，一次性把路由需要的事实读齐。
 //   - 返回 nil 是合法的：表示"裁定场景，让 Coordinator LLM 自主决策"。
 //
-// Router 覆盖的是"查表型"决策（每章下一步、弧末后处理、队列驱动），
+// Router 覆盖的是"查表型"决策（每章下一步、legacy 弧末后处理、队列驱动），
 // 不覆盖"语义理解型"决策（选规划师、处理用户 Steer、输出总结）。
+// sealed_two_pass_v2 的正文验收由外层 pipeline 按章完成；这里保留的
+// scope=arc 只服务未迁移工程的结构复盘，绝不能替代章级 exact-body review。
 package flow
 
 import (
@@ -102,8 +104,8 @@ type State struct {
 //  4. Flow=Reviewing        → nil（editor 刚保存 review，verdict 分叉由工具层处理）
 //  5. Flow=Steering         → nil（用户干预处理中）
 //  6. 已完成章章级评审缺失    → editor(chapter review)
-//  7. 弧末评审缺失           → editor(arc review)
-//  8. 弧末评审有但弧摘要缺失  → editor(arc summary)
+//  7. legacy 弧末结构复盘缺失  → editor(arc review; never chapter acceptance)
+//  8. legacy 弧末复盘有但摘要缺失 → editor(arc summary)
 //  9. 卷末弧摘要有但卷摘要缺失 → editor(volume summary)
 //
 // 10. 下一弧是骨架           → architect_long(expand_arc)
@@ -277,14 +279,16 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 6-10. 分层模式的弧末后处理
+	// 6-10. 未迁移分层工程的 legacy 弧末后处理。sealed_two_pass_v2 在
+	// 外层 render 中逐章验收，并以 arc completion receipt 聚合完整性；
+	// 此处 scope=arc 只是结构复盘，不能成为正文 acceptance。
 	if p.Layered && s.ArcBoundary != nil && s.ArcBoundary.IsArcEnd {
 		b := s.ArcBoundary
 		switch {
 		case !s.HasArcReview:
 			return &Instruction{
 				Agent:  "editor",
-				Task:   fmt.Sprintf("对第 %d 卷第 %d 弧做弧级评审（scope=arc）", b.Volume, b.Arc),
+				Task:   fmt.Sprintf("对第 %d 卷第 %d 弧做 legacy 结构复盘（scope=arc；不得替代任何章级正文审核）", b.Volume, b.Arc),
 				Reason: "弧末评审未完成",
 			}
 		case !s.HasArcSummary:

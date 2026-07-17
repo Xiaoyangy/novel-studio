@@ -235,6 +235,15 @@ var outlinePlaceholderFragments = []string{
 	"\u672c\u7ae0\u56f4\u7ed5", "\u8fdb\u4e00\u6b65\u63a8\u8fdb", "\u4e3a\u540e\u7eed\u57cb\u4e0b\u4f0f\u7b14",
 }
 
+var outlinePlaceholderShellFragments = []string{
+	"\u6b64\u5904\u5360\u4f4d", "\u4e34\u65f6\u5360\u4f4d", "\u6682\u65f6\u5360\u4f4d", "\u5148\u884c\u5360\u4f4d",
+	"\u4ec5\u4f5c\u5360\u4f4d", "\u53ea\u4f5c\u5360\u4f4d", "\u4ec5\u7528\u4e8e\u5360\u4f4d", "\u53ea\u7528\u4e8e\u5360\u4f4d", "\u7528\u6765\u5360\u4f4d", "\u7528\u4e8e\u5360\u4f4d", "\u4f5c\u4e3a\u5360\u4f4d",
+	"\u5360\u4f4d\u5185\u5bb9", "\u5360\u4f4d\u6587\u672c", "\u5360\u4f4d\u5b57\u6bb5", "\u5360\u4f4d\u7ae0\u8282", "\u5360\u4f4d\u573a\u666f", "\u5360\u4f4d\u63cf\u8ff0", "\u5360\u4f4d\u5f85",
+}
+
+const outlineCoreEventMinMeaningfulRunes = 18
+const outlineAmbiguousPlaceholderMaxMeaningfulRunes = 12
+
 // OutlineChapterContractIssues distinguishes a merely expanded arc from one
 // that is concrete enough to feed all-book simulation and later rendering.
 func OutlineChapterContractIssues(volumes []VolumeOutline) []OutlineContractIssue {
@@ -271,8 +280,14 @@ func OutlineChapterContractIssues(volumes []VolumeOutline) []OutlineContractIssu
 				}
 
 				coreKey := normalizeContractText(chapter.CoreEvent)
-				if meaningfulRuneCount(chapter.CoreEvent) < 18 || containsOutlinePlaceholder(chapter.CoreEvent) {
-					issues = append(issues, contractIssue("core_event_not_concrete", volume.Index, arc.Index, chapterNo, "core_event needs a concrete actor, action, obstacle, and state change"))
+				if meaningfulRuneCount(chapter.CoreEvent) < outlineCoreEventMinMeaningfulRunes || containsOutlinePlaceholder(chapter.CoreEvent) {
+					issues = append(issues, contractIssue(
+						"core_event_not_concrete",
+						volume.Index,
+						arc.Index,
+						chapterNo,
+						outlineCoreEventRepairFeedback(chapter.CoreEvent),
+					))
 				}
 				if previous := coreOwner[coreKey]; coreKey != "" && previous > 0 {
 					issues = append(issues, contractIssue("duplicate_core_event", volume.Index, arc.Index, chapterNo, fmt.Sprintf("core_event duplicates earlier chapter %d", previous)))
@@ -342,13 +357,58 @@ func ArcChapterContractReady(volumes []VolumeOutline, volume, arc int) bool {
 }
 
 func containsOutlinePlaceholder(value string) bool {
+	return outlinePlaceholderFragment(value) != ""
+}
+
+func outlinePlaceholderFragment(value string) string {
 	lower := strings.ToLower(strings.TrimSpace(value))
 	for _, fragment := range outlinePlaceholderFragments {
-		if strings.Contains(lower, fragment) {
+		if !strings.Contains(lower, fragment) {
+			continue
+		}
+		// “占位” is also ordinary domain language: a merchant can split orders
+		// to occupy a warehouse slot, reserve a seat, or hold inventory space.
+		// Treating every substring occurrence as a meta placeholder rejects long,
+		// concrete events. It remains fail-closed for short shells and explicit
+		// wrapper phrases that describe placeholder content rather than a story
+		// action. The other fragments are unambiguously meta-writing language.
+		if fragment == "\u5360\u4f4d" && !outlineAmbiguousPlaceholderIsShell(lower, value) {
+			continue
+		}
+		return fragment
+	}
+	return ""
+}
+
+func outlineAmbiguousPlaceholderIsShell(lower, original string) bool {
+	if meaningfulRuneCount(original) <= outlineAmbiguousPlaceholderMaxMeaningfulRunes {
+		return true
+	}
+	for _, wrapper := range outlinePlaceholderShellFragments {
+		if strings.Contains(lower, wrapper) {
 			return true
 		}
 	}
 	return false
+}
+
+func outlineCoreEventRepairFeedback(value string) string {
+	meaningfulRunes := meaningfulRuneCount(value)
+	placeholder := outlinePlaceholderFragment(value)
+	placeholderSignal := "none"
+	if placeholder != "" {
+		placeholderSignal = strconv.Quote(placeholder)
+	}
+	return fmt.Sprintf(
+		"field=core_event parser_signals={meaningful_runes:%d, minimum:%d, punctuation_and_spaces_count:false, placeholder_fragment:%s}; "+
+			"repair: replace only this chapter's core_event with one complete sentence that has at least %d meaningful letters/digits, contains a concrete actor + specific obstacle + chosen visible action + observable state change, and removes the reported placeholder fragment; "+
+			"fill every bracket with actual story facts and do not submit the bracket labels: [actor] because [specific obstacle] cannot [immediate goal], chooses [visible action], changing [ledger/relationship/resource/timeline] from [before] to [after]; "+
+			"passing example: 林澈因供货商临时涨价无法按期开市，改用备用名单重排摊位，使开市时间恢复并留下新核销记录",
+		meaningfulRunes,
+		outlineCoreEventMinMeaningfulRunes,
+		placeholderSignal,
+		outlineCoreEventMinMeaningfulRunes,
+	)
 }
 
 func meaningfulRuneCount(value string) int {

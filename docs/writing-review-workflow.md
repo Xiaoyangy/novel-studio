@@ -152,17 +152,21 @@ go run ./cmd/novel-studio --pipeline --prompt-file run-prompts/<book>.md
 go run ./cmd/novel-studio --pipeline
 ```
 
-完整流水线阶段：
+长篇新协议的默认阶段：
 
 ```text
-architect -> zero-init -> write -> review -> rewrite -> deliver
+architect -> outline-all -> zero-init -> preplan -> project-all -> seal -> promote -> render
 ```
+
+其中 `project-all` 一次推演当前一弧全部章节，`seal` 冻结弧内连续计划；`promote -> render` 每轮只处理 realization cursor 指向的一章，并对该章 final exact body 独立审核。弧末只聚合章级 acceptance receipts 和结构摘要，不能用一次 `scope=arc` 审核代替任一章审核。旧 `write -> review -> rewrite -> deliver` 仅保留给尚未迁移到 `sealed_two_pass_v2` 的兼容工程。
 
 需要先共创澄清时显式加入：
 
 ```text
-cocreate -> architect -> zero-init -> write -> review -> rewrite -> deliver
+cocreate -> architect -> outline-all -> zero-init -> preplan -> project-all -> seal -> promote -> render
 ```
+
+进入新协议后，当前弧全部正式 plan、render capacity 和 transition contracts 未 seal 时不能写该弧正文；当前章正文 SHA、章级审核工件、actual outcome 与 acceptance receipt 未全部一致时不能提升下一章。
 
 写作阶段内部固定顺序：
 

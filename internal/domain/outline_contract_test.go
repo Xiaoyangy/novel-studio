@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,132 @@ func TestOutlineChapterContractAcceptsConcreteDistinctChapters(t *testing.T) {
 	volumes := []VolumeOutline{{Index: 1, Arcs: []ArcOutline{{Index: 1, Chapters: chapters}}}}
 	if issues := OutlineChapterContractIssues(volumes); len(issues) != 0 {
 		t.Fatalf("unexpected issues: %+v", issues)
+	}
+}
+
+func TestOutlineChapterContractRepeatedCoreEventFailureReportsExecutableParserFeedback(t *testing.T) {
+	base := OutlineEntry{
+		Title: "仓门前的涨价单",
+		Hook:  "仓门刚开，第二家供货商又带着停供通知堵住入口",
+		Scenes: []string{
+			"林澈在仓库门口逐张核对临时涨价单和原始报价",
+			"供货商当场拒绝按旧价卸货并要求先改付款记录",
+			"沈知遥调出备用名单让双方重新确认开市时限",
+		},
+	}
+	tests := []struct {
+		name        string
+		coreEvent   string
+		placeholder string
+	}{
+		{
+			name:        "reported placeholder even when text is long",
+			coreEvent:   "林澈在仓库门口召集供货商继续推进冷链整改并登记新的交货结果",
+			placeholder: "继续推进",
+		},
+		{
+			name:      "reported effective rune count when text is short",
+			coreEvent: "林澈改了仓位表",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chapter := base
+			chapter.CoreEvent = tc.coreEvent
+			volumes := []VolumeOutline{{Index: 3, Arcs: []ArcOutline{{Index: 3, Chapters: []OutlineEntry{chapter}}}}}
+
+			// A tool retry validates a fresh copy of the same proposed arc. Repeating
+			// the failure must preserve exact, field-level repair instructions rather
+			// than collapsing back to the old generic semantic label.
+			var messages []string
+			for attempt := 0; attempt < 2; attempt++ {
+				issues := OutlineChapterContractIssues(volumes)
+				var coreIssue *OutlineContractIssue
+				for i := range issues {
+					if issues[i].Code == "core_event_not_concrete" {
+						coreIssue = &issues[i]
+						break
+					}
+				}
+				if coreIssue == nil {
+					t.Fatalf("attempt %d unexpectedly passed core_event gate: %+v", attempt+1, issues)
+				}
+				messages = append(messages, coreIssue.Message)
+			}
+
+			if messages[0] != messages[1] {
+				t.Fatalf("repeated parser feedback drifted:\nfirst: %s\nsecond: %s", messages[0], messages[1])
+			}
+			wantSignals := []string{
+				"field=core_event",
+				fmt.Sprintf("meaningful_runes:%d", meaningfulRuneCount(tc.coreEvent)),
+				fmt.Sprintf("minimum:%d", outlineCoreEventMinMeaningfulRunes),
+				"replace only this chapter's core_event",
+				"actor + specific obstacle + chosen visible action + observable state change",
+				"do not submit the bracket labels",
+				"passing example:",
+			}
+			if tc.placeholder == "" {
+				wantSignals = append(wantSignals, "placeholder_fragment:none")
+			} else {
+				wantSignals = append(wantSignals, fmt.Sprintf("placeholder_fragment:%q", tc.placeholder))
+			}
+			for _, signal := range wantSignals {
+				if !strings.Contains(messages[1], signal) {
+					t.Fatalf("actionable feedback missing %q: %s", signal, messages[1])
+				}
+			}
+		})
+	}
+}
+
+func TestOutlinePlaceholderTokenDistinguishesBusinessOccupationFromMetaShell(t *testing.T) {
+	// This reproduces the production shape that triggered four retries: “占位”
+	// describes split orders occupying warehouse capacity inside an otherwise
+	// concrete core event. Pad to exactly 248 meaningful runes to keep the
+	// regression tied to the long-field case rather than merely crossing 18.
+	longConcreteCore := "许牧发现四家申报商户共用同一联系人和车辆，贺骁确认它们都由赵启明统一调车，但赵启明坚持营业执照不同就应分别占位。沈知遥让宋砚核对合同与收款关系，林澈当众新增关联申报和合并上限，四单合并重排，一家真正独立经营的商户不受牵连，旧利益方借拆单占位抢仓的路径被堵住。"
+	padding := []rune(strings.Repeat("现场订单车辆收款仓位变化均留下可复核记录", 20))
+	need := 248 - meaningfulRuneCount(longConcreteCore)
+	if need <= 0 || need > len(padding) {
+		t.Fatalf("invalid long core fixture: count=%d padding=%d", meaningfulRuneCount(longConcreteCore), len(padding))
+	}
+	longConcreteCore += string(padding[:need])
+	if got := meaningfulRuneCount(longConcreteCore); got != 248 {
+		t.Fatalf("long core fixture meaningful runes=%d, want 248", got)
+	}
+	if fragment := outlinePlaceholderFragment(longConcreteCore); fragment != "" {
+		t.Fatalf("concrete split-order occupation was mistaken for placeholder %q", fragment)
+	}
+
+	chapter := OutlineEntry{
+		Title:     "四张订单原来是一家人",
+		CoreEvent: longConcreteCore,
+		Hook:      "失去提前仓位后，赵启明转而拿七天低价包圆争夺货源",
+		Scenes: []string{
+			"四张订单平码在桌上，许牧圈出相同联系电话和车牌",
+			"宋砚核对合同后确认四单最终回款进入同一账户",
+			"四块时段牌合并重排，后排两家农户自动前移",
+		},
+	}
+	volumes := []VolumeOutline{{Index: 3, Arcs: []ArcOutline{{Index: 3, Chapters: []OutlineEntry{chapter}}}}}
+	for _, issue := range OutlineChapterContractIssues(volumes) {
+		if issue.Code == "core_event_not_concrete" {
+			t.Fatalf("248-rune concrete core event was rejected: %+v", issue)
+		}
+	}
+
+	for _, shell := range []string{"占位", "占位内容", "此处占位"} {
+		if fragment := outlinePlaceholderFragment(shell); fragment != "占位" {
+			t.Fatalf("meta shell %q matched %q, want 占位", shell, fragment)
+		}
+		feedback := outlineCoreEventRepairFeedback(shell)
+		if !strings.Contains(feedback, `placeholder_fragment:"占位"`) {
+			t.Fatalf("meta shell %q lost exact placeholder feedback: %s", shell, feedback)
+		}
+	}
+	if fragment := outlinePlaceholderFragment("林澈让团队继续推进"); fragment != "继续推进" {
+		t.Fatalf("unambiguous meta fragment matched %q, want 继续推进", fragment)
 	}
 }
 

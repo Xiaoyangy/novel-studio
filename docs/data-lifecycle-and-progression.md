@@ -190,12 +190,13 @@ flowchart TD
 
 `meta/pipeline.json` 是阶段级恢复状态：
 
-- 阶段顺序默认 `architect -> zero-init -> write -> review -> rewrite -> deliver`。
+- 长篇新协议默认 `architect -> outline-all -> zero-init -> preplan -> project-all -> seal -> promote -> render`；旧 `write -> review -> rewrite -> deliver` 仅是未迁移工程的兼容阶段。
 - 已完成阶段重跑时先验证证据；证据缺失会清除完成标记并重跑。
-- `write` 证据看 `progress + chapters + commit_chapter checkpoint`。
-- `review` 证据要求机械门禁、AI voice、Editor JSON、DeepSeek 裸正文判定、统一报告和 `review-summary` 都绑定当前正文 SHA-256。
-- `rewrite` 只使用当前正文版本的审核证据，并核对章节更新和 `.pre-rewrite.md`。
-- `deliver` 要求当前章审 `accept`、交付日志和 delivery snapshot。
+- `project-all` 证据是当前弧逐章 bundle、obligation registry、projection cursor 与 capacity contract；不得写正文。
+- `seal` 证据是不可变 arc manifest 和完整 digest chain；弧内缺章或承载力不足时不能 promote。
+- `render` 每轮只处理当前 promotion 绑定的一章；机械门禁、AI voice、Editor JSON、DeepSeek 裸正文判定和统一报告都必须绑定该章最终正文 SHA-256。
+- 章级 `acceptance receipt` 还绑定最终正文 Unicode rune 数、审核工件和 actual outcome；弧完成只聚合全部章级回执，不执行可替代章审的弧级正文审核。
+- 兼容阶段中的 `rewrite` 也只能使用当前正文版本的审核证据，并核对章节更新和 `.pre-rewrite.md`。
 - 每个阶段保存 artifact digest；最终对账刷新合法跨阶段变更，`diag` 报告后续内容漂移。
 
 Pipeline 只负责阶段编排。章内下一步仍由 `progress.json`、checkpoint、pending signal 和 Host reminder 决定。

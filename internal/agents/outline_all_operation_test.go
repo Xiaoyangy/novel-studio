@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -15,11 +16,13 @@ import (
 )
 
 type outlineAllOperationCaptureModel struct {
-	mu       sync.Mutex
-	calls    int
-	messages []agentcore.Message
-	tools    []agentcore.ToolSpec
-	response agentcore.Message
+	mu        sync.Mutex
+	calls     int
+	messages  []agentcore.Message
+	requests  [][]agentcore.Message
+	tools     []agentcore.ToolSpec
+	response  agentcore.Message
+	responses []agentcore.Message
 }
 
 func (m *outlineAllOperationCaptureModel) take(
@@ -28,10 +31,16 @@ func (m *outlineAllOperationCaptureModel) take(
 ) *agentcore.LLMResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	callIndex := m.calls
 	m.calls++
 	m.messages = append([]agentcore.Message(nil), messages...)
+	m.requests = append(m.requests, append([]agentcore.Message(nil), messages...))
 	m.tools = append([]agentcore.ToolSpec(nil), tools...)
-	return &agentcore.LLMResponse{Message: m.response}
+	response := m.response
+	if callIndex < len(m.responses) {
+		response = m.responses[callIndex]
+	}
+	return &agentcore.LLMResponse{Message: response}
 }
 
 func (m *outlineAllOperationCaptureModel) Generate(
@@ -61,6 +70,34 @@ func (m *outlineAllOperationCaptureModel) GenerateStream(
 }
 
 func (*outlineAllOperationCaptureModel) SupportsTools() bool { return true }
+
+func outlineAllOperationToolUseResponse(id string) agentcore.Message {
+	return agentcore.Message{
+		Role:       agentcore.RoleAssistant,
+		StopReason: agentcore.StopReasonToolUse,
+		Content: []agentcore.ContentBlock{agentcore.ToolCallBlock(agentcore.ToolCall{
+			ID:   id,
+			Name: "save_foundation",
+			Args: json.RawMessage(`{"type":"expand_arc","volume":3,"arc":3,"content":"[]"}`),
+		})},
+	}
+}
+
+func outlineAllOperationTask(t *testing.T, operation, volume, arc, span int) string {
+	t.Helper()
+	marker, err := domain.FormatOutlineAllIntent(domain.OutlineAllPendingAction{
+		Type:                domain.OutlineAllActionExpandArc,
+		Operation:           operation,
+		Volume:              volume,
+		Arc:                 arc,
+		ExpectedChapterSpan: span,
+		BeforeLayeredDigest: domain.PlanningV2DigestPrefix + strings.Repeat("c", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "[PIPELINE OUTLINE-ALL / SINGLE MUTATION]\n" + marker
+}
 
 func TestRunOutlineAllOperationWithModelDirectPromptAndCapability(t *testing.T) {
 	st := store.NewStore(t.TempDir())
@@ -142,6 +179,125 @@ func TestRunOutlineAllOperationWithModelDirectPromptAndCapability(t *testing.T) 
 	}
 	if strings.Contains(strings.ToLower(system), "coordinator") {
 		t.Fatalf("direct Architect system still claims Coordinator dependency: %q", system)
+	}
+}
+
+func TestRunOutlineAllOperationWithModelReanchorsExactFailureOnRetry(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	model := &outlineAllOperationCaptureModel{responses: []agentcore.Message{
+		outlineAllOperationToolUseResponse("save-rejected"),
+		outlineAllOperationToolUseResponse("save-success"),
+	}}
+	const rejection = "outline_all V3A3 chapter 167 rejected: core_event matched placeholder fragment 继续推进"
+	var executions int
+	saveTool := agentcore.NewFuncTool(
+		"save_foundation",
+		"test save",
+		map[string]any{"type": "object"},
+		func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+			executions++
+			if executions == 1 {
+				return nil, errors.New(rejection)
+			}
+			return json.RawMessage(`{"saved":true,"outline_all":true,"type":"expand_arc"}`), nil
+		},
+	)
+	task := outlineAllOperationTask(t, 18, 3, 3, 14)
+	protocolBefore, err := OutlineAllOperationProtocolDigest("ARCHITECT-LONG-SYSTEM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runOutlineAllOperationWithModel(
+		context.Background(),
+		bootstrap.Config{},
+		assets.Bundle{Prompts: assets.Prompts{ArchitectLong: "ARCHITECT-LONG-SYSTEM"}},
+		st,
+		task,
+		outlineAllOperationModel{ChatModel: model, Provider: "architect-provider", Name: "architect-main"},
+		saveTool,
+	)
+	if err != nil {
+		t.Fatalf("run direct operation with one correction: %v", err)
+	}
+	if executions != 2 || model.calls != 2 {
+		t.Fatalf("retry counts: executions=%d model_calls=%d, want 2/2", executions, model.calls)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(model.requests))
+	}
+	second := model.requests[1]
+	if len(second) < 2 {
+		t.Fatalf("second request too short: %+v", second)
+	}
+	retryReminder := second[len(second)-1]
+	if retryReminder.Role != agentcore.RoleUser {
+		t.Fatalf("retry tail role = %s, want user", retryReminder.Role)
+	}
+	for _, exact := range []string{
+		"operation=18 type=expand_arc volume=3 arc=3 expected_chapter_span=14",
+		`save_foundation(type="expand_arc", volume=3, arc=3, content=<恰好14个OutlineEntry>)`,
+		rejection,
+	} {
+		if !strings.Contains(retryReminder.TextContent(), exact) {
+			t.Fatalf("retry reminder missing %q: %q", exact, retryReminder.TextContent())
+		}
+	}
+	toolResult := second[len(second)-2]
+	if toolResult.Role != agentcore.RoleTool || !strings.Contains(toolResult.TextContent(), rejection) {
+		t.Fatalf("exact failed tool result was not preserved before retry reminder: role=%s text=%q", toolResult.Role, toolResult.TextContent())
+	}
+	protocolAfter, err := OutlineAllOperationProtocolDigest("ARCHITECT-LONG-SYSTEM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protocolAfter != protocolBefore {
+		t.Fatalf("runtime retry transport changed protocol digest: before=%s after=%s", protocolBefore, protocolAfter)
+	}
+}
+
+func TestRunOutlineAllOperationWithModelStopsAfterFourRejectedTurns(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	responses := make([]agentcore.Message, outlineAllOperationMaxTurns+1)
+	for i := range responses {
+		responses[i] = outlineAllOperationToolUseResponse("save-rejected-" + string(rune('a'+i)))
+	}
+	model := &outlineAllOperationCaptureModel{responses: responses}
+	var executions int
+	saveTool := agentcore.NewFuncTool(
+		"save_foundation",
+		"test save",
+		map[string]any{"type": "object"},
+		func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+			executions++
+			return nil, errors.New("host rejected outline mutation")
+		},
+	)
+	cfg := bootstrap.Config{Roles: map[string]bootstrap.RoleConfig{
+		"architect": {MaxTurns: 20},
+	}}
+	err := runOutlineAllOperationWithModel(
+		context.Background(),
+		cfg,
+		assets.Bundle{},
+		st,
+		outlineAllOperationTask(t, 18, 3, 3, 14),
+		outlineAllOperationModel{ChatModel: model, Provider: "architect-provider", Name: "architect-main"},
+		saveTool,
+	)
+	if !errors.Is(err, agentcore.ErrMaxTurns) {
+		t.Fatalf("four rejected turns error = %v, want ErrMaxTurns", err)
+	}
+	if model.calls != outlineAllOperationMaxTurns || executions != outlineAllOperationMaxTurns {
+		t.Fatalf(
+			"bounded retries: model_calls=%d executions=%d, want %d/%d",
+			model.calls, executions, outlineAllOperationMaxTurns, outlineAllOperationMaxTurns,
+		)
 	}
 }
 
