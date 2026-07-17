@@ -431,6 +431,231 @@ func normalizeContractText(value string) string {
 	return b.String()
 }
 
+var outlineContractClauseSplitRE = regexp.MustCompile(`[，,。；;！？!?\r\n]+`)
+
+var outlineContractHypotheticalMarkers = []string{
+	"计划以后", "计划日后", "计划未来", "计划下一", "打算以后", "打算日后", "打算未来", "打算下一",
+	"准备以后", "准备日后", "准备未来", "准备下一", "未来再", "日后再", "以后再", "等以后", "等日后",
+	"如果", "假如", "若是", "若要", "若能", "仅是假设", "只是假设", "只是设想", "仅是设想",
+	"方案写着", "草案写着", "回执写着", "纸面写着", "文件写着", "设想是", "考虑将", "考虑把",
+	"声称将", "宣称将", "拟于", "尚待", "仍待", "有待",
+}
+
+var outlineContractNegatedOutcomeMarkers = []string{
+	"并未", "未能", "更未", "不曾", "尚未", "还未", "还没", "无法", "没有", "否决", "落空", "取消", "放弃",
+}
+
+var outlineContractAlwaysNonRealizedMarkers = []string{
+	"并未做到", "没有做到", "未能做到", "并未实现", "没有实现", "未能实现", "并未落实", "没有落实", "未能落实",
+	"并未完成", "没有完成", "未能完成", "并未兑现", "没有兑现", "未能兑现", "最终落空", "后来取消", "当场否决",
+	"只是纸面", "仅在纸面",
+}
+
+var outlineContractExactFrameMarkers = []string{
+	"并非", "不是", "并未", "未曾", "没有", "未能", "尚未", "还未", "还没", "无法",
+	"原文如下", "会议纪要", "方案写着", "草案写着", "回执写着", "纸面写着", "文件写着", "公告栏展示", "展示一段文字",
+	"有人提议", "曾提议", "会上提出", "提议", "建议", "计划", "打算", "准备", "考虑", "如果", "假如", "若是", "若要", "若能",
+	"下个月", "下周", "明天", "未来", "以后", "日后", "届时", "将在", "将于", "拟于", "声称", "宣称",
+	"待审", "待定", "待批", "待表决", "尚处讨论", "仍在讨论", "仅供讨论", "只供讨论", "没有采纳", "未被采纳", "并未采纳", "未采纳",
+	"否决", "取消", "落空", "未发生", "没有发生", "未曾发生", "并未发生", "未实现", "未落实", "未兑现", "不作数", "作废",
+	"仅是假设", "只是假设", "只是方案", "仅是方案", "只是一份方案", "只是草案", "仅是草案", "仅为记录", "只作记录", "只做记录",
+}
+
+var outlineContractNegativeIntentMarkers = []string{
+	"不再", "不能", "不得", "不许", "不知", "不公开", "不泄露", "不抢", "不返场", "不依赖", "不牺牲", "不接受", "不允许",
+	"未返", "未满", "从未", "尚未", "未公开", "未知", "未接触", "未泄露", "未暴露", "未牺牲", "未发生", "未完成", "未能",
+	"无冷战", "无分离", "无人", "无须", "无需", "无法", "无权", "无因", "无损", "无条件",
+	"拒绝", "保密", "守密", "秘密", "隐藏", "隐瞒", "禁止", "停止", "退出", "取消", "否决", "放弃",
+}
+
+// OutlineContractResolutionRealized is the single deterministic proof
+// predicate shared by arc mutation validation, repair selection, and final
+// outline validation. It accepts a concrete paraphrase only when evidence
+// covers the actor/action/outcome breadth of planned_resolution. Clauses that
+// explicitly describe a future plan, rejected quotation, or negated outcome
+// do not contribute evidence, so lexical copying cannot prove realization.
+func OutlineContractResolutionRealized(chapter OutlineEntry, ref StoryContractRef) bool {
+	resolution := normalizeContractText(ref.PlannedResolution)
+	if resolution == "" {
+		return false
+	}
+	negativeIntent := containsAnyContractMarker(resolution, outlineContractNegativeIntentMarkers)
+	evidenceBigrams := make(map[string]struct{})
+	fields := append([]string{chapter.CoreEvent}, chapter.Scenes...)
+	for _, field := range fields {
+		normalizedField := normalizeContractText(field)
+		if normalizedField == "" {
+			continue
+		}
+		if strings.Contains(normalizedField, resolution) {
+			if outlineContractExactResolutionIsAsserted(normalizedField, resolution) {
+				return true
+			}
+			// A framed exact copy contributes no fallback n-grams. Otherwise
+			// removing only its first clause would let the remaining copied
+			// clauses satisfy the semantic coverage threshold.
+			continue
+		}
+		for _, clause := range outlineContractClauseSplitRE.Split(field, -1) {
+			normalizedClause := normalizeContractText(clause)
+			if normalizedClause == "" || containsAnyContractMarker(normalizedClause, outlineContractHypotheticalMarkers) {
+				continue
+			}
+			if containsAnyContractMarker(normalizedClause, outlineContractAlwaysNonRealizedMarkers) {
+				continue
+			}
+			if !negativeIntent && containsAnyContractMarker(normalizedClause, outlineContractNegatedOutcomeMarkers) {
+				continue
+			}
+			if strings.Contains(normalizedClause, resolution) {
+				return true
+			}
+			for gram := range outlineContractBigrams(normalizedClause) {
+				evidenceBigrams[gram] = struct{}{}
+			}
+		}
+	}
+	resolutionBigrams := outlineContractBigrams(resolution)
+	if len(resolutionBigrams) == 0 || len(evidenceBigrams) == 0 {
+		return false
+	}
+	hits := outlineContractBigramHits(resolutionBigrams, evidenceBigrams)
+	minimumHits := 10
+	if len(resolutionBigrams) < 24 {
+		minimumHits = 6
+	}
+	if hits < minimumHits || hits*4 < len(resolutionBigrams) {
+		return false
+	}
+	resolutionRunes := []rune(resolution)
+	for segment := 0; segment < 3; segment++ {
+		start := len(resolutionRunes) * segment / 3
+		end := len(resolutionRunes) * (segment + 1) / 3
+		segmentBigrams := outlineContractBigrams(string(resolutionRunes[start:end]))
+		minimumSegmentHits := (len(segmentBigrams) + 4) / 5
+		if minimumSegmentHits < 1 {
+			minimumSegmentHits = 1
+		}
+		if minimumSegmentHits > 3 {
+			minimumSegmentHits = 3
+		}
+		if outlineContractBigramHits(segmentBigrams, evidenceBigrams) < minimumSegmentHits {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAnyContractMarker(value string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func outlineContractTextPrefix(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func outlineContractTextSuffix(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[len(runes)-limit:])
+}
+
+func outlineContractExactResolutionIsAsserted(field, resolution string) bool {
+	searchFrom := 0
+	for searchFrom <= len(field)-len(resolution) {
+		relative := strings.Index(field[searchFrom:], resolution)
+		if relative < 0 {
+			break
+		}
+		start := searchFrom + relative
+		end := start + len(resolution)
+		outside := outlineContractTextSuffix(field[:start], 32) + outlineContractTextPrefix(field[end:], 32)
+		if !containsAnyContractMarker(outside, outlineContractExactFrameMarkers) {
+			return true
+		}
+		searchFrom = end
+	}
+	return false
+}
+
+func outlineContractBigrams(value string) map[string]struct{} {
+	runes := []rune(value)
+	grams := make(map[string]struct{}, max(0, len(runes)-1))
+	for i := 0; i+1 < len(runes); i++ {
+		grams[string(runes[i:i+2])] = struct{}{}
+	}
+	return grams
+}
+
+func outlineContractBigramHits(want, evidence map[string]struct{}) int {
+	hits := 0
+	for gram := range want {
+		if _, ok := evidence[gram]; ok {
+			hits++
+		}
+	}
+	return hits
+}
+
+// OutlineArcContractPayoffIssues validates the complete arc-local payoff
+// receipt, including its immutable ref, exact global chapter, uniqueness, and
+// concrete planned_resolution evidence. Callers must use the same globalStart
+// convention as FlattenOutline (reserved arcs included in the cursor).
+func OutlineArcContractPayoffIssues(arc ArcOutline, globalStart int) []string {
+	want := make(map[string]StoryContractRef, len(arc.ContractRefs))
+	parentCounts := make(map[string]int, len(arc.ContractRefs))
+	for _, ref := range arc.ContractRefs {
+		want[ref.ID] = ref
+		parentCounts[ref.ID]++
+	}
+	seen := make(map[string]int, len(want))
+	var issues []string
+	for offset, chapter := range arc.Chapters {
+		chapterNo := globalStart + offset
+		for _, ref := range chapter.ContractRefs {
+			expected, ok := want[ref.ID]
+			switch {
+			case !ok:
+				issues = append(issues, fmt.Sprintf("unknown_contract_ref=%q@chapter-%d", ref.ID, chapterNo))
+				continue
+			case ref != expected:
+				issues = append(issues, fmt.Sprintf("contract_ref_drift=%q@chapter-%d", ref.ID, chapterNo))
+				continue
+			case ref.PlannedPayoffChapter != chapterNo:
+				issues = append(issues, fmt.Sprintf("misplaced_contract_ref=%q@chapter-%d want-%d", ref.ID, chapterNo, ref.PlannedPayoffChapter))
+			}
+			seen[ref.ID]++
+			if !OutlineContractResolutionRealized(chapter, ref) {
+				issues = append(issues, fmt.Sprintf(
+					"planned_resolution_evidence_missing=%q@chapter-%d; concretely realize this actor, action, and terminal state in core_event/scenes (a negated, quoted-only, or future plan does not count): %q",
+					ref.ID, chapterNo, ref.PlannedResolution,
+				))
+			}
+		}
+	}
+	for id := range want {
+		if parentCounts[id] != 1 {
+			issues = append(issues, fmt.Sprintf("arc_contract_ref=%q count=%d want-1", id, parentCounts[id]))
+		}
+		if seen[id] != 1 {
+			issues = append(issues, fmt.Sprintf("contract_ref=%q payoff_count=%d want-1", id, seen[id]))
+		}
+	}
+	sort.Strings(issues)
+	return issues
+}
+
 func sceneLooksLikeJSONShell(value string) bool {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -542,7 +767,7 @@ type outlineContractPlacement struct {
 	arcEnd         int
 	isFinalArc     bool
 	isFinalChapter bool
-	payoffEvidence string
+	payoffChapter  OutlineEntry
 }
 
 // MissingCompassCoverage validates references, source digests and unique
@@ -583,6 +808,9 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 		for _, arc := range volume.Arcs {
 			start := cursor
 			end := start + arc.ChapterSpan() - 1
+			for _, issue := range OutlineArcContractPayoffIssues(arc, start) {
+				invalid = append(invalid, fmt.Sprintf("V%dA%d %s", volume.Index, arc.Index, issue))
+			}
 			for _, ref := range arc.ContractRefs {
 				where := fmt.Sprintf("V%dA%d", volume.Index, arc.Index)
 				if validateRef(ref, where) {
@@ -603,7 +831,7 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 							arcStart: start, arcEnd: end,
 							isFinalArc:     volume.Index == finalVolume && arc.Index == finalArc,
 							isFinalChapter: chapterNo == finalChapter,
-							payoffEvidence: normalizeContractText(chapter.CoreEvent + "\n" + strings.Join(chapter.Scenes, "\n")),
+							payoffChapter:  chapter,
 						})
 					}
 				}
@@ -630,8 +858,7 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 			a.volume != c.volume || a.arc != c.arc {
 			missing = append(missing, id+" payoff_binding_mismatch")
 		}
-		resolutionEvidence := normalizeContractText(c.ref.PlannedResolution)
-		if resolutionEvidence == "" || !strings.Contains(c.payoffEvidence, resolutionEvidence) {
+		if !OutlineContractResolutionRealized(c.payoffChapter, c.ref) {
 			missing = append(missing, id+" planned_resolution_not_realized_in_core_event_or_scenes")
 		}
 		if (want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable) &&

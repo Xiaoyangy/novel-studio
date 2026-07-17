@@ -237,3 +237,36 @@ func TestChapterZeroOutlineAllWorldTickBypassRejectsCompleteReceipt(t *testing.T
 		t.Fatalf("completed receipt must revoke bypass, authorized=%v err=%v", authorized, err)
 	}
 }
+
+func TestValidateOutlineAllArcContractPayoffsRequiresConcreteSemanticEvidence(t *testing.T) {
+	ref := domain.StoryContractRef{
+		ID:                   "open_thread-00-deadbeef",
+		Kind:                 domain.StoryContractOpenThread,
+		SourceDigest:         "sha256:deadbeef",
+		PlannedPayoffChapter: 13,
+		PlannedResolution:    "沈知遥凭连续异常完成推理，林澈主动坦白系统全貌，两人确认关系并把她确立为唯一知情者。",
+	}
+	arc := domain.ArcOutline{
+		Index:        2,
+		ContractRefs: []domain.StoryContractRef{ref},
+		Chapters: []domain.OutlineEntry{
+			{Title: "第十二章"},
+			{
+				Title:        "第十三章",
+				CoreEvent:    "林澈宣布旧厂问题已经解决，众人鼓掌后离开会场。",
+				Scenes:       []string{"工人到场", "会议结束", "厂门重新打开"},
+				ContractRefs: []domain.StoryContractRef{ref},
+			},
+		},
+	}
+	if err := validateOutlineAllArcContractPayoffs(arc, 12); err == nil {
+		t.Fatal("bare contract receipt passed without planned_resolution evidence")
+	}
+	arc.Chapters[1].CoreEvent = "林澈不再拿资金方挡在前面，主动交代系统的绑定经过、额度边界和失败惩罚；沈知遥用此前记录的连续异常逐项验证，补上推理最后一环。两人把感情选择与任务分开说清，正式确认关系，并约定她是除林澈外唯一知道系统真相的人。"
+	if err := validateOutlineAllArcContractPayoffs(arc, 12); err != nil {
+		t.Fatalf("concrete semantic planning evidence rejected: %v", err)
+	}
+	if err := validateOutlineAllArcContractPayoffs(arc, 11); err == nil {
+		t.Fatal("wrong reserved-arc cursor passed payoff placement validation")
+	}
+}

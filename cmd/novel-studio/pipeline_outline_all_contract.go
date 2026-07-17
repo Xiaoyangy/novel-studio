@@ -326,7 +326,7 @@ func outlineAllNextStructuralAction(
 
 func outlineAllNextRevisionAction(
 	volumes []domain.VolumeOutline,
-	compass domain.StoryCompass,
+	_ domain.StoryCompass,
 ) (domain.OutlineAllPendingAction, bool) {
 	for _, issue := range domain.OutlineChapterContractIssues(volumes) {
 		if issue.Code != "arc_unexpanded" {
@@ -338,42 +338,24 @@ func outlineAllNextRevisionAction(
 			}
 		}
 	}
-	if len(domain.MissingCompassCoverage(volumes, compass)) > 0 {
-		for _, volume := range volumes {
-			for _, arc := range volume.Arcs {
-				if outlineAllArcContractRefsNeedRevision(arc) {
-					return domain.OutlineAllPendingAction{
-						Type: domain.OutlineAllActionReviseArc, Volume: volume.Index,
-						Arc: arc.Index, ExpectedChapterSpan: arc.ChapterSpan(),
-					}, true
-				}
+	cursor := 1
+	for _, volume := range volumes {
+		for _, arc := range volume.Arcs {
+			start := cursor
+			cursor += arc.ChapterSpan()
+			if outlineAllArcContractRefsNeedRevision(arc, start) {
+				return domain.OutlineAllPendingAction{
+					Type: domain.OutlineAllActionReviseArc, Volume: volume.Index,
+					Arc: arc.Index, ExpectedChapterSpan: arc.ChapterSpan(),
+				}, true
 			}
 		}
 	}
 	return domain.OutlineAllPendingAction{}, false
 }
 
-func outlineAllArcContractRefsNeedRevision(arc domain.ArcOutline) bool {
-	want := make(map[string]domain.StoryContractRef, len(arc.ContractRefs))
-	for _, ref := range arc.ContractRefs {
-		want[ref.ID] = ref
-	}
-	seen := make(map[string]int)
-	for _, chapter := range arc.Chapters {
-		for _, ref := range chapter.ContractRefs {
-			expected, ok := want[ref.ID]
-			if !ok || ref != expected {
-				return true
-			}
-			seen[ref.ID]++
-		}
-	}
-	for id := range want {
-		if seen[id] != 1 {
-			return true
-		}
-	}
-	return false
+func outlineAllArcContractRefsNeedRevision(arc domain.ArcOutline, globalStart int) bool {
+	return len(domain.OutlineArcContractPayoffIssues(arc, globalStart)) > 0
 }
 
 func findOutlineAllArc(volumes []domain.VolumeOutline, volume, arc int) *domain.ArcOutline {

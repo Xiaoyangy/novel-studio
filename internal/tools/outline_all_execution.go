@@ -224,25 +224,8 @@ func validateOutlineAllArcMutationContent(
 }
 
 func validateOutlineAllArcContractPayoffs(arc domain.ArcOutline, globalStart int) error {
-	want := make(map[string]domain.StoryContractRef, len(arc.ContractRefs))
-	for _, ref := range arc.ContractRefs {
-		want[ref.ID] = ref
-	}
-	seen := make(map[string]int, len(want))
-	for offset, chapter := range arc.Chapters {
-		chapterNo := globalStart + offset
-		for _, ref := range chapter.ContractRefs {
-			expected, ok := want[ref.ID]
-			if !ok || ref != expected || ref.PlannedPayoffChapter != chapterNo {
-				return fmt.Errorf("outline_all arc chapter has an unknown or misplaced contract ref %q: %w", ref.ID, errs.ErrToolPrecondition)
-			}
-			seen[ref.ID]++
-		}
-	}
-	for id := range want {
-		if seen[id] != 1 {
-			return fmt.Errorf("outline_all arc contract ref %q payoff count=%d want 1: %w", id, seen[id], errs.ErrToolPrecondition)
-		}
+	if issues := domain.OutlineArcContractPayoffIssues(arc, globalStart); len(issues) > 0 {
+		return fmt.Errorf("outline_all arc contract payoff invalid (%s): contract ref alone is insufficient; core_event/scenes must concretely realize the planned actor, action, and terminal state without negation, quotation-only, or future-plan language: %w", strings.Join(issues, "; "), errs.ErrToolPrecondition)
 	}
 	return nil
 }
