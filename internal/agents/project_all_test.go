@@ -40,9 +40,25 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 
 func TestProjectAllPlanningProtocolDigestKeepsRuntimeRecoveryOutOfIdentity(t *testing.T) {
 	const plannerFixture = "planner-protocol-fixture.v1"
-	const want = "43830a7121a70165f92c5e36b98bce7edfb1c2d66dc6df765c40278ffb510332"
+	const want = "973c424eda31f62ac6c2ffd475a451b02844a11e614bd7dc5327edf827479232"
 	if got := ProjectAllPlanningProtocolDigest(plannerFixture); got != want {
 		t.Fatalf("project-all planning protocol digest changed: got %s want %s", got, want)
+	}
+}
+
+func TestWorldSimulatorSystemPromptCarriesGroundedAuthorityContract(t *testing.T) {
+	for _, required := range []string{
+		"grounded DecisionPolicy",
+		"location 必须是不超过 32 个 Unicode 字符",
+		"不得包含，。；！？或换行",
+		"decision/action 不得整句复制 current_goal",
+		"具体 current_action 或本章大纲中的具体行动句",
+		"decision_reason 与其余投影必须由至少2个当前因果锚点支持",
+		"不得加入后见信息",
+	} {
+		if !strings.Contains(worldSimulatorSystemPrompt, required) {
+			t.Fatalf("world simulator prompt missing grounded authority rule %q", required)
+		}
 	}
 }
 

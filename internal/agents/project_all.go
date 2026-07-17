@@ -745,6 +745,10 @@ func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
 	if toolContracts == "" {
 		return ""
 	}
+	authorityPolicy := tools.ProjectAllSimulationAuthorityProtocolDigest()
+	if authorityPolicy == "" {
+		return ""
+	}
 	digest, err := domain.DeterministicPlanningHash(struct {
 		Version            string `json:"version"`
 		WorldSimulator     string `json:"world_simulator"`
@@ -752,6 +756,7 @@ func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
 		Planner            string `json:"planner"`
 		PlannerBoundary    string `json:"planner_boundary"`
 		ToolContracts      string `json:"tool_contracts"`
+		AuthorityPolicy    string `json:"authority_policy"`
 	}{
 		Version:            "project-all-agent-protocol.v2",
 		WorldSimulator:     worldSimulatorSystemPrompt,
@@ -759,6 +764,7 @@ func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
 		Planner:            plannerPrompt,
 		PlannerBoundary:    projectAllPlannerBoundary,
 		ToolContracts:      toolContracts,
+		AuthorityPolicy:    authorityPolicy,
 	})
 	if err != nil {
 		return ""

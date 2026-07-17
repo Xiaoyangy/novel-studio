@@ -35,6 +35,46 @@ const (
 	simulationAuthorityNotSpecified  = "not_specified_in_rewrite_source"
 )
 
+const (
+	projectAllReuseDecisionPolicy            = "该角色决定已在当前 partial 落盘；只读校验，不得重发、改写或用本摘要覆盖。"
+	projectAllGroundedDecisionPolicy         = "本角色由服务端 project_all_grounded authority receipt 授权。必须使用 current_goal、current_pressure、resources、current_action、decision_model、本章大纲和当前 project_all_state 推演；project_all_state/连续态覆盖零章种子。current_goal 与 resources 逐项原样复制；knowledge_boundary 必须严格等于本对象的 knowledge_boundary 加 required_knowledge_boundaries，不得追加任何知识或秘密；current_pressure_policy=exact_continuity 时原样复制，=outline_authorized_concise 时从 current_pressure 或本章大纲中截取一条完整短句，不得概括。location 必须是逐字来自上一连续态、本章大纲或 book_world 的紧凑空间锚点，不超过 32 个 Unicode 字符，不得包含，。；！？或换行，禁止复制整段场景概述。decision 与 action 是当前具体行动合同，不得整句等于 current_goal；二者必须逐字来自具体的 current_action，或本章大纲中的一条具体行动句，不得用目标、主题或概述冒充动作。decision_reason 与 available_options 的其他项、immediate_result、state_after、butterfly_effect.effect、protagonist_impact 等 projected output 必须保留至少两个输入因果锚点，不得引入输入中不存在的人名、地点、资源、数量、秘密、后台规则或世界机制，也不得使用事后信息或 arc 中尚未发生的未来结果。所有 projected output 会进入服务端 decision root、authority receipt、SimulationID 与后续 delta gate，禁止用一段合法前缀夹带新秘密。"
+	projectAllRewriteOnlyDecisionPolicy      = "把角色实名放入 simulate_chapter_world.authority_contract_characters；服务端将逐字段物化 rewrite_source_only_contract。action 已优先取自 rewrite_source.preserve_facts 的角色明确动作、其次取正文原句；不得手抄、概括或扩写。"
+	projectAllHoldBaselineDecisionPolicy     = "把角色实名放入 simulate_chapter_world.authority_contract_characters；服务端将逐字段物化 hold_baseline_contract。不得手抄或补职业、地点、关系、资源、通信、动机与未来行动。"
+	projectAllAuthoritativeDecisionPolicy    = "只使用本摘要列出的权威事实和本章可见证据推进；不得把 arc 中的未来结果提前当成当前事实。"
+	projectAllRequiredKnowledgePolicy        = " knowledge_boundary 必须逐条原样包含 required_knowledge_boundaries；这是 preserve_facts 的独立知识锁，不能删除、弱化或改成可能知道。"
+	projectAllAuthoritySummaryPolicyTemplate = "名单与摘要一一对应。blocking=%d 的角色不得补猜或手抄合同；只把实名放入 simulate_chapter_world.authority_contract_characters，由服务端按 authority_mode 物化 rewrite_source_only 或 hold_baseline。unknown 是有效边界，不是等待模型填空。"
+)
+
+// ProjectAllSimulationAuthorityProtocolDigest returns a stable dependency root
+// for every model-visible authority policy. Project-all generation identity can
+// include this root so policy changes cannot resume an older generation under
+// a different simulation contract.
+func ProjectAllSimulationAuthorityProtocolDigest() string {
+	digest, err := domain.DeterministicPlanningHash(struct {
+		Version           string `json:"version"`
+		Reuse             string `json:"reuse"`
+		Grounded          string `json:"grounded"`
+		RewriteSourceOnly string `json:"rewrite_source_only"`
+		HoldBaseline      string `json:"hold_baseline"`
+		Authoritative     string `json:"authoritative"`
+		RequiredKnowledge string `json:"required_knowledge"`
+		AuthoritySummary  string `json:"authority_summary"`
+	}{
+		Version:           "project-all-simulation-authority-protocol.v2",
+		Reuse:             projectAllReuseDecisionPolicy,
+		Grounded:          projectAllGroundedDecisionPolicy,
+		RewriteSourceOnly: projectAllRewriteOnlyDecisionPolicy,
+		HoldBaseline:      projectAllHoldBaselineDecisionPolicy,
+		Authoritative:     projectAllAuthoritativeDecisionPolicy,
+		RequiredKnowledge: projectAllRequiredKnowledgePolicy,
+		AuthoritySummary:  projectAllAuthoritySummaryPolicyTemplate,
+	})
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
 // effectiveProtagonistDecision removes authority-store sentinels from the POV
 // contract. A blocking protagonist may keep an exact no-inference sentinel in
 // character_decisions, but protagonist_projection must still contain an
@@ -356,25 +396,25 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		switch {
 		case entry.SimulationStatus == "already_present":
 			entry.AuthorityMode = "reuse_saved_decision"
-			entry.DecisionPolicy = "该角色决定已在当前 partial 落盘；只读校验，不得重发、改写或用本摘要覆盖。"
+			entry.DecisionPolicy = projectAllReuseDecisionPolicy
 		case projectAllGrounded:
 			entry.AuthorityMode = "project_all_grounded"
-			entry.DecisionPolicy = "本角色由服务端 project_all_grounded authority receipt 授权。必须使用 current_goal、current_pressure、resources、current_action、decision_model、本章大纲和当前 project_all_state 推演；project_all_state/连续态覆盖零章种子。current_goal 与 resources 逐项原样复制；knowledge_boundary 必须严格等于本对象的 knowledge_boundary 加 required_knowledge_boundaries，不得追加任何知识或秘密；current_pressure_policy=exact_continuity 时原样复制，=outline_authorized_concise 时从 current_pressure 或本章大纲中截取一条完整短句，不得概括。location 必须原样来自上一连续态、本章大纲或 book_world。decision 与 action 是输入侧合同，必须逐字来自 current_action/current_goal/本章大纲；available_options 的其他项、immediate_result、state_after、butterfly_effect.effect 与 protagonist_impact 可以写推演出的新文本，但必须保留至少两个输入因果锚点，不能引入输入中不存在的人名、地点、资源、数量、秘密、后台规则或世界机制。所有 projected output 会进入服务端 decision root、authority receipt、SimulationID 与后续 delta gate，禁止用一段合法前缀夹带新秘密。"
+			entry.DecisionPolicy = projectAllGroundedDecisionPolicy
 		case entry.Blocking && entry.VisibleInCurrentChapter && !projectAllFresh:
 			entry.AuthorityMode = "rewrite_source_only"
 			entry.RewriteSourceEvidence = rewriteSourceEvidenceForCharacter(st, chapter, name)
 			entry.RewriteSourceOnlyContract = rewriteSourceOnlyContractPayload(name, chapter, entry.RewriteSourceEvidence, entry.RequiredKnowledgeBoundary)
-			entry.DecisionPolicy = "把角色实名放入 simulate_chapter_world.authority_contract_characters；服务端将逐字段物化 rewrite_source_only_contract。action 已优先取自 rewrite_source.preserve_facts 的角色明确动作、其次取正文原句；不得手抄、概括或扩写。"
+			entry.DecisionPolicy = projectAllRewriteOnlyDecisionPolicy
 		case entry.Blocking:
 			entry.AuthorityMode = "hold_baseline"
-			entry.DecisionPolicy = "把角色实名放入 simulate_chapter_world.authority_contract_characters；服务端将逐字段物化 hold_baseline_contract。不得手抄或补职业、地点、关系、资源、通信、动机与未来行动。"
+			entry.DecisionPolicy = projectAllHoldBaselineDecisionPolicy
 			entry.HoldBaselineContract = holdBaselineContractPayload(name, chapter, entry.RequiredKnowledgeBoundary)
 		default:
 			entry.AuthorityMode = "authoritative"
-			entry.DecisionPolicy = "只使用本摘要列出的权威事实和本章可见证据推进；不得把 arc 中的未来结果提前当成当前事实。"
+			entry.DecisionPolicy = projectAllAuthoritativeDecisionPolicy
 		}
 		if len(entry.RequiredKnowledgeBoundary) > 0 && entry.SimulationStatus != "already_present" {
-			entry.DecisionPolicy += " knowledge_boundary 必须逐条原样包含 required_knowledge_boundaries；这是 preserve_facts 的独立知识锁，不能删除、弱化或改成可能知道。"
+			entry.DecisionPolicy += projectAllRequiredKnowledgePolicy
 		}
 		entry.AuthoritySources = compactStrings(entry.AuthoritySources)
 		result = append(result, entry)
@@ -1000,6 +1040,6 @@ func simulationCharacterAuthorityPolicy(authority []simulationCharacterAuthority
 	return map[string]any{
 		"required_count": len(authority),
 		"blocking_count": missing,
-		"policy":         fmt.Sprintf("名单与摘要一一对应。blocking=%d 的角色不得补猜或手抄合同；只把实名放入 simulate_chapter_world.authority_contract_characters，由服务端按 authority_mode 物化 rewrite_source_only 或 hold_baseline。unknown 是有效边界，不是等待模型填空。", missing),
+		"policy":         fmt.Sprintf(projectAllAuthoritySummaryPolicyTemplate, missing),
 	}
 }

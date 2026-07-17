@@ -995,6 +995,36 @@ func TestSimulationCharacterAuthorityPolicyMatchesRoster(t *testing.T) {
 	}
 }
 
+func TestProjectAllSimulationAuthorityProtocolDigestStable(t *testing.T) {
+	const want = "9338f8a1c6c22ce5ab5126d983e3e5ece186fffc3e3ce4224266d2fff67af4d5"
+	got := ProjectAllSimulationAuthorityProtocolDigest()
+	if got == "" {
+		t.Fatal("project-all simulation authority protocol digest is empty")
+	}
+	if got != want {
+		t.Fatalf("project-all simulation authority protocol digest changed: got %s want %s", got, want)
+	}
+}
+
+func TestProjectAllGroundedDecisionPolicyPinsProjectionContract(t *testing.T) {
+	for _, required := range []string{
+		"紧凑空间锚点",
+		"不超过 32 个 Unicode 字符",
+		"不得包含，。；！？或换行",
+		"不得整句等于 current_goal",
+		"具体的 current_action",
+		"本章大纲中的一条具体行动句",
+		"decision_reason",
+		"至少两个输入因果锚点",
+		"不得引入输入中不存在",
+		"不得使用事后信息",
+	} {
+		if !strings.Contains(projectAllGroundedDecisionPolicy, required) {
+			t.Fatalf("grounded authority policy missing %q:\n%s", required, projectAllGroundedDecisionPolicy)
+		}
+	}
+}
+
 func TestStagedPlanRepairKeepsSimulationCharacterAuthority(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	if err := st.SaveCharacterDossier(domain.CharacterDossier{
