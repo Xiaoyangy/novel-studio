@@ -1246,6 +1246,29 @@ func compactWorldSimulationAuthority(result map[string]any) {
 			entry["rewrite_source_only_contract"] = item.RewriteSourceOnlyContract
 		case "reuse_saved_decision":
 			entry["locked_policy"] = "决定已在 partial 落盘；不得重发、改写或从旧正文重建。"
+		case domain.SimulationAuthorityModeGrounded:
+			// Grounded actors must expose the exact server-validated inputs, but the
+			// long shared decision policy belongs at mode level. Falling through to
+			// the full-struct fallback repeats dossier/arc/policy prose and can push
+			// the one still-missing actor into Codex's middle-clipped message region.
+			add("description", item.Description, strings.TrimSpace(item.Description) != "")
+			entry["current_location"] = item.CurrentLocation
+			entry["current_status"] = item.CurrentStatus
+			entry["current_goal"] = item.CurrentGoal
+			entry["current_action"] = item.CurrentAction
+			entry["current_pressure"] = item.CurrentPressure
+			entry["current_pressure_policy"] = item.CurrentPressurePolicy
+			// Keep an explicit empty set: [] is an exact grounded resource boundary,
+			// not an invitation to infer resources from role or relationship prose.
+			entry["resources"] = append([]string{}, item.Resources...)
+			entry["required_knowledge_boundaries"] = append(
+				[]string{},
+				item.RequiredKnowledgeBoundary...,
+			)
+			add("relationships", item.Relationships, len(item.Relationships) > 0)
+			add("knowledge_boundary", item.KnowledgeBoundary, strings.TrimSpace(item.KnowledgeBoundary) != "")
+			add("decision_model", item.DecisionModel, strings.TrimSpace(item.DecisionModel) != "")
+			entry["communication_boundary"] = item.CommunicationBoundary
 		case "authoritative":
 			// Only current causal inputs belong here. Arc is deliberately omitted:
 			// it is a future trajectory, not an authorized present fact.
@@ -1278,6 +1301,7 @@ func compactWorldSimulationAuthority(result map[string]any) {
 		"format": "layered_v1",
 		"mode_policies": map[string]string{
 			"authoritative":        "仅用 entry 中 current_*、desires/boundaries、resources、relationships、knowledge_boundary、required_knowledge_boundaries、decision_model 和通信边界推演；required_knowledge_boundaries 必须逐条原样进入提交的 knowledge_boundary，不得把未下发 arc 当当前事实。",
+			"project_all_grounded": projectAllGroundedDecisionPolicy,
 			"reuse_saved_decision": "该角色已落盘，禁止重发。",
 			"hold_baseline":        "把角色实名放入 simulate_chapter_world.authority_contract_characters，由服务端物化 hold_baseline_contract；不得手抄或补职业、地点、关系、资源、通信、动机或未来行动。",
 			"rewrite_source_only":  "把角色实名放入 simulate_chapter_world.authority_contract_characters，由服务端物化 rewrite_source_only_contract；不得手抄或改写 preserve_facts/rewrite_source_evidence。",

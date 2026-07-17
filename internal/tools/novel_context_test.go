@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -1685,6 +1686,136 @@ func TestWorldSimulationProfileLayersInvalidNineteenCharacterAuthority(t *testin
 	brief := working["rewrite_brief"].(map[string]any)
 	if gates, _ := brief["whole_text_single_segment_gates"].([]any); len(gates) == 0 {
 		t.Fatalf("world repair lost exact whole-text gate: %#v", brief)
+	}
+}
+
+func TestWorldSimulationProfileKeepsLastGroundedAuthorityInsideCodexMessageBudget(t *testing.T) {
+	const codexPerMessageTextRuneBudget = 45_000
+	const (
+		groundedCharacter = "梁广财"
+		currentGoal       = "梁广财要以农户合作社代表的立场，在第一章核心事件里做出一个可验证、会留下后果的选择。"
+		currentAction     = "由角色卡推出：50岁，山地果蔬乡镇合作社负责人，关心果蔬卖价、损耗和运输，话不多但认结果。直播助农和冷链仓推进中，他代表农户的真实期待和警惕。；务实；谨慎；重承诺；不爱空话；行动时先保留边界，再换取新信息。"
+		currentPressure   = "返乡接风饭上，梁广财借关心追问失业补偿、工资和下一份工作。"
+		knowledgeBoundary = "只知道角色卡、自己经历、通信中获得的信息；不知道主角内心、后台规则和其他配角未传回的时间线。"
+		decisionModel     = "先核验证据，再决定是否承诺、交易、暴露秘密或升级冲突。"
+	)
+
+	authority := make([]simulationCharacterAuthority, 0, 16)
+	characters := make([]string, 0, 16)
+	present := make([]string, 0, 15)
+	for i := 1; i <= 15; i++ {
+		name := fmt.Sprintf("已落盘角色%02d", i)
+		characters = append(characters, name)
+		present = append(present, name)
+		authority = append(authority, simulationCharacterAuthority{
+			Character:        name,
+			AuthorityMode:    "reuse_saved_decision",
+			SimulationStatus: "already_present",
+			Blocking:         false,
+		})
+	}
+	characters = append(characters, groundedCharacter)
+	authority = append(authority, simulationCharacterAuthority{
+		Character:               groundedCharacter,
+		Role:                    "农户合作社代表",
+		Tier:                    "secondary",
+		Aliases:                 []string{"梁叔", "二姨夫"},
+		Description:             "50岁，山地果蔬乡镇合作社负责人，关心果蔬卖价、损耗和运输，话不多但认结果。",
+		Arc:                     strings.Repeat("未来弧线不得进入当前 grounded 决策。", 2_400),
+		CurrentLocation:         "返乡接风饭上",
+		CurrentStatus:           simulationAuthorityUnknown,
+		CurrentGoal:             currentGoal,
+		CurrentAction:           currentAction,
+		CurrentPressure:         currentPressure,
+		CurrentPressurePolicy:   "outline_authorized_concise",
+		Resources:               nil,
+		Relationships:           []string{"林澈｜试探/未结盟基线｜未新增正文债务或信任"},
+		KnowledgeBoundary:       knowledgeBoundary,
+		DecisionModel:           decisionModel,
+		VisibleInCurrentChapter: true,
+		SimulationStatus:        "required_missing",
+		AuthorityMode:           domain.SimulationAuthorityModeGrounded,
+		AuthoritySources:        []string{"meta/initial_character_dynamics.json:梁广财"},
+		MissingAuthority:        []string{"current_status"},
+		Blocking:                false,
+		DecisionPolicy:          projectAllGroundedDecisionPolicy,
+	})
+
+	result := map[string]any{
+		"simulation_characters":          characters,
+		"simulation_character_authority": authority,
+		"simulation_character_authority_policy": map[string]any{
+			"required_count": 16,
+			"blocking_count": 0,
+		},
+		"chapter_world_simulation": map[string]any{
+			"status":             "invalid",
+			"characters_present": present,
+			"gaps":               []string{"missing character decision: 梁广财"},
+		},
+		"working_memory": map[string]any{
+			"current_chapter_outline": map[string]any{
+				"chapter": 1,
+				"scenes":  []string{"返乡接风饭上，梁广财一边夹菜一边追问下一份工作。"},
+			},
+		},
+	}
+	before, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := utf8.RuneCount(before); got <= codexPerMessageTextRuneBudget {
+		t.Fatalf("fixture must reproduce the old per-message middle-clipping risk: got=%d", got)
+	}
+
+	raw, err := finalizeContextResult(result, 1, "world_simulation")
+	if err != nil {
+		t.Fatalf("grounded repair context failed to finalize: %v", err)
+	}
+	if got := utf8.RuneCount(raw); got > codexPerMessageTextRuneBudget {
+		t.Fatalf("grounded repair context would still trigger Codex middle clipping: got=%d budget=%d", got, codexPerMessageTextRuneBudget)
+	}
+	if strings.Contains(string(raw), "Codex 入参压缩") {
+		t.Fatal("grounded repair context already contains a middle-clipping marker")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	packet := payload["simulation_character_authority"].(map[string]any)
+	entries := packet["entries"].([]any)
+	if len(entries) != 16 {
+		t.Fatalf("authority roster changed during compaction: %d", len(entries))
+	}
+	grounded := entries[len(entries)-1].(map[string]any)
+	for key, want := range map[string]string{
+		"authority_mode":          domain.SimulationAuthorityModeGrounded,
+		"current_goal":            currentGoal,
+		"current_action":          currentAction,
+		"current_pressure":        currentPressure,
+		"current_pressure_policy": "outline_authorized_concise",
+		"knowledge_boundary":      knowledgeBoundary,
+		"decision_model":          decisionModel,
+	} {
+		if got := strings.TrimSpace(fmt.Sprint(grounded[key])); got != want {
+			t.Fatalf("grounded compact entry lost %s:\nwant=%q\ngot=%q", key, want, got)
+		}
+	}
+	if resources, ok := grounded["resources"].([]any); !ok || len(resources) != 0 {
+		t.Fatalf("empty grounded resource boundary must remain explicit: %#v", grounded["resources"])
+	}
+	if locks, ok := grounded["required_knowledge_boundaries"].([]any); !ok || len(locks) != 0 {
+		t.Fatalf("empty grounded knowledge-lock set must remain explicit: %#v", grounded["required_knowledge_boundaries"])
+	}
+	for _, removed := range []string{"arc", "decision_policy", "traits", "desires", "boundaries"} {
+		if _, leaked := grounded[removed]; leaked {
+			t.Fatalf("grounded compact entry retained duplicated/non-current field %q: %#v", removed, grounded)
+		}
+	}
+	modePolicies := packet["mode_policies"].(map[string]any)
+	if got := fmt.Sprint(modePolicies[domain.SimulationAuthorityModeGrounded]); got != projectAllGroundedDecisionPolicy {
+		t.Fatalf("grounded shared mode policy was lost or changed: %q", got)
 	}
 }
 
