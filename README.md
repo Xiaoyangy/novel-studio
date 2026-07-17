@@ -139,6 +139,9 @@ projected state delta。
 - `outline-all` 的单次 operation 最多执行四轮；每次 `save_foundation` 被拒后，下一轮最后一条 user 消息都会重新附上同一份精确授权与宿主原始错误，防止长上下文重试时漂移到其他卷弧。上限与回锚只属于运行时传输，不改变既有候选的 protocol digest，可从原 operation receipt 继续。
 - 章纲占位符检查改为语义化处理：`占位`、`占位内容`、`此处占位` 等元写作壳仍会 fail closed；长而具体的经营事件中出现“拆单占位”“仓位占位”等正常叙事词不再被误杀。其他 `TODO`、`待细化`、`继续推进` 等空泛片段继续严格拦截。
 - 指南针回收的逐弧保存、自动 `revise_arc` 定位与全书终局校验现在共用同一个确定性证据谓词：章级 ref 必须逐字段一致、落在冻结的全局章位且只出现一次，对应 `planned_resolution` 的行动者、行动与终态必须在该章 `core_event/scenes` 中形成跨首中尾的具体语义证据。自然改写可以通过；裸 ref、空泛“事情解决”以及带常见显式否定、方案引用、未采纳或未来态框架的字面复制不能冒充兑现。缺口会在目标弧内即时返工，不再等全书展开完才报错；它也不替代后续逐章推演、逐章渲染和 exact-body 审核。
+- Project-Arc 的 world simulation 不再把一次 20-turn 会话当成唯一成败边界：每次成功工具调用继续落到同一 non-canon partial；会话预算耗尽后，宿主读取精确 gaps，用最多三次有界 fresh session 续接，恢复会话缩短到最多 6 turns。若最后一轮刚好补齐字段却没来得及 finalize，宿主会用当前 execution lease 刷新 `novel_context` access receipt 并原子收口，不要求人工重跑，也不复用旧 PID 的 token。
+- `project_all_grounded` 主角只对 `protagonist_projection.chosen_decision` 做服务端精确绑定；options 和 reason 仍由模型按最终决定时点的可用选项与可见证据编写，再经知识边界、新奇事实和因果锚点校验，防止已失败或后见动作被固化成当前选项。任何显式提交的残缺 projection 都在落盘前原子拒绝，不再覆盖可恢复 partial；若所有有界会话仍不能收口，错误会同时报告剩余 gaps、agent error 与 host-finalize error。
+- `blocking=true` 的 hold-baseline/rewrite-only 角色合同改由宿主在模型会话前按 8 名一批确定性物化，不消耗模型轮次，也不生成 grounded 决定或自动 finalize。Project-All generation identity 同时纳入 Simulator/Planner 实际可见的工具 description 与 schema；选项语义、必填字段或工具合同变化会正式生成新 generation，不会静默续用旧 partial。
 
 ## 快速开始
 
@@ -286,6 +289,7 @@ flowchart TD
 ### 拆分阶段命令
 
 `--dir` 指向书目运行目录，不是 `output/novel`。`preplan`、`project-all` 和 `seal` 都是当前弧阶段，弧边界由已冻结的全书章纲与当前正史决定，通常不要传 `--from/--to`。
+`--restart` 只用于显式开启 successor generation；同一 building generation 的中断续跑必须去掉它，否则会旋转 attempt nonce 并放弃本可安全恢复的 partial。若模型可见协议或工具合同真的变化，新 protocol digest 会自动建立新 generation，也不需要额外传 `--restart`。
 
 ```bash
 PROJECT='data/runs/你的书名'

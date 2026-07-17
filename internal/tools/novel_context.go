@@ -423,7 +423,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			policy = "该 partial 没有任何角色决定、保留事实覆盖或主角投影；下一次有效 simulate_chapter_world 提交会先丢弃这个空壳，再从当前上下文重建。"
 		} else if len(gaps) == 0 {
 			status = "ready_to_finalize"
-			policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、sources 或 time_window。"
+			policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, sources=[本轮 planning_context_access_receipt.source_token], finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、旧 sources 或 time_window。"
 		}
 		if status != "ready_to_finalize" {
 			addAuthority()
@@ -439,7 +439,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			"rewrite_fact_coverage":      partial.RewriteFactCoverage,
 			"gaps":                       gaps,
 			"policy":                     policy,
-			"projection_policy":          "locked_character_decisions 是已落盘、禁止覆盖的权威证据。protagonist_projection 只能由这些决定及本轮新增决定派生；rewrite_source 正文可能正是待修旧稿，不得用旧稿覆盖锁定决定。hidden_pressures 也不得把 preserve_facts 明令禁止的推测改写成‘是否/可能’后重新引入。",
+			"projection_policy":          "locked_character_decisions 是已落盘、禁止覆盖的权威证据。protagonist_projection 只能由这些决定及本轮新增决定派生；project_all_grounded 只由服务端精确绑定主角 chosen_decision，模型仍必须一次完整提交决定当下真正可用的 available_options、基于可见证据的 decision_reason、observable_effects、hidden_pressures、plan_constraints 和 causal_chain，不得把已失败或已过期动作当作当前选项。rewrite_source 正文可能正是待修旧稿，不得用旧稿覆盖锁定决定。hidden_pressures 也不得把 preserve_facts 明令禁止的推测改写成‘是否/可能’后重新引入。",
 		}
 		return
 	}
@@ -587,7 +587,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 				simulationAuthorityNeeded = true
 			} else if len(gaps) == 0 {
 				status = "ready_to_finalize"
-				policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、sources 或 time_window。"
+				policy = "全部角色决定、保留事实覆盖、主角投影和来源已通过校验。只调用 simulate_chapter_world(chapter=N, sources=[本轮 planning_context_access_receipt.source_token], finalize=true) 原子转正式；不得重发 character_decisions、protagonist_projection、rewrite_fact_coverage、旧 sources 或 time_window。"
 				simulationFinalizationOnly = true
 			} else {
 				simulationAuthorityNeeded = true
@@ -599,7 +599,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 				"policy":             policy,
 			}
 			if simulationFinalizationOnly {
-				nextStep = "只调用 simulate_chapter_world(chapter=N, finalize=true) 原子转正式；不得重发任何已落盘字段。成功后重新调用 novel_context(profile=planning) 并按新 simulation 重建 plan_structure。"
+				nextStep = "只调用 simulate_chapter_world(chapter=N, sources=[本轮 planning_context_access_receipt.source_token], finalize=true) 原子转正式；不得重发任何已落盘字段或旧 sources。成功后重新调用 novel_context(profile=planning) 并按新 simulation 重建 plan_structure。"
 			} else {
 				nextStep = "先继续分批调用 simulate_chapter_world，完成全角色决定、理由、蝴蝶效应和 protagonist_projection 并 finalize；此前禁止 plan_details、craft_recall/read_chapter。"
 			}

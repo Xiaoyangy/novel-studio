@@ -43,6 +43,311 @@ type ProjectedArcBoundary struct {
 	BookLastChapter int
 }
 
+// A simulator turn is intentionally bounded, but every successful tool call
+// durably stages a partial. A large cast plus strict authority contracts can
+// legitimately consume one agent's turn budget before the final two actors or
+// projection fields are submitted. Project-Arc resumes that partial in a fresh
+// context instead of making the operator rerun the whole pipeline. The bound
+// remains small so a model that makes no progress still fails closed.
+const projectAllWorldSimulationPassLimit = 3
+
+const projectAllAuthorityPrefillBatchLimit = 8
+
+type projectAllWorldSimulationExecutor interface {
+	Execute(context.Context, json.RawMessage) (json.RawMessage, error)
+}
+
+type projectAllAuthorityPrefillResult struct {
+	Characters    []string
+	Batches       [][]string
+	RemainingGaps []string
+}
+
+type projectAllAuthorityContextEntry struct {
+	Character        string `json:"character"`
+	SimulationStatus string `json:"simulation_status"`
+	Blocking         bool   `json:"blocking"`
+}
+
+// prefillProjectedWorldSimulationAuthority moves server-authored blocking
+// contracts into the durable partial before the model session. It never
+// authors a grounded decision or projection and never finalizes a simulation.
+func prefillProjectedWorldSimulationAuthority(
+	ctx context.Context,
+	contextTool projectAllWorldSimulationExecutor,
+	simulationTool projectAllWorldSimulationExecutor,
+	chapter int,
+	remainingGaps func() []string,
+) (projectAllAuthorityPrefillResult, error) {
+	var result projectAllAuthorityPrefillResult
+	if contextTool == nil || simulationTool == nil || chapter <= 0 {
+		return result, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := projectAllWorldSimulationContextError(ctx, chapter, "before authority prefill context"); err != nil {
+		return result, err
+	}
+	contextArgs, err := json.Marshal(map[string]any{
+		"chapter": chapter,
+		"profile": "world_simulation",
+	})
+	if err != nil {
+		return result, err
+	}
+	contextRaw, err := contextTool.Execute(ctx, contextArgs)
+	if err != nil {
+		return result, fmt.Errorf("read world-simulation authority prefill context: %w", err)
+	}
+	if err := projectAllWorldSimulationContextError(ctx, chapter, "after authority prefill context"); err != nil {
+		return result, err
+	}
+	characters, accessToken, projectAllToken, err := projectedWorldSimulationAuthorityPrefillInputs(contextRaw)
+	if err != nil {
+		return result, err
+	}
+	result.Characters = append([]string(nil), characters...)
+	if len(characters) > 0 {
+		if accessToken == "" {
+			return result, fmt.Errorf("world-simulation authority prefill context did not issue an access source token")
+		}
+		if projectAllToken == "" {
+			return result, fmt.Errorf("world-simulation authority prefill context did not expose the project-all state source token")
+		}
+	}
+	for start := 0; start < len(characters); start += projectAllAuthorityPrefillBatchLimit {
+		if err := projectAllWorldSimulationContextError(ctx, chapter, "before authority prefill write"); err != nil {
+			return result, err
+		}
+		end := min(start+projectAllAuthorityPrefillBatchLimit, len(characters))
+		batch := append([]string(nil), characters[start:end]...)
+		args := map[string]any{
+			"chapter":                       chapter,
+			"authority_contract_characters": batch,
+		}
+		if start == 0 {
+			args["sources"] = []string{projectAllToken, accessToken}
+		}
+		raw, marshalErr := json.Marshal(args)
+		if marshalErr != nil {
+			return result, marshalErr
+		}
+		responseRaw, executeErr := simulationTool.Execute(ctx, raw)
+		if executeErr != nil {
+			return result, fmt.Errorf("prefill world-simulation authority batch %d: %w", len(result.Batches)+1, executeErr)
+		}
+		result.Batches = append(result.Batches, batch)
+		var response struct {
+			Gaps []string `json:"gaps"`
+		}
+		if err := json.Unmarshal(responseRaw, &response); err != nil {
+			return result, fmt.Errorf("decode world-simulation authority prefill batch %d: %w", len(result.Batches), err)
+		}
+		result.RemainingGaps = append([]string(nil), response.Gaps...)
+		if err := projectAllWorldSimulationContextError(ctx, chapter, "after authority prefill write"); err != nil {
+			return result, err
+		}
+	}
+	if remainingGaps != nil {
+		result.RemainingGaps = append([]string(nil), remainingGaps()...)
+	}
+	return result, nil
+}
+
+func projectedWorldSimulationAuthorityPrefillInputs(
+	raw json.RawMessage,
+) (characters []string, accessToken string, projectAllToken string, err error) {
+	var envelope struct {
+		Access struct {
+			SourceToken string `json:"source_token"`
+		} `json:"planning_context_access_receipt"`
+		ProjectAllToken string          `json:"project_all_state_source_token"`
+		Authority       json.RawMessage `json:"simulation_character_authority"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, "", "", fmt.Errorf("decode world-simulation authority prefill context: %w", err)
+	}
+	accessToken = strings.TrimSpace(envelope.Access.SourceToken)
+	projectAllToken = strings.TrimSpace(envelope.ProjectAllToken)
+	authorityRaw := json.RawMessage(strings.TrimSpace(string(envelope.Authority)))
+	if len(authorityRaw) == 0 || string(authorityRaw) == "null" {
+		return nil, accessToken, projectAllToken, nil
+	}
+	var entries []projectAllAuthorityContextEntry
+	if authorityRaw[0] == '[' {
+		if err := json.Unmarshal(authorityRaw, &entries); err != nil {
+			return nil, "", "", fmt.Errorf("decode world-simulation authority entries: %w", err)
+		}
+	} else {
+		var layered struct {
+			Entries []projectAllAuthorityContextEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(authorityRaw, &layered); err != nil {
+			return nil, "", "", fmt.Errorf("decode layered world-simulation authority entries: %w", err)
+		}
+		entries = layered.Entries
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Character)
+		if !entry.Blocking || name == "" ||
+			strings.TrimSpace(entry.SimulationStatus) == "already_present" {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		characters = append(characters, name)
+	}
+	return characters, accessToken, projectAllToken, nil
+}
+
+func projectAllWorldSimulationPrompt(
+	arcBoundary ProjectedArcBoundary,
+	chapter int,
+	pass int,
+	gaps []string,
+) string {
+	gapSummary := "missing chapter world simulation"
+	if compact := compactProjectAllPromptGaps(gaps); len(compact) > 0 {
+		gapSummary = strings.Join(compact, "；")
+	}
+	return fmt.Sprintf(
+		"Project-Arc 正在隔离工作区推演 V%dA%d《%s》（第%d-%d章），本弧目标：%s。当前只处理第 %d 章，这是本次进程第 %d/%d 个有界 world-simulation 会话。先调用 novel_context(chapter=%d, profile=world_simulation)，并把本轮 planning_context_access_receipt.source_token 放入随后第一次 simulate_chapter_world.sources；若已有 partial，只补 durable gaps，禁止重发 locked/already_present 角色。当前缺口：%s。随后只调用 simulate_chapter_world，每批在不超过8名的前提下尽量填满；project_all_grounded 只由服务端绑定主角 chosen_decision，模型必须自行补齐决定当下仍真正可用的 available_options、可见证据支持的 decision_reason、可见影响、隐藏压力、计划边界与因果链，不得把已失败或已过期动作当作当前选项。gaps 清零后立即单独 finalize；若本轮只需 finalize，也必须提交本轮唯一 access token，禁止沿用旧 sources。不得写正文、不得修改设定或进度、不得处理其他弧。若本章是本弧末章，必须闭合本弧内部因果并把跨弧影响明确标为 carried-forward；只有第%d章才是全书末章。",
+		arcBoundary.Volume,
+		arcBoundary.Arc,
+		arcBoundary.Title,
+		arcBoundary.FirstChapter,
+		arcBoundary.LastChapter,
+		arcBoundary.Goal,
+		chapter,
+		pass,
+		projectAllWorldSimulationPassLimit,
+		chapter,
+		gapSummary,
+		arcBoundary.BookLastChapter,
+	)
+}
+
+func compactProjectAllPromptGaps(gaps []string) []string {
+	const maxGaps = 12
+	compact := make([]string, 0, min(len(gaps), maxGaps))
+	for _, gap := range gaps {
+		gap = strings.TrimSpace(gap)
+		if gap == "" {
+			continue
+		}
+		compact = append(compact, gap)
+		if len(compact) == maxGaps {
+			break
+		}
+	}
+	if len(gaps) > len(compact) {
+		compact = append(compact, fmt.Sprintf("另有%d项，以 novel_context 返回为准", len(gaps)-len(compact)))
+	}
+	return compact
+}
+
+func projectAllWorldSimulationStartsFresh(gaps []string) bool {
+	return len(gaps) == 1 && strings.TrimSpace(gaps[0]) == "missing chapter world simulation"
+}
+
+func projectAllWorldSimulationContextError(ctx context.Context, chapter int, stage string) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf(
+			"project-all world simulation chapter %d canceled %s: %w",
+			chapter,
+			stage,
+			err,
+		)
+	}
+	return nil
+}
+
+// finalizeReadyProjectedWorldSimulation closes a gap-free partial without
+// spending another model turn. It deliberately refreshes novel_context first:
+// a planning-context access token is process/lease bound and a restarted
+// Project-Arc process must not reuse the opaque token staged by an older PID.
+func finalizeReadyProjectedWorldSimulation(
+	ctx context.Context,
+	contextTool *tools.ContextTool,
+	simulationTool *tools.SimulateChapterWorldTool,
+	st *store.Store,
+	chapter int,
+) (bool, error) {
+	if contextTool == nil || simulationTool == nil || st == nil || chapter <= 0 {
+		return false, nil
+	}
+	if err := projectAllWorldSimulationContextError(ctx, chapter, "before host finalize"); err != nil {
+		return false, err
+	}
+	if partial, err := st.LoadChapterWorldSimulationPartial(chapter); err != nil {
+		return false, err
+	} else if partial == nil {
+		return false, nil
+	}
+	_, _, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+	if len(gaps) > 0 {
+		return false, nil
+	}
+	contextArgs, err := json.Marshal(map[string]any{
+		"chapter": chapter,
+		"profile": "world_simulation",
+	})
+	if err != nil {
+		return false, err
+	}
+	contextRaw, err := contextTool.Execute(ctx, contextArgs)
+	if err != nil {
+		return false, fmt.Errorf("refresh ready world-simulation context receipt: %w", err)
+	}
+	if err := projectAllWorldSimulationContextError(ctx, chapter, "after context receipt refresh"); err != nil {
+		return false, err
+	}
+	var contextResult struct {
+		Access struct {
+			SourceToken string `json:"source_token"`
+		} `json:"planning_context_access_receipt"`
+	}
+	if err := json.Unmarshal(contextRaw, &contextResult); err != nil {
+		return false, fmt.Errorf("decode ready world-simulation context receipt: %w", err)
+	}
+	sourceToken := strings.TrimSpace(contextResult.Access.SourceToken)
+	if sourceToken == "" {
+		return false, fmt.Errorf("ready world-simulation context did not issue an access source token")
+	}
+	finalizeArgs, err := json.Marshal(map[string]any{
+		"chapter":  chapter,
+		"sources":  []string{sourceToken},
+		"finalize": true,
+	})
+	if err != nil {
+		return false, err
+	}
+	if err := projectAllWorldSimulationContextError(ctx, chapter, "before formal simulation write"); err != nil {
+		return false, err
+	}
+	finalizeRaw, err := simulationTool.Execute(ctx, finalizeArgs)
+	if err != nil {
+		return false, fmt.Errorf("host finalize ready world simulation: %w", err)
+	}
+	var result struct {
+		Simulated bool `json:"simulated"`
+	}
+	if err := json.Unmarshal(finalizeRaw, &result); err != nil {
+		return false, fmt.Errorf("decode host world-simulation finalize: %w", err)
+	}
+	if !result.Simulated {
+		return false, fmt.Errorf("host world-simulation finalize returned simulated=false")
+	}
+	return true, nil
+}
+
 func (b ProjectedArcBoundary) validate(chapter int) error {
 	if b.Volume <= 0 || b.Arc <= 0 || strings.TrimSpace(b.Title) == "" ||
 		strings.TrimSpace(b.Goal) == "" || b.FirstChapter <= 0 ||
@@ -124,39 +429,163 @@ func RunProjectedChapterPlanning(
 		return nil, simulationErr
 	}
 	if simulation == nil {
-		simulator := agentcore.NewAgent(
-			agentcore.WithModel(model),
-			agentcore.WithSystemPrompt(worldSimulatorSystemPrompt+projectAllSimulationBoundary),
-			agentcore.WithTools(contextTool, tools.NewSimulateChapterWorldTool(st)),
-			agentcore.WithMaxTurns(cappedMaxTurns(cfg.ResolveMaxTurns("writer", 20), 20)),
-			agentcore.WithToolsAreIdempotent(false),
-			agentcore.WithMaxToolErrors(0),
-			agentcore.WithMaxRetries(subagentMaxRetries),
-			agentcore.WithStopGuard(reminder.NewWorldSimulatorStopGuard(st)),
-		)
-		thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))
-		simulator.SetThinkingLevel(thinking)
-		if err := simulator.Prompt(ctx, fmt.Sprintf(
-			"Project-Arc 正在隔离工作区推演 V%dA%d《%s》（第%d-%d章），本弧目标：%s。当前只处理第 %d 章：先调用 novel_context(chapter=%d, profile=world_simulation)，再分批完成并 finalize simulate_chapter_world。不得写正文、不得修改设定或进度、不得处理其他弧。若本章是本弧末章，必须闭合本弧内部因果并把跨弧影响明确标为 carried-forward，不能为了封弧把它提前兑现；只有第%d章才是全书末章，届时不得指向书外章节。",
-			arcBoundary.Volume,
-			arcBoundary.Arc,
-			arcBoundary.Title,
-			arcBoundary.FirstChapter,
-			arcBoundary.LastChapter,
-			arcBoundary.Goal,
-			chapter,
-			chapter,
-			arcBoundary.BookLastChapter,
-		)); err != nil {
-			return nil, fmt.Errorf("project-all world simulation chapter %d: %w", chapter, err)
-		}
-		simulator.WaitForIdle()
-		simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
-		if err != nil {
-			return nil, err
+		var lastSimulatorError string
+		var lastHostFinalizeError string
+		for pass := 1; pass <= projectAllWorldSimulationPassLimit && simulation == nil; pass++ {
+			if err := projectAllWorldSimulationContextError(ctx, chapter, "before recovery session"); err != nil {
+				return nil, err
+			}
+			_, _, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+			startsFresh := projectAllWorldSimulationStartsFresh(gaps)
+			simulationTool := tools.NewSimulateChapterWorldTool(st)
+			if len(gaps) == 0 {
+				finalized, finalizeErr := finalizeReadyProjectedWorldSimulation(
+					ctx,
+					contextTool,
+					simulationTool,
+					st,
+					chapter,
+				)
+				if finalizeErr != nil {
+					if err := projectAllWorldSimulationContextError(ctx, chapter, "during host finalize"); err != nil {
+						return nil, err
+					}
+					lastHostFinalizeError = finalizeErr.Error()
+				} else if finalized {
+					simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
+					if err != nil {
+						return nil, err
+					}
+					if simulation != nil && simulationCP != nil {
+						break
+					}
+				}
+			}
+			if len(gaps) > 0 {
+				prefill, prefillErr := prefillProjectedWorldSimulationAuthority(
+					ctx,
+					contextTool,
+					simulationTool,
+					chapter,
+					func() []string {
+						_, _, remaining := tools.ChapterWorldSimulationStatus(st, chapter)
+						return remaining
+					},
+				)
+				if prefillErr != nil {
+					return nil, fmt.Errorf(
+						"project-all world simulation chapter %d authority prefill: %w",
+						chapter,
+						prefillErr,
+					)
+				}
+				gaps = prefill.RemainingGaps
+				if len(gaps) == 0 {
+					finalized, finalizeErr := finalizeReadyProjectedWorldSimulation(
+						ctx,
+						contextTool,
+						simulationTool,
+						st,
+						chapter,
+					)
+					if finalizeErr != nil {
+						if err := projectAllWorldSimulationContextError(ctx, chapter, "during host finalize after authority prefill"); err != nil {
+							return nil, err
+						}
+						lastHostFinalizeError = finalizeErr.Error()
+					} else if finalized {
+						simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
+						if err != nil {
+							return nil, err
+						}
+						if simulation != nil && simulationCP != nil {
+							break
+						}
+					}
+				}
+			}
+			turnCeiling := 20
+			if pass > 1 || !startsFresh {
+				turnCeiling = 6
+			}
+			simulator := agentcore.NewAgent(
+				agentcore.WithModel(model),
+				agentcore.WithSystemPrompt(worldSimulatorSystemPrompt+projectAllSimulationBoundary),
+				agentcore.WithTools(contextTool, simulationTool),
+				agentcore.WithMaxTurns(cappedMaxTurns(cfg.ResolveMaxTurns("writer", turnCeiling), turnCeiling)),
+				agentcore.WithToolsAreIdempotent(false),
+				agentcore.WithMaxToolErrors(0),
+				agentcore.WithMaxRetries(subagentMaxRetries),
+				agentcore.WithStopGuard(reminder.NewWorldSimulatorStopGuard(st)),
+			)
+			thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))
+			simulator.SetThinkingLevel(thinking)
+			if err := projectAllWorldSimulationContextError(ctx, chapter, "before simulator prompt"); err != nil {
+				return nil, err
+			}
+			if err := simulator.Prompt(ctx, projectAllWorldSimulationPrompt(
+				arcBoundary,
+				chapter,
+				pass,
+				gaps,
+			)); err != nil {
+				return nil, fmt.Errorf("project-all world simulation chapter %d pass %d: %w", chapter, pass, err)
+			}
+			simulator.WaitForIdle()
+			if err := projectAllWorldSimulationContextError(ctx, chapter, "after simulator session"); err != nil {
+				return nil, err
+			}
+			if state := simulator.State(); strings.TrimSpace(state.Error) != "" {
+				lastSimulatorError = strings.TrimSpace(state.Error)
+			}
+			simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
+			if err != nil {
+				return nil, err
+			}
+			if simulation == nil {
+				_, _, remainingGaps := tools.ChapterWorldSimulationStatus(st, chapter)
+				if len(remainingGaps) == 0 {
+					finalized, finalizeErr := finalizeReadyProjectedWorldSimulation(
+						ctx,
+						contextTool,
+						simulationTool,
+						st,
+						chapter,
+					)
+					if finalizeErr != nil {
+						if err := projectAllWorldSimulationContextError(ctx, chapter, "during host finalize"); err != nil {
+							return nil, err
+						}
+						lastHostFinalizeError = finalizeErr.Error()
+					} else if finalized {
+						simulation, simulationCP, err = loadCurrentProjectedSimulation(st, chapter)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
 		}
 		if simulation == nil || simulationCP == nil {
-			return nil, fmt.Errorf("project-all world simulation chapter %d did not finalize", chapter)
+			_, _, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+			remaining := strings.Join(compactProjectAllPromptGaps(gaps), "；")
+			if remaining == "" {
+				remaining = "formal simulation/checkpoint absent"
+			}
+			diagnostics := ""
+			if lastSimulatorError != "" {
+				diagnostics += "; agent error: " + lastSimulatorError
+			}
+			if lastHostFinalizeError != "" {
+				diagnostics += "; host finalize error: " + lastHostFinalizeError
+			}
+			return nil, fmt.Errorf(
+				"project-all world simulation chapter %d did not finalize after %d bounded sessions; remaining gaps: %s%s",
+				chapter,
+				projectAllWorldSimulationPassLimit,
+				remaining,
+				diagnostics,
+			)
 		}
 	}
 
@@ -271,23 +700,65 @@ func exactProjectAllSourceToken(sources []string, expected string) bool {
 	return false
 }
 
+type projectAllModelToolProtocol interface {
+	Name() string
+	Description() string
+	Schema() map[string]any
+}
+
+func projectAllToolContractsDigest() string {
+	contracts := make([]struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Schema      map[string]any `json:"schema"`
+	}, 0, 5)
+	for _, tool := range []projectAllModelToolProtocol{
+		tools.NewContextTool(nil, tools.References{}, ""),
+		tools.NewSimulateChapterWorldTool(nil),
+		tools.NewCraftRecallTool(nil),
+		tools.NewPlanStructureTool(nil),
+		tools.NewPlanDetailsTool(nil),
+	} {
+		contracts = append(contracts, struct {
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			Schema      map[string]any `json:"schema"`
+		}{
+			Name:        tool.Name(),
+			Description: tool.Description(),
+			Schema:      tool.Schema(),
+		})
+	}
+	digest, err := domain.DeterministicPlanningHash(contracts)
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
 // ProjectAllPlanningProtocolDigest exposes the complete model-visible
-// simulator/planner protocol to the generation identity without exporting the
-// prompts themselves. Any boundary or system-prompt change creates a different
-// planning dependency root.
+// simulator/planner prompt and tool protocol to the generation identity
+// without exporting those inputs. Any model contract change creates a new
+// planning dependency root; bounded host recovery mechanics remain outside it.
 func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
+	toolContracts := projectAllToolContractsDigest()
+	if toolContracts == "" {
+		return ""
+	}
 	digest, err := domain.DeterministicPlanningHash(struct {
 		Version            string `json:"version"`
 		WorldSimulator     string `json:"world_simulator"`
 		SimulationBoundary string `json:"simulation_boundary"`
 		Planner            string `json:"planner"`
 		PlannerBoundary    string `json:"planner_boundary"`
+		ToolContracts      string `json:"tool_contracts"`
 	}{
-		Version:            "project-all-agent-protocol.v1",
+		Version:            "project-all-agent-protocol.v2",
 		WorldSimulator:     worldSimulatorSystemPrompt,
 		SimulationBoundary: projectAllSimulationBoundary,
 		Planner:            plannerPrompt,
 		PlannerBoundary:    projectAllPlannerBoundary,
+		ToolContracts:      toolContracts,
 	})
 	if err != nil {
 		return ""

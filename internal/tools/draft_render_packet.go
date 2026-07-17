@@ -1139,7 +1139,7 @@ func sanitizePlanningWorldSimulation(result map[string]any) {
 	if status == "ready" {
 		lean["planning_policy"] = "完整 character_decisions 已在 meta/chapter_simulations 落盘；POV plan 只能投影 protagonist_projection，不得重写隐藏角色决定。"
 	} else {
-		lean["planning_policy"] = "当前 partial 的 gaps 已清零；只调用 simulate_chapter_world(chapter=N, finalize=true)，不得重发决定、投影、coverage 或 sources，finalize 前禁止 plan_structure。"
+		lean["planning_policy"] = "当前 partial 的 gaps 已清零；只调用 simulate_chapter_world(chapter=N, sources=[本轮 planning_context_access_receipt.source_token], finalize=true)，不得重发决定、投影、coverage 或旧 sources，finalize 前禁止 plan_structure。"
 	}
 	result["chapter_world_simulation"] = lean
 }

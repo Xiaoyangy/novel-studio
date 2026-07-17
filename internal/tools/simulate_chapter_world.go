@@ -34,7 +34,7 @@ func (t *SimulateChapterWorldTool) Label() string                          { ret
 func (t *SimulateChapterWorldTool) ReadOnly(_ json.RawMessage) bool        { return false }
 func (t *SimulateChapterWorldTool) ConcurrencySafe(_ json.RawMessage) bool { return false }
 func (t *SimulateChapterWorldTool) Description() string {
-	return "在章节 plan 之前推进单一世界中的全部实名角色。通常每个角色都按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。例外：simulation_character_authority 中 blocking=true 的角色不要手抄长 JSON，直接把实名放入 authority_contract_characters；工具会在服务端逐字段物化并校验对应 hold_baseline_contract 或 rewrite_source_only_contract，避免引号、长句和知识锁在传输中被改写。novel_context 若返回 chapter_pipeline_instruction 或 planning_context_access_receipt，必须把对应 source_token 原样写入 sources；token 本身不能替代服务端访问回执。character_decisions 与 authority_contract_characters 合计每批最多8名，最后 finalize=true；若 chapter_world_simulation.status=ready_to_finalize，则只传 chapter、当轮 access source_token（如有）和 finalize=true，禁止重复提交任何已校验字段。完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。空补丁会被拒绝。"
+	return "在章节 plan 之前推进单一世界中的全部实名角色。通常每个角色都按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。例外：simulation_character_authority 中 blocking=true 的角色不要手抄长 JSON，直接把实名放入 authority_contract_characters；工具会在服务端逐字段物化并校验对应 hold_baseline_contract 或 rewrite_source_only_contract，避免引号、长句和知识锁在传输中被改写。novel_context 若返回 chapter_pipeline_instruction 或 planning_context_access_receipt，必须把对应 source_token 原样写入 sources；token 本身不能替代服务端访问回执。character_decisions 与 authority_contract_characters 合计每批最多8名，并应尽量一次填满本批；最后 finalize=true。project_all_grounded 主角的 protagonist_projection.chosen_decision 由服务端精确绑定已验证的主角 character_decision；模型仍必须基于该决定时点填写当时真正可用的 available_options、可见证据支持的 decision_reason、可见影响、隐藏压力、计划边界和因果链，不得把已失败或已过期动作写成当前选项。若 chapter_world_simulation.status=ready_to_finalize，则只传 chapter、sources=[本轮唯一 access source_token]（如有）和 finalize=true；禁止重复提交任何已校验字段或旧 sources。完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。空补丁会被拒绝。"
 }
 
 func (t *SimulateChapterWorldTool) Schema() map[string]any {
@@ -69,9 +69,9 @@ func (t *SimulateChapterWorldTool) Schema() map[string]any {
 		schema.Property("protagonist", schema.String("主视角角色实名")).Required(),
 		schema.Property("observable_effects", schema.Array("本章主角可依法感知的影响", schema.String(""))).Required(),
 		schema.Property("hidden_pressures", schema.Array("已在世界发生但主角暂时不知道的压力", schema.String(""))).Required(),
-		schema.Property("available_options", schema.Array("世界推演后主角真正拥有的选项", schema.String(""))).Required(),
-		schema.Property("chosen_decision", schema.String("主角最终选择")).Required(),
-		schema.Property("decision_reason", schema.String("主角基于可见证据和自身目标作此选择的理由")).Required(),
+		schema.Property("available_options", schema.Array("主角作出最终决定的当下真正可用选项；已失败、已过期或已被证据排除的动作不得列入", schema.String(""))).Required(),
+		schema.Property("chosen_decision", schema.String("主角最终选择；project_all_grounded 会由服务端精确绑定主角 character_decision.decision")).Required(),
+		schema.Property("decision_reason", schema.String("主角在决定时点基于已可见证据和自身目标作此选择的理由，不得使用后见信息")).Required(),
 		schema.Property("plan_constraints", schema.Array("POV plan 必须遵守的信息和因果边界", schema.String(""))).Required(),
 		schema.Property("causal_chain", schema.Array("全角色决定如何汇聚为主角选择的因果链", schema.String(""))).Required(),
 	)
@@ -205,6 +205,8 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if partial == nil {
 		partial = &domain.ChapterWorldSimulation{Version: 1, Chapter: a.Chapter}
 	}
+	submittedProjection := strings.TrimSpace(a.ProtagonistProjection.Protagonist) != "" ||
+		protagonistProjectionHasCausalWork(a.ProtagonistProjection)
 	if projectAllContextToken != "" &&
 		!projectAllStateSourcesContain(partial.Sources, projectAllContextToken) &&
 		!projectAllStateSourcesContain(a.Sources, projectAllContextToken) {
@@ -235,7 +237,7 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 		return nil, fmt.Errorf("simulate_chapter_world authority guard: %w: %w", err, errs.ErrToolPrecondition)
 	}
 	if strings.TrimSpace(a.TimeWindow) == "" && len(a.CharacterDecisions) == 0 &&
-		strings.TrimSpace(a.ProtagonistProjection.Protagonist) == "" && len(a.RewriteFactCoverage) == 0 &&
+		!submittedProjection && len(a.RewriteFactCoverage) == 0 &&
 		len(a.Sources) == 0 && !a.Finalize {
 		return nil, fmt.Errorf("simulate_chapter_world 空提交无效：必须补1-%d名 character_decisions、rewrite_fact_coverage、protagonist_projection 或 finalize。当前缺口：%s: %w", chapterWorldSimulationBatchLimit,
 			strings.Join(chapterWorldSimulationGaps(t.store, *partial), "；"), errs.ErrToolArgs)
@@ -264,7 +266,7 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	}
 	partial.CharacterDecisions = mergeCharacterWorldDecisions(partial.CharacterDecisions, a.CharacterDecisions)
 	partial.RewriteFactCoverage = mergeRewriteFactCoverage(partial.RewriteFactCoverage, a.RewriteFactCoverage)
-	if strings.TrimSpace(a.ProtagonistProjection.Protagonist) != "" {
+	if submittedProjection {
 		partial.ProtagonistProjection = a.ProtagonistProjection
 	}
 	if projectAllContextToken != "" {
@@ -273,6 +275,18 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 		}
 	}
 	normalizeProtagonistProjection(t.store, partial)
+	if submittedProjection {
+		if missing := protagonistProjectionMissingFields(
+			partial.ProtagonistProjection,
+			inferCommitProtagonist(t.store),
+		); len(missing) > 0 {
+			return nil, fmt.Errorf(
+				"simulate_chapter_world protagonist_projection 必须一次完整提交；缺少或无效字段：%s。project_all_grounded 只由服务端绑定 chosen_decision；available_options 和 decision_reason 仍必须是当下有效的 POV 投影: %w",
+				strings.Join(missing, "、"),
+				errs.ErrToolArgs,
+			)
+		}
+	}
 	for _, source := range a.Sources {
 		partial.Sources = appendUniqueString(partial.Sources, source)
 	}
@@ -455,6 +469,38 @@ func protagonistProjectionHasCausalWork(projection domain.ProtagonistDecisionPro
 		len(projection.PlanConstraints) > 0 || len(projection.CausalChain) > 0
 }
 
+func protagonistProjectionMissingFields(
+	projection domain.ProtagonistDecisionProjection,
+	protagonist string,
+) []string {
+	var missing []string
+	if strings.TrimSpace(projection.Protagonist) != strings.TrimSpace(protagonist) {
+		missing = append(missing, "protagonist")
+	}
+	if len(projection.ObservableEffects) == 0 {
+		missing = append(missing, "observable_effects")
+	}
+	if len(projection.HiddenPressures) == 0 {
+		missing = append(missing, "hidden_pressures")
+	}
+	if len(projection.AvailableOptions) < 2 {
+		missing = append(missing, "available_options")
+	}
+	if effectiveProtagonistDecision(projection) == "" {
+		missing = append(missing, "chosen_decision")
+	}
+	if strings.TrimSpace(projection.DecisionReason) == "" {
+		missing = append(missing, "decision_reason")
+	}
+	if len(projection.PlanConstraints) == 0 {
+		missing = append(missing, "plan_constraints")
+	}
+	if len(projection.CausalChain) == 0 {
+		missing = append(missing, "causal_chain")
+	}
+	return missing
+}
+
 func ensureChapterWorldSimulationCheckpoint(st *store.Store, chapter int) error {
 	if st == nil || chapter <= 0 {
 		return fmt.Errorf("chapter world simulation checkpoint requires a store and chapter")
@@ -488,11 +534,12 @@ func normalizeProtagonistProjection(st *store.Store, simulation *domain.ChapterW
 			continue
 		}
 		decisionText := strings.TrimSpace(decision.Decision)
+		grounded := simulationAuthorityReceiptGroundsCharacter(
+			simulation.AuthorityReceipt,
+			protagonist,
+		)
 		if simulationAuthorityDecisionPlaceholder(decisionText) {
-			if simulationAuthorityReceiptGroundsCharacter(
-				simulation.AuthorityReceipt,
-				protagonist,
-			) {
+			if grounded {
 				// Only a server-built project-all receipt may preserve an
 				// independently authored human projection beside an authority
 				// contract. Genuine rewrites never enter this branch.
@@ -746,10 +793,8 @@ func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulatio
 	p := sim.ProtagonistProjection
 	protagonist := inferCommitProtagonist(s)
 	effectiveDecision := effectiveProtagonistDecision(p)
-	if strings.TrimSpace(p.Protagonist) != protagonist || len(p.ObservableEffects) == 0 || len(p.HiddenPressures) == 0 ||
-		len(p.AvailableOptions) < 2 || effectiveDecision == "" ||
-		strings.TrimSpace(p.ChosenDecision) != effectiveDecision || strings.TrimSpace(p.DecisionReason) == "" ||
-		len(p.PlanConstraints) == 0 || len(p.CausalChain) == 0 {
+	if len(protagonistProjectionMissingFields(p, protagonist)) > 0 ||
+		strings.TrimSpace(p.ChosenDecision) != effectiveDecision {
 		gaps = append(gaps, "incomplete protagonist_projection")
 	}
 	if decision, ok := present[protagonist]; ok &&

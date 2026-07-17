@@ -900,9 +900,23 @@ func validateProjectAllGroundedDecision(
 	if !projectAllGroundedLocationAuthorized(st, chapter, entry, decision.Location) {
 		return fmt.Errorf("location is not authorized by prior state, current outline, or book world")
 	}
+	if strings.TrimSpace(decision.Decision) == strings.TrimSpace(decision.CurrentGoal) ||
+		strings.TrimSpace(decision.Action) == strings.TrimSpace(decision.CurrentGoal) {
+		return fmt.Errorf("decision/action must be a concrete current move, not a copy of current_goal")
+	}
 	if !projectAllGroundedActionAuthorized(st, chapter, entry, decision.Decision) ||
 		!projectAllGroundedActionAuthorized(st, chapter, entry, decision.Action) {
 		return fmt.Errorf("decision/action is not an exact grounded input")
+	}
+	if err := validateProjectAllGroundedProjectedOutput(
+		st,
+		chapter,
+		entry,
+		decision,
+		"decision_reason",
+		decision.DecisionReason,
+	); err != nil {
+		return err
 	}
 	for i, option := range decision.AvailableOptions {
 		if option == decision.Decision {
@@ -1238,15 +1252,30 @@ func projectAllGroundedProjectionGaps(
 	}
 	projection := simulation.ProtagonistProjection
 	var gaps []string
-	if !sameAuthorityStringSet(
-		projection.AvailableOptions,
-		protagonistDecision.AvailableOptions,
-	) {
-		gaps = append(gaps, "grounded protagonist projection available_options drift from character decision")
+	if !containsExactString(projection.AvailableOptions, protagonistDecision.Decision) {
+		gaps = append(gaps, "grounded protagonist projection available_options omit chosen decision")
 	}
-	if strings.TrimSpace(projection.DecisionReason) !=
-		strings.TrimSpace(protagonistDecision.DecisionReason) {
-		gaps = append(gaps, "grounded protagonist projection decision_reason drift from character decision")
+	for i, option := range projection.AvailableOptions {
+		if err := validateProjectAllGroundedProjectedOutput(
+			st,
+			simulation.Chapter,
+			entry,
+			*protagonistDecision,
+			fmt.Sprintf("protagonist_projection.available_options[%d]", i),
+			option,
+		); err != nil {
+			gaps = append(gaps, err.Error())
+		}
+	}
+	if err := validateProjectAllGroundedProjectedOutput(
+		st,
+		simulation.Chapter,
+		entry,
+		*protagonistDecision,
+		"protagonist_projection.decision_reason",
+		projection.DecisionReason,
+	); err != nil {
+		gaps = append(gaps, err.Error())
 	}
 	for _, group := range []struct {
 		name   string
@@ -1349,6 +1378,12 @@ func projectAllGroundedLocationAuthorized(
 ) bool {
 	location = strings.TrimSpace(location)
 	if location == "" || simulationAuthorityDecisionPlaceholder(location) {
+		return false
+	}
+	// A location is a compact spatial anchor, not a copied scene synopsis. Long
+	// event sentences used to pass because they were literal substrings of the
+	// outline, then leaked planning prose into every character record.
+	if len([]rune(location)) > 32 || strings.ContainsAny(location, "，。；！？\n\r") {
 		return false
 	}
 	if current := nonSentinelAuthorityText(entry.CurrentLocation); current != "" &&

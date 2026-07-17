@@ -128,6 +128,89 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 	}
 }
 
+func TestSimulateChapterWorldRejectsIncompleteProjectionAtomically(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	existing := domain.ChapterWorldSimulation{
+		Version:    1,
+		Chapter:    1,
+		TimeWindow: "当晚两小时",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "林澈",
+			ObservableEffects: []string{"旧可见影响"},
+			HiddenPressures:   []string{"旧隐藏压力"},
+			AvailableOptions:  []string{"旧选项一", "旧选项二"},
+			ChosenDecision:    "旧选项二",
+			DecisionReason:    "旧理由",
+			PlanConstraints:   []string{"旧边界"},
+			CausalChain:       []string{"旧因果链"},
+		},
+	}
+	if err := st.SaveChapterWorldSimulationPartial(existing); err != nil {
+		t.Fatal(err)
+	}
+	before, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := json.Marshal(map[string]any{
+		"chapter": 1,
+		"protagonist_projection": map[string]any{
+			"protagonist":     "林澈",
+			"chosen_decision": "残缺新选择",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSimulateChapterWorldTool(st).Execute(t.Context(), args); err == nil ||
+		!strings.Contains(err.Error(), "一次完整提交") ||
+		!strings.Contains(err.Error(), "observable_effects") {
+		t.Fatalf("incomplete projection did not fail precisely: %v", err)
+	}
+	afterSimulation, err := st.LoadChapterWorldSimulationPartial(1)
+	if err != nil || afterSimulation == nil {
+		t.Fatalf("reload partial: sim=%+v err=%v", afterSimulation, err)
+	}
+	after, err := json.Marshal(afterSimulation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("invalid projection overwrote durable partial:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	// Tool.Execute can be called directly without the agent's JSON-schema
+	// validation. A causal field without protagonist still counts as a submitted
+	// projection: it must replace the in-memory candidate and fail as one atomic
+	// patch, rather than silently validating the complete projection already on
+	// disk and discarding the caller's new field.
+	args, err = json.Marshal(map[string]any{
+		"chapter": 1,
+		"protagonist_projection": map[string]any{
+			"observable_effects": []string{"不应被静默丢弃的新可见影响"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSimulateChapterWorldTool(st).Execute(t.Context(), args); err == nil ||
+		!strings.Contains(err.Error(), "一次完整提交") ||
+		!strings.Contains(err.Error(), "hidden_pressures") {
+		t.Fatalf("projection without protagonist was silently ignored: %v", err)
+	}
+	afterSimulation, err = st.LoadChapterWorldSimulationPartial(1)
+	if err != nil || afterSimulation == nil {
+		t.Fatalf("reload partial after omitted protagonist: sim=%+v err=%v", afterSimulation, err)
+	}
+	after, err = json.Marshal(afterSimulation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("projection without protagonist changed durable partial:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
 func TestSimulateChapterWorldReusesValidFinalAndDropsRedundantPartial(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	sim := domain.ChapterWorldSimulation{

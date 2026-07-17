@@ -279,6 +279,46 @@ func TestNormalizeProtagonistProjectionRejectsSentinelOnlyProjection(t *testing.
 	}
 }
 
+func TestNormalizeGroundedProtagonistProjectionBindsOnlyChosenDecision(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	decision := simulatedDecision("林澈", "先做一笔可核验的小额县内试验", true)
+	decision.AvailableOptions = []string{"暂缓操作", "先做一笔可核验的小额县内试验"}
+	decision.DecisionReason = "先用现场付款和真实货物排除额度风险"
+	simulation := domain.ChapterWorldSimulation{
+		Chapter:            1,
+		CharacterDecisions: []domain.CharacterWorldDecision{decision},
+		AuthorityReceipt: &domain.SimulationAuthorityReceipt{
+			Mode:               domain.SimulationAuthorityModeGrounded,
+			GroundedCharacters: []string{"林澈"},
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "林澈",
+			ObservableEffects: []string{"额度与货物都能现场核验"},
+			HiddenPressures:   []string{"监管复看尚未完成"},
+			AvailableOptions:  []string{"继续观察现场证据", "模型改写后的另一组选项"},
+			ChosenDecision:    "模型改写后的选择",
+			DecisionReason:    "模型改写后的理由",
+			PlanConstraints:   []string{"只写主角已知事实"},
+			CausalChain:       []string{"额度出现", "小额试验", "现场核验"},
+		},
+	}
+
+	normalizeProtagonistProjection(st, &simulation)
+
+	projection := simulation.ProtagonistProjection
+	if projection.ChosenDecision != decision.Decision {
+		t.Fatalf("grounded chosen decision was not server-bound: %+v", projection)
+	}
+	if !slices.Equal(projection.AvailableOptions, []string{"继续观察现场证据", "模型改写后的另一组选项"}) ||
+		projection.DecisionReason != "模型改写后的理由" {
+		t.Fatalf("server binding overwrote time-correct POV options/reason: %+v", projection)
+	}
+	if !slices.Equal(projection.ObservableEffects, []string{"额度与货物都能现场核验"}) ||
+		!slices.Equal(projection.CausalChain, []string{"额度出现", "小额试验", "现场核验"}) {
+		t.Fatalf("server binding overwrote model-authored POV evidence: %+v", projection)
+	}
+}
+
 func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
@@ -369,6 +409,7 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 	grounded.KnowledgeBoundary = "只知道本人经历和合法通信获得的信息"
 	grounded.AvailableOptions = []string{"暂缓夜市试验", decisionText}
 	grounded.Action = "先核验专项额度，再完成一笔可撤回的小额县内试验"
+	grounded.DecisionReason = "先核验专项额度能把风险压到一笔可撤回的小额县内试验"
 	grounded.ImmediateResult = "首笔真实县内支出完成并首次结算"
 	grounded.StateAfter = "林澈约定次日继续核验"
 	grounded.ButterflyEffects[0].Effect = "首笔真实县内支出完成并首次结算"
@@ -381,6 +422,12 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		}
 	}
 	for name, mutate := range map[string]func(*domain.CharacterWorldDecision){
+		"scene synopsis used as location": func(decision *domain.CharacterWorldDecision) {
+			decision.Location = "林澈在青山县河畔夜市先核验专项额度，再完成一笔可撤回的小额县内试验"
+		},
+		"current goal copied as action": func(decision *domain.CharacterWorldDecision) {
+			decision.Action = decision.CurrentGoal
+		},
 		"invented location suffix": func(decision *domain.CharacterWorldDecision) {
 			decision.Location = "青山县河畔夜市旁地下实验室"
 		},
@@ -392,6 +439,9 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		},
 		"invented action suffix": func(decision *domain.CharacterWorldDecision) {
 			decision.Action = "先核验专项额度，再完成一笔可撤回的小额县内试验并秘密扩张"
+		},
+		"invented decision reason": func(decision *domain.CharacterWorldDecision) {
+			decision.DecisionReason = "地下实验室已经开启，所以必须立即交易"
 		},
 		"invented effect suffix": func(decision *domain.CharacterWorldDecision) {
 			decision.ButterflyEffects[0].Effect = "首笔真实县内支出完成并首次结算，地下实验室随即开启"
@@ -418,7 +468,7 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		Protagonist:       "林澈",
 		ObservableEffects: []string{"专项额度已在本人界面出现"},
 		HiddenPressures:   []string{"沈知遥尚未进入现场"},
-		AvailableOptions:  []string{"暂缓夜市试验", decisionText},
+		AvailableOptions:  []string{"先暂缓交易，继续核验专项额度", decisionText},
 		ChosenDecision:    decisionText,
 		DecisionReason:    grounded.DecisionReason,
 		PlanConstraints:   []string{"只能写本人可见的额度与交易结果"},
@@ -449,6 +499,12 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		simulation.ProtagonistProjection.ChosenDecision != decisionText ||
 		!validSimulationAuthorityDigest(simulation.AuthorityReceipt.ReceiptDigest) {
 		t.Fatalf("grounded receipt identity incomplete: %+v", simulation)
+	}
+	if !containsExactString(
+		simulation.ProtagonistProjection.AvailableOptions,
+		"先暂缓交易，继续核验专项额度",
+	) {
+		t.Fatalf("server overwrote a grounded, time-correct POV alternative: %+v", simulation.ProtagonistProjection)
 	}
 	tamperedProjection := *simulation
 	tamperedProjection.ProtagonistProjection = simulation.ProtagonistProjection
@@ -652,7 +708,7 @@ func TestProjectAllGroundedCoarseOutlineAllowsDerivedOutputsWithoutNovelty(t *te
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
 		Chapter:   9,
 		Title:     "承载边界",
-		CoreEvent: "推进河畔夜市试点，验证商户承载边界并留下可复核后果。",
+		CoreEvent: "推进河畔夜市试点，林澈逐摊核对真实反馈，验证商户承载边界并留下可复核后果。",
 		Hook:      "林澈进入下一轮复核。",
 	}}); err != nil {
 		t.Fatal(err)
@@ -662,7 +718,7 @@ func TestProjectAllGroundedCoarseOutlineAllowsDerivedOutputsWithoutNovelty(t *te
 		CurrentLocation:       simulationAuthorityUnknown,
 		CurrentStatus:         simulationAuthorityUnknown,
 		CurrentGoal:           "推进河畔夜市试点",
-		CurrentAction:         "推进河畔夜市试点",
+		CurrentAction:         "逐摊核对真实反馈",
 		CurrentPressure:       "验证商户承载边界",
 		CurrentPressurePolicy: "outline_authorized_concise",
 		KnowledgeBoundary:     "只知道本人经历和合法通信获得的信息",
@@ -676,10 +732,10 @@ func TestProjectAllGroundedCoarseOutlineAllowsDerivedOutputsWithoutNovelty(t *te
 		Pressure:          entry.CurrentPressure,
 		Resources:         []string{},
 		KnowledgeBoundary: entry.KnowledgeBoundary,
-		AvailableOptions:  []string{"暂缓河畔夜市试点", "推进河畔夜市试点"},
-		Decision:          "推进河畔夜市试点",
-		DecisionReason:    "先取得一轮真实反馈再扩大",
-		Action:            "推进河畔夜市试点",
+		AvailableOptions:  []string{"暂缓河畔夜市试点", "逐摊核对真实反馈"},
+		Decision:          "逐摊核对真实反馈",
+		DecisionReason:    "逐摊取得一轮真实反馈后才能验证商户承载边界",
+		Action:            "逐摊核对真实反馈",
 		ActionDuration:    "一个营业时段",
 		CompletionState:   "in_progress",
 		ImmediateResult:   "河畔夜市试点形成一项待复核的摊位反馈",
@@ -695,7 +751,7 @@ func TestProjectAllGroundedCoarseOutlineAllowsDerivedOutputsWithoutNovelty(t *te
 		}},
 	}
 	if strings.Contains(
-		"推进河畔夜市试点，验证商户承载边界并留下可复核后果。",
+		"推进河畔夜市试点，林澈逐摊核对真实反馈，验证商户承载边界并留下可复核后果。",
 		decision.ImmediateResult,
 	) {
 		t.Fatal("coarse regression did not exercise genuinely projected output")
