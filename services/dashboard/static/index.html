@@ -438,7 +438,7 @@
   .project-section:last-child { border-right: 0; }
   .section-kicker { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; color: var(--muted); font-size: 10px; }
   .section-kicker b { color: var(--text); font-size: 12px; }
-  .progress-line { display: grid; grid-template-columns: 58px 1fr 52px; align-items: center; gap: 8px; margin-top: 9px; font-size: 10px; color: var(--muted); }
+  .progress-line { display: grid; grid-template-columns: 78px 1fr 104px; align-items: center; gap: 8px; margin-top: 9px; font-size: 10px; color: var(--muted); }
   .progress-line strong { color: var(--text); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
   .trackbar { height: 5px; background: var(--surface-strong); overflow: hidden; border-radius: 3px; }
   .trackbar i { display: block; height: 100%; background: var(--accent1); border-radius: 3px; box-shadow: none; transition: width .35s ease; }
@@ -692,7 +692,8 @@ let allNovels = [], activeFilter = "all", refreshing = false;
 const fmtNum = n => (n >= 10000 ? (n / 10000).toFixed(1) + " 万" : String(n ?? 0));
 const fmtMoney = n => "$" + (n ?? 0).toFixed(2);
 const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
-const stepName = { simulate: "推演", plan: "计划", draft: "落稿", check: "校验", commit: "提交", review: "评审", rewrite: "返工", deliver: "交付" };
+const stepName = { rag: "RAG 重建", simulate: "推演", plan: "计划", draft: "落稿", check: "校验", commit: "提交", review: "评审", rewrite: "返工", deliver: "交付" };
+const stageName = { "rag-build": "RAG 重建", foundation: "基础冻结", "outline-all": "全书分层大纲", preplan: "弧规划准备", "project-all": "正式弧推演规划", seal: "弧规划封存", render: "正文渲染" };
 const runtimeName = { running: "运行中", error: "运行异常", attention: "待处理", idle: "空闲", complete: "已完结" };
 const healthName = { ok: "数据一致", warning: "有差异", error: "数据冲突" };
 const ago = ts => {
@@ -704,6 +705,7 @@ const ago = ts => {
   return Math.floor(s / 86400) + " 天前";
 };
 const pct = n => Math.max(0, Math.min(100, Number(n) || 0));
+const chapterText = (n, empty = "尚未进入正文") => Number(n) > 0 ? `第 ${Number(n)} 章` : empty;
 const shortTime = value => value ? new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
 const travelTime = days => {
   if (days == null || Number.isNaN(Number(days))) return "—";
@@ -728,8 +730,9 @@ function stepChain(w, compact) {
 
 function card(b) {
   const runtime = b.runtime || {}, health = b.health || {}, w = b.working || {};
+  const formal = b.formal_planning || {};
   const status = runtime.status || (b.active ? "running" : "idle");
-  const workLabel = w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : w.chapter ? `第 ${w.chapter} 章` : "尚未进入章节";
+  const workLabel = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? (stageName[runtime.current_stage] || "规划阶段") : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
   const latest = w.last_step || (runtime.last_event || {}).summary || "等待下一步";
   const err = w.last_error || runtime.last_error;
   const errRecovered = err && w.last_at && new Date(w.last_at).getTime() > new Date(err.time || 0).getTime() && !w.last_failed;
@@ -756,14 +759,15 @@ function card(b) {
       <section class="project-section">
         <div class="section-kicker"><span>全书进度</span><b>${b.chapters_completed} / ${b.chapters_total || "?"} 章</b></div>
         <div class="progress-line"><span>已归档</span><span class="trackbar"><i style="width:${pct(b.progress_percent)}%"></i></span><strong>${pct(b.progress_percent).toFixed(1)}%</strong></div>
-        <div class="progress-line plan"><span>已细化</span><span class="trackbar"><i style="width:${pct(b.plan_percent)}%"></i></span><strong>${pct(b.plan_percent).toFixed(1)}%</strong></div>
+        <div class="progress-line plan"><span>冻结分层大纲</span><span class="trackbar"><i style="width:${pct(b.outline_percent)}%"></i></span><strong>${pct(b.outline_percent).toFixed(1)}%</strong></div>
+        <div class="progress-line plan"><span>正式弧规划</span><span class="trackbar"><i style="width:${pct(formal.percent)}%"></i></span><strong>${esc(formal.label || "未开始")} · ${formal.planned_chapters || 0}/${formal.expected_chapters || "?"}</strong></div>
         <div class="progress-line quality"><span>质检通过</span><span class="trackbar"><i style="width:${pct(b.quality_percent)}%"></i></span><strong>${b.reviews_accepted}/${b.chapters_on_disk}</strong></div>
-        <div class="progress-facts"><span>主线 <b>第 ${b.current_chapter || "?"} 章</b></span><span>卷/弧 <b>${b.volume || "-"}/${b.arc || "-"}</b></span><span>落盘 <b>${b.chapters_on_disk}</b></span><span>细纲 <b>${b.chapters_planned}</b></span></div>
+        <div class="progress-facts"><span>正文游标 <b>${chapterText(b.current_chapter)}</b></span><span>卷/弧 <b>${b.volume || "-"}/${b.arc || "-"}</b></span><span>落盘 <b>${b.chapters_on_disk}</b></span><span>分层大纲 <b>${b.chapters_outlined || 0}</b></span></div>
       </section>
       <section class="project-section">
         <div class="section-kicker"><span>当前执行</span><b>${runtimeName[status] || esc(status)}</b></div>
-        <div class="current-title"><b>${workLabel}</b><span>${w.step ? stepName[w.step] || esc(w.step) : "等待 pipeline 动作"}</span></div>
-        ${stepChain(w, true)}
+        <div class="current-title"><b>${workLabel}</b><span>${w.mode === "planning" ? esc(stageName[runtime.current_stage] || runtime.current_stage || "规划") : w.step ? stepName[w.step] || esc(w.step) : "等待 pipeline 动作"}</span></div>
+        ${w.mode === "rag" ? '<div class="latest-event">正在重建项目检索索引，不推进正文章号。</div>' : w.mode === "planning" ? '<div class="latest-event">当前处理规划资产，不代表正文章号已经开始。</div>' : stepChain(w, true)}
         <div class="latest-event"><b>${esc(latest)}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""} · ${shortTime(w.last_at)}</div>
         ${err && (runtime.active || status === "error") ? `<div class="runtime-error ${errRecovered ? "recovered" : ""}">${errRecovered ? "近期错误后已继续：" : "当前错误："}${esc(err.summary || err.detail)}</div>` : ""}
       </section>
@@ -942,14 +946,15 @@ function renderOverview(d) {
   const sources = (health.sources || []).map(s => `<div class="source-item"><b>${esc(s.label)}</b><span title="${esc(s.path)}">${esc(s.path)} · ${ago(s.updated_at)}</span></div>`).join("");
   const assetItems = (assets.items || []).map(a => `<div class="asset-item ${a.exists ? "ok" : ""}"><i></i><span title="${esc(a.path)}">${esc(a.label)}</span><code>${a.exists ? "ready" : "missing"}</code></div>`).join("");
   const rag = assets.rag || {}, sediment = assets.sediment || {};
+  const formal = d.formal_planning || {};
   const lastError = runtime.last_error;
   const lastEvent = runtime.last_event || {};
   const errorRecovered = lastError && lastEvent.time && new Date(lastEvent.time).getTime() > new Date(lastError.time || 0).getTime() && !lastEvent.failed;
   const healthTag = `<span class="tag health-${health.status || "warning"}">${healthName[health.status] || "待校验"}</span>`;
-  const workTitle = w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : `第 ${w.chapter || "?"} 章`;
+  const workTitle = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? (stageName[runtime.current_stage] || "规划阶段") : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
   return `
     <div class="detail-kpis">
-      <div class="detail-kpi"><div class="k">主线下一章</div><div class="v">第 ${d.current_chapter || "?"} 章</div></div>
+      <div class="detail-kpi"><div class="k">正文游标</div><div class="v">${chapterText(d.current_chapter)}</div></div>
       <div class="detail-kpi"><div class="k">实际工作</div><div class="v">${workTitle}</div></div>
       <div class="detail-kpi"><div class="k">完成 / 目标</div><div class="v">${d.chapters_completed} / ${d.chapters_total || "?"}</div></div>
       <div class="detail-kpi"><div class="k">正文实算</div><div class="v">${fmtNum(d.words_total)}</div></div>
@@ -961,15 +966,15 @@ function renderOverview(d) {
         <div class="kv"><span class="k">状态</span><span><span class="tag ${runtime.status === "running" ? "ok" : runtime.status === "error" ? "rewrite" : "pending"}">${runtimeName[runtime.status] || esc(runtime.status)}</span>　${esc(runtime.provider || "—")} / <b>${esc(runtime.model || "—")}</b>${runtime.planning_tier ? ` / ${esc(runtime.planning_tier)}` : ""}</span></div>
         <div class="kv"><span class="k">当前位置</span><span>${pos.volume_title ? `卷 ${pos.volume}《${esc(pos.volume_title)}》 · 弧 ${pos.arc}「${esc(pos.arc_title)}」` : `卷 ${d.volume || "?"} · 弧 ${d.arc || "?"}`}${pos.arc_total ? `　${pos.arc_completed}/${pos.arc_total} 章` : ""}</span></div>
         ${pos.arc_goal ? `<div class="kv"><span class="k">弧目标</span><span>${esc(pos.arc_goal)}</span></div>` : ""}
-        <div class="kv"><span class="k">工作章</span><span><b>${workTitle}</b>${w.next_chapter && w.next_chapter !== w.chapter ? `　主线下一章为第 ${w.next_chapter} 章` : ""}</span></div>
-        ${stepChain(w) || '<span style="color:var(--muted);font-size:11px">尚未进入章节 pipeline。</span>'}
+        <div class="kv"><span class="k">当前工作</span><span><b>${workTitle}</b>${w.next_chapter && w.next_chapter !== w.chapter ? `　正文游标为第 ${w.next_chapter} 章` : ""}</span></div>
+        ${w.mode === "rag" ? '<span style="color:var(--muted);font-size:11px">正在重建项目检索索引；该活动独立于正文与弧规划进度。</span>' : w.mode === "planning" ? '<span style="color:var(--muted);font-size:11px">当前处理规划资产；正文游标仍以进度台账为准。</span>' : stepChain(w) || '<span style="color:var(--muted);font-size:11px">尚未进入章节 pipeline。</span>'}
         <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span><b>${esc(w.last_step || "—")}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""}　<span style="color:var(--muted)">${shortTime(w.last_at)}</span></span></div>
         ${lastError ? `<div class="runtime-error ${errorRecovered ? "recovered" : ""}">${errorRecovered ? "近期错误后已继续：" : "最近错误："}${esc(lastError.summary || lastError.detail)} · ${shortTime(lastError.time)}</div>` : ""}
       </div>
     </div>
     <div class="sec"><h3>数据口径与一致性 ${healthTag}</h3>
       <div class="panel">
-        <div class="kv"><span class="k">章节口径</span><span>台账完成 ${health.reported_completed ?? d.chapters_reported_completed} · 正文交叉验证 ${health.verified_completed ?? d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 细化规划 ${d.chapters_planned}</span></div>
+        <div class="kv"><span class="k">章节口径</span><span>台账完成 ${health.reported_completed ?? d.chapters_reported_completed} · 正文交叉验证 ${health.verified_completed ?? d.chapters_completed} · 落盘 ${d.chapters_on_disk} · 冻结分层大纲 ${d.chapters_outlined || 0}/${d.chapters_total || "?"} · 正式弧规划 ${esc(formal.label || "未开始")} ${formal.planned_chapters || 0}/${formal.expected_chapters || "?"}</span></div>
         <div class="kv"><span class="k">字数口径</span><span>正文 rune 实算 <b>${health.actual_words ?? d.words_total}</b> · 进度台账 <b>${health.reported_words ?? d.words_reported}</b>${health.actual_words !== health.reported_words ? ` · 差值 ${(health.actual_words || 0) - (health.reported_words || 0)}` : " · 一致"}</span></div>
         ${healthIssues || '<div class="health-list"><div class="health-item" style="color:var(--ok)">正文、进度、评审版本与返工队列当前一致。</div></div>'}
         <div class="source-grid">${sources}</div>
@@ -1194,7 +1199,7 @@ function renderPlan(p) {
       ${(np.required_beats || []).length ? `<div class="kv"><span class="k">必备节拍</span><span>${np.required_beats.map(b => "· " + esc(b)).join("<br>")}</span></div>` : ""}
     </div></div>` : ""}
     <div class="sec"><h3>卷 / 弧骨架</h3><div class="panel tree">${tree || '<span style="color:var(--muted);font-size:13px">暂无分层大纲。</span>'}</div></div>
-    <div class="sec"><h3>已细化章节规划（${(p.outline || []).length}）</h3>
+    <div class="sec"><h3>冻结分层章节大纲（${(p.outline || []).length}）</h3>
       ${outline ? `<div class="table-wrap"><table><thead><tr><th>章</th><th>标题</th><th>核心事件</th><th>钩子</th></tr></thead><tbody>${outline}</tbody></table></div>` : '<div class="loading">暂无细纲。</div>'}
     </div>
     <div class="sec"><h3>伏笔台账（${(p.foreshadows || []).length}）</h3>

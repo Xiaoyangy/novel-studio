@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import time
 import urllib.parse
 from datetime import datetime
@@ -73,6 +75,13 @@ def iso_time(ts: float) -> str:
     if not ts:
         return ""
     return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
+
+
+def int_value(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def novel_dir(run: Path) -> Path:
@@ -255,6 +264,10 @@ PIPELINE_STAGE_BY_MODE = {
     "project_all": "project-all",
     "render": "render",
 }
+PLANNING_PIPELINE_STAGES = {"foundation", "outline-all", "preplan", "project-all", "seal"}
+RAG_PROCESS_CACHE_SECONDS = 1.0
+_rag_process_cache_at = 0.0
+_rag_process_cache: list[dict] = []
 
 
 def checkpoint_tail(nd: Path, n: int = 60) -> list[dict]:
@@ -265,6 +278,8 @@ def normalize_step(value: str) -> str:
     raw = str(value or "").strip().lower().replace("_", "-")
     if not raw:
         return ""
+    if raw in ("rag", "rag-build", "build-rag"):
+        return "rag"
     if ("simulate-chapter-world" in raw or "chapter-world-simulation" in raw or
             "world-simulation" in raw or raw == "project-all"):
         return "simulate"
@@ -295,6 +310,105 @@ def process_alive(pid: int) -> bool:
         return True
     except (ProcessLookupError, OSError):
         return False
+
+
+def elapsed_seconds(value: str) -> int:
+    """解析 ps 的 [[dd-]hh:]mm:ss ETIME；异常值只影响开始时间展示。"""
+    raw = str(value or "").strip()
+    match = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", raw)
+    if not match:
+        return 0
+    days, hours, minutes, seconds = (int(value or 0) for value in match.groups())
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def cli_flag_value(tokens: list[str], name: str) -> str:
+    for index, token in enumerate(tokens):
+        if token == name and index + 1 < len(tokens):
+            return tokens[index + 1]
+        prefix = name + "="
+        if token.startswith(prefix):
+            return token[len(prefix):]
+    return ""
+
+
+def normalize_rag_output_dir(raw: str) -> Path | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    path = Path(os.path.abspath(path))
+    if path.name == "novel" and path.parent.name == "output":
+        return path
+    candidate = path / "output" / "novel"
+    if candidate.is_dir():
+        return candidate
+    return path
+
+
+def scan_rag_processes() -> list[dict]:
+    """只读扫描本机 build-rag 进程，并把显式 --dir 归一到小说输出目录。"""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-axo", "pid=,etime=,command="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    now = time.time()
+    activities = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"^\s*(\d+)\s+(\S+)\s+(.+)$", line)
+        if not match:
+            continue
+        pid, elapsed, command = int(match.group(1)), match.group(2), match.group(3)
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            continue
+        if "--build-rag" not in tokens:
+            continue
+        build_index = tokens.index("--build-rag")
+        if not any("novel-studio" in Path(token).name for token in tokens[:build_index]):
+            continue
+        output_dir = normalize_rag_output_dir(cli_flag_value(tokens, "--dir"))
+        if output_dir is None:
+            # 没有显式 --dir 时无法可靠归属到某本书，宁可不误报其他工程。
+            continue
+        age = elapsed_seconds(elapsed)
+        activities.append({
+            "kind": "rag",
+            "stage": "rag-build",
+            "process_id": pid,
+            "output_dir": str(output_dir),
+            "started_at": iso_time(now - age),
+            "started_timestamp": now - age,
+            "observed_timestamp": now,
+        })
+    return activities
+
+
+def active_rag_processes() -> list[dict]:
+    global _rag_process_cache_at, _rag_process_cache
+    now = time.monotonic()
+    if now - _rag_process_cache_at >= RAG_PROCESS_CACHE_SECONDS:
+        _rag_process_cache = scan_rag_processes()
+        _rag_process_cache_at = now
+    return _rag_process_cache
+
+
+def rag_process_state(nd: Path) -> dict:
+    target = str(Path(os.path.abspath(nd)))
+    matches = [item for item in active_rag_processes() if item.get("output_dir") == target]
+    if not matches:
+        return {"active": False, "kind": "", "stage": "", "process_id": 0,
+                "started_at": "", "started_timestamp": 0.0, "observed_timestamp": 0.0}
+    return max(matches, key=lambda item: item.get("started_timestamp") or 0)
 
 
 def pipeline_execution_state(nd: Path, now: float | None = None) -> dict:
@@ -409,6 +523,7 @@ def runtime_state(nd: Path, prog: dict) -> dict:
     run = read_json(nd / "meta" / "run.json") or {}
     pipe = read_json(nd / "meta" / "pipeline.json") or {}
     execution = pipeline_execution_state(nd)
+    rag_execution = rag_process_state(nd)
 
     def event_key(event: dict) -> tuple[float, int]:
         seq = event.get("seq")
@@ -428,21 +543,27 @@ def runtime_state(nd: Path, prog: dict) -> dict:
     )
     log_ts = latest_mtime(nd / "logs" / "headless.log")
     execution_ts = (execution.get("acquired_timestamp") or 0) if execution.get("active") else 0
-    updated = max(event_ts, durable_ts, log_ts, execution_ts)
+    rag_ts = (rag_execution.get("observed_timestamp") or 0) if rag_execution.get("active") else 0
+    rag_started_ts = (rag_execution.get("started_timestamp") or 0) if rag_execution.get("active") else 0
+    updated = max(event_ts, durable_ts, log_ts, execution_ts, rag_ts)
     age = max(0.0, time.time() - updated) if updated else None
     pending = prog.get("pending_rewrites") or []
     successful_event_ts = max(
         (event.get("activity_timestamp") or 0 for event in events if not event.get("failed")),
         default=0,
     )
-    recovery_ts = max(durable_ts, successful_event_ts, execution_ts)
+    recovery_ts = max(durable_ts, successful_event_ts, execution_ts, rag_ts)
     error_ts = (last_error or {}).get("activity_timestamp") or 0
     current_error = bool(last_error) and error_ts >= recovery_ts
-    last_event_current = bool(last) and (last.get("activity_timestamp") or 0) >= max(durable_ts, execution_ts)
-    if prog.get("phase") == "complete":
-        status = "complete"
-    elif execution.get("active"):
+    last_event_current = bool(last) and (last.get("activity_timestamp") or 0) >= max(
+        durable_ts, execution_ts, rag_started_ts,
+    )
+    if execution.get("active"):
         status = "running"
+    elif rag_execution.get("active"):
+        status = "running"
+    elif prog.get("phase") == "complete":
+        status = "complete"
     elif updated and age is not None and age < ACTIVE_WINDOW_SECONDS:
         status = "error" if current_error else "running"
     elif pending or prog.get("flow") == "rewriting":
@@ -450,6 +571,8 @@ def runtime_state(nd: Path, prog: dict) -> dict:
     else:
         status = "idle"
     pipeline_stage = execution.get("stage") if execution.get("active") else ""
+    if not pipeline_stage and rag_execution.get("active"):
+        pipeline_stage = rag_execution.get("stage") or "rag-build"
     if status == "running" and not pipeline_stage and not last_event_current:
         pipeline_stage = next_pipeline_stage(pipe)
     recent = events[-16:]
@@ -468,6 +591,7 @@ def runtime_state(nd: Path, prog: dict) -> dict:
         "recent_errors": errors,
         "current_stage": pipeline_stage,
         "execution": execution,
+        "activity": rag_execution if rag_execution.get("active") else {},
         "provider": run.get("provider") or "",
         "model": run.get("model") or "",
         "planning_tier": run.get("planning_tier") or "",
@@ -491,6 +615,7 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         pending = [pending]
     runtime = runtime or runtime_state(nd, prog)
     execution = runtime.get("execution") or {}
+    activity = runtime.get("activity") or {}
     cur = prog.get("in_progress_chapter") or 0
     if not cur and prog.get("flow") == "rewriting" and pending:
         cur = pending[0]
@@ -498,8 +623,8 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         cur = prog.get("current_chapter") or 0
     if not cur and chapter_steps:
         cur = max(chapter_steps)
-    if not cur:
-        cur = (len(prog.get("completed_chapters") or []) or 0) + 1
+    if not cur and "current_chapter" not in prog:
+        cur = (len(completed_chapters(prog.get("completed_chapters"))) or 0) + 1
     if execution.get("active") and execution.get("target_chapter"):
         cur = execution["target_chapter"]
     live = runtime.get("last_event") or {}
@@ -516,24 +641,40 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         elif list((nd / "drafts").glob(f"{cur:02d}.plan*")) if (nd / "drafts").is_dir() else []:
             step = "plan"
     last_scope = last.get("scope") or {}
-    pipeline_summary = f"{pipeline_stage}（第 {cur} 章）" if pipeline_stage else ""
+    planning_execution = (
+        execution.get("active") and execution.get("mode") != "render" or
+        pipeline_stage in PLANNING_PIPELINE_STAGES and prog.get("phase") != "writing"
+    )
+    if activity.get("kind") == "rag":
+        pipeline_summary = "RAG 重建"
+    elif planning_execution:
+        pipeline_summary = pipeline_stage
+    else:
+        pipeline_summary = f"{pipeline_stage}（第 {cur} 章）" if pipeline_stage and cur else pipeline_stage
     last_step = live.get("summary") or pipeline_summary or str(last.get("step") or "")
     last_at = (live.get("time") or execution.get("acquired_at") or
                (iso_time(runtime.get("updated_at") or 0) if pipeline_stage else "") or
                str(last.get("occurred_at") or ""))
-    mode = "rewrite" if prog.get("flow") == "rewriting" or cur in pending else "write"
+    if activity.get("kind") == "rag":
+        mode = "rag"
+    elif planning_execution:
+        mode = "planning"
+    else:
+        mode = "rewrite" if prog.get("flow") == "rewriting" or cur in pending else "write"
+    display_chapter = 0 if planning_execution or activity.get("kind") == "rag" else cur
     return {
-        "chapter": cur,
-        "next_chapter": prog.get("current_chapter") or cur,
+        "chapter": display_chapter,
+        "target_chapter": cur if planning_execution else display_chapter,
+        "next_chapter": prog.get("current_chapter") or 0,
         "mode": mode,
         "step": step,
         "chain": CHAPTER_STEP_CHAIN,
         "chain_pos": CHAPTER_STEP_CHAIN.index(step) if step in CHAPTER_STEP_CHAIN else -1,
         "last_step": last_step,
-        "last_kind": "runtime" if live else "pipeline" if pipeline_stage else str(last_scope.get("kind") or ""),
-        "last_chapter": cur if pipeline_stage else last_scope.get("chapter"),
+        "last_kind": "runtime" if live else "rag" if activity.get("kind") == "rag" else "pipeline" if pipeline_stage else str(last_scope.get("kind") or ""),
+        "last_chapter": None if activity.get("kind") == "rag" or planning_execution else cur if pipeline_stage else last_scope.get("chapter"),
         "last_at": last_at,
-        "last_agent": live.get("agent") or ("pipeline" if pipeline_stage else ""),
+        "last_agent": live.get("agent") or ("rag" if activity.get("kind") == "rag" else "pipeline" if pipeline_stage else ""),
         "last_failed": bool(live.get("failed")),
         "last_error": runtime.get("last_error"),
     }
@@ -545,6 +686,144 @@ def completed_chapters(raw) -> list[int]:
     if not isinstance(raw, list):
         return []
     return sorted({n for n in raw if isinstance(n, int) and n > 0})
+
+
+def current_arc_outline(nd: Path, prog: dict) -> dict:
+    volumes = [value for value in (read_json(nd / "layered_outline.json") or []) if isinstance(value, dict)]
+    if not volumes:
+        return {"volume": 0, "arc": 0, "first_chapter": 0, "last_chapter": 0, "expected_chapters": 0}
+    volume_index = int_value(prog.get("current_volume"))
+    expanded_volumes = [value for value in volumes if isinstance(value.get("arcs"), list) and value.get("arcs")]
+    volume = next((value for value in expanded_volumes if value.get("index") == volume_index),
+                  expanded_volumes[0] if expanded_volumes else volumes[0])
+    arcs = [value for value in (volume.get("arcs") or []) if isinstance(value, dict)]
+    if not arcs:
+        return {"volume": volume.get("index") or 0, "arc": 0,
+                "first_chapter": 0, "last_chapter": 0, "expected_chapters": 0}
+    arc_index = int_value(prog.get("current_arc"))
+    arc = next((value for value in arcs if value.get("index") == arc_index), arcs[0])
+    chapter_cursor = 0
+    derived_first, derived_last = 0, 0
+    for candidate_volume in volumes:
+        for candidate_arc in (candidate_volume.get("arcs") or []):
+            if not isinstance(candidate_arc, dict):
+                continue
+            candidate_chapters = candidate_arc.get("chapters") or []
+            span = len(candidate_chapters) if isinstance(candidate_chapters, list) else 0
+            span = span or int_value(candidate_arc.get("estimated_chapters"))
+            if candidate_volume is volume and candidate_arc is arc:
+                derived_first = chapter_cursor + 1 if span else 0
+                derived_last = chapter_cursor + span if span else 0
+            chapter_cursor += span
+    chapter_numbers = []
+    chapters = arc.get("chapters") or []
+    if isinstance(chapters, list):
+        for value in chapters:
+            chapter = value.get("chapter") if isinstance(value, dict) else value
+            if isinstance(chapter, int) and not isinstance(chapter, bool) and chapter > 0:
+                chapter_numbers.append(chapter)
+    expected = len(chapter_numbers) or int_value(arc.get("estimated_chapters"))
+    expected = expected or max(0, derived_last - derived_first + 1)
+    return {
+        "volume": volume.get("index") or 0,
+        "arc": arc.get("index") or 0,
+        "first_chapter": min(chapter_numbers) if chapter_numbers else derived_first,
+        "last_chapter": max(chapter_numbers) if chapter_numbers else derived_last,
+        "expected_chapters": expected,
+    }
+
+
+def formal_planning_summary(nd: Path, prog: dict, runtime: dict) -> dict:
+    """把冻结分层大纲与 project-all/seal 的正式弧计划证据分开计数。"""
+    arc = current_arc_outline(nd, prog)
+    candidates = []
+    roots = (
+        (nd / "meta" / "planning" / "v2" / ".building", "building"),
+        (nd / "meta" / "planning" / "v2" / "generations", "sealed"),
+    )
+    for root, location_state in roots:
+        for generation_path in root.glob("*/generation.json"):
+            generation = read_json(generation_path)
+            if not isinstance(generation, dict):
+                continue
+            if str(generation.get("status") or "") != location_state:
+                continue
+            generation_id = str(generation.get("generation_id") or "")
+            generation_dir = generation_path.parent
+            if location_state == "sealed" and not (generation_dir / "seal_receipt.json").is_file():
+                continue
+            lifecycle = nd / "meta" / "planning" / "v2" / "lifecycle"
+            if (list((lifecycle / "archives" / generation_id).glob("*.json")) or
+                    list((lifecycle / "invalidations" / generation_id).glob("*.json"))):
+                continue
+            first = int_value(generation.get("first_projected_chapter"))
+            last = int_value(generation.get("last_projected_chapter"))
+            if (arc["first_chapter"] and arc["last_chapter"] and
+                    (last < arc["first_chapter"] or first > arc["last_chapter"])):
+                continue
+            bundle_count = len(list((generation_dir / "chapters").glob("*.bundle.json")))
+            projected = max(bundle_count, int_value(generation.get("projected_chapter_count")))
+            expected = int_value(generation.get("expected_chapter_count"))
+            if location_state == "sealed":
+                projected = max(projected, expected)
+            updated = latest_mtime(generation_path, generation_dir / "seal_receipt.json")
+            try:
+                updated = max(updated, max(
+                    (path.stat().st_mtime for path in (generation_dir / "chapters").glob("*.bundle.json")),
+                    default=0.0,
+                ))
+            except OSError:
+                pass
+            candidates.append({
+                "state": location_state,
+                "generation_id": generation_id,
+                "planned_chapters": projected,
+                "expected_chapters": expected,
+                "first_chapter": first,
+                "last_chapter": last,
+                "updated_at": updated,
+            })
+
+    selected = max(candidates, key=lambda value: value["updated_at"]) if candidates else None
+    stage = str(runtime.get("current_stage") or "")
+    if selected:
+        state = selected["state"]
+        planned = selected["planned_chapters"]
+        expected = selected["expected_chapters"] or arc["expected_chapters"]
+        first = selected["first_chapter"] or arc["first_chapter"]
+        last = selected["last_chapter"] or arc["last_chapter"]
+        generation_id = selected["generation_id"]
+        updated = selected["updated_at"]
+    else:
+        state = "building" if stage == "project-all" else "sealing" if stage == "seal" else "not_started"
+        planned = 0
+        expected = arc["expected_chapters"]
+        first, last = arc["first_chapter"], arc["last_chapter"]
+        generation_id = ""
+        updated = 0.0
+    if state == "building" and stage == "seal":
+        state = "sealing"
+    labels = {
+        "not_started": "未开始",
+        "building": "推演规划中",
+        "sealing": "封存中",
+        "sealed": "已封存",
+    }
+    percent = round(min(100, planned / expected * 100), 2) if expected else 0
+    return {
+        "state": state,
+        "label": labels[state],
+        "generation_id": generation_id,
+        "planned_chapters": planned,
+        "expected_chapters": expected,
+        "first_chapter": first,
+        "last_chapter": last,
+        "sealed": state == "sealed",
+        "percent": percent,
+        "updated_at": updated,
+        "volume": arc["volume"],
+        "arc": arc["arc"],
+    }
 
 
 def artifact_inventory(nd: Path) -> dict:
@@ -685,6 +964,7 @@ def summarize_run(run: Path) -> dict:
     files = chapter_files(nd)
     actual_counts = {ch: count_words(nd, ch) for ch in files}
     runtime = runtime_state(nd, prog)
+    formal_planning = formal_planning_summary(nd, prog, runtime)
     health = progress_health(nd, prog, files, actual_counts)
     assets = artifact_inventory(nd)
     reviews_dir = nd / "reviews"
@@ -731,7 +1011,10 @@ def summarize_run(run: Path) -> dict:
         "current_chapter": prog.get("current_chapter") or 0,
         "in_progress_chapter": prog.get("in_progress_chapter"),
         "chapters_total": total_chapters,
+        "chapters_outlined": planned_count,
         "chapters_planned": planned_count,
+        "chapters_formally_planned": formal_planning["planned_chapters"],
+        "formal_planning": formal_planning,
         "chapters_completed": completed_count,
         "chapters_reported_completed": health["reported_completed"],
         "chapters_on_disk": len(files),
@@ -759,7 +1042,10 @@ def summarize_run(run: Path) -> dict:
         "pending_rewrites": pending_rewrites,
         "rewrite_reason": clip(prog.get("rewrite_reason"), 260),
         "progress_percent": round(completed_count / total_chapters * 100, 2) if total_chapters else 0,
+        "outline_percent": round(planned_count / total_chapters * 100, 2) if total_chapters else 0,
+        "outline_frozen": bool(total_chapters and planned_count == total_chapters),
         "plan_percent": round(planned_count / total_chapters * 100, 2) if total_chapters else 0,
+        "formal_plan_percent": formal_planning["percent"],
         "quality_percent": round(accepted / len(files) * 100, 2) if files else 0,
         "assets_ready": assets["ready"],
         "assets_total": assets["total"],

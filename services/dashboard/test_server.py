@@ -60,6 +60,7 @@ class DashboardDataTest(unittest.TestCase):
         data = server.summarize_run(self.run)
 
         self.assertEqual(data["working"]["chapter"], 1)
+        self.assertEqual(data["working"]["target_chapter"], 1)
         self.assertEqual(data["working"]["next_chapter"], 2)
         self.assertEqual(data["working"]["mode"], "rewrite")
         self.assertEqual(data["working"]["step"], "plan")
@@ -147,7 +148,8 @@ class DashboardDataTest(unittest.TestCase):
         self.assertTrue(data["runtime"]["execution"]["active"])
         self.assertTrue(data["runtime"]["execution"]["process_alive"])
         self.assertEqual(data["runtime"]["current_stage"], "project-all")
-        self.assertEqual(data["working"]["chapter"], 1)
+        self.assertEqual(data["working"]["chapter"], 0)
+        self.assertEqual(data["working"]["target_chapter"], 1)
         self.assertEqual(data["working"]["step"], "simulate")
         self.assertEqual(data["working"]["last_kind"], "pipeline")
 
@@ -184,6 +186,167 @@ class DashboardDataTest(unittest.TestCase):
         self.assertTrue(data["runtime"]["execution"]["valid"])
         self.assertFalse(data["runtime"]["execution"]["active"])
         self.assertFalse(data["runtime"]["execution"]["process_alive"])
+
+    def test_build_rag_process_is_reported_without_advancing_chapter_zero(self):
+        now = datetime.now().astimezone()
+        self.write_json("meta/progress.json", {
+            "novel_name": "测试书",
+            "phase": "planning",
+            "flow": "planning",
+            "current_chapter": 0,
+            "completed_chapters": [],
+            "total_chapters": 420,
+        })
+        self.write_json("meta/pipeline.json", {"stages": ["preplan", "project-all", "seal"], "completed": []})
+        stale = (now - timedelta(hours=1)).timestamp()
+        for rel in ("meta/progress.json", "meta/pipeline.json"):
+            os.utime(self.nd / rel, (stale, stale))
+        activity = {
+            "active": True,
+            "kind": "rag",
+            "stage": "rag-build",
+            "process_id": 60141,
+            "output_dir": str(self.nd),
+            "started_at": (now - timedelta(minutes=8)).isoformat(),
+            "started_timestamp": (now - timedelta(minutes=8)).timestamp(),
+            "observed_timestamp": now.timestamp(),
+        }
+
+        with mock.patch.object(server, "active_rag_processes", return_value=[activity]):
+            data = server.summarize_run(self.run)
+
+        self.assertEqual(data["runtime"]["status"], "running")
+        self.assertEqual(data["runtime"]["current_stage"], "rag-build")
+        self.assertEqual(data["runtime"]["activity"]["process_id"], 60141)
+        self.assertEqual(data["current_chapter"], 0)
+        self.assertEqual(data["working"]["chapter"], 0)
+        self.assertEqual(data["working"]["mode"], "rag")
+        self.assertEqual(data["working"]["step"], "rag")
+        self.assertEqual(data["working"]["last_step"], "RAG 重建")
+
+    def test_chapter_zero_planning_lease_is_not_presented_as_active_prose(self):
+        now = datetime.now().astimezone()
+        self.write_json("meta/progress.json", {
+            "novel_name": "测试书",
+            "phase": "outline",
+            "flow": "planning",
+            "current_chapter": 0,
+            "completed_chapters": [],
+            "total_chapters": 420,
+        })
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1,
+            "mode": "foundation",
+            "target_chapter": 1,
+            "owner": f"pipeline-foundation-ch000001-pid{os.getpid()}-test",
+            "process_id": os.getpid(),
+            "acquired_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=10)).isoformat(),
+        })
+
+        data = server.summarize_run(self.run)
+
+        self.assertEqual(data["current_chapter"], 0)
+        self.assertEqual(data["working"]["mode"], "planning")
+        self.assertEqual(data["working"]["chapter"], 0)
+        self.assertEqual(data["working"]["target_chapter"], 1)
+        self.assertEqual(data["working"]["next_chapter"], 0)
+        self.assertIsNone(data["working"]["last_chapter"])
+        self.assertEqual(data["runtime"]["current_stage"], "foundation")
+
+    def test_scan_rag_processes_matches_explicit_run_dir(self):
+        command = (
+            f"60141 08:05 /tmp/novel-studio-ragfix --build-rag "
+            f"--dir {self.run} --probe-chapter 1\n"
+        )
+        completed = mock.Mock(stdout=command)
+
+        with mock.patch.object(server.subprocess, "run", return_value=completed):
+            activities = server.scan_rag_processes()
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["process_id"], 60141)
+        self.assertEqual(activities[0]["output_dir"], str(self.nd))
+        self.assertGreater(activities[0]["started_timestamp"], 0)
+
+    def test_frozen_outline_and_formal_arc_plan_have_independent_progress(self):
+        self.write_json("meta/progress.json", {
+            "novel_name": "测试书",
+            "phase": "planning",
+            "flow": "planning",
+            "current_chapter": 0,
+            "current_volume": 1,
+            "current_arc": 1,
+            "completed_chapters": [],
+            "total_chapters": 420,
+        })
+        self.write_json("outline.json", [{"chapter": chapter} for chapter in range(1, 421)])
+        self.write_json("layered_outline.json", [{
+            "index": 1,
+            "arcs": [{
+                "index": 1,
+                "chapters": [{"chapter": chapter} for chapter in range(1, 13)],
+            }],
+        }])
+
+        data = server.summarize_run(self.run)
+
+        self.assertTrue(data["outline_frozen"])
+        self.assertEqual(data["outline_percent"], 100)
+        self.assertEqual(data["chapters_outlined"], 420)
+        self.assertEqual(data["formal_planning"]["state"], "not_started")
+        self.assertEqual(data["formal_planning"]["planned_chapters"], 0)
+        self.assertEqual(data["formal_planning"]["expected_chapters"], 12)
+        self.assertEqual(data["formal_plan_percent"], 0)
+
+        generation_id = "pg2_dashboard_test"
+        self.write_json(
+            f"meta/planning/v2/.building/{generation_id}/generation.json",
+            {
+                "generation_id": generation_id,
+                "status": "building",
+                "first_projected_chapter": 1,
+                "last_projected_chapter": 12,
+                "expected_chapter_count": 12,
+                "projected_chapter_count": 3,
+            },
+        )
+        for chapter in range(1, 4):
+            self.write_json(
+                f"meta/planning/v2/.building/{generation_id}/chapters/{chapter:04d}.bundle.json",
+                {"chapter": chapter},
+            )
+
+        building_data = server.summarize_run(self.run)
+
+        self.assertEqual(building_data["formal_planning"]["state"], "building")
+        self.assertEqual(building_data["formal_planning"]["planned_chapters"], 3)
+        self.assertEqual(building_data["formal_plan_percent"], 25)
+
+        sealed_id = "pg2_dashboard_sealed"
+        sealed = self.nd / "meta" / "planning" / "v2" / "generations" / sealed_id
+        self.write_json(
+            f"meta/planning/v2/generations/{sealed_id}/generation.json",
+            {
+                "generation_id": sealed_id,
+                "status": "sealed",
+                "first_projected_chapter": 1,
+                "last_projected_chapter": 12,
+                "expected_chapter_count": 12,
+                "projected_chapter_count": 12,
+            },
+        )
+        self.write_json(f"meta/planning/v2/generations/{sealed_id}/seal_receipt.json", {"sealed": True})
+        future = datetime.now().timestamp() + 2
+        os.utime(sealed / "generation.json", (future, future))
+        os.utime(sealed / "seal_receipt.json", (future, future))
+
+        sealed_data = server.summarize_run(self.run)
+
+        self.assertEqual(sealed_data["formal_planning"]["state"], "sealed")
+        self.assertTrue(sealed_data["formal_planning"]["sealed"])
+        self.assertEqual(sealed_data["formal_planning"]["planned_chapters"], 12)
+        self.assertEqual(sealed_data["formal_plan_percent"], 100)
 
     def test_dispatch_finished_at_can_report_a_current_failure(self):
         self.seed_progress()
