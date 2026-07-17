@@ -177,7 +177,7 @@ func cloneFatigue(m map[string]int) map[string]int {
 
 // SystemDefaults 是代码内置的机械基线（最低优先级来源），不走 LLM 归一化。
 //
-// chapter_words 是工程默认单章区间：规划按总字数先反推大致章数，再按 2100-3000
+// chapter_words 是工程默认单章区间：规划按总字数先反推大致章数，再按 2000-3300
 // 字/章配置每章承载量。它是节奏预算，不是为了卡点牺牲内容的硬切刀。
 // 疲劳词阈值依据一并保留：
 // 后段疲劳词（像一/沉默了/没有说话/X息）来自 196 章长跑产物实证——传统 AI 套话被前段
@@ -186,7 +186,7 @@ func SystemDefaults() Candidate {
 	return Candidate{
 		Source: "system_defaults",
 		Structured: Structured{
-			ChapterWords: &WordRange{Min: 2100, Max: 3000},
+			ChapterWords: &WordRange{Min: 2000, Max: 3300},
 			// 定长固定串的 AI 套句；checker 字面子串匹配，带变量的模式（不是X而是Y）归语义层。
 			ForbiddenPhrases: []string{"某种程度上", "值得注意的是", "不知为何", "五味杂陈"},
 			FatigueWords: map[string]int{

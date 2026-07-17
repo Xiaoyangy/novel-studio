@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,10 +26,71 @@ const (
 	pipelineFrozenPlanPath      = "meta/planning/current_frozen_plan.json"
 	pipelineRenderReceiptPath   = "meta/planning/current_render_receipt.json"
 	pipelinePlanningSchema      = "pipeline-planning.v1"
+	pipelineMissingDependency   = "missing"
 	pipelineExecutionLease      = 6 * time.Hour
 	pipelineProjectionExpanded  = "expanded_outline"
 	pipelineProjectionCoarse    = "arc_slot_coarse"
 )
+
+var pipelineFrozenRenderDependencyPaths = []string{
+	"meta/user_rules.json",
+	"meta/writing_assets.json",
+	"meta/style_rules.json",
+}
+
+// pipelinePlanningFoundationDependencyPaths are immutable, model-visible
+// foundation inputs. They are listed separately from the canon snapshot so
+// project-all can keep revalidating them after sequential rendering starts,
+// while mutable ledgers and the RAG corpus remain bound to the captured source
+// snapshot of the sealed generation.
+var pipelinePlanningFoundationDependencyPaths = []struct {
+	kind string
+	path string
+}{
+	{kind: "characters", path: "characters.json"},
+	{kind: "book_world", path: "book_world.json"},
+	{kind: "world_codex", path: "world_codex.json"},
+	{kind: "initial_relationships", path: "relationship_state.initial.json"},
+	{kind: "initial_foreshadow", path: "foreshadow_ledger.initial.json"},
+	{kind: "world_foundation", path: "meta/world_foundation.json"},
+	{kind: "initial_character_dynamics", path: "meta/initial_character_dynamics.json"},
+	{kind: "initial_resource_ledger", path: "meta/initial_resource_ledger.json"},
+	{kind: "simulation_restart_policy", path: "meta/simulation_restart_policy.json"},
+	{kind: "story_time_contract", path: "meta/story_time_contract.json"},
+	{kind: "story_calendar", path: "meta/story_calendar.json"},
+	{kind: "crowd_role_policy", path: "meta/crowd_role_policy.json"},
+	{kind: "prewrite_storycraft_plan", path: "meta/prewrite_storycraft_plan.json"},
+	{kind: "prewrite_storycraft_plan", path: "meta/prewrite_storycraft_plan.md"},
+	{kind: "prewrite_storycraft_plan", path: "references/prewrite_storycraft_plan.md"},
+	{kind: "world_background_plan", path: "meta/world_background_plan.json"},
+	{kind: "world_background_plan", path: "meta/world_background_plan.md"},
+	{kind: "world_background_plan", path: "references/world_background_plan.md"},
+	{kind: "zero_chapter_context", path: "meta/zero_chapter_context_manifest.json"},
+	{kind: "moral_ceiling", path: "meta/moral_ceiling.json"},
+	{kind: "physics_axioms", path: "meta/physics_axioms.json"},
+	{kind: "pacing_contract", path: "meta/pacing_contract.json"},
+	{kind: "info_graph", path: "meta/info_graph.json"},
+	{kind: "ritual_calendar", path: "meta/ritual_calendar.json"},
+	{kind: "crowd_life", path: "meta/crowd_life.json"},
+	{kind: "ecological_map", path: "meta/ecological_map.json"},
+	{kind: "cosmology", path: "meta/cosmology.json"},
+	{kind: "cultural_footnotes", path: "meta/cultural_footnotes.json"},
+	{kind: "user_rules", path: "meta/user_rules.json"},
+	{kind: "style_rules", path: "meta/style_rules.json"},
+	{kind: "web_reference_brief", path: "meta/web_reference_brief.json"},
+	{kind: "web_reference_brief", path: "meta/web_reference_brief.md"},
+	{kind: "web_reference_brief", path: "references/web_reference_brief.md"},
+}
+
+var pipelinePlanningFoundationDependencyDirs = []struct {
+	kind string
+	path string
+}{
+	{kind: "character_dossier", path: "meta/characters"},
+	{kind: "volume_codex", path: "meta/volume_codex"},
+}
+
+var errPipelinePreplanRebaseRequired = errors.New("preplan canonical rebase required")
 
 // pipelineProjectedChapterPayload is deliberately not a ChapterPlan. It is a
 // prose-free forecast derived from an already-expanded outline entry. Keeping a
@@ -67,37 +130,54 @@ type pipelinePreplanReceipt struct {
 }
 
 type pipelineFrozenPlan struct {
-	Version                 string `json:"version"`
-	Chapter                 int    `json:"chapter"`
-	PlanPath                string `json:"plan_path"`
-	PlanDigest              string `json:"plan_digest"`
-	PlanCheckpointSeq       int64  `json:"plan_checkpoint_seq"`
-	BaselineCommitSeq       int64  `json:"baseline_commit_seq"`
-	BaselineCompletedDigest string `json:"baseline_completed_digest"`
-	PlanningGenerationID    string `json:"planning_generation_id"`
-	PlanningDependencyRoot  string `json:"planning_dependency_root"`
-	ProjectionBinding       string `json:"projection_binding"`
-	ProjectedPlanSHA256     string `json:"projected_plan_sha256,omitempty"`
-	ProjectedPreStateRoot   string `json:"projected_pre_state_root,omitempty"`
-	ProjectedPostStateRoot  string `json:"projected_post_state_root,omitempty"`
-	FrozenAt                string `json:"frozen_at"`
+	Version                 string            `json:"version"`
+	Chapter                 int               `json:"chapter"`
+	PlanPath                string            `json:"plan_path"`
+	PlanDigest              string            `json:"plan_digest"`
+	PlanCheckpointSeq       int64             `json:"plan_checkpoint_seq"`
+	BaselineCommitSeq       int64             `json:"baseline_commit_seq"`
+	BaselineCompletedDigest string            `json:"baseline_completed_digest"`
+	BaselineCanonRoot       string            `json:"baseline_canon_root"`
+	BaselineChapterSHA256   map[string]string `json:"baseline_chapter_sha256"`
+	RenderDependencySHA256  map[string]string `json:"render_dependency_sha256"`
+	PipelineRunInputDigest  string            `json:"pipeline_run_input_digest"`
+	RenderContextPath       string            `json:"render_context_path"`
+	RenderContextSHA256     string            `json:"render_context_sha256"`
+	PlanningGenerationID    string            `json:"planning_generation_id"`
+	PlanningDependencyRoot  string            `json:"planning_dependency_root"`
+	ProjectionBinding       string            `json:"projection_binding"`
+	ProjectedPlanSHA256     string            `json:"projected_plan_sha256,omitempty"`
+	ProjectedPreStateRoot   string            `json:"projected_pre_state_root,omitempty"`
+	ProjectedPostStateRoot  string            `json:"projected_post_state_root,omitempty"`
+	ProjectedBundleDigest   string            `json:"projected_bundle_digest,omitempty"`
+	PromotionReceiptDigest  string            `json:"promotion_receipt_digest,omitempty"`
+	FrozenAt                string            `json:"frozen_at"`
 }
 
 type pipelineRenderReceipt struct {
-	Version             string `json:"version"`
-	Chapter             int    `json:"chapter"`
-	PlanDigest          string `json:"plan_digest"`
-	PlanCheckpointSeq   int64  `json:"plan_checkpoint_seq"`
-	CommitDigest        string `json:"commit_digest"`
-	CommitCheckpointSeq int64  `json:"commit_checkpoint_seq"`
-	ChapterPath         string `json:"chapter_path"`
-	ChapterBodySHA256   string `json:"chapter_body_sha256"`
-	ActualCanonRoot     string `json:"actual_canon_root"`
-	ProjectedStateRoot  string `json:"projected_state_root,omitempty"`
-	ProjectionBound     bool   `json:"projection_receipt_bound"`
-	DownstreamInvalid   bool   `json:"downstream_invalidated"`
-	NextAction          string `json:"next_action,omitempty"`
-	RenderedAt          string `json:"rendered_at"`
+	Version                string            `json:"version"`
+	Chapter                int               `json:"chapter"`
+	PlanDigest             string            `json:"plan_digest"`
+	PlanCheckpointSeq      int64             `json:"plan_checkpoint_seq"`
+	CommitDigest           string            `json:"commit_digest"`
+	CommitCheckpointSeq    int64             `json:"commit_checkpoint_seq"`
+	ChapterPath            string            `json:"chapter_path"`
+	ChapterBodySHA256      string            `json:"chapter_body_sha256"`
+	ActualCanonRoot        string            `json:"actual_canon_root"`
+	RenderDependencySHA256 map[string]string `json:"render_dependency_sha256"`
+	PipelineRunInputDigest string            `json:"pipeline_run_input_digest"`
+	RenderContextSHA256    string            `json:"render_context_sha256"`
+	ProjectedStateRoot     string            `json:"projected_state_root,omitempty"`
+	ProjectionBound        bool              `json:"projection_receipt_bound"`
+	PlanningGenerationID   string            `json:"planning_generation_id,omitempty"`
+	ProjectedBundleDigest  string            `json:"projected_bundle_digest,omitempty"`
+	PromotionReceiptDigest string            `json:"promotion_receipt_digest,omitempty"`
+	OutcomeReceiptDigest   string            `json:"outcome_receipt_digest,omitempty"`
+	DirectoryPublishID     string            `json:"directory_publish_transaction_id,omitempty"`
+	DirectoryPublishDigest string            `json:"directory_publish_receipt_digest,omitempty"`
+	DownstreamInvalid      bool              `json:"downstream_invalidated"`
+	NextAction             string            `json:"next_action,omitempty"`
+	RenderedAt             string            `json:"rendered_at"`
 }
 
 type pipelineProjectionEntry struct {
@@ -116,6 +196,16 @@ type pipelinePlanProseSnapshot struct {
 }
 
 func pipelinePreplan(opts cliOptions, flags pipelineFlags) (returnErr error) {
+	liveDir, releaseControl, err := acquirePublishedOutlineAllStageForInvocation(opts)
+	if err != nil {
+		return fmt.Errorf("preplan requires published outline-all: %w", err)
+	}
+	defer releasePublishedOutlineAllStage(releaseControl, "preplan", &returnErr)
+	if liveDir != "" {
+		if err := requirePublishedOutlineAllWithControlHeld(liveDir); err != nil {
+			return fmt.Errorf("preplan requires immutable published outline-all: %w", err)
+		}
+	}
 	cfg, _, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
@@ -124,6 +214,28 @@ func pipelinePreplan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		return err
 	}
 	st := store.NewStore(cfg.OutputDir)
+	mode, err := st.LoadWritingPipelineMode()
+	if err != nil {
+		return err
+	}
+	sealedArcMode := mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2
+	if sealedArcMode {
+		if active, loadErr := st.ProjectedV2().LoadActiveGeneration(); loadErr != nil {
+			return loadErr
+		} else if active != nil && !flags.Restart {
+			progress, progressErr := st.Progress.Load()
+			if progressErr != nil || progress == nil {
+				return fmt.Errorf("preplan 检查前一弧进度: %w", progressErr)
+			}
+			if err := requirePipelinePreviousArcFullyRealized(st, progress.LatestCompleted()); err != nil {
+				return fmt.Errorf(
+					"preplan 不能越过 active sealed arc generation %s；当前弧必须先逐章渲染并逐章审核通过: %w",
+					active.GenerationID,
+					err,
+				)
+			}
+		}
+	}
 	progress, err := st.Progress.Load()
 	if err != nil {
 		return fmt.Errorf("preplan 读取 progress: %w", err)
@@ -132,6 +244,11 @@ func pipelinePreplan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		return fmt.Errorf("preplan 缺少 meta/progress.json")
 	}
 	baseChapter := progress.LatestCompleted()
+	if sealedArcMode {
+		if err := requirePipelinePreviousArcFullyRealized(st, baseChapter); err != nil {
+			return fmt.Errorf("preplan 只能从已完成的弧边界启动: %w", err)
+		}
+	}
 	owner := pipelineExecutionOwner("preplan", baseChapter+1)
 	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
 		Mode:          domain.PipelineExecutionPreplan,
@@ -321,7 +438,15 @@ func pipelinePreplan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	if _, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), receipt); err != nil {
 		return fmt.Errorf("preplan 保存验收回执: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[pipeline:preplan] 全书 %d 个稳定章位已建立非正史因果投影：详细投影 %d 章，骨架级投影 %d 章；正式 world simulation/POV plan 仍只在逐章 plan 阶段生成\n", total, len(detailed), len(coarse))
+	if sealedArcMode {
+		nextArc, arcErr := requirePipelineArcStart(st, baseChapter)
+		if arcErr != nil {
+			return arcErr
+		}
+		fmt.Fprintf(os.Stderr, "[pipeline:preplan] 全书 %d 个稳定章位已从正史第 %d 章重新建立非正史骨架；下一步只物化 V%dA%d（第%d-%d章），整弧计划封存后再逐章渲染/逐章审核\n", total, baseChapter, nextArc.Volume, nextArc.Arc, nextArc.FirstChapter, nextArc.LastChapter)
+	} else {
+		fmt.Fprintf(os.Stderr, "[pipeline:preplan] 全书 %d 个稳定章位已建立非正史因果投影：详细投影 %d 章，骨架级投影 %d 章\n", total, len(detailed), len(coarse))
+	}
 	return nil
 }
 
@@ -412,6 +537,11 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 			returnErr = fmt.Errorf("plan 释放推演执行锁: %w", err)
 		}
 	}()
+	if flags.Restart {
+		if err := retirePipelinePlanPartial(st, chapter, "explicit pipeline --restart requires a fresh source-bound planning epoch"); err != nil {
+			return err
+		}
+	}
 
 	before, err := capturePipelinePlanProseSnapshot(st, progress, chapter)
 	if err != nil {
@@ -421,7 +551,7 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	if old := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "plan"); old != nil {
 		baselinePlanSeq = old.Seq
 	}
-	cp, recovered, err := recoverPipelineUnfrozenFormalPlan(st, chapter, before.CommitSeq)
+	cp, recovered, err := recoverPipelineUnfrozenFormalPlan(st, chapter, before.CommitSeq, flags.Restart)
 	if err != nil {
 		return fmt.Errorf("plan 第 %d 章恢复未冻结正式计划: %w", chapter, err)
 	}
@@ -456,6 +586,23 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	if err := verifyPipelinePlanDidNotWriteProse(st, progress, chapter, before); err != nil {
 		return err
 	}
+	baselineChapterSHA256, err := pipelineCompletedChapterSHA256(cfg.OutputDir, progress)
+	if err != nil {
+		return fmt.Errorf("plan 记录冻结前正史章节清单: %w", err)
+	}
+	renderDependencySHA256, err := capturePipelineFrozenRenderDependencies(cfg.OutputDir)
+	if err != nil {
+		return fmt.Errorf("plan 记录冻结渲染依赖: %w", err)
+	}
+	frozenContext, err := tools.FreezeDraftRenderContext(
+		context.Background(),
+		tools.NewContextTool(st, bundle.References, cfg.Style),
+		chapter,
+		cp.Digest,
+	)
+	if err != nil {
+		return fmt.Errorf("plan 封存第 %d 章精确正文上下文: %w", chapter, err)
+	}
 	frozen := pipelineFrozenPlan{
 		Version:                 pipelinePlanningSchema,
 		Chapter:                 chapter,
@@ -464,6 +611,12 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		PlanCheckpointSeq:       cp.Seq,
 		BaselineCommitSeq:       before.CommitSeq,
 		BaselineCompletedDigest: before.CompletedDigest,
+		BaselineCanonRoot:       preplanReceipt.CurrentCanonRoot,
+		BaselineChapterSHA256:   baselineChapterSHA256,
+		RenderDependencySHA256:  renderDependencySHA256,
+		PipelineRunInputDigest:  pipelineRunInputDigest(cfg, bundle),
+		RenderContextPath:       tools.FrozenDraftRenderContextPath,
+		RenderContextSHA256:     frozenContext.PayloadSHA256,
 		PlanningGenerationID:    preplanReceipt.GenerationID,
 		PlanningDependencyRoot:  preplanReceipt.DependencyRoot,
 		ProjectionBinding:       "canonical_rewrite_rebase_required",
@@ -507,9 +660,15 @@ func recoverPipelineUnfrozenFormalPlan(
 	st *store.Store,
 	chapter int,
 	baselineCommitSeq int64,
+	explicitRestart bool,
 ) (*domain.Checkpoint, bool, error) {
 	if st == nil {
 		return nil, false, fmt.Errorf("store is nil")
+	}
+	if explicitRestart {
+		// --restart is an explicit request for a fresh source-bound planning
+		// epoch. Crash recovery remains the default only for ordinary resume.
+		return nil, false, nil
 	}
 	if frozen, _, err := loadAndVerifyPipelineFrozenPlan(st.Dir()); err == nil && frozen != nil {
 		return nil, false, nil
@@ -559,21 +718,40 @@ func pipelinePlanCheckpointAfterLatestBoundary(
 }
 
 func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) (returnErr error) {
-	cfg, _, err := loadCfgBundle(opts)
+	_, releaseControl, err := acquirePublishedOutlineAllStageForInvocation(opts)
+	if err != nil {
+		return fmt.Errorf("render requires published outline-all: %w", err)
+	}
+	defer releasePublishedOutlineAllStage(releaseControl, "render", &returnErr)
+	if err := recoverPipelineRenderPublishesBeforeLoad(opts); err != nil {
+		return err
+	}
+	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
 	}
 	st := store.NewStore(cfg.OutputDir)
-	if _, err := pipelineQueueCurrentExternalSamplingFailures(st, flags.Start, flags.End); err != nil {
-		return err
-	}
 	frozen, cp, err := loadAndVerifyPipelineFrozenPlan(cfg.OutputDir)
 	if err != nil {
+		return err
+	}
+	if err := requirePipelineRenderBindingForWritingMode(st, frozen); err != nil {
+		return err
+	}
+	if _, err := pipelineQueueCurrentExternalSamplingFailures(st, flags.Start, flags.End); err != nil {
 		return err
 	}
 	chapter := frozen.Chapter
 	_, postCommitRecovery := pipelineCommittedAfterFrozenBaseline(st, frozen)
 	if !postCommitRecovery {
+		currentInputDigest := pipelineRunInputDigest(cfg, bundle)
+		if frozen.ProjectionBinding == "sealed_v2" {
+			currentInputDigest = pipelineRenderInputDigest(cfg, bundle)
+		}
+		if frozen.PipelineRunInputDigest == "" || frozen.PipelineRunInputDigest != currentInputDigest {
+			return fmt.Errorf("render 模型/provider/prompt 运行输入已漂移（frozen=%s current=%s）；必须重新执行 plan",
+				frozen.PipelineRunInputDigest, currentInputDigest)
+		}
 		actionable, _, actionErr := pipelineCurrentActionableChapter(st, flags)
 		if actionErr != nil {
 			return actionErr
@@ -588,15 +766,6 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	} else {
 		fmt.Fprintf(os.Stderr, "[pipeline:render] 检测到第 %d 章 commit 已落盘但 render receipt 尚待收口；从冻结计划恢复 fresh review/receipt，不重复写正文\n", chapter)
 	}
-	var preplanReceipt pipelinePreplanReceipt
-	if err := readPipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), &preplanReceipt); err != nil {
-		return fmt.Errorf("render 读取 preplan 回执: %w", err)
-	}
-	if frozen.PlanningGenerationID != preplanReceipt.GenerationID ||
-		frozen.PlanningDependencyRoot != preplanReceipt.DependencyRoot {
-		return fmt.Errorf("render 冻结计划未绑定当前 preplan generation；必须显式重跑 plan")
-	}
-	preplanForValidation := preplanReceipt
 	if postCommitRecovery {
 		progress, progressErr := st.Progress.Load()
 		if progressErr != nil {
@@ -608,29 +777,57 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		if err := validatePipelinePostCommitProgressBoundary(progress, frozen); err != nil {
 			return err
 		}
-		currentRoot, rootErr := pipelineCanonRoot(cfg.OutputDir, progress)
-		if rootErr != nil {
-			return rootErr
+		if err := validatePipelinePostCommitChapterBoundary(cfg.OutputDir, frozen); err != nil {
+			return err
 		}
-		// The only canon drift allowed here is the durable commit bound to this
-		// exact frozen plan. Dependency and invalidation checks still run.
-		preplanForValidation.CurrentCanonRoot = currentRoot
-	}
-	if err := validatePipelinePreplanFresh(st, preplanForValidation); err != nil {
-		return err
 	}
 	if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, chapter); err != nil {
 		return fmt.Errorf("render 正式计划 freshness 失败: %w", err)
 	}
-	projectedManifest, err := st.Planning.LoadStagedChapterPlanManifest(chapter)
-	if err != nil {
-		return fmt.Errorf("render 读取 projected manifest: %w", err)
-	}
-	if _, err := loadAndVerifyPipelineProjectedPayload(cfg.OutputDir, projectedManifest); err != nil {
-		return fmt.Errorf("render projected payload 已漂移；必须显式重跑 preplan/plan: %w", err)
-	}
-	if err := validatePipelineFrozenProjectionBinding(frozen, projectedManifest); err != nil {
-		return fmt.Errorf("render 冻结投影绑定失效；必须显式重跑 plan: %w", err)
+	sealedV2 := frozen.ProjectionBinding == "sealed_v2"
+	var preplanReceipt pipelinePreplanReceipt
+	var projectedManifest *domain.StagedChapterPlanManifest
+	var sealedBinding *pipelineSealedRenderBinding
+	if sealedV2 {
+		sealedBinding, err = validatePipelineSealedRenderBinding(st, frozen, postCommitRecovery)
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := readPipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), &preplanReceipt); err != nil {
+			return fmt.Errorf("render 读取 preplan 回执: %w", err)
+		}
+		if frozen.PlanningGenerationID != preplanReceipt.GenerationID ||
+			frozen.PlanningDependencyRoot != preplanReceipt.DependencyRoot {
+			return fmt.Errorf("render 冻结计划未绑定当前 preplan generation；必须显式重跑 plan")
+		}
+		preplanForValidation := preplanReceipt
+		if postCommitRecovery {
+			progress, progressErr := st.Progress.Load()
+			if progressErr != nil || progress == nil {
+				return fmt.Errorf("render commit recovery 读取 progress: %w", progressErr)
+			}
+			currentRoot, rootErr := pipelineCanonRoot(cfg.OutputDir, progress)
+			if rootErr != nil {
+				return rootErr
+			}
+			// The only canon drift allowed here is the durable commit bound to
+			// this exact frozen plan.
+			preplanForValidation.CurrentCanonRoot = currentRoot
+		}
+		if err := validatePipelinePreplanFresh(st, preplanForValidation); err != nil {
+			return err
+		}
+		projectedManifest, err = st.Planning.LoadStagedChapterPlanManifest(chapter)
+		if err != nil {
+			return fmt.Errorf("render 读取 projected manifest: %w", err)
+		}
+		if _, err := loadAndVerifyPipelineProjectedPayload(cfg.OutputDir, projectedManifest); err != nil {
+			return fmt.Errorf("render projected payload 已漂移；必须显式重跑 preplan/plan: %w", err)
+		}
+		if err := validatePipelineFrozenProjectionBinding(frozen, projectedManifest); err != nil {
+			return fmt.Errorf("render 冻结投影绑定失效；必须显式重跑 plan: %w", err)
+		}
 	}
 	owner := pipelineExecutionOwner("render", chapter)
 	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
@@ -647,48 +844,124 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			returnErr = fmt.Errorf("render 释放正文执行锁: %w", err)
 		}
 	}()
-
 	if !postCommitRecovery {
-		renderFlags := flags
-		renderFlags.WriteTo = chapter
-		renderFlags.StopAfterCommit = chapter
-		renderFlags.RenderOnly = true
-		if err := pipelineWrite(opts, renderFlags, state); err != nil {
-			return fmt.Errorf("render 第 %d 章失败（render lock 已禁止临时重规划）: %w", chapter, err)
+		if err := validatePipelineFrozenRenderDependencies(cfg.OutputDir, frozen); err != nil {
+			return fmt.Errorf("render 获取执行锁后冻结渲染依赖复核失败: %w", err)
 		}
 	}
-	// headless writes checkpoints through another Store. CheckpointStore is a
-	// point-in-time cache, so reusing the pre-render Store would miss the new
-	// commit and falsely report that render produced nothing.
-	st = reloadPipelineStore(cfg.OutputDir)
-	currentPlan, err := tools.CurrentChapterPlanCausalCheckpoint(st, chapter)
-	if err != nil {
-		return fmt.Errorf("render 后正式计划不可验证: %w", err)
+
+	var rendered *pipelineRenderedChapterSnapshot
+	directoryPublishReceiptDigest := ""
+	directoryPublishTransactionID := ""
+	reviewAlreadyAccepted := false
+	var sealedActualMatch *pipelineSealedActualDeltaMatch
+	if sealedV2 {
+		transactionID, idErr := pipelineRenderTransactionID(frozen)
+		if idErr != nil {
+			return idErr
+		}
+		publishState, stateErr := store.NewDirectoryPublishStore(
+			pipelineRenderTransactionRoot(cfg.OutputDir),
+		).LoadDirectoryPublishState(transactionID)
+		if stateErr != nil {
+			return fmt.Errorf("render 读取候选目录发布状态: %w", stateErr)
+		}
+		if publishState != nil && publishState.Receipt != nil {
+			directoryPublishTransactionID = transactionID
+			directoryPublishReceiptDigest = publishState.Receipt.ReceiptDigest
+		}
 	}
-	if currentPlan.Digest != frozen.PlanDigest || currentPlan.Seq != cp.Seq {
-		return fmt.Errorf("render 期间第 %d 章正式计划漂移（frozen=%s#%d current=%s#%d）",
-			chapter, frozen.PlanDigest, cp.Seq, currentPlan.Digest, currentPlan.Seq)
+	if !postCommitRecovery && sealedV2 {
+		candidate, candidateSnapshot, err := runPipelineSealedRenderCandidate(
+			opts,
+			flags,
+			state,
+			cfg,
+			bundle,
+			frozen,
+			cp,
+		)
+		if err != nil {
+			return err
+		}
+		actualMatch, matchErr := matchPipelineSealedRenderActualDelta(
+			candidateSnapshot.Store,
+			&sealedBinding.Bundle,
+			nil,
+			candidateSnapshot.Body,
+		)
+		if matchErr != nil {
+			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-match-error")
+			return fmt.Errorf("render 第 %d 章候选实际状态核验失败（live canon 未变）: %w", chapter, matchErr)
+		}
+		if !actualMatch.ProjectionMatch {
+			_ = savePipelineSealedActualMatch(candidate.OutputDir, actualMatch)
+			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-mismatch")
+			return fmt.Errorf(
+				"render 第 %d 章候选未实现 sealed projected delta（live canon 未变）：%s",
+				chapter,
+				strings.Join(actualMatch.MismatchReasons, "；"),
+			)
+		}
+		if err := savePipelineSealedActualMatch(candidate.OutputDir, actualMatch); err != nil {
+			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-match-receipt-error")
+			return fmt.Errorf("render 第 %d 章保存 actual match 证据失败: %w", chapter, err)
+		}
+		sealedActualMatch = &actualMatch
+		publishReceipt, err := publishPipelineRenderCandidate(cfg.OutputDir, candidate)
+		if err != nil {
+			return err
+		}
+		directoryPublishReceiptDigest = publishReceipt.ReceiptDigest
+		directoryPublishTransactionID = publishReceipt.TransactionID
+		reviewAlreadyAccepted = true
+		// Re-open the promoted directory instead of retaining any Store/file
+		// handles rooted at the old candidate path.
+		rendered, err = loadPipelineRenderedChapterSnapshot(cfg.OutputDir, frozen, cp)
+		if err != nil {
+			return fmt.Errorf("render 候选发布后 live snapshot 不可验证: %w", err)
+		}
+		if rendered.BodySHA256 != candidateSnapshot.BodySHA256 {
+			return fmt.Errorf("render 候选目录发布后正文 hash 漂移")
+		}
+		if err := finalizePipelineRenderCandidate(cfg.OutputDir, directoryPublishTransactionID); err != nil {
+			return err
+		}
+	} else {
+		if !postCommitRecovery {
+			renderFlags := flags
+			renderFlags.WriteTo = chapter
+			renderFlags.StopAfterCommit = chapter
+			renderFlags.RenderOnly = true
+			if err := pipelineWrite(opts, renderFlags, state); err != nil {
+				return fmt.Errorf("render 第 %d 章失败（render lock 已禁止临时重规划）: %w", chapter, err)
+			}
+		}
+		rendered, err = loadPipelineRenderedChapterSnapshot(cfg.OutputDir, frozen, cp)
+		if err != nil {
+			return err
+		}
 	}
-	commit := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "commit")
-	if commit == nil || commit.Seq <= frozen.BaselineCommitSeq {
-		return fmt.Errorf("render 第 %d 章没有产生晚于冻结基线 #%d 的 commit checkpoint", chapter, frozen.BaselineCommitSeq)
-	}
-	chapterPath := fmt.Sprintf("chapters/%02d.md", chapter)
-	bodySHA, err := pipelineRequiredFileSHA(cfg.OutputDir, chapterPath)
-	if err != nil {
-		return fmt.Errorf("render 验证正文: %w", err)
-	}
-	if commit.Artifact != chapterPath || commit.Digest != "sha256:"+bodySHA {
-		return fmt.Errorf("render 第 %d 章 commit checkpoint 未绑定当前正文（artifact=%q digest=%s current=sha256:%s）",
-			chapter, commit.Artifact, commit.Digest, bodySHA)
-	}
-	progress, err := st.Progress.Load()
-	if err != nil || progress == nil {
-		return fmt.Errorf("render 读取提交后 progress: %w", err)
-	}
-	actualCanonRoot, err := pipelineCanonRoot(cfg.OutputDir, progress)
-	if err != nil {
-		return fmt.Errorf("render 计算提交后 canon root: %w", err)
+	st = rendered.Store
+	commit := rendered.Commit
+	chapterPath := rendered.ChapterPath
+	bodySHA := rendered.BodySHA256
+	actualCanonRoot := rendered.ActualCanonRoot
+	if sealedV2 && !reviewAlreadyAccepted && sealedBinding.Outcome != nil {
+		alreadySaved, acceptanceErr := pipelineChapterAcceptanceAlreadySaved(
+			st,
+			sealedBinding.Generation.GenerationID,
+			chapter,
+			bodySHA,
+			sealedBinding.Outcome.ReceiptDigest,
+		)
+		if acceptanceErr != nil {
+			return fmt.Errorf("render 第 %d 章恢复不可变逐章审核回执失败: %w", chapter, acceptanceErr)
+		}
+		if alreadySaved {
+			reviewAlreadyAccepted = true
+			fmt.Fprintf(os.Stderr, "[pipeline:render] 第 %d 章 exact-body 逐章审核回执已封存；恢复时不重复改写审核文件\n", chapter)
+		}
 	}
 	// ProjectedState.PostStateRoot and the canonical artifact root are different
 	// hash domains and must never be compared directly. Exact frozen-plan
@@ -701,21 +974,46 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	if flags.Budget > 0 {
 		reviewArgs = append(reviewArgs, "--budget", flags.Budget.String())
 	}
-	if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
-		return fmt.Errorf("render 第 %d 章 fresh exact-body review 失败: %w", chapter, err)
+	if !reviewAlreadyAccepted {
+		if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
+			return fmt.Errorf("render 第 %d 章 fresh exact-body review 失败: %w", chapter, err)
+		}
+		if err := requirePipelineAcceptedExactReview(cfg.OutputDir, chapter); err != nil {
+			if !sealedV2 && projectedManifest != nil {
+				downstreamInvalidated, _ = appendPipelineProjectionInvalidation(
+					st,
+					*projectedManifest,
+					chapter,
+					fmt.Sprintf("chapter %d fresh exact-body review did not accept the realized projection: %v", chapter, err),
+				)
+			}
+			if sealedV2 {
+				return fmt.Errorf("render 第 %d 章未通过 fresh exact-body accept；sealed generation 保持在本章，禁止提升下一章，必须只重渲染当前冻结计划: %w", chapter, err)
+			}
+			return fmt.Errorf("render 第 %d 章未通过 fresh exact-body accept；下一步只能显式 preplan/plan 后再 render: %w", chapter, err)
+		}
 	}
-	if err := requirePipelineAcceptedExactReview(cfg.OutputDir, chapter); err != nil {
-		if projectedManifest != nil {
-			downstreamInvalidated, _ = appendPipelineProjectionInvalidation(
-				st,
-				*projectedManifest,
+	if sealedV2 && sealedActualMatch == nil {
+		actualMatch, matchErr := matchPipelineSealedRenderActualDelta(
+			st,
+			&sealedBinding.Bundle,
+			nil,
+			rendered.Body,
+		)
+		if matchErr != nil {
+			return fmt.Errorf("render 第 %d 章 actual projected delta 核验失败: %w", chapter, matchErr)
+		}
+		if !actualMatch.ProjectionMatch {
+			_ = savePipelineSealedActualMatch(cfg.OutputDir, actualMatch)
+			return fmt.Errorf(
+				"render 第 %d 章 actual state 与 sealed projection 不匹配，禁止推进后缀：%s",
 				chapter,
-				fmt.Sprintf("chapter %d fresh exact-body review did not accept the realized projection: %v", chapter, err),
+				strings.Join(actualMatch.MismatchReasons, "；"),
 			)
 		}
-		return fmt.Errorf("render 第 %d 章未通过 fresh exact-body accept；下一步只能显式 preplan/plan 后再 render: %w", chapter, err)
+		sealedActualMatch = &actualMatch
 	}
-	progress, err = st.Progress.Load()
+	progress, err := st.Progress.Load()
 	if err != nil || progress == nil {
 		return fmt.Errorf("render 读取复审后 progress: %w", err)
 	}
@@ -723,48 +1021,118 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	if err != nil {
 		return fmt.Errorf("render 计算复审后 canon root: %w", err)
 	}
-	projectionBound = projectedManifest != nil
-	preplanReceipt.CurrentCanonRoot = actualCanonRoot
-	if projectedManifest != nil {
-		projectedManifest.Realization = domain.PlanningRealizationRendered
-		projectedManifest.ProjectedState.Realization = domain.PlanningRealizationRendered
-		if err := st.Planning.SaveStagedChapterPlanManifest(*projectedManifest); err != nil {
-			return fmt.Errorf("render 标记第 %d 章 projected manifest 已实现: %w", chapter, err)
+	outcomeReceiptDigest := ""
+	if sealedV2 {
+		projectionBound = true
+		outcome, outcomeErr := acceptPipelineSealedRenderOutcome(
+			st,
+			sealedBinding,
+			commit,
+			bodySHA,
+			pipelineProjectAllCanonRootFromSnapshot(actualCanonRoot),
+			sealedActualMatch,
+		)
+		if outcomeErr != nil {
+			return outcomeErr
 		}
-		if !slices.Contains(preplanReceipt.RealizedChapters, chapter) {
-			preplanReceipt.RealizedChapters = append(preplanReceipt.RealizedChapters, chapter)
-			sort.Ints(preplanReceipt.RealizedChapters)
+		outcomeReceiptDigest = outcome.ReceiptDigest
+		if _, acceptanceErr := savePipelineChapterAcceptance(
+			cfg.OutputDir,
+			st,
+			&sealedBinding.Generation,
+			chapter,
+			bodySHA,
+			outcome,
+		); acceptanceErr != nil {
+			return fmt.Errorf("render 第 %d 章封存 exact-body 逐章审核回执失败: %w", chapter, acceptanceErr)
 		}
+		if chapter == sealedBinding.Generation.LastProjectedChapter {
+			nextAction = "finalize the current arc after verifying every chapter-level acceptance; do not run an arc-level prose review"
+		} else {
+			nextAction = "promote the next immutable chapter bundle in this arc; keep review chapter-scoped; no replanning"
+		}
+	} else {
+		projectionBound = projectedManifest != nil
+		preplanReceipt.CurrentCanonRoot = actualCanonRoot
+		if projectedManifest != nil {
+			projectedManifest.Realization = domain.PlanningRealizationRendered
+			projectedManifest.ProjectedState.Realization = domain.PlanningRealizationRendered
+			if err := st.Planning.SaveStagedChapterPlanManifest(*projectedManifest); err != nil {
+				return fmt.Errorf("render 标记第 %d 章 projected manifest 已实现: %w", chapter, err)
+			}
+			if !slices.Contains(preplanReceipt.RealizedChapters, chapter) {
+				preplanReceipt.RealizedChapters = append(preplanReceipt.RealizedChapters, chapter)
+				sort.Ints(preplanReceipt.RealizedChapters)
+			}
+		}
+		// Legacy v1 projected and actual state are different hash domains.
+		preplanReceipt.RebaseRequiredBeforeFuture = true
+		if _, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), preplanReceipt); err != nil {
+			return fmt.Errorf("render 推进 preplan realization 回执: %w", err)
+		}
+		nextAction = "render changed canonical state; refresh preplan before promoting any future chapter"
 	}
-	// Until projected and actual state use one homogeneous outcome-receipt
-	// schema, an exact frozen plan plus accepted exact-body review proves the
-	// hand-off, not semantic root equality. Conservatively require a fresh
-	// full-book projection before promoting any later future chapter.
-	preplanReceipt.RebaseRequiredBeforeFuture = true
-	if _, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), preplanReceipt); err != nil {
-		return fmt.Errorf("render 推进 preplan realization 回执: %w", err)
-	}
-	nextAction = "render changed canonical state; refresh preplan before promoting any future chapter"
 	receipt := pipelineRenderReceipt{
-		Version:             pipelinePlanningSchema,
-		Chapter:             chapter,
-		PlanDigest:          frozen.PlanDigest,
-		PlanCheckpointSeq:   frozen.PlanCheckpointSeq,
-		CommitDigest:        commit.Digest,
-		CommitCheckpointSeq: commit.Seq,
-		ChapterPath:         chapterPath,
-		ChapterBodySHA256:   bodySHA,
-		ActualCanonRoot:     actualCanonRoot,
-		ProjectedStateRoot:  frozen.ProjectedPostStateRoot,
-		ProjectionBound:     projectionBound,
-		DownstreamInvalid:   downstreamInvalidated,
-		NextAction:          nextAction,
-		RenderedAt:          time.Now().UTC().Format(time.RFC3339Nano),
+		Version:                pipelinePlanningSchema,
+		Chapter:                chapter,
+		PlanDigest:             frozen.PlanDigest,
+		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
+		CommitDigest:           commit.Digest,
+		CommitCheckpointSeq:    commit.Seq,
+		ChapterPath:            chapterPath,
+		ChapterBodySHA256:      bodySHA,
+		ActualCanonRoot:        actualCanonRoot,
+		RenderDependencySHA256: maps.Clone(frozen.RenderDependencySHA256),
+		PipelineRunInputDigest: frozen.PipelineRunInputDigest,
+		RenderContextSHA256:    frozen.RenderContextSHA256,
+		ProjectedStateRoot:     frozen.ProjectedPostStateRoot,
+		ProjectionBound:        projectionBound,
+		PlanningGenerationID:   frozen.PlanningGenerationID,
+		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
+		OutcomeReceiptDigest:   outcomeReceiptDigest,
+		DirectoryPublishID:     directoryPublishTransactionID,
+		DirectoryPublishDigest: directoryPublishReceiptDigest,
+		DownstreamInvalid:      downstreamInvalidated,
+		NextAction:             nextAction,
+		RenderedAt:             time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if _, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelineRenderReceiptPath), receipt); err != nil {
 		return fmt.Errorf("render 保存验收回执: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[pipeline:render] 第 %d 章已按冻结计划渲染并提交\n", chapter)
+	return nil
+}
+
+// Once a project opts into sealed_two_pass_v2, render may only consume a
+// mechanically promoted bundle from the active sealed generation. This closes
+// the compatibility-path gap where a legacy frozen plan left on disk before
+// project-all could otherwise be rendered while the all-book generation was
+// still building.
+func requirePipelineRenderBindingForWritingMode(
+	st *store.Store,
+	frozen *pipelineFrozenPlan,
+) error {
+	if st == nil || frozen == nil {
+		return fmt.Errorf("render writing-mode validation requires store and frozen plan")
+	}
+	mode, err := st.LoadWritingPipelineMode()
+	if err != nil {
+		return fmt.Errorf("render 读取 writing pipeline mode: %w", err)
+	}
+	if mode != nil &&
+		mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 &&
+		frozen.ProjectionBinding != "sealed_v2" {
+		return fmt.Errorf(
+			"项目已启用 sealed_two_pass_v2，render 只能消费 promote 发布的 sealed_v2 冻结包；当前 binding=%q",
+			frozen.ProjectionBinding,
+		)
+	}
+	if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		if err := requireNoPendingSealedSteer(st, "sealed render"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -803,6 +1171,44 @@ func validatePipelinePostCommitProgressBoundary(progress *domain.Progress, froze
 	}
 	if previousDigest != frozen.BaselineCompletedDigest {
 		return fmt.Errorf("render commit recovery 检测到冻结章以外的 completed_chapters 漂移；拒绝把未知正史变化伪装成第 %d 章 commit", frozen.Chapter)
+	}
+	return nil
+}
+
+func pipelineCompletedChapterSHA256(outputDir string, progress *domain.Progress) (map[string]string, error) {
+	if progress == nil {
+		return nil, fmt.Errorf("progress is nil")
+	}
+	chapters := append([]int(nil), progress.CompletedChapters...)
+	sort.Ints(chapters)
+	out := make(map[string]string, len(chapters))
+	for _, chapter := range chapters {
+		rel := fmt.Sprintf("chapters/%02d.md", chapter)
+		digest, err := pipelineRequiredFileSHA(outputDir, rel)
+		if err != nil {
+			return nil, err
+		}
+		out[rel] = digest
+	}
+	return out, nil
+}
+
+func validatePipelinePostCommitChapterBoundary(outputDir string, frozen *pipelineFrozenPlan) error {
+	if frozen == nil || frozen.BaselineChapterSHA256 == nil {
+		return fmt.Errorf("render commit recovery 缺少冻结前逐章 SHA 清单；拒绝放宽 preplan canon root")
+	}
+	target := fmt.Sprintf("chapters/%02d.md", frozen.Chapter)
+	for rel, expected := range frozen.BaselineChapterSHA256 {
+		if rel == target {
+			continue
+		}
+		actual, err := pipelineRequiredFileSHA(outputDir, rel)
+		if err != nil {
+			return fmt.Errorf("render commit recovery 核对非目标章节 %s: %w", rel, err)
+		}
+		if actual != expected {
+			return fmt.Errorf("render commit recovery 检测到非目标章节 %s 漂移；拒绝把未知正史变化伪装成第 %d 章 commit", rel, frozen.Chapter)
+		}
 	}
 	return nil
 }
@@ -884,6 +1290,49 @@ func retirePipelineFormalPlan(st *store.Store, chapter int, checkpointSeq int64)
 		if err := os.Remove(filepath.Join(st.Dir(), filepath.FromSlash(rel))); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("plan 退役旧计划 %s: %w", rel, err)
 		}
+	}
+	return nil
+}
+
+func retirePipelinePlanPartial(st *store.Store, chapter int, reason string) error {
+	if st == nil || chapter <= 0 {
+		return fmt.Errorf("plan partial retirement requires a valid store/chapter")
+	}
+	rel := fmt.Sprintf("drafts/%02d.plan.partial.json", chapter)
+	path := filepath.Join(st.Dir(), filepath.FromSlash(rel))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("plan 读取旧 staged partial: %w", err)
+	}
+	epoch := time.Now().UTC().Format("20060102T150405.000000000Z")
+	archiveRel := filepath.ToSlash(filepath.Join(
+		"meta", "planning", "retired_formal_plans",
+		fmt.Sprintf("ch%06d", chapter),
+		fmt.Sprintf("%s-plan-partial.json", epoch),
+	))
+	if err := atomicWriteRewriteFile(filepath.Join(st.Dir(), filepath.FromSlash(archiveRel)), raw, 0o644); err != nil {
+		return fmt.Errorf("plan 归档旧 staged partial: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("plan 删除已归档 staged partial: %w", err)
+	}
+	meta := map[string]any{
+		"version":                pipelinePlanningSchema,
+		"chapter":                chapter,
+		"source":                 rel,
+		"archive":                archiveRel,
+		"retired_for":            strings.TrimSpace(reason),
+		"retired_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		"retired_partial_sha256": pipelineBytesSHA(raw),
+		"canonical_authority":    false,
+		"may_resume_from_copy":   false,
+	}
+	metaPath := strings.TrimSuffix(filepath.Join(st.Dir(), filepath.FromSlash(archiveRel)), ".json") + ".retirement.json"
+	if _, err := writePipelinePlanningJSON(metaPath, meta); err != nil {
+		return fmt.Errorf("plan 保存 staged partial 归档回执: %w", err)
 	}
 	return nil
 }
@@ -1018,6 +1467,46 @@ func verifyPipelinePlanDidNotWriteProse(st *store.Store, beforeProgress *domain.
 	return nil
 }
 
+func capturePipelineFrozenRenderDependencies(outputDir string) (map[string]string, error) {
+	dependencies := make(map[string]string, len(pipelineFrozenRenderDependencyPaths))
+	for _, rel := range pipelineFrozenRenderDependencyPaths {
+		raw, err := os.ReadFile(filepath.Join(outputDir, filepath.FromSlash(rel)))
+		if err != nil {
+			if os.IsNotExist(err) {
+				dependencies[rel] = pipelineMissingDependency
+				continue
+			}
+			return nil, fmt.Errorf("读取 %s: %w", rel, err)
+		}
+		dependencies[rel] = pipelineBytesSHA(raw)
+	}
+	return dependencies, nil
+}
+
+func validatePipelineFrozenRenderDependencies(outputDir string, frozen *pipelineFrozenPlan) error {
+	if frozen == nil {
+		return fmt.Errorf("冻结计划为空")
+	}
+	for _, rel := range pipelineFrozenRenderDependencyPaths {
+		expected, ok := frozen.RenderDependencySHA256[rel]
+		if !ok || strings.TrimSpace(expected) == "" {
+			return fmt.Errorf("冻结计划未绑定硬渲染依赖 %s；必须重新执行 plan", rel)
+		}
+	}
+	current, err := capturePipelineFrozenRenderDependencies(outputDir)
+	if err != nil {
+		return err
+	}
+	for _, rel := range pipelineFrozenRenderDependencyPaths {
+		expected := frozen.RenderDependencySHA256[rel]
+		if current[rel] != expected {
+			return fmt.Errorf("冻结计划硬渲染依赖 %s 漂移（frozen=%s current=%s）；必须重新执行 plan",
+				rel, expected, current[rel])
+		}
+	}
+	return nil
+}
+
 func loadAndVerifyPipelineFrozenPlan(outputDir string) (*pipelineFrozenPlan, *domain.Checkpoint, error) {
 	var frozen pipelineFrozenPlan
 	if err := readPipelinePlanningJSON(filepath.Join(outputDir, pipelineFrozenPlanPath), &frozen); err != nil {
@@ -1027,8 +1516,20 @@ func loadAndVerifyPipelineFrozenPlan(outputDir string) (*pipelineFrozenPlan, *do
 		return nil, nil, fmt.Errorf("render 读取冻结计划: %w", err)
 	}
 	if frozen.Version != pipelinePlanningSchema || frozen.Chapter <= 0 ||
-		strings.TrimSpace(frozen.PlanDigest) == "" || frozen.PlanCheckpointSeq <= 0 {
+		strings.TrimSpace(frozen.PlanDigest) == "" || frozen.PlanCheckpointSeq <= 0 ||
+		frozen.RenderContextPath != tools.FrozenDraftRenderContextPath ||
+		strings.TrimSpace(frozen.RenderContextSHA256) == "" {
 		return nil, nil, fmt.Errorf("冻结计划回执无效")
+	}
+	if frozen.ProjectionBinding == "sealed_v2" &&
+		(strings.TrimSpace(frozen.PlanningGenerationID) == "" ||
+			strings.TrimSpace(frozen.PlanningDependencyRoot) == "" ||
+			strings.TrimSpace(frozen.ProjectedPlanSHA256) == "" ||
+			strings.TrimSpace(frozen.ProjectedPreStateRoot) == "" ||
+			strings.TrimSpace(frozen.ProjectedPostStateRoot) == "" ||
+			strings.TrimSpace(frozen.ProjectedBundleDigest) == "" ||
+			strings.TrimSpace(frozen.PromotionReceiptDigest) == "") {
+		return nil, nil, fmt.Errorf("sealed_v2 冻结计划缺少 generation/bundle/promotion 精确绑定")
 	}
 	wantPath := fmt.Sprintf("drafts/%02d.plan.json", frozen.Chapter)
 	if frozen.PlanPath != wantPath {
@@ -1041,6 +1542,19 @@ func loadAndVerifyPipelineFrozenPlan(outputDir string) (*pipelineFrozenPlan, *do
 	if cp.Digest != frozen.PlanDigest || cp.Seq != frozen.PlanCheckpointSeq {
 		return nil, nil, fmt.Errorf("冻结计划漂移（frozen=%s#%d current=%s#%d）；必须重新执行 plan",
 			frozen.PlanDigest, frozen.PlanCheckpointSeq, cp.Digest, cp.Seq)
+	}
+	if _, contextEnvelope, err := tools.LoadFrozenDraftRenderContext(
+		store.NewStore(outputDir),
+		frozen.Chapter,
+		frozen.PlanDigest,
+	); err != nil {
+		return nil, nil, fmt.Errorf("冻结正文上下文已失效: %w", err)
+	} else if contextEnvelope.PayloadSHA256 != frozen.RenderContextSHA256 {
+		return nil, nil, fmt.Errorf(
+			"冻结正文上下文摘要漂移（plan=%s context=%s）；必须重新执行 plan",
+			frozen.RenderContextSHA256,
+			contextEnvelope.PayloadSHA256,
+		)
 	}
 	return &frozen, cp, nil
 }
@@ -1126,9 +1640,45 @@ func verifyPipelinePreplanStage(outputDir string, evidence domain.PipelineStageE
 		receipt.CurrentCanonRoot == "" || receipt.DependencyRoot == "" {
 		return evidence, fmt.Errorf("preplan 验收回执字段不完整")
 	}
-	st := store.NewStore(outputDir)
-	if err := validatePipelinePreplanFresh(st, receipt); err != nil {
+	rebasePending, err := pipelinePreplanRebasePending(outputDir, receipt)
+	if err != nil {
 		return evidence, err
+	}
+	if rebasePending {
+		return evidence, fmt.Errorf(
+			"%w：上一轮 render 已改变正史；必须重跑 preplan 后才能进入下一章 plan/render",
+			errPipelinePreplanRebaseRequired,
+		)
+	}
+	st := store.NewStore(outputDir)
+	sealedArcActive := false
+	if mode, modeErr := st.LoadWritingPipelineMode(); modeErr != nil {
+		return evidence, modeErr
+	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		active, activeErr := st.ProjectedV2().LoadActiveGeneration()
+		if activeErr != nil {
+			return evidence, activeErr
+		}
+		if active != nil {
+			generation, generationErr := st.ProjectedV2().LoadSealedGeneration(active.GenerationID)
+			cursor, cursorErr := st.ProjectedV2().LoadRealizationCursor()
+			progress, progressErr := st.Progress.Load()
+			if generationErr != nil || generation == nil || cursorErr != nil || cursor == nil || progressErr != nil || progress == nil {
+				return evidence, fmt.Errorf("preplan active arc control state is incomplete")
+			}
+			if receipt.BaseCanonChapter != generation.BaseCanonChapter ||
+				receipt.TotalChapters < generation.LastProjectedChapter ||
+				cursor.ActiveGenerationID != generation.GenerationID ||
+				cursor.LastAcceptedChapter != progress.LatestCompleted() {
+				return evidence, fmt.Errorf("preplan receipt does not bind the active sealed arc/canon prefix")
+			}
+			sealedArcActive = true
+		}
+	}
+	if !sealedArcActive {
+		if err := validatePipelinePreplanFresh(st, receipt); err != nil {
+			return evidence, err
+		}
 	}
 	book, err := st.Planning.LoadBookCausalSkeleton()
 	if err != nil || book == nil {
@@ -1222,6 +1772,20 @@ func verifyPipelinePreplanStage(outputDir string, evidence domain.PipelineStageE
 	return evidence, nil
 }
 
+func pipelinePreplanRebasePending(outputDir string, receipt pipelinePreplanReceipt) (bool, error) {
+	if !receipt.RebaseRequiredBeforeFuture {
+		return false, nil
+	}
+	progress, err := store.NewStore(outputDir).Progress.Load()
+	if err != nil {
+		return false, fmt.Errorf("preplan rebase boundary 读取 progress: %w", err)
+	}
+	if progress == nil {
+		return false, fmt.Errorf("preplan rebase boundary 缺少 meta/progress.json")
+	}
+	return len(progress.PendingRewrites) > 0 || progress.Phase != domain.PhaseComplete, nil
+}
+
 func validatePipelinePreplanFresh(st *store.Store, receipt pipelinePreplanReceipt) error {
 	progress, err := st.Progress.Load()
 	if err != nil {
@@ -1278,6 +1842,12 @@ func verifyPipelinePlanStage(outputDir string, evidence domain.PipelineStageEvid
 	if frozen.PlanningGenerationID != preplan.GenerationID || frozen.PlanningDependencyRoot != preplan.DependencyRoot {
 		return evidence, fmt.Errorf("plan 冻结回执未绑定当前 preplan generation")
 	}
+	if strings.TrimSpace(frozen.PipelineRunInputDigest) == "" {
+		return evidence, fmt.Errorf("plan 冻结回执未绑定模型/provider/prompt 运行输入")
+	}
+	if err := validatePipelineFrozenRenderDependencies(outputDir, frozen); err != nil {
+		return evidence, err
+	}
 	if err := validatePipelinePreplanFresh(store.NewStore(outputDir), preplan); err != nil {
 		return evidence, err
 	}
@@ -1295,7 +1865,12 @@ func verifyPipelinePlanStage(outputDir string, evidence domain.PipelineStageEvid
 	if err := validatePipelineFrozenProjectionBinding(frozen, manifest); err != nil {
 		return evidence, fmt.Errorf("plan frozen projection binding 无效: %w", err)
 	}
-	evidence.Artifacts = append(evidence.Artifacts, pipelineFrozenPlanPath, frozen.PlanPath)
+	evidence.Artifacts = append(
+		evidence.Artifacts,
+		pipelineFrozenPlanPath,
+		frozen.PlanPath,
+		frozen.RenderContextPath,
+	)
 	evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:plan#%d:%s", frozen.Chapter, cp.Seq, cp.Digest))
 	evidence.Message = fmt.Sprintf("chapter %d formal plan frozen", frozen.Chapter)
 	return evidence, nil
@@ -1308,7 +1883,9 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 		return evidence, fmt.Errorf("render 缺少验收回执: %w", err)
 	}
 	if receipt.Version != pipelinePlanningSchema || receipt.Chapter <= 0 || receipt.CommitCheckpointSeq <= 0 ||
-		receipt.PlanDigest == "" || receipt.CommitDigest == "" || receipt.ChapterBodySHA256 == "" || receipt.ActualCanonRoot == "" {
+		receipt.PlanDigest == "" || receipt.CommitDigest == "" || receipt.ChapterBodySHA256 == "" ||
+		receipt.ActualCanonRoot == "" || len(receipt.RenderDependencySHA256) == 0 ||
+		receipt.PipelineRunInputDigest == "" || receipt.RenderContextSHA256 == "" {
 		return evidence, fmt.Errorf("render 验收回执字段不完整")
 	}
 	frozen, cp, err := loadAndVerifyPipelineFrozenPlan(outputDir)
@@ -1318,19 +1895,59 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 	if frozen.Chapter != receipt.Chapter || frozen.PlanDigest != receipt.PlanDigest || cp.Seq != receipt.PlanCheckpointSeq {
 		return evidence, fmt.Errorf("render 回执与冻结计划不一致")
 	}
+	if !maps.Equal(frozen.RenderDependencySHA256, receipt.RenderDependencySHA256) {
+		return evidence, fmt.Errorf("render 回执未绑定正文实际消费的冻结渲染依赖")
+	}
+	if frozen.PipelineRunInputDigest != receipt.PipelineRunInputDigest {
+		return evidence, fmt.Errorf("render 回执未绑定正文实际消费的模型/provider/prompt 运行输入")
+	}
+	if frozen.RenderContextSHA256 != receipt.RenderContextSHA256 {
+		return evidence, fmt.Errorf("render 回执未绑定正文实际消费的冻结正文上下文")
+	}
 	st := store.NewStore(outputDir)
-	manifest, err := st.Planning.LoadStagedChapterPlanManifest(receipt.Chapter)
-	if err != nil {
-		return evidence, fmt.Errorf("render 读取 projected manifest: %w", err)
-	}
-	if _, err := loadAndVerifyPipelineProjectedPayload(outputDir, manifest); err != nil {
-		return evidence, fmt.Errorf("render projected payload 已漂移: %w", err)
-	}
-	if err := validatePipelineFrozenProjectionBinding(frozen, manifest); err != nil {
-		return evidence, fmt.Errorf("render frozen projection binding 无效: %w", err)
-	}
-	if receipt.ProjectionBound != (manifest != nil) {
-		return evidence, fmt.Errorf("render projection_receipt_bound 与 manifest 存在性不一致")
+	if frozen.ProjectionBinding == "sealed_v2" {
+		binding, err := validatePipelineSealedRenderBinding(st, frozen, true)
+		if err != nil {
+			return evidence, err
+		}
+		expectedPublishID, err := pipelineRenderTransactionID(frozen)
+		if err != nil {
+			return evidence, err
+		}
+		publishState, err := store.NewDirectoryPublishStore(
+			pipelineRenderTransactionRoot(outputDir),
+		).LoadDirectoryPublishState(expectedPublishID)
+		if err != nil {
+			return evidence, fmt.Errorf("render sealed_v2 目录发布回执不可验证: %w", err)
+		}
+		if binding.Outcome == nil ||
+			!receipt.ProjectionBound ||
+			receipt.PlanningGenerationID != binding.Generation.GenerationID ||
+			receipt.ProjectedBundleDigest != binding.Bundle.BundleDigest ||
+			receipt.PromotionReceiptDigest != binding.Promotion.ReceiptDigest ||
+			receipt.OutcomeReceiptDigest != binding.Outcome.ReceiptDigest ||
+			receipt.DirectoryPublishID != expectedPublishID ||
+			strings.TrimSpace(receipt.DirectoryPublishDigest) == "" ||
+			publishState == nil ||
+			publishState.Phase != store.DirectoryPublishFinalized ||
+			publishState.Receipt == nil ||
+			publishState.Receipt.ReceiptDigest != receipt.DirectoryPublishDigest {
+			return evidence, fmt.Errorf("render sealed_v2 回执未绑定 exact bundle/promotion/outcome")
+		}
+	} else {
+		manifest, err := st.Planning.LoadStagedChapterPlanManifest(receipt.Chapter)
+		if err != nil {
+			return evidence, fmt.Errorf("render 读取 projected manifest: %w", err)
+		}
+		if _, err := loadAndVerifyPipelineProjectedPayload(outputDir, manifest); err != nil {
+			return evidence, fmt.Errorf("render projected payload 已漂移: %w", err)
+		}
+		if err := validatePipelineFrozenProjectionBinding(frozen, manifest); err != nil {
+			return evidence, fmt.Errorf("render frozen projection binding 无效: %w", err)
+		}
+		if receipt.ProjectionBound != (manifest != nil) {
+			return evidence, fmt.Errorf("render projection_receipt_bound 与 manifest 存在性不一致")
+		}
 	}
 	commit := st.Checkpoints.LatestByStep(domain.ChapterScope(receipt.Chapter), "commit")
 	if commit == nil || commit.Seq != receipt.CommitCheckpointSeq || commit.Digest != receipt.CommitDigest {
@@ -1355,7 +1972,7 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 		return evidence, err
 	}
 	if currentRoot != receipt.ActualCanonRoot {
-		return evidence, fmt.Errorf("render 后 canon root 已漂移；需显式重跑 preplan/plan")
+		return evidence, fmt.Errorf("render 后 canon root 已漂移；需从当前 active generation 恢复或重推演")
 	}
 	evidence.Artifacts = append(evidence.Artifacts, pipelineRenderReceiptPath, receipt.ChapterPath)
 	evidence.Checkpoints = append(evidence.Checkpoints,
@@ -1531,22 +2148,30 @@ func pipelinePlanningDependencies(outputDir string) ([]domain.PlanningDependency
 			path string
 		}{kind: "stable_flat_outline", path: "outline.json"})
 	}
-	dependencies := make([]domain.PlanningDependency, 0, len(required)+2)
-	artifacts := make([]string, 0, len(required)+2)
+	dependencies := make([]domain.PlanningDependency, 0, len(required)+len(pipelinePlanningFoundationDependencyPaths)+8)
+	artifacts := make([]string, 0, cap(dependencies)+2)
+	seenArtifacts := make(map[string]struct{})
+	appendArtifact := func(rel string) {
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if _, exists := seenArtifacts[rel]; exists {
+			return
+		}
+		seenArtifacts[rel] = struct{}{}
+		artifacts = append(artifacts, rel)
+	}
 	for _, item := range required {
 		digest, err := pipelineRequiredFileSHA(outputDir, item.path)
 		if err != nil {
 			return nil, nil, fmt.Errorf("preplan 必需依赖 %s: %w", item.path, err)
 		}
 		dependencies = append(dependencies, domain.PlanningDependency{Kind: item.kind, ID: item.path, SHA256: digest})
-		artifacts = append(artifacts, item.path)
+		appendArtifact(item.path)
 	}
-	for _, item := range []struct {
+	optional := append([]struct {
 		kind string
 		path string
-	}{
-		{kind: "premise", path: "premise.md"},
-	} {
+	}{{kind: "premise", path: "premise.md"}}, pipelinePlanningFoundationDependencyPaths...)
+	for _, item := range optional {
 		digest, err := pipelineOptionalFileSHA(outputDir, item.path)
 		if err != nil {
 			return nil, nil, err
@@ -1555,16 +2180,75 @@ func pipelinePlanningDependencies(outputDir string) ([]domain.PlanningDependency
 			continue
 		}
 		dependencies = append(dependencies, domain.PlanningDependency{Kind: item.kind, ID: item.path, SHA256: digest})
-		artifacts = append(artifacts, item.path)
+		appendArtifact(item.path)
+	}
+	for _, root := range pipelinePlanningFoundationDependencyDirs {
+		base := filepath.Join(outputDir, filepath.FromSlash(root.path))
+		if _, err := os.Stat(base); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return nil, nil, err
+		}
+		err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(outputDir, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("preplan foundation dependency refuses symlink %s", rel)
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() || strings.ToLower(filepath.Ext(rel)) != ".json" {
+				return nil
+			}
+			digest, err := pipelineRequiredFileSHA(outputDir, rel)
+			if err != nil {
+				return err
+			}
+			dependencies = append(dependencies, domain.PlanningDependency{
+				Kind:   root.kind,
+				ID:     rel,
+				SHA256: digest,
+			})
+			appendArtifact(rel)
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	// The coarse skeleton does not consume arbitrary RAG chunks. Keep the index
 	// in the audit list, but do not make its ever-growing file hash a hard
-	// generation dependency. Formal plans bind selected retrieval receipts.
-	if digest, err := pipelineOptionalFileSHA(outputDir, "meta/rag/index_state.json"); err != nil {
-		return nil, nil, err
-	} else if digest != "" {
-		artifacts = append(artifacts, "meta/rag/index_state.json")
+	// preplan dependency. Project-all separately captures both local RAG files
+	// into its immutable source snapshot and each formal plan binds selected
+	// retrieval receipts.
+	for _, rel := range []string{
+		"meta/rag/index_state.json",
+		"meta/rag/vector_store.json",
+	} {
+		if digest, err := pipelineOptionalFileSHA(outputDir, rel); err != nil {
+			return nil, nil, err
+		} else if digest != "" {
+			appendArtifact(rel)
+		}
 	}
+	sort.Slice(dependencies, func(i, j int) bool {
+		if dependencies[i].Kind != dependencies[j].Kind {
+			return dependencies[i].Kind < dependencies[j].Kind
+		}
+		return dependencies[i].ID < dependencies[j].ID
+	})
+	sort.Strings(artifacts)
 	return dependencies, artifacts, nil
 }
 
@@ -1583,30 +2267,150 @@ func pipelineCanonRoot(outputDir string, progress *domain.Progress) (string, err
 	}
 	completed := append([]int(nil), progress.CompletedChapters...)
 	sort.Ints(completed)
+	seen := make(map[string]struct{})
+	add := func(rel string, required bool) error {
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if _, ok := seen[rel]; ok {
+			return nil
+		}
+		var digest string
+		var err error
+		if required {
+			digest, err = pipelineRequiredFileSHA(outputDir, rel)
+		} else {
+			digest, err = pipelineOptionalFileSHA(outputDir, rel)
+		}
+		if err != nil {
+			return err
+		}
+		if digest == "" {
+			return nil
+		}
+		seen[rel] = struct{}{}
+		payload.Artifacts = append(payload.Artifacts, canonArtifact{Path: rel, SHA256: digest})
+		return nil
+	}
 	for _, chapter := range completed {
 		rel := fmt.Sprintf("chapters/%02d.md", chapter)
-		digest, err := pipelineRequiredFileSHA(outputDir, rel)
-		if err != nil {
+		if err := add(rel, true); err != nil {
 			return "", fmt.Errorf("preplan 正史根读取第 %d 章: %w", chapter, err)
 		}
-		payload.Artifacts = append(payload.Artifacts, canonArtifact{Path: rel, SHA256: digest})
 	}
 	for _, rel := range []string{
-		"meta/world_tick.json",
-		"meta/resource_ledger.json",
-		"meta/state_changes.json",
-		"meta/cast_ledger.json",
-		"meta/chapter_progress.json",
+		"premise.md",
+		"characters.json",
+		"outline.json",
+		"layered_outline.json",
+		"world_rules.json",
+		"book_world.json",
+		"world_codex.json",
+		"timeline.json",
+		"relationship_state.json",
+		"foreshadow_ledger.json",
 	} {
-		digest, err := pipelineOptionalFileSHA(outputDir, rel)
-		if err != nil {
+		if err := add(rel, false); err != nil {
 			return "", err
 		}
-		if digest != "" {
-			payload.Artifacts = append(payload.Artifacts, canonArtifact{Path: rel, SHA256: digest})
+	}
+	for _, root := range []string{"summaries", "meta"} {
+		base := filepath.Join(outputDir, root)
+		if _, err := os.Stat(base); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		if err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(outputDir, path)
+			if err != nil {
+				return err
+			}
+			slashRel := filepath.ToSlash(rel)
+			if entry.IsDir() {
+				if pipelineCanonSnapshotExcluded(slashRel, true) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("canonical planning snapshot refuses symlink %s", slashRel)
+			}
+			if pipelineCanonSnapshotExcluded(slashRel, false) {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("canonical planning snapshot refuses non-regular file %s", slashRel)
+			}
+			switch strings.ToLower(filepath.Ext(entry.Name())) {
+			case ".json", ".jsonl", ".md":
+				return add(slashRel, false)
+			default:
+				return nil
+			}
+		}); err != nil {
+			return "", err
 		}
 	}
+	sort.Slice(payload.Artifacts, func(i, j int) bool {
+		return payload.Artifacts[i].Path < payload.Artifacts[j].Path
+	})
 	return domain.DeterministicPlanningHash(payload)
+}
+
+func pipelineCanonSnapshotExcluded(rel string, isDir bool) bool {
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "./")
+	for _, prefix := range []string{
+		"meta/planning",
+		"meta/runtime",
+		"meta/quarantine",
+		"meta/sampling",
+		"meta/chapter_metrics",
+		"meta/chapter_simulations",
+		// RAG is a derived retrieval snapshot, not canon. Project-all binds the
+		// exact index/vector pair it copied into PlanningSourceSnapshotV2;
+		// accepted chapters may then grow live RAG without rewriting canon
+		// identity or invalidating the next mechanical promotion.
+		"meta/rag",
+	} {
+		if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
+			return true
+		}
+	}
+	if isDir {
+		return false
+	}
+	switch rel {
+	case "meta/pipeline.json",
+		// Stable progress identity is already represented above by
+		// GenerationID, BaseChapter and the exact completed chapter bodies.
+		// The file also contains transient StartChapter/flow fields written
+		// during promote, so hashing it would make an interrupted mechanical
+		// promotion look like an unknown canon mutation and prevent recovery.
+		"meta/progress.json",
+		"meta/usage.json",
+		"meta/run.json",
+		"meta/checkpoints.jsonl",
+		"meta/pending_commit.json",
+		"meta/diag-export.md",
+		"meta/delivery_log.jsonl",
+		"meta/delivery_log.md",
+		"meta/external_detection_log.jsonl",
+		"meta/review-summary.md",
+		"meta/prompt_manifest.json",
+		"meta/rag/craft_recall_log.jsonl",
+		"meta/rag/retrieval_trace.jsonl",
+		"meta/rag/index_state.md",
+		"meta/rag/vector_store.md":
+		return true
+	default:
+		return false
+	}
 }
 
 func writePipelinePlanningJSON(path string, value any) (string, error) {

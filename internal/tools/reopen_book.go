@@ -60,6 +60,9 @@ func (t *ReopenBookTool) Execute(_ context.Context, args json.RawMessage) (json.
 	if len(a.Chapters) == 0 {
 		return nil, fmt.Errorf("chapters 不能为空，需指明要返工的章节: %w", errs.ErrToolArgs)
 	}
+	if err := guardPipelineGlobalPlanningExecution(t.store, t.Name()); err != nil {
+		return nil, err
+	}
 
 	progress, err := t.store.Progress.Load()
 	if err != nil {

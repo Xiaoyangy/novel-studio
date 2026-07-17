@@ -6,9 +6,9 @@ import (
 )
 
 func TestBuildSnapshot_FieldOverridePrecedence(t *testing.T) {
-	// 低→高：defaults 设 2100-3000，project 覆盖为 1200-1600；高优先级胜出。
+	// 低→高：defaults 设 2000-3300，project 覆盖为 1200-1600；高优先级胜出。
 	snap := BuildSnapshot([]Candidate{
-		{Source: "system_defaults", Structured: Structured{ChapterWords: &WordRange{Min: 2100, Max: 3000}}},
+		{Source: "system_defaults", Structured: Structured{ChapterWords: &WordRange{Min: 2000, Max: 3300}}},
 		{Source: "project:a.md", Structured: Structured{ChapterWords: &WordRange{Min: 1200, Max: 1600}}},
 	})
 	if snap.Structured.ChapterWords == nil || snap.Structured.ChapterWords.Min != 1200 || snap.Structured.ChapterWords.Max != 1600 {
@@ -27,7 +27,7 @@ func TestBuildSnapshot_EmptyAndZeroAreAbsent(t *testing.T) {
 	snap := BuildSnapshot([]Candidate{
 		{Source: "system_defaults", Structured: Structured{
 			Genre:        "修仙",
-			ChapterWords: &WordRange{Min: 2100, Max: 3000},
+			ChapterWords: &WordRange{Min: 2000, Max: 3300},
 		}},
 		{Source: "startup_prompt", Structured: Structured{
 			Genre:            "",                         // 占位空串 → 不覆盖
@@ -38,7 +38,7 @@ func TestBuildSnapshot_EmptyAndZeroAreAbsent(t *testing.T) {
 	if snap.Structured.Genre != "修仙" {
 		t.Fatalf("空 genre 不应覆盖，期望 修仙，得到 %q", snap.Structured.Genre)
 	}
-	if snap.Structured.ChapterWords == nil || snap.Structured.ChapterWords.Min != 2100 {
+	if snap.Structured.ChapterWords == nil || snap.Structured.ChapterWords.Min != 2000 {
 		t.Fatalf("零值 chapter_words 不应覆盖，得到 %+v", snap.Structured.ChapterWords)
 	}
 	if len(snap.Structured.ForbiddenPhrases) != 0 {
@@ -95,7 +95,7 @@ func TestBuildSnapshot_FatigueWordsMergeByWord(t *testing.T) {
 
 func TestBuildSnapshot_DegradedPropagates(t *testing.T) {
 	snap := BuildSnapshot([]Candidate{
-		{Source: "system_defaults", Structured: Structured{ChapterWords: &WordRange{Min: 2100, Max: 3000}}},
+		{Source: "system_defaults", Structured: Structured{ChapterWords: &WordRange{Min: 2000, Max: 3300}}},
 		{Source: "project:bad.md", Preferences: "原文降级", Degraded: true},
 	})
 	if snap.Status != StatusDegraded {
@@ -112,8 +112,8 @@ func TestBuildSnapshot_DegradedPropagates(t *testing.T) {
 
 func TestSystemDefaults_UsesUnifiedChapterWordBudget(t *testing.T) {
 	d := SystemDefaults().Structured
-	if d.ChapterWords == nil || d.ChapterWords.Min != 2100 || d.ChapterWords.Max != 3000 {
-		t.Fatalf("默认字数应为 2100-3000，得到 %+v", d.ChapterWords)
+	if d.ChapterWords == nil || d.ChapterWords.Min != 2000 || d.ChapterWords.Max != 3300 {
+		t.Fatalf("默认字数应为 2000-3300，得到 %+v", d.ChapterWords)
 	}
 	if len(d.ForbiddenPhrases) != 4 {
 		t.Fatalf("默认禁语应为 4 条，得到 %d", len(d.ForbiddenPhrases))

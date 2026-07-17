@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,43 @@ func TestReadChapterAllowsNewCandidateAfterExplicitRerenderConsumed(t *testing.T
 	}
 	if got["withheld"] == true || got["content"] != newBody {
 		t.Fatalf("current candidate reread was blocked after request consumption: %s", raw)
+	}
+}
+
+func TestReadChapterRenderLockOnlyAllowsCurrentCandidateSurface(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, "# 当前候选\n\n只允许回读这一份。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "# 旧终稿\n\n不允许作为动态输入。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionRender,
+		TargetChapter: 1,
+		PlanDigest:    "sha256:frozen",
+		Owner:         "read-surface-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewReadChapterTool(st)
+	raw, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1,"source":"draft"}`))
+	if err != nil || !strings.Contains(string(raw), "当前候选") {
+		t.Fatalf("current render candidate should remain readable: raw=%s err=%v", raw, err)
+	}
+	for _, args := range []string{
+		`{"chapter":1,"source":"final"}`,
+		`{"chapter":2,"source":"draft"}`,
+		`{"from":1,"to":2,"source":"draft"}`,
+		`{"character":"林澈","source":"draft"}`,
+	} {
+		if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err == nil ||
+			!strings.Contains(err.Error(), "render execution lock") {
+			t.Fatalf("render lock accepted live chapter surface args=%s err=%v", args, err)
+		}
 	}
 }
 

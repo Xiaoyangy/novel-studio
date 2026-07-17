@@ -39,9 +39,9 @@ type DraftExternalRerenderRequirement struct {
 	RequiredMode            string                        `json:"required_mode,omitempty"`
 	RequiredExternalRetests []DraftExternalRetestIdentity `json:"required_external_retests,omitempty"`
 	// ExternalRetestPolicy makes the production semantics explicit in every new
-	// marker. Legacy markers without this field remain compatible: a true
-	// block_until_external_retest maps to automated_hard, otherwise they map to
-	// sampling_optional.
+	// marker. Legacy markers without this field are observational sampling even
+	// if they contain block_until_external_retest=true: only the explicit new
+	// enum can opt a deployment into an automated hard detector contract.
 	ExternalRetestPolicy DraftExternalRetestPolicy `json:"external_retest_policy"`
 	// BlockUntilExternalRetest is retained as a legacy compatibility alias.
 	// New readers use ExternalRetestPolicy; new hard markers write both fields so
@@ -567,11 +567,8 @@ func normalizeDraftExternalRetestPolicy(requirement *DraftExternalRerenderRequir
 	}
 	switch requirement.ExternalRetestPolicy {
 	case "":
-		if requirement.BlockUntilExternalRetest {
-			requirement.ExternalRetestPolicy = DraftExternalRetestPolicyAutomatedHard
-		} else {
-			requirement.ExternalRetestPolicy = DraftExternalRetestPolicySamplingOptional
-		}
+		requirement.ExternalRetestPolicy = DraftExternalRetestPolicySamplingOptional
+		requirement.BlockUntilExternalRetest = false
 	case DraftExternalRetestPolicySamplingOptional:
 		// The explicit policy wins over a contradictory legacy alias.
 		requirement.BlockUntilExternalRetest = false
@@ -626,11 +623,9 @@ func effectiveDraftExternalRetestPolicy(requirement *DraftExternalRerenderRequir
 	case DraftExternalRetestPolicySamplingOptional, DraftExternalRetestPolicyAutomatedHard:
 		return requirement.ExternalRetestPolicy
 	default:
-		// Backward compatibility for markers written before
-		// external_retest_policy existed.
-		if requirement.BlockUntilExternalRetest {
-			return DraftExternalRetestPolicyAutomatedHard
-		}
+		// Legacy block_until_external_retest is deliberately not sufficient to
+		// opt into an automated release dependency. Older markers may have been
+		// produced from a user-operated detector and must remain sampling-only.
 		return DraftExternalRetestPolicySamplingOptional
 	}
 }

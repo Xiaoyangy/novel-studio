@@ -92,7 +92,7 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 			return nil, fmt.Errorf("plan_structure 缺少核心字段 %s: %w", field, errs.ErrToolArgs)
 		}
 	}
-	applyOutlineAnchorsToStructure(t.store, chapter, structure)
+	applyOutlineAnchorsToStructure(t.store, chapter, structure, isRewritePlan)
 	if err := applyRewriteAnchorsToStructure(t.store, chapter, structure); err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func planStructureBoundToSources(s *store.Store, chapter int, partial map[string
 	return true
 }
 
-func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[string]any) {
+func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[string]any, rewrite bool) {
 	if s == nil || chapter <= 0 || structure == nil {
 		return
 	}
@@ -207,6 +207,15 @@ func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[s
 	}
 	if title := strings.TrimSpace(entry.Title); title != "" {
 		structure["title"] = title
+	}
+	// A rewrite is rooted in the exact committed body, current rewrite brief,
+	// and finalized world simulation. Its outline can predate a causal
+	// correction (for example which character discovered and fixed a hazard).
+	// Keep the stable chapter title, but do not overwrite the planner's
+	// source-bound goal/hook with stale outline prose. New chapters still use
+	// the outline as their scope authority.
+	if rewrite {
+		return
 	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		// 大纲核心事件决定本章“要完成什么”。允许 Planner 自由设计冲突、场景和
@@ -251,7 +260,9 @@ func (t *PlanDetailsTool) Name() string { return "plan_details" }
 func (t *PlanDetailsTool) Description() string {
 	return "章节推演第 2 阶段：向 plan_structure 建立的中间态分批合并 causal_simulation 字段，" +
 		"同名字段后批覆盖前批。最后一批传 finalize=true：合并结果按 plan_chapter 同一口径完整校验，" +
-		"通过后写 drafts/NN.plan.json、置章节 in_progress 并记 checkpoint。"
+		"通过后写 drafts/NN.plan.json、置章节 in_progress 并记 checkpoint。novel_context 若返回 " +
+		"planning_context_access_receipt，必须把其 source_token 写入 causal_simulation.context_sources；" +
+		"finalize 会同时消费对应服务端回执。"
 }
 func (t *PlanDetailsTool) Label() string { return "补充章节推演" }
 
@@ -332,6 +343,20 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		)
 	}
 	mergeCausalSimulationPatch(merged, a.CausalSimulation)
+	_, projectAllContextToken, err := loadProjectAllStateForExecution(t.store, a.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	if projectAllContextToken != "" &&
+		!projectAllStateSourcesContain(
+			stringSliceFromAny(merged["context_sources"]),
+			projectAllContextToken,
+		) {
+		return nil, fmt.Errorf(
+			"project-all planner must call novel_context and submit its exact authoritative context binding before finalize: %w",
+			errs.ErrToolPrecondition,
+		)
+	}
 	if err := applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt); err != nil {
 		return nil, err
 	}
@@ -509,7 +534,12 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 	contextSources = withoutStaleFactReceipt
 	if simulation != nil {
 		merged["world_simulation_id"] = simulation.SimulationID
-		merged["protagonist_decision"] = simulation.ProtagonistProjection.ChosenDecision
+		// The world store may retain an authority sentinel when a rewrite must
+		// preserve the source action. Formal planning needs the projected
+		// human-readable choice; re-injecting the raw sentinel here made every
+		// finalize retry deterministically fail after validation correctly
+		// rejected it.
+		merged["protagonist_decision"] = effectiveProtagonistDecision(simulation.ProtagonistProjection)
 		contextSources = appendUniqueString(contextSources, "chapter_world_simulation:"+simulation.SimulationID)
 		for _, source := range simulation.Sources {
 			source = strings.TrimSpace(source)
@@ -906,9 +936,10 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 
 func planDetailsRecommendedBatches() []string {
 	return []string{
-		"batch1_pov_projection: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state(max 2) + causal_beats(max 4) + decision_points(max 4) + outcome_shift(max 4)",
-		"batch2_voice_and_rendering: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker) + literary_rendering_plan(可选：只选本章有功能的镜头并保留 source_refs，不做九项清单)；返工章同时补 review_refinement；若 rewrite_craft_pack 有命中，补 receipt-backed external_reference_plan：每个 need.id 恰好一行，query_or_need 原样写 need.id，同 need 的精确 hit.ref 合入 source_refs；calibration_reference/craft_technique 统一写 source_type=craft_recall，benchmark_reference 写 source_type=benchmark_craft_recall，禁止把 source_kind 当 source_type，不得重新检索",
-		"batch3_project_contracts_if_required: 只补 gap_summary 或 finalize 错误明确点名的 emotional_logic / anti_ai_execution_plan / reader_reward_plan / retention_plan / ending_delivery_plan / reader_entertainment_plan / longform_opening / trend_language_plan；项目规则或 meta/web_reference_brief 要求的字段不是可选项，未点名的字段不要重复生成",
+		"batch1_pov_projection: world_simulation_id + protagonist_decision + project_promise + chapter_function + context_sources + initial_state(max 2) + causal_beats(max 4) + decision_points(max 4) + outcome_shift(max 4) + arc_transition_contract（project-all 必填；非弧首章逐字复制 project_all_state.predecessor_contract 的 outgoing id/text，并让 consumed_by_cause 逐字等于本章某个 causal_beats[].cause；每章另给唯一 outgoing id/text）",
+		"batch2_render_capacity: project-all 必填 render_capacity：3-6个 scene_units，每场填 target_runes + pov_objective + active_opposition + turn + exit_consequence + 至少3个 concrete_action_beats；total_target_runes 等于各场之和且必须落入 user_rules.chapter_words；anti_padding_policy 禁止用重复心理、同义对话、流程解释或无因果新场景凑字数",
+		"batch3_voice_and_rendering: voice_logic(max 4: protagonist, active counterpart, system, one supporting speaker) + literary_rendering_plan(可选：只选本章有功能的镜头并保留 source_refs，不做九项清单)；返工章同时补 review_refinement；若 rag_fact_receipt.no_material=false，必须从其 hits 选择与本章直接相关的精确 hit.ref，按事实来源补 external_reference_plan 或 grounding_details/reality_support_plan，并填写本章化 usable_details、transformation_rule、do_not_use 或对应 scene anchor，不能只挂 ref；若 rewrite_craft_pack 有命中，另补 craft receipt-backed external_reference_plan：每个 need.id 恰好一行，query_or_need 原样写 need.id，同 need 的精确 hit.ref 合入 source_refs；calibration_reference/craft_technique 统一写 source_type=craft_recall，benchmark_reference 写 source_type=benchmark_craft_recall，禁止把 source_kind 当 source_type，不得重新检索",
+		"batch4_project_contracts_if_required: 只补 gap_summary 或 finalize 错误明确点名的 emotional_logic / anti_ai_execution_plan / reader_reward_plan / retention_plan / ending_delivery_plan / reader_entertainment_plan / longform_opening / trend_language_plan；项目规则或 meta/web_reference_brief 要求的字段不是可选项，未点名的字段不要重复生成",
 	}
 }
 
@@ -933,6 +964,18 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 	} {
 		if _, ok := merged[field]; !ok {
 			gaps = append(gaps, "missing "+field)
+		}
+	}
+	if lock, lockErr := s.Runtime.LoadPipelineExecution(); lockErr == nil &&
+		lock != nil && lock.Mode == domain.PipelineExecutionProjectAll {
+		if _, ok := merged["arc_transition_contract"]; !ok {
+			gaps = append(gaps, "missing arc_transition_contract")
+		} else if plan, planErr := chapterPlanFromPartial(chapter, partial, merged); planErr == nil {
+			if context, _, contextErr := loadProjectAllStateForExecution(s, chapter); contextErr == nil && context != nil {
+				if transitionErr := domain.ValidateArcChapterTransitionContract(plan, context.PredecessorContract); transitionErr != nil {
+					gaps = append(gaps, "invalid arc_transition_contract: "+transitionErr.Error())
+				}
+			}
 		}
 	}
 	if rewrite, _ := partial["rewrite"].(bool); rewrite {

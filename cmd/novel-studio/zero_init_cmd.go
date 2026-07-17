@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -120,15 +121,30 @@ type zeroInitRAGStats struct {
 const zeroReadinessSchemaVersion = tools.ZeroInitReadinessSchemaVersion
 
 type zeroInitReadiness struct {
-	Ready            bool             `json:"ready"`
-	SchemaVersion    int              `json:"schema_version,omitempty"`
-	GeneratorVersion string           `json:"generator_version,omitempty"`
-	Missing          []string         `json:"missing,omitempty"`
-	Issues           []string         `json:"issues,omitempty"`
-	Warnings         []string         `json:"warnings,omitempty"`
-	RAG              zeroInitRAGStats `json:"rag,omitempty"`
-	GeneratedAt      string           `json:"generated_at,omitempty"`
-	Path             string           `json:"path,omitempty"`
+	Ready            bool                      `json:"ready"`
+	SchemaVersion    int                       `json:"schema_version,omitempty"`
+	GeneratorVersion string                    `json:"generator_version,omitempty"`
+	Missing          []string                  `json:"missing,omitempty"`
+	Issues           []string                  `json:"issues,omitempty"`
+	Warnings         []string                  `json:"warnings,omitempty"`
+	StoryTime        zeroInitStoryTimeEvidence `json:"story_time"`
+	RAG              zeroInitRAGStats          `json:"rag,omitempty"`
+	GeneratedAt      string                    `json:"generated_at,omitempty"`
+	Path             string                    `json:"path,omitempty"`
+}
+
+type zeroInitStoryTimeEvidence struct {
+	Validated              bool    `json:"validated"`
+	Source                 string  `json:"source,omitempty"`
+	TargetChapters         int     `json:"target_chapters,omitempty"`
+	DurationDaysMin        float64 `json:"duration_days_min,omitempty"`
+	DurationDaysMax        float64 `json:"duration_days_max,omitempty"`
+	NominalDaysPerChapter  float64 `json:"nominal_days_per_chapter,omitempty"`
+	ArcScheduleEntries     int     `json:"arc_schedule_entries,omitempty"`
+	ChapterScheduleEntries int     `json:"chapter_schedule_entries,omitempty"`
+	CoreDigest             string  `json:"core_digest,omitempty"`
+	ScheduleDigest         string  `json:"schedule_digest,omitempty"`
+	CalendarSynced         bool    `json:"calendar_synced"`
 }
 
 func hasZeroInitFlag(argv []string) bool {
@@ -168,7 +184,7 @@ func parseZeroInitFlags(argv []string) (zeroInitFlags, []string, error) {
 	return f, fs.Args(), nil
 }
 
-func zeroInitPipeline(opts cliOptions, args []string) error {
+func zeroInitPipeline(opts cliOptions, args []string) (returnErr error) {
 	if hasHelpToken(args) {
 		_, _, _ = parseZeroInitFlags([]string{"--help"})
 		return nil
@@ -189,9 +205,32 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	if flags.RefreshOpeningPlan && (flags.Overwrite || flags.ResetSimulationState) {
 		return fmt.Errorf("--refresh-opening-plan 不能与 --overwrite/--reset-simulation-state 同时使用")
 	}
-	dir, err := resolveZeroInitDir(opts, flags.Dir)
-	if err != nil {
-		return err
+	var (
+		dir            string
+		releaseControl func() error
+	)
+	if explicit := strings.TrimSpace(flags.Dir); explicit != "" {
+		dir, releaseControl, err = acquirePublishedOutlineAllStageAtOutput(explicit)
+		if err != nil {
+			return fmt.Errorf("--zero-init requires published outline-all: %w", err)
+		}
+	} else {
+		// Acquire the stable run-root exclusive control before loadCfgBundle or any
+		// Store.Init path can touch the swappable live directory.
+		dir, releaseControl, err = acquirePublishedOutlineAllStageForInvocation(opts)
+		if err != nil {
+			return fmt.Errorf("--zero-init requires published outline-all: %w", err)
+		}
+		if dir == "" {
+			dir, err = resolveZeroInitDir(opts, "")
+			if err != nil {
+				return err
+			}
+		}
+	}
+	defer releasePublishedOutlineAllStage(releaseControl, "zero-init", &returnErr)
+	if err := requirePublishedOutlineAllChapterZeroProgressWithControlHeld(dir); err != nil {
+		return fmt.Errorf("--zero-init requires chapter-zero published outline-all progress: %w", err)
 	}
 	if flags.Check {
 		readiness := assessZeroInitReadiness(dir, zeroInitRAGStats{})
@@ -206,14 +245,37 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	if err := st.Init(); err != nil {
 		return err
 	}
+	if mode, modeErr := st.LoadWritingPipelineMode(); modeErr != nil {
+		return modeErr
+	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		if active, loadErr := st.ProjectedV2().LoadActiveGeneration(); loadErr != nil {
+			return loadErr
+		} else if active != nil {
+			return fmt.Errorf(
+				"--zero-init 不能改写 active sealed generation %s 的基础输入；必须先显式全书 rebase/restart",
+				active.GenerationID,
+			)
+		}
+		if cursor, loadErr := st.ProjectedV2().LoadProjectionCursor(); loadErr != nil {
+			return loadErr
+		} else if cursor != nil {
+			return fmt.Errorf(
+				"--zero-init 不能改写 generation %s 正在构建或已封存的基础输入；必须先显式全书 rebase/restart",
+				cursor.GenerationID,
+			)
+		}
+	}
 	project, err := loadZeroInitProject(st, dir)
 	if err != nil {
 		return err
 	}
-	if flags.GenerationID != "" {
-		project.GenerationID = strings.TrimSpace(flags.GenerationID)
-	} else if existingPolicy, perr := st.LoadSimulationRestartPolicy(); perr == nil && existingPolicy != nil && strings.TrimSpace(existingPolicy.GenerationID) != "" {
-		project.GenerationID = strings.TrimSpace(existingPolicy.GenerationID)
+	project.GenerationID, err = resolveZeroInitGenerationID(
+		st,
+		flags.GenerationID,
+		project.GenerationID,
+	)
+	if err != nil {
+		return err
 	}
 	if flags.RefreshOpeningPlan {
 		if err := writeZeroInitOpeningPlanArtifacts(dir, project); err != nil {
@@ -250,6 +312,99 @@ func zeroInitPipeline(opts cliOptions, args []string) error {
 	}
 	fmt.Fprintf(os.Stdout, "%s\n", filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"))
 	return nil
+}
+
+// resolveZeroInitGenerationID keeps the planning/render epoch stable across
+// rebase -> outline-all -> zero-init. An explicit operator override remains
+// authoritative. Otherwise a valid existing zero-init policy is reused; when
+// rebase intentionally removed that policy, the clean chapter-zero progress
+// (and, after publication, its outline-all receipt) supplies the same ID.
+func resolveZeroInitGenerationID(
+	st *store.Store,
+	explicit string,
+	generated string,
+) (string, error) {
+	if st == nil {
+		return "", fmt.Errorf("zero-init generation selection requires store")
+	}
+	explicit = strings.TrimSpace(explicit)
+	receipt, err := st.LoadOutlineAllExecutionReceipt()
+	if err != nil {
+		return "", fmt.Errorf("load outline-all receipt for zero-init generation: %w", err)
+	}
+	receiptGeneration := ""
+	if receipt != nil && receipt.Status == domain.OutlineAllExecutionComplete {
+		receiptGeneration = strings.TrimSpace(receipt.GenerationID)
+	}
+	if explicit != "" {
+		if receiptGeneration != "" && explicit != receiptGeneration {
+			return "", fmt.Errorf(
+				"zero-init generation_id %s cannot override published outline-all generation %s",
+				explicit,
+				receiptGeneration,
+			)
+		}
+		return explicit, nil
+	}
+
+	policy, err := st.LoadSimulationRestartPolicy()
+	if err != nil {
+		return "", fmt.Errorf("load zero-init simulation restart policy: %w", err)
+	}
+	policyGeneration := ""
+	if policy != nil && policy.Active &&
+		strings.TrimSpace(policy.Mode) == "restart_from_seed" {
+		policyGeneration = strings.TrimSpace(policy.GenerationID)
+	}
+
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return "", fmt.Errorf("load progress for zero-init generation: %w", err)
+	}
+	progressGeneration := ""
+	if zeroInitCleanChapterZeroProgress(progress) {
+		progressGeneration = strings.TrimSpace(progress.GenerationID)
+	}
+
+	if progressGeneration != "" && receiptGeneration != "" &&
+		progressGeneration != receiptGeneration {
+		return "", fmt.Errorf(
+			"zero-init generation drift: chapter-zero progress=%s outline-all=%s",
+			progressGeneration,
+			receiptGeneration,
+		)
+	}
+	if policyGeneration != "" && receiptGeneration != "" &&
+		policyGeneration != receiptGeneration {
+		return "", fmt.Errorf(
+			"zero-init generation drift: restart policy=%s outline-all=%s",
+			policyGeneration,
+			receiptGeneration,
+		)
+	}
+	for _, candidate := range []string{
+		policyGeneration,
+		progressGeneration,
+		receiptGeneration,
+		strings.TrimSpace(generated),
+	} {
+		if candidate != "" {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("zero-init generation selection produced an empty generation_id")
+}
+
+func zeroInitCleanChapterZeroProgress(progress *domain.Progress) bool {
+	return progress != nil &&
+		progress.Phase == domain.PhaseInit &&
+		progress.CurrentChapter == 0 &&
+		progress.InProgressChapter == 0 &&
+		progress.TotalWordCount == 0 &&
+		len(progress.CompletedChapters) == 0 &&
+		len(progress.PendingRewrites) == 0 &&
+		len(progress.ChapterWordCounts) == 0 &&
+		len(progress.CompletedScenes) == 0
 }
 
 func writeZeroInitOpeningPlanArtifacts(dir string, project zeroInitProject) error {
@@ -322,12 +477,39 @@ func resolveZeroInitDir(opts cliOptions, explicit string) (string, error) {
 }
 
 func loadZeroInitProject(st *store.Store, dir string) (zeroInitProject, error) {
+	return loadZeroInitProjectWithArchitectReadiness(st, dir, true)
+}
+
+// loadZeroInitProjectForExplicitRebaseCandidate is the only project loader
+// allowed to ignore the old Architect receipt. --rebase-all-chapters runs
+// before stages (including architect), so that receipt may be stale or failed
+// precisely because the requested architect stage still needs to refresh it.
+// The complete current foundation remains mandatory, and the shared loader
+// below still parses premise/outline/characters/world rules/book world before
+// the candidate may be built.
+func loadZeroInitProjectForExplicitRebaseCandidate(st *store.Store, dir string) (zeroInitProject, error) {
+	if missing := tools.FoundationCoreMissing(dir); len(missing) > 0 {
+		return zeroInitProject{}, fmt.Errorf(
+			"全书 rebase 候选加载缺少完整 Architect foundation：%s",
+			strings.Join(missing, ", "),
+		)
+	}
+	return loadZeroInitProjectWithArchitectReadiness(st, dir, false)
+}
+
+func loadZeroInitProjectWithArchitectReadiness(
+	st *store.Store,
+	dir string,
+	requireArchitectReadiness bool,
+) (zeroInitProject, error) {
 	missing := st.FoundationMissing()
 	if len(missing) > 0 {
 		return zeroInitProject{}, fmt.Errorf("零章初始化缺少基础设定：%s；请先用 --pipeline 让 architect/save_foundation 落盘 foundation", strings.Join(missing, ", "))
 	}
-	if ok, reason := architectReadinessState(dir); !ok {
-		return zeroInitProject{}, fmt.Errorf("零章初始化前必须先完成 Architect：%s", reason)
+	if requireArchitectReadiness {
+		if ok, reason := architectReadinessState(dir); !ok {
+			return zeroInitProject{}, fmt.Errorf("零章初始化前必须先完成 Architect：%s", reason)
+		}
 	}
 	premise, err := st.Outline.LoadPremise()
 	if err != nil {
@@ -619,12 +801,14 @@ func zeroInitManifest(project zeroInitProject) map[string]any {
 		"required_dynamic_fields":        zeroRequiredDynamicFields(),
 		"required_side_character_fields": []string{"status", "transport", "travel_time", "meeting_constraint", "personality_delta", "death_state", "protagonist_notice"},
 		"world_foundation_rule":          "world_foundation 是正文开始前铁律、开局时间和过去时间线；角色未获得改变规则的明确能力/凭证前不得突破。",
+		"story_time_rule":                "story_time_contract 冻结全书目标章数与故事跨度；chapter_schedule/arc_schedule 优先，缺失具体 schedule 才按 nominal_days_per_chapter 估算。",
 		"character_dossier_rule":         "每个角色必须有独立 dossier；主角未通信/未见证/无证据时不能知道配角档案和时间线。",
 		"context_sources": []string{
 			"premise", "outline/current_chapter_outline", "characters", "world_rules/book_world", "simulation_restart_policy",
-			"world_foundation", "character_dossiers", "initial_character_dynamics", "relationship_state.initial", "initial_resource_ledger",
+			"world_foundation", "story_time_contract", "story_calendar", "character_dossiers", "initial_character_dynamics", "relationship_state.initial", "initial_resource_ledger",
 			"foreshadow_ledger.initial", "crowd_role_policy", "prewrite_storycraft_plan", "world_background_plan", "dialogue_writing", "initial_review_lessons",
 		},
+		"authoritative_numeric_sources": []string{"meta/story_time_contract.json", "meta/story_calendar.json"},
 		"rag_source_policy": map[string]any{
 			"allowed":               zeroInitDisplaySources(project.Dir),
 			"forbidden_dir_markers": []string{"chapters", "drafts", "summaries", "reviews", "reviews_ai", "meta/rag", "meta/runtime", "meta/sessions", "source_project", "experiments", "拆文库", "deconstruction-library", "对标", "meta/resource_ledger", "meta/state_changes", "meta/project_progress", "meta/character_continuity"},
@@ -656,6 +840,7 @@ func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationR
 		AllowedSeedSources: []string{
 			"prompt.md", "input/", "premise.md", "outline.md", "layered_outline.md", "characters.md",
 			"world_rules.md", "book_world.md", "meta/simulation_restart_policy.md", "meta/world_foundation.md",
+			"meta/story_time_contract.json", "meta/story_calendar.json",
 			"meta/characters/*/dossier.md", "meta/zero_chapter_context_manifest.md", "meta/initial_character_dynamics.md",
 			"meta/initial_resource_ledger.md", "meta/prewrite_storycraft_plan.md", "meta/world_background_plan.md", "relationship_state.initial.md", "foreshadow_ledger.initial.md",
 		},
@@ -665,7 +850,7 @@ func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationR
 			"meta/character_continuity.*", "meta/chapter_progress.*", "旧章节 delivery_snapshots",
 		},
 		CanonicalStateRoots: []string{
-			"meta/world_foundation.*", "meta/characters/*/dossier.*", "meta/character_stage/", "meta/side_character_journeys/",
+			"meta/world_foundation.*", "meta/story_time_contract.json", "meta/story_calendar.json", "meta/characters/*/dossier.*", "meta/character_stage/", "meta/side_character_journeys/",
 			"meta/initial_resource_ledger.*", "meta/prewrite_storycraft_plan.*", "meta/world_background_plan.*", "relationship_state.initial.*", "foreshadow_ledger.initial.*",
 			"chapters/ 与 drafts/ 中由本 generation_id 重新生成并 commit 的章节",
 		},
@@ -1158,6 +1343,10 @@ func zeroNextIndependentMove(c domain.Character, firstMention int, project zeroI
 // 种子记忆（initial_character_dynamics）已有，此处补日程与时钟基线。
 func writeZeroWorldSimAssets(dir string, project zeroInitProject, overwrite bool) error {
 	st := store.NewStore(dir)
+	storyTimeContract, published, err := zeroEnsureStoryTimeContract(st, &project)
+	if err != nil {
+		return err
+	}
 
 	// LOD 分层：按角色卡 Tier 初始指派（写作推进后由世界 tick 升降级）。
 	if zeroShouldWriteArtifact(dir, overwrite, "meta/simulation_tiers.json") && len(project.Characters) > 0 {
@@ -1202,15 +1391,11 @@ func writeZeroWorldSimAssets(dir string, project zeroInitProject, overwrite bool
 		}
 	}
 
-	// 故事日历骨架：世界时钟基线。era/start_date/season 由 Architect 初始规划校准。
-	if zeroShouldWriteArtifact(dir, overwrite, "meta/story_calendar.json") {
-		if err := st.WorldSim.SaveStoryCalendar(domain.StoryCalendar{
-			DaysPerChapter: 2,
-			Notes: []string{
-				"zero-init 默认骨架：era / start_date / season_at_start 由 Architect 初始规划时校准",
-				"days_per_chapter 默认 2 天/章，按题材节奏调整（战斗弧更密、旅途弧更疏）",
-			},
-		}); err != nil {
+	// story_calendar 仍承载纪年/开场日期/季节，但平均故事日不再写死为 2。
+	// 它必须由冻结的全书时间合同导出；具体弧/章节 schedule（若明确提供）
+	// 由消费端优先使用。已出版项目只读，绝不在 zero-init 中改写时间基线。
+	if !published && storyTimeContract != nil {
+		if err := zeroSyncStoryCalendar(st, *storyTimeContract); err != nil {
 			return err
 		}
 	}
@@ -1240,6 +1425,217 @@ func writeZeroWorldSimAssets(dir string, project zeroInitProject, overwrite bool
 	// 世界 tick 零点：让首次弧边界推演有游标基准。
 	if err := zeroEnsureWorldTickSeed(st, overwrite); err != nil {
 		return err
+	}
+	return nil
+}
+
+func zeroEnsureStoryTimeContract(st *store.Store, project *zeroInitProject) (*domain.StoryTimeContract, bool, error) {
+	if st == nil {
+		return nil, false, fmt.Errorf("story time contract requires store")
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return nil, false, fmt.Errorf("load progress for story time contract: %w", err)
+	}
+	published := progress != nil && len(progress.CompletedChapters) > 0
+	existing, err := st.WorldSim.LoadStoryTimeContract()
+	if err != nil {
+		return nil, published, err
+	}
+	if published {
+		// Migration must never manufacture or rewrite a contract behind published
+		// prose. The next intentional rebase/reset owns that decision.
+		return existing, true, nil
+	}
+
+	outlineAllTarget, outlineAllScale, outlineAllBound, err := zeroCompletedOutlineAllTimeSource(st)
+	if err != nil {
+		return nil, false, err
+	}
+	target := outlineAllTarget
+	if target <= 0 {
+		target = zeroStoryTimeTargetChapters(st, progress, project)
+	}
+	if target <= 0 && existing != nil {
+		target = existing.TargetChapters
+	}
+	if target <= 0 {
+		return nil, false, fmt.Errorf("story time contract requires finalized target_chapters")
+	}
+	if existing != nil && existing.TargetChapters == target {
+		if !outlineAllBound || existing.Source == domain.StoryTimeSourceExplicit {
+			return existing, false, nil
+		}
+		if existing.Source == domain.StoryTimeSourceOutlineAll {
+			expected, deriveErr := domain.DeriveStoryTimeContract(outlineAllScale, target)
+			if deriveErr != nil {
+				return nil, false, fmt.Errorf("derive completed outline-all story time core: %w", deriveErr)
+			}
+			expected.Source = domain.StoryTimeSourceOutlineAll
+			expected, deriveErr = domain.FinalizeStoryTimeContract(expected)
+			if deriveErr != nil {
+				return nil, false, fmt.Errorf("finalize completed outline-all story time core: %w", deriveErr)
+			}
+			if existing.CoreDigest == expected.CoreDigest {
+				return existing, false, nil
+			}
+			if len(existing.ArcSchedule) > 0 || len(existing.ChapterSchedule) > 0 {
+				return nil, false, fmt.Errorf("outline-all story time core drifted while a structured schedule is already frozen")
+			}
+			// Same chapter count from a different completed attempt is not the
+			// same time promise. With no schedule to invalidate, rebind below to
+			// the exact current receipt scale instead of trusting the old core.
+			existing = nil
+		}
+		if existing != nil && (len(existing.ArcSchedule) > 0 || len(existing.ChapterSchedule) > 0) {
+			return nil, false, fmt.Errorf("pre-outline story time contract has schedules and cannot be silently rebound to completed outline-all")
+		}
+	}
+	if existing != nil && (existing.Source == domain.StoryTimeSourceExplicit ||
+		existing.Source == domain.StoryTimeSourceOutlineAll ||
+		len(existing.ArcSchedule) > 0 || len(existing.ChapterSchedule) > 0) {
+		return nil, false, fmt.Errorf(
+			"frozen story time contract target_chapters=%d conflicts with finalized outline target=%d",
+			existing.TargetChapters,
+			target,
+		)
+	}
+
+	estimatedScale := strings.TrimSpace(outlineAllScale)
+	if !outlineAllBound {
+		if compass, loadErr := st.Outline.LoadCompass(); loadErr != nil {
+			return nil, false, fmt.Errorf("load compass for story time contract: %w", loadErr)
+		} else if compass != nil {
+			estimatedScale = strings.TrimSpace(compass.EstimatedScale)
+		}
+	}
+	contract, err := domain.DeriveStoryTimeContract(estimatedScale, target)
+	if err != nil {
+		return nil, false, fmt.Errorf("derive story time contract: %w", err)
+	}
+	if outlineAllBound {
+		contract.Source = domain.StoryTimeSourceOutlineAll
+		contract, err = domain.FinalizeStoryTimeContract(contract)
+		if err != nil {
+			return nil, false, fmt.Errorf("finalize outline-all story time contract: %w", err)
+		}
+	}
+	if err := st.WorldSim.SaveStoryTimeContract(contract); err != nil {
+		return nil, false, fmt.Errorf("save story time contract: %w", err)
+	}
+	return &contract, false, nil
+}
+
+// zeroCompletedOutlineAllTimeSource binds the time contract to the exact
+// promoted full-book outline, not merely to a plausible target number. A
+// present building/stale receipt fails closed; legacy projects with no receipt
+// continue through the deterministic compass/progress migration path.
+func zeroCompletedOutlineAllTimeSource(st *store.Store) (int, string, bool, error) {
+	receipt, err := st.LoadOutlineAllExecutionReceipt()
+	if err != nil {
+		return 0, "", false, fmt.Errorf("load outline-all execution receipt for story time contract: %w", err)
+	}
+	if receipt == nil {
+		return 0, "", false, nil
+	}
+	if receipt.Status != domain.OutlineAllExecutionComplete {
+		return 0, "", false, fmt.Errorf("story time contract requires completed outline-all receipt; current status=%s", receipt.Status)
+	}
+	compass, err := st.Outline.LoadCompass()
+	if err != nil {
+		return 0, "", false, fmt.Errorf("load compass bound by outline-all receipt: %w", err)
+	}
+	if compass == nil {
+		return 0, "", false, fmt.Errorf("compass bound by outline-all receipt is missing")
+	}
+	compassDigest, err := domain.ComputeStoryCompassDigest(*compass)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if compassDigest != receipt.CompassDigest {
+		return 0, "", false, fmt.Errorf("outline-all compass digest drifted before story time contract")
+	}
+	layered, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		return 0, "", false, err
+	}
+	layeredDigest, err := domain.ComputeLayeredOutlineDigest(layered)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if layeredDigest != receipt.FinalLayeredDigest || domain.TotalChapters(layered) != receipt.TargetChapters {
+		return 0, "", false, fmt.Errorf("outline-all layered outline no longer matches completed receipt")
+	}
+	flat, err := st.Outline.LoadOutline()
+	if err != nil {
+		return 0, "", false, err
+	}
+	flatDigest, err := domain.ComputeFlatOutlineDigest(flat)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if flatDigest != receipt.FinalFlatDigest || len(flat) != receipt.TargetChapters {
+		return 0, "", false, fmt.Errorf("outline-all flat outline no longer matches completed receipt")
+	}
+	return receipt.TargetChapters, receipt.EstimatedScale, true, nil
+}
+
+func zeroStoryTimeTargetChapters(st *store.Store, progress *domain.Progress, project *zeroInitProject) int {
+	if st != nil {
+		if layered, err := st.Outline.LoadLayeredOutline(); err == nil {
+			if total := domain.TotalChapters(layered); total > 0 {
+				return total
+			}
+		}
+	}
+	if progress != nil && progress.TotalChapters > 0 {
+		return progress.TotalChapters
+	}
+	if project != nil {
+		return len(project.Outline)
+	}
+	if st != nil {
+		if outline, err := st.Outline.LoadOutline(); err == nil {
+			return len(outline)
+		}
+	}
+	return 0
+}
+
+func zeroSyncStoryCalendar(st *store.Store, contract domain.StoryTimeContract) error {
+	calendar, err := st.WorldSim.LoadStoryCalendar()
+	if err != nil {
+		return fmt.Errorf("load story calendar: %w", err)
+	}
+	if calendar == nil {
+		calendar = &domain.StoryCalendar{}
+	}
+	contractNote := fmt.Sprintf(
+		"zero-init 时间合同：days_per_chapter=%.6f，由 meta/story_time_contract.json 的全书目标与跨度导出；存在弧/章节 schedule 时以 schedule 为准。",
+		contract.NominalDaysPerChapter,
+	)
+	notes := make([]string, 0, len(calendar.Notes)+2)
+	for _, note := range calendar.Notes {
+		trimmed := strings.TrimSpace(note)
+		if trimmed == "" || strings.HasPrefix(trimmed, "zero-init 时间合同：") ||
+			strings.Contains(trimmed, "days_per_chapter 默认 2") {
+			continue
+		}
+		notes = append(notes, note)
+	}
+	if calendar.Era == "" && calendar.StartDate == "" && calendar.SeasonAtStart == "" {
+		notes = append(notes, "zero-init 日历骨架：era / start_date / season_at_start 由 Architect 初始规划时校准")
+	}
+	notes = append(notes, contractNote)
+	changed := math.Abs(calendar.DaysPerChapter-contract.NominalDaysPerChapter) > 1e-9 ||
+		!slices.Equal(calendar.Notes, notes)
+	if !changed {
+		return nil
+	}
+	calendar.DaysPerChapter = contract.NominalDaysPerChapter
+	calendar.Notes = notes
+	if err := st.WorldSim.SaveStoryCalendar(*calendar); err != nil {
+		return fmt.Errorf("save story calendar from time contract: %w", err)
 	}
 	return nil
 }

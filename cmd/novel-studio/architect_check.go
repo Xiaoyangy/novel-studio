@@ -89,6 +89,27 @@ func architectCheckPipeline(opts cliOptions, argv []string) error {
 	if err != nil {
 		return err
 	}
+	st := store.NewStore(dir)
+	if mode, modeErr := st.LoadWritingPipelineMode(); modeErr != nil {
+		return modeErr
+	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		if active, loadErr := st.ProjectedV2().LoadActiveGeneration(); loadErr != nil {
+			return loadErr
+		} else if active != nil {
+			return fmt.Errorf(
+				"--architect-check 不能改写 active sealed generation %s 的 readiness 依赖",
+				active.GenerationID,
+			)
+		}
+		if cursor, loadErr := st.ProjectedV2().LoadProjectionCursor(); loadErr != nil {
+			return loadErr
+		} else if cursor != nil {
+			return fmt.Errorf(
+				"--architect-check 不能改写 generation %s 正在构建或已封存的 readiness 依赖",
+				cursor.GenerationID,
+			)
+		}
+	}
 	readiness := assessArchitectReadiness(dir)
 	if err := writeArchitectReadiness(dir, readiness); err != nil {
 		return err
@@ -385,6 +406,15 @@ func architectReadinessState(dir string) (bool, string) {
 		return false, "architect_readiness.generated_at 无法解析，需重跑 --architect-check"
 	}
 	for _, rel := range architectFoundationFreshnessFiles {
+		if rel == "outline.json" &&
+			nonEmptyFile(filepath.Join(dir, "layered_outline.json")) {
+			// In a layered project, preplan deterministically refreshes the flat
+			// outline as a compatibility/index view. layered_outline.json is the
+			// authored foundation and remains freshness-checked; touching its
+			// derived flat projection must not invalidate the Architect receipt
+			// between preplan and project-all.
+			continue
+		}
 		info, err := os.Stat(filepath.Join(dir, rel))
 		if err != nil {
 			continue

@@ -13,7 +13,7 @@
 3. 世界模拟 ready 后，调用 `plan_structure` 保存标题、目标、冲突、钩子和章节契约；标题服从 current_chapter_outline。
 4. 用三批 `plan_details` 收口：
    - batch1 因果基础：`world_simulation_id`、`protagonist_decision`、`project_promise`、`chapter_function`、`context_sources`、`initial_state`、`environment_state`、`causal_beats`、`decision_points`、`outcome_shift`。
-   - batch2 声口与可读性：`voice_logic` 为常规必需；`dialogue_scene_blueprints`、`emotional_logic`、`reader_entertainment_plan` 按本章缺口补。若 `novel_context` / `gap_summary` 显示本章仍有命名外部复测、whole-text/segment 结构型 AIGC 返工或结构重渲染升级，`anti_ai_execution_plan` 必须完整填写；普通非 AIGC 返工不强制。用户明确要求热梗时同时补 `trend_language_plan`。
+   - batch2 声口与可读性：`voice_logic` 为常规必需；`dialogue_scene_blueprints`、`emotional_logic`、`reader_entertainment_plan` 按本章缺口补。若 `novel_context` / `gap_summary` 显示当前精确正文仍有自动 whole-text/segment 结构型 AIGC 返工或结构重渲染升级，`anti_ai_execution_plan` 必须完整填写；用户手工抽查只否决被报告的精确旧 SHA，替换稿不等待同一检测器复测。普通非 AIGC 返工不强制。用户明确要求热梗时同时补 `trend_language_plan`。
    - batch3 读者契约：`reader_reward_plan`、`reader_retention_plan`、`ending_consequence_contract`；第一章长篇项目补 `longform_opening`；返工章补 `review_refinement`，并把 preserve_facts 原样写入 preserve_constraints。本批可直接 `finalize=true`。
 5. `plan_details` 返回 planned=true 后立即停止，不输出总结，不调用正文工具。
 
@@ -35,9 +35,10 @@
 - `voice_logic` 最多 4 张，只覆盖主角、当章关系核心、陪伴型系统和一名真正承担对白的配角。`dialogue_scene_blueprints` 默认不生成；人物说话符合场合、身份和口语习惯即可，不能把流程说明分配给角色轮流朗读。
 - 陪伴型系统必须会短促接话、吐槽和支持主角；限制的是说明书式弹窗和过密提示，不得把系统改成冷硬任务机器人。
 - 颜文字仅在用户允许且现场自然时进入系统私聊、群聊或手机消息，每章 0-2 次；这是上限，不是最低用量，旁白和正式条款不用。
-- 系统消息排版和陪伴声口由 Drafter 的固定渲染规则与系统 voice card 负责。普通章节不为填表重复生成 `anti_ai_execution_plan`，但命名外部复测、当前 whole-text/segment 结构型 AIGC 返工或结构重渲染升级时必须提交完整计划；仍不得逐条预写系统台词。
+- 系统消息排版和陪伴声口由 Drafter 的固定渲染规则与系统 voice card 负责。普通章节不为填表重复生成 `anti_ai_execution_plan`，但当前精确正文的自动 whole-text/segment 结构型 AIGC 返工或结构重渲染升级时必须提交完整计划；用户手工抽查记录不得制造持续复测义务，仍不得逐条预写系统台词。
 - **黄金三章**：第 1 章能力亮相并首次兑现；第 2 章限制升级、关键搭档同场并取得小胜；第 3 章首个目标结算、外界态度变化并打开更大项目。把这些收进每章 2-4 个结果，不再另做 `reader_reward_plan.reward_ladder`。
 - 现实资料、RAG 和网络材料只转成可见动作、生活细节、制度压力、界面痕迹、耗时和角色误判；不抄来源表达，不把弱召回当事实。
+- 若 `reference_pack.rag_fact_receipt.no_material=false`，不能只把 receipt token 或 `hits.ref` 挂在来源字段。至少选择一个与本章直接相关的精确 `hits.ref`，通过 `external_reference_plan`、`grounding_details` 或 `reality_support_plan` 转成本书事实或现场细节；使用 `external_reference_plan` 时同时填写本章化的 `usable_details`、`transformation_rule` 与 `do_not_use`。`no_material=true` 时只保留空收据，不为交差伪造命中。
 - 第一章必须在页面内兑现最小爽点、展示长期连载发动机，并给出具体追读理由；不能只承诺“以后会变强/有钱”。
 
 ## 返工

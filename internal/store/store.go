@@ -72,6 +72,14 @@ func NewStore(dir string) *Store {
 // Dir 返回输出根目录。
 func (s *Store) Dir() string { return s.dir }
 
+// LoadProjectedChapterBundlesV2 exposes the validated immutable/building
+// projection chain to cross-domain guards without exposing Store's internal IO
+// implementation. Callers receive only bundles that pass the projected-store
+// chain validator.
+func (s *Store) LoadProjectedChapterBundlesV2(generationID string) ([]domain.ProjectedChapterBundle, error) {
+	return NewProjectedStoreV2(newIO(s.dir)).LoadProjectedChapterBundles(generationID)
+}
+
 // CheckConsistency 对事实层做一次浅层校验，用于启动/恢复时生成 warning。
 // 纯只读：不修正数据，仅返回可读的问题描述。调用方决定如何展示（log / UI）。
 // 为避免扫全目录带来的 IO 开销，只校验 Progress 的关键点：
@@ -175,15 +183,59 @@ func (s *Store) ExpandArc(volumeIdx, arcIdx int, chapters []domain.OutlineEntry)
 	return s.Progress.saveUnlocked(p)
 }
 
-// AppendVolume 追加新卷到分层大纲末尾（Outline + Progress 联动）。
-func (s *Store) AppendVolume(vol domain.VolumeOutline) error {
+// ReviseArc replaces one expanded arc in place. The OutlineStore validates
+// equal chapter count and stable global starts; callers cannot use it to grow,
+// shrink, insert, or renumber any part of the book.
+func (s *Store) ReviseArc(volumeIdx, arcIdx int, chapters []domain.OutlineEntry) error {
 	s.crossMu.Lock()
 	defer s.crossMu.Unlock()
 
 	s.Outline.io.mu.Lock()
 	defer s.Outline.io.mu.Unlock()
 
-	volumes, err := s.Outline.appendVolumeUnlocked(vol)
+	_, err := s.Outline.reviseArcUnlocked(volumeIdx, arcIdx, chapters)
+	return err
+}
+
+// MapArcContracts atomically assigns the full-book compass payoff map while
+// preserving every existing structural and chapter field.
+func (s *Store) MapArcContracts(assignments []domain.ArcContractAssignment) error {
+	s.crossMu.Lock()
+	defer s.crossMu.Unlock()
+
+	s.Outline.io.mu.Lock()
+	defer s.Outline.io.mu.Unlock()
+
+	_, err := s.Outline.mapArcContractsUnlocked(assignments)
+	return err
+}
+
+// AppendVolume 追加新卷到分层大纲末尾（Outline + Progress 联动）。
+func (s *Store) AppendVolume(vol domain.VolumeOutline) error {
+	return s.appendVolume(vol, false)
+}
+
+// AppendVolumeSkeleton appends a reservation-only volume. Authorization is
+// intentionally not inferred here; only the receipt-gated save_foundation
+// outline-all path may call it.
+func (s *Store) AppendVolumeSkeleton(vol domain.VolumeOutline) error {
+	return s.appendVolume(vol, true)
+}
+
+func (s *Store) appendVolume(vol domain.VolumeOutline, skeletonOnly bool) error {
+	s.crossMu.Lock()
+	defer s.crossMu.Unlock()
+
+	s.Outline.io.mu.Lock()
+	defer s.Outline.io.mu.Unlock()
+
+	var volumes []domain.VolumeOutline
+	var err error
+	if skeletonOnly {
+		volumes, err = s.Outline.appendVolumeSkeletonUnlocked(vol)
+	} else {
+		volumes, err = s.Outline.appendVolumeUnlocked(vol)
+	}
 	if err != nil {
 		return err
 	}

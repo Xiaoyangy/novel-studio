@@ -23,11 +23,19 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
-func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *domain.PipelineState) (domain.PipelineStageEvidence, error) {
-	evidence := domain.PipelineStageEvidence{
+func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *domain.PipelineState) (evidence domain.PipelineStageEvidence, returnErr error) {
+	evidence = domain.PipelineStageEvidence{
 		Stage:     stage,
 		Status:    "verified",
 		CheckedAt: time.Now(),
+	}
+	switch stage {
+	case "zero-init", "preplan", "project-all", "seal", "promote", "render":
+		_, releaseControl, err := acquirePublishedOutlineAllStageAtOutput(outputDir)
+		if err != nil {
+			return evidence, fmt.Errorf("%s verifier requires published outline-all: %w", stage, err)
+		}
+		defer releasePublishedOutlineAllStage(releaseControl, stage+" verifier", &returnErr)
 	}
 	switch stage {
 	case "cocreate":
@@ -38,10 +46,18 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		evidence.Message = "prompt captured"
 	case "architect":
 		return verifyPipelineArchitectStage(outputDir, evidence)
+	case "outline-all":
+		return verifyPipelineOutlineAllStage(outputDir, evidence)
 	case "zero-init":
 		return verifyPipelineZeroInitStage(outputDir, evidence)
 	case "preplan":
 		return verifyPipelinePreplanStage(outputDir, evidence)
+	case "project-all":
+		return verifyPipelineProjectAllStage(outputDir, evidence)
+	case "seal":
+		return verifyPipelineSealStage(outputDir, evidence)
+	case "promote":
+		return verifyPipelinePromoteStage(outputDir, evidence)
 	case "plan":
 		return verifyPipelinePlanStage(outputDir, evidence)
 	case "render":
@@ -123,34 +139,28 @@ func verifyPipelineZeroInitStage(outputDir string, evidence domain.PipelineStage
 			evidence.Missing = append(evidence.Missing, filepath.ToSlash(rel))
 		}
 	}
-	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok && firstWritePending {
-		sort.Strings(evidence.Missing)
-		return evidence, fmt.Errorf("zero-init 阶段 readiness 未就绪：%s", reason)
-	} else if !ok {
-		evidence.Missing = nil
-		for _, rel := range []string{
-			filepath.Join("meta", "world_tick.json"),
-			filepath.Join("meta", "world_events.jsonl"),
-		} {
-			if nonEmptyFile(filepath.Join(outputDir, rel)) {
-				evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
-			}
+	if !firstWritePending {
+		// world_tick/world_events are live ledgers. Their advancement proves
+		// writing happened; it must not stale the immutable fact that zero-init
+		// was completed before chapter one. Keep only the static readiness files
+		// in stage hash evidence and let later stages validate current ledgers.
+		if len(evidence.Missing) > 0 {
+			sort.Strings(evidence.Missing)
+			return evidence, fmt.Errorf("zero-init historical readiness artifacts are missing: %s", strings.Join(evidence.Missing, ", "))
 		}
-		evidence.Message = "historical zero-init evidence is stale after chapter one: " + reason
+		evidence.Message = "zero-init completed before chapter one; live world ledgers have advanced"
 		return evidence, nil
+	}
+	if firstWritePending {
+		if ok, reason := pipelineCurrentZeroInitReadinessState(outputDir); !ok {
+			sort.Strings(evidence.Missing)
+			return evidence, fmt.Errorf("zero-init 阶段 readiness 未就绪：%s", reason)
+		}
 	}
 	if err := verifyPipelineZeroInitWorldTick(st); err != nil {
 		evidence.Missing = append(evidence.Missing, filepath.ToSlash(filepath.Join("meta", "world_tick.json")), filepath.ToSlash(filepath.Join("meta", "world_events.jsonl")))
 		sort.Strings(evidence.Missing)
 		return evidence, fmt.Errorf("zero-init 阶段初始 world_tick 未就绪：%w", err)
-	}
-	for _, rel := range []string{
-		filepath.Join("meta", "world_tick.json"),
-		filepath.Join("meta", "world_events.jsonl"),
-	} {
-		if nonEmptyFile(filepath.Join(outputDir, rel)) {
-			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))
-		}
 	}
 	if len(evidence.Missing) > 0 {
 		sort.Strings(evidence.Missing)

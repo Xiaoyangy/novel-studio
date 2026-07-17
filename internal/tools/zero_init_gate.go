@@ -106,6 +106,14 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 		return false, "readiness generated_at 无法解析，需重跑 zero-init"
 	}
 	for _, rel := range foundationFreshnessFiles {
+		if rel == "outline.json" &&
+			nonEmptyRegularFile(filepath.Join(dir, "layered_outline.json")) {
+			// preplan rewrites the flat outline as a deterministic projection
+			// of layered_outline.json. The authored layered outline remains
+			// freshness-checked; its derived compatibility view must not make
+			// an otherwise current zero-init receipt expire.
+			continue
+		}
 		info, err := os.Stat(filepath.Join(dir, rel))
 		if err != nil {
 			continue

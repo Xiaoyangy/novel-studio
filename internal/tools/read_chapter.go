@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -60,6 +62,9 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 	}
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
+	}
+	if err := t.guardFrozenRenderRead(&a); err != nil {
+		return nil, err
 	}
 
 	// 模式 1：提取角色对话
@@ -229,6 +234,53 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		"content":    content,
 		"word_count": len([]rune(content)),
 	})
+}
+
+// guardFrozenRenderRead prevents read_chapter from becoming a live-canon
+// side door after the prose payload was frozen. The only readable surface in a
+// render lease is the target chapter's draft produced by that same lease,
+// which Drafter/Finalizer must be able to inspect and edit. Prior canon,
+// character dialogue samples, ranges, and the superseded final body are
+// already represented by the frozen render packet and may not be reloaded.
+func (t *ReadChapterTool) guardFrozenRenderRead(a *struct {
+	Chapter   int    `json:"chapter"`
+	From      int    `json:"from"`
+	To        int    `json:"to"`
+	Source    string `json:"source"`
+	Part      int    `json:"part"`
+	Character string `json:"character"`
+	MaxRunes  int    `json:"max_runes"`
+}) error {
+	if t == nil || t.store == nil || a == nil {
+		return nil
+	}
+	lock, err := t.store.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return fmt.Errorf("read_chapter 读取 pipeline execution lock: %w", err)
+	}
+	if lock == nil || lock.Mode != domain.PipelineExecutionRender {
+		return nil
+	}
+	if err := requireCurrentPipelineExecutionProcess(lock, "read_chapter"); err != nil {
+		return err
+	}
+	source := strings.TrimSpace(a.Source)
+	if a.Chapter <= 0 && a.From <= 0 && a.To <= 0 && strings.TrimSpace(a.Character) == "" {
+		a.Chapter = lock.TargetChapter
+	}
+	if strings.TrimSpace(a.Character) != "" || a.From > 0 || a.To > 0 ||
+		a.Chapter != lock.TargetChapter || (source != "draft" && source != "draft_part") {
+		return fmt.Errorf(
+			"render execution lock 只允许 read_chapter(chapter=%d, source=draft|draft_part) 回读本次执行产生的候选；收到 chapter=%d from=%d to=%d source=%q character=%q。前文、旧终稿、范围与声口样本必须来自冻结 render context",
+			lock.TargetChapter,
+			a.Chapter,
+			a.From,
+			a.To,
+			a.Source,
+			a.Character,
+		)
+	}
+	return nil
 }
 
 func normalizedChapterSurfaceSource(source string) string {

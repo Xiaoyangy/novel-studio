@@ -34,7 +34,7 @@ func (t *SimulateChapterWorldTool) Label() string                          { ret
 func (t *SimulateChapterWorldTool) ReadOnly(_ json.RawMessage) bool        { return false }
 func (t *SimulateChapterWorldTool) ConcurrencySafe(_ json.RawMessage) bool { return false }
 func (t *SimulateChapterWorldTool) Description() string {
-	return "在章节 plan 之前推进单一世界中的全部实名角色。通常每个角色都按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。例外：simulation_character_authority 中 blocking=true 的角色不要手抄长 JSON，直接把实名放入 authority_contract_characters；工具会在服务端逐字段物化并校验对应 hold_baseline_contract 或 rewrite_source_only_contract，避免引号、长句和知识锁在传输中被改写。novel_context 若返回 chapter_pipeline_instruction，必须逐条服从其硬约束并把 source_token 原样写入 sources。character_decisions 与 authority_contract_characters 合计每批最多8名，最后 finalize=true；若 chapter_world_simulation.status=ready_to_finalize，则只传 chapter 和 finalize=true，禁止重复提交任何已校验字段。完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。空补丁会被拒绝。"
+	return "在章节 plan 之前推进单一世界中的全部实名角色。通常每个角色都按自己的目标、压力、资源和知识边界选择行动，写明决定理由，并携带至少一个会改变世界或主角选项的蝴蝶效应。例外：simulation_character_authority 中 blocking=true 的角色不要手抄长 JSON，直接把实名放入 authority_contract_characters；工具会在服务端逐字段物化并校验对应 hold_baseline_contract 或 rewrite_source_only_contract，避免引号、长句和知识锁在传输中被改写。novel_context 若返回 chapter_pipeline_instruction 或 planning_context_access_receipt，必须把对应 source_token 原样写入 sources；token 本身不能替代服务端访问回执。character_decisions 与 authority_contract_characters 合计每批最多8名，最后 finalize=true；若 chapter_world_simulation.status=ready_to_finalize，则只传 chapter、当轮 access source_token（如有）和 finalize=true，禁止重复提交任何已校验字段。完成后 POV plan 只能引用返回的 simulation_id 和 protagonist_projection，正文不得直接泄露 hidden/delayed 信息。空补丁会被拒绝。"
 }
 
 func (t *SimulateChapterWorldTool) Schema() map[string]any {
@@ -86,7 +86,7 @@ func (t *SimulateChapterWorldTool) Schema() map[string]any {
 		schema.Property("character_decisions", schema.Array("本批非 blocking 角色决定；每批与 authority_contract_characters 合计最多8名，剩余角色下次补；already_present 禁止重发", decision)),
 		schema.Property("protagonist_projection", projection),
 		schema.Property("rewrite_fact_coverage", schema.Array("仅返工章需要：逐条证明保留事实已进入本轮世界模拟", rewriteCoverage)),
-		schema.Property("sources", schema.Array("本次推演依据的 tick、角色档案、台账、大纲和规则；存在 chapter_pipeline_instruction 时必须原样包含其 source_token", schema.String(""))),
+		schema.Property("sources", schema.Array("本次推演依据的 tick、角色档案、台账、大纲和规则；存在 chapter_pipeline_instruction 或 planning_context_access_receipt 时必须原样包含其 source_token", schema.String(""))),
 		schema.Property("finalize", schema.Bool("全角色覆盖后传 true，生成正式 simulation_id")),
 	)
 }
@@ -114,6 +114,22 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if err := guardPipelinePlanningExecution(t.store, a.Chapter, t.Name()); err != nil {
 		return nil, err
 	}
+	_, projectAllContextToken, err := loadProjectAllStateForExecution(t.store, a.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	if projectAllContextToken != "" {
+		if dossiers, loadErr := t.store.LoadAllCharacterDossiers(); loadErr != nil {
+			return nil, fmt.Errorf("load project-all character authority corpus: %w", loadErr)
+		} else if len(dossiers) > 0 {
+			if _, inputErr := loadProjectAllAuthorityInputs(t.store, a.Chapter); inputErr != nil {
+				return nil, fmt.Errorf(
+					"project-all grounded authority inputs invalid; refusing sentinel downgrade: %w",
+					inputErr,
+				)
+			}
+		}
+	}
 	if len(a.CharacterDecisions)+len(a.AuthorityCharacters) > chapterWorldSimulationBatchLimit {
 		return nil, fmt.Errorf("simulate_chapter_world 单批最多提交%d名角色，当前 character_decisions=%d authority_contract_characters=%d；请按 gaps 分批: %w", chapterWorldSimulationBatchLimit, len(a.CharacterDecisions), len(a.AuthorityCharacters), errs.ErrToolArgs)
 	}
@@ -128,6 +144,27 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if finalized, loadErr := t.store.LoadChapterWorldSimulation(a.Chapter); loadErr != nil {
 		return nil, fmt.Errorf("load finalized chapter simulation: %w", loadErr)
 	} else if !forceStructuralResimulation && finalized != nil && len(chapterWorldSimulationGaps(t.store, *finalized)) == 0 {
+		if projectAllContextToken != "" &&
+			!projectAllStateSourcesContain(finalized.Sources, projectAllContextToken) {
+			return nil, fmt.Errorf(
+				"project-all finalized world simulation lacks the exact authoritative context binding: %w",
+				errs.ErrToolPrecondition,
+			)
+		}
+		reuseSources := append([]string(nil), finalized.Sources...)
+		reuseSources = append(reuseSources, a.Sources...)
+		if err := consumePlanningContextAccessReceipt(
+			t.store,
+			a.Chapter,
+			domain.PlanningContextAccessSimulate,
+			reuseSources,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"第 %d 章 world simulation reuse 缺少本轮成功 novel_context(world_simulation) 的服务端访问证明: %w",
+				a.Chapter,
+				err,
+			)
+		}
 		if err := ensureChapterWorldSimulationCheckpoint(t.store, a.Chapter); err != nil {
 			return nil, fmt.Errorf("checkpoint reused chapter world simulation: %w", err)
 		}
@@ -167,6 +204,14 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	}
 	if partial == nil {
 		partial = &domain.ChapterWorldSimulation{Version: 1, Chapter: a.Chapter}
+	}
+	if projectAllContextToken != "" &&
+		!projectAllStateSourcesContain(partial.Sources, projectAllContextToken) &&
+		!projectAllStateSourcesContain(a.Sources, projectAllContextToken) {
+		return nil, fmt.Errorf(
+			"project-all world simulation must first call novel_context and submit its exact authoritative context binding: %w",
+			errs.ErrToolPrecondition,
+		)
 	}
 	materialized, materializeErr := materializeSimulationAuthorityContracts(t.store, a.Chapter, a.AuthorityCharacters)
 	if materializeErr != nil {
@@ -222,11 +267,27 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if strings.TrimSpace(a.ProtagonistProjection.Protagonist) != "" {
 		partial.ProtagonistProjection = a.ProtagonistProjection
 	}
+	if projectAllContextToken != "" {
+		if err := prepareSimulationAuthorityBinding(t.store, partial); err != nil {
+			return nil, fmt.Errorf("prepare project-all authority binding: %w", err)
+		}
+	}
 	normalizeProtagonistProjection(t.store, partial)
 	for _, source := range a.Sources {
 		partial.Sources = appendUniqueString(partial.Sources, source)
 	}
-	if progress, loadErr := t.store.Progress.Load(); loadErr == nil && progress != nil {
+	if projectAllContextToken != "" &&
+		!projectAllStateSourcesContain(partial.Sources, projectAllContextToken) {
+		return nil, fmt.Errorf(
+			"project-all world simulation did not persist the exact authoritative context binding: %w",
+			errs.ErrToolPrecondition,
+		)
+	}
+	if projectAllContext, _, contextErr := loadProjectAllStateForExecution(t.store, a.Chapter); contextErr != nil {
+		return nil, contextErr
+	} else if projectAllContext != nil {
+		partial.GenerationID = projectAllContext.GenerationID
+	} else if progress, loadErr := t.store.Progress.Load(); loadErr == nil && progress != nil {
 		partial.GenerationID = progress.GenerationID
 	}
 	if tick, loadErr := t.store.WorldSim.LoadTick(); loadErr == nil && tick != nil {
@@ -241,7 +302,7 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	if !a.Finalize {
 		nextStep := "继续分批调用 simulate_chapter_world，每批只补 gaps 中最多8名角色；补齐后单独提交 protagonist_projection 并传 finalize=true。禁止空提交，不要开始 plan_structure。"
 		if len(gaps) == 0 {
-			nextStep = "所有字段已通过校验；下一次只传 chapter 和 finalize=true 原子转正式，不得重发任何角色、投影、覆盖、来源或时间窗口。"
+			nextStep = "所有字段已通过校验；下一次只传 chapter、当轮 novel_context access source_token（如尚未持久化）和 finalize=true 原子转正式，不得重发任何角色、投影、覆盖或时间窗口。"
 		}
 		result := map[string]any{
 			"staged":             "chapter_world_simulation",
@@ -258,6 +319,25 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	}
 	if len(gaps) > 0 {
 		return nil, fmt.Errorf("第 %d 章全角色世界推演未完成：%s: %w", a.Chapter, strings.Join(gaps, "；"), errs.ErrToolPrecondition)
+	}
+	if err := consumePlanningContextAccessReceipt(
+		t.store,
+		a.Chapter,
+		domain.PlanningContextAccessSimulate,
+		partial.Sources,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"第 %d 章 world simulation finalize 缺少本轮成功 novel_context(world_simulation) 的服务端访问证明: %w",
+			a.Chapter,
+			err,
+		)
+	}
+	if err := finalizeSimulationAuthorityReceipt(t.store, partial); err != nil {
+		return nil, fmt.Errorf(
+			"第 %d 章 project-all authority receipt finalize 失败: %w",
+			a.Chapter,
+			err,
+		)
 	}
 	partial.SimulationID = chapterWorldSimulationID(*partial)
 	if err := t.store.SaveChapterWorldSimulation(*partial); err != nil {
@@ -407,9 +487,48 @@ func normalizeProtagonistProjection(st *store.Store, simulation *domain.ChapterW
 		if strings.TrimSpace(decision.Character) != protagonist || strings.TrimSpace(decision.Decision) == "" {
 			continue
 		}
-		projection.ChosenDecision = strings.TrimSpace(decision.Decision)
+		decisionText := strings.TrimSpace(decision.Decision)
+		if simulationAuthorityDecisionPlaceholder(decisionText) {
+			if simulationAuthorityReceiptGroundsCharacter(
+				simulation.AuthorityReceipt,
+				protagonist,
+			) {
+				// Only a server-built project-all receipt may preserve an
+				// independently authored human projection beside an authority
+				// contract. Genuine rewrites never enter this branch.
+				projection.ChosenDecision = effectiveProtagonistDecision(*projection)
+				return
+			}
+			// A genuine rewrite_source_only protagonist may expose only the
+			// exact source action materialized by the server. If no such action
+			// exists, leave the projection incomplete and fail finalization.
+			action := nonSentinelAuthorityText(decision.Action)
+			projection.ChosenDecision = action
+			if action != "" && !containsExactString(projection.AvailableOptions, action) {
+				projection.AvailableOptions = append([]string{action}, projection.AvailableOptions...)
+			}
+			return
+		}
+		projection.ChosenDecision = decisionText
 		return
 	}
+}
+
+func simulationAuthorityReceiptGroundsCharacter(
+	receipt *domain.SimulationAuthorityReceipt,
+	character string,
+) bool {
+	if receipt == nil ||
+		receipt.Mode != domain.SimulationAuthorityModeGrounded {
+		return false
+	}
+	character = strings.TrimSpace(character)
+	for _, grounded := range receipt.GroundedCharacters {
+		if strings.TrimSpace(grounded) == character {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeCharacterWorldDecisions(existing, incoming []domain.CharacterWorldDecision) []domain.CharacterWorldDecision {
@@ -545,6 +664,18 @@ func rewriteFactCoverageIntegrityGaps(expected []string, actual []domain.Chapter
 func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulation) []string {
 	var gaps []string
 	sim.CharacterDecisions = canonicalizeCharacterWorldDecisions(s, sim.CharacterDecisions)
+	// Legacy/imported simulations historically used caller-chosen IDs. New
+	// project-all receipts are content-addressed and must remain so on every
+	// read; live artifact checkpoints separately protect legacy files.
+	if sim.AuthorityReceipt != nil && strings.TrimSpace(sim.SimulationID) != "" {
+		if expected := chapterWorldSimulationID(sim); sim.SimulationID != expected {
+			gaps = append(gaps, fmt.Sprintf(
+				"simulation_id payload digest mismatch: got %s want %s",
+				sim.SimulationID,
+				expected,
+			))
+		}
+	}
 	if gap := storedSimulationCharacterAuthorityGap(s, sim); gap != "" {
 		gaps = append(gaps, gap)
 	}
@@ -614,14 +745,26 @@ func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulatio
 	}
 	p := sim.ProtagonistProjection
 	protagonist := inferCommitProtagonist(s)
+	effectiveDecision := effectiveProtagonistDecision(p)
 	if strings.TrimSpace(p.Protagonist) != protagonist || len(p.ObservableEffects) == 0 || len(p.HiddenPressures) == 0 ||
-		len(p.AvailableOptions) < 2 || strings.TrimSpace(p.ChosenDecision) == "" || strings.TrimSpace(p.DecisionReason) == "" ||
+		len(p.AvailableOptions) < 2 || effectiveDecision == "" ||
+		strings.TrimSpace(p.ChosenDecision) != effectiveDecision || strings.TrimSpace(p.DecisionReason) == "" ||
 		len(p.PlanConstraints) == 0 || len(p.CausalChain) == 0 {
 		gaps = append(gaps, "incomplete protagonist_projection")
 	}
-	if decision, ok := present[protagonist]; ok && strings.TrimSpace(p.ChosenDecision) != "" && strings.TrimSpace(decision.Decision) != strings.TrimSpace(p.ChosenDecision) {
+	if decision, ok := present[protagonist]; ok &&
+		!simulationAuthorityDecisionPlaceholder(decision.Decision) &&
+		strings.TrimSpace(p.ChosenDecision) != "" &&
+		strings.TrimSpace(decision.Decision) != strings.TrimSpace(p.ChosenDecision) {
 		gaps = append(gaps, "protagonist_projection.chosen_decision must equal protagonist character decision")
+	} else if ok && simulationAuthorityDecisionPlaceholder(decision.Decision) &&
+		!simulationAuthorityReceiptGroundsCharacter(sim.AuthorityReceipt, protagonist) {
+		expected := nonSentinelAuthorityText(decision.Action)
+		if expected == "" || strings.TrimSpace(p.ChosenDecision) != expected {
+			gaps = append(gaps, "rewrite protagonist_projection.chosen_decision must equal exact source action")
+		}
 	}
+	gaps = append(gaps, projectAllGroundedProjectionGaps(s, sim)...)
 	if expected, _, _, err := loadChapterRewriteSource(s, sim.Chapter); err == nil && expected != nil {
 		gaps = append(gaps, chapterWorldSimulationProjectionInvariantGaps(p, expected.PreserveFacts)...)
 	}
@@ -640,6 +783,12 @@ func storedSimulationCharacterAuthorityGap(s *store.Store, sim domain.ChapterWor
 	// because their already-present actors are immutable within the current
 	// epoch and were checked on ingress.
 	if s == nil || strings.TrimSpace(sim.SimulationID) == "" || len(sim.CharacterDecisions) == 0 {
+		return ""
+	}
+	if sim.AuthorityReceipt != nil {
+		if err := validateStoredSimulationAuthorityReceipt(s, sim); err != nil {
+			return "stored project-all authority receipt invalid: " + err.Error()
+		}
 		return ""
 	}
 	if err := validateIncomingSimulationCharacterAuthority(s, sim.Chapter, sim.CharacterDecisions); err != nil {
@@ -1358,8 +1507,9 @@ func validateChapterWorldSimulationReference(s *store.Store, plan domain.Chapter
 	if strings.TrimSpace(causal.WorldSimulationID) != strings.TrimSpace(sim.SimulationID) {
 		return fmt.Errorf("第 %d 章 POV plan 必须引用本轮 world_simulation_id=%s，当前为 %q: %w", plan.Chapter, sim.SimulationID, causal.WorldSimulationID, errs.ErrToolPrecondition)
 	}
-	if strings.TrimSpace(causal.ProtagonistDecision) != strings.TrimSpace(sim.ProtagonistProjection.ChosenDecision) {
-		return fmt.Errorf("第 %d 章 protagonist_decision 必须等于世界模拟投影的主角选择 %q，当前为 %q: %w", plan.Chapter, sim.ProtagonistProjection.ChosenDecision, causal.ProtagonistDecision, errs.ErrToolPrecondition)
+	expectedDecision := effectiveProtagonistDecision(sim.ProtagonistProjection)
+	if strings.TrimSpace(causal.ProtagonistDecision) != expectedDecision {
+		return fmt.Errorf("第 %d 章 protagonist_decision 必须等于世界模拟投影的人类可读主角选择 %q，当前为 %q: %w", plan.Chapter, expectedDecision, causal.ProtagonistDecision, errs.ErrToolPrecondition)
 	}
 	if !contextSourcesContain(causal.ContextSources, sim.SimulationID) || !contextSourcesContain(causal.ContextSources, "chapter_world_simulation") {
 		return fmt.Errorf("第 %d 章 context_sources 必须记录 chapter_world_simulation:%s: %w", plan.Chapter, sim.SimulationID, errs.ErrToolPrecondition)

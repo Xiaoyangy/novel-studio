@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,93 @@ import (
 func TestRewriteCraftSafeCorpusPolicyUsesFieldAlignedPrimaryDiversityV5(t *testing.T) {
 	if rewriteCraftSafeCorpusPolicy != "rewrite-craft-safe-corpus-v5-field-aligned-primary-diversity" {
 		t.Fatalf("unexpected safe rewrite policy identity: %q", rewriteCraftSafeCorpusPolicy)
+	}
+}
+
+func TestProjectAllCraftReceiptIsChapterizedContentAddressedAndFrozen(t *testing.T) {
+	st := newRAGFactReceiptTestStore(t, rewriteCraftTestChunks())
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "饭桌上的欠费单",
+		CoreEvent: "林澈与房东争执后逐项核对欠费单",
+		Hook:      "房东漏答的那一项指向第二把钥匙",
+		Scenes:    []string{"饭桌交涉中断", "房东开口又改口"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	planningContext, _ := installPlanningContextAccessProjectAll(t, st, 1, "project-all-craft-owner")
+	receipt, err := EnsureProjectAllCraftReceiptForCurrentContext(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.GenerationID != planningContext.GenerationID ||
+		receipt.PlanningContextDigest != planningContext.ContextDigest ||
+		len(receipt.Attempts) != 2 {
+		t.Fatalf("project-all craft receipt lost exact planning identity/coverage: %+v", receipt)
+	}
+	if receipt.Attempts[0].Need.ID != "project-all-methodology" ||
+		!strings.Contains(receipt.Attempts[0].Need.Topic, "饭桌上的欠费单") ||
+		receipt.Attempts[1].Need.ID != "project-all-dialogue" ||
+		!strings.Contains(receipt.Attempts[1].Need.Topic, "房东开口又改口") {
+		t.Fatalf("craft needs were not deterministically chapterized from outline content: %+v", receipt.Attempts)
+	}
+	for _, attempt := range receipt.Attempts {
+		if len(attempt.Hits) == 0 || attempt.NoMaterial {
+			t.Fatalf("fixture expected a relevant safe hit for %s: %+v", attempt.Need.ID, attempt)
+		}
+	}
+	again, err := EnsureProjectAllCraftReceiptForCurrentContext(st, 1)
+	if err != nil || again.ID != receipt.ID || again.PayloadSHA256 != receipt.PayloadSHA256 {
+		t.Fatalf("identical chapter/generation/context/index did not reuse content address: first=%+v second=%+v err=%v", receipt, again, err)
+	}
+
+	plan := domain.ChapterPlan{Chapter: 1}
+	plan.CausalSimulation.ContextSources = []string{domain.CraftRecallReceiptSourceTokenV2(*receipt)}
+	for _, attempt := range receipt.Attempts {
+		plan.CausalSimulation.ExternalRefs = append(plan.CausalSimulation.ExternalRefs, domain.ExternalReferencePlan{
+			QueryOrNeed:        attempt.Need.ID,
+			SourceType:         craftSourceType,
+			SourceRefs:         []string{attempt.Hits[0].Ref},
+			UsableDetails:      []string{"让人物先用漏答和票据位置变化争夺话语权。"},
+			TransformationRule: "只迁移方法到本章人物选择，不复制外部情节与措辞。",
+			DoNotUse:           []string{"不复制示例句", "不引入外部角色或设定"},
+		})
+	}
+	if err := ValidateProjectAllCraftPlanCurrent(st, plan, receipt); err != nil {
+		t.Fatalf("exact project-all craft plan consumption rejected: %v", err)
+	}
+	packet := newDraftRenderPacket(plan)
+	if len(packet.CraftMethods) != 2 {
+		t.Fatalf("chapterized craft needs did not survive plan-to-render projection: %+v", packet.CraftMethods)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"_context_profile": "draft",
+		"working_memory": map[string]any{
+			"render_packet": packet,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := domain.ValidateProjectAllCraftRenderConsumptionV2(raw, *receipt); err != nil {
+		t.Fatalf("frozen render packet lost exact craft receipt refs: %v", err)
+	}
+	for _, attempt := range receipt.Attempts {
+		for _, hit := range attempt.Hits {
+			if hit.Summary != "" && strings.Contains(string(raw), hit.Summary) {
+				t.Fatalf("frozen render packet leaked raw craft summary: %s", raw)
+			}
+		}
+	}
+
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1, Title: "仓库追逐", CoreEvent: "林澈在仓库避开封锁", Scenes: []string{"货架间追逐"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProjectAllCraftPlanCurrent(st, plan, receipt); err == nil ||
+		!strings.Contains(err.Error(), "不匹配") {
+		t.Fatalf("outline-driven craft need drift did not invalidate current receipt: %v", err)
 	}
 }
 
@@ -363,16 +451,18 @@ func TestDeriveRewriteCraftNeedsIgnoresStaleOrUnboundEvidence(t *testing.T) {
 	if err := os.WriteFile(gatePath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if needs := deriveRewriteCraftNeeds(st, 1); len(needs) != 0 {
-		t.Fatalf("stale mechanical gate drove current receipt needs: %+v", needs)
+	if needs := deriveRewriteCraftNeeds(st, 1); len(needs) != 2 ||
+		!slices.Contains(needs[0].TriggerRefs, "rewrite_brief") ||
+		!slices.Contains(needs[1].TriggerRefs, "rewrite_brief") {
+		t.Fatalf("current rewrite brief should survive stale mechanical evidence: %+v", needs)
 	}
 	stale.BodySHA256 = ""
 	raw, _ = json.Marshal(stale)
 	if err := os.WriteFile(gatePath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if needs := deriveRewriteCraftNeeds(st, 1); len(needs) != 0 {
-		t.Fatalf("legacy unbound gate must not become an enforcement trigger: %+v", needs)
+	if needs := deriveRewriteCraftNeeds(st, 1); len(needs) != 2 {
+		t.Fatalf("legacy unbound gate changed current brief-derived needs: %+v", needs)
 	}
 }
 
@@ -403,8 +493,9 @@ func TestDeriveRewriteCraftNeedsFallsBackPastStalePrimaryGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	needs := deriveRewriteCraftNeeds(st, 1)
-	if len(needs) != 1 || needs[0].ID != "rewrite-dialogue" {
-		t.Fatalf("current fallback gate was hidden by stale primary: %+v", needs)
+	if len(needs) != 2 || needs[0].ID != "rewrite-methodology" || needs[1].ID != "rewrite-dialogue" ||
+		!slices.Contains(needs[1].TriggerRefs, "mechanical_gate.rule:dialogue_conveyor_overuse") {
+		t.Fatalf("current fallback gate was hidden by stale primary or current brief: %+v", needs)
 	}
 }
 
@@ -839,7 +930,7 @@ func TestPlanStructurePrefetchAndLegacyPlanDetailsRecovery(t *testing.T) {
 	if err := json.Unmarshal(planStructureArgs(1), &structure); err != nil {
 		t.Fatal(err)
 	}
-	applyOutlineAnchorsToStructure(legacy, 1, structure)
+	applyOutlineAnchorsToStructure(legacy, 1, structure, true)
 	if err := applyRewriteAnchorsToStructure(legacy, 1, structure); err != nil {
 		t.Fatal(err)
 	}

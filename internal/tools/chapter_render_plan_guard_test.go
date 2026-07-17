@@ -287,6 +287,47 @@ func TestCurrentRenderPlanRejectsNewerSimulationCheckpointWithSameID(t *testing.
 	}
 }
 
+func TestCurrentRenderPlanRejectsWorldSimulationBytesChangedAfterCheckpoint(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: "frozen-sim", TimeWindow: "本章",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈", ChosenDecision: "先停扩",
+		},
+	}
+	if err := s.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "冻结计划"}
+	plan.CausalSimulation.WorldSimulationID = sim.SimulationID
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	sim.ProtagonistProjection.ObservableEffects = []string{"checkpoint 后新增的可见结果"}
+	if err := s.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CurrentChapterPlanCausalCheckpoint(s, 1); err == nil ||
+		!strings.Contains(err.Error(), "world simulation 与 checkpoint 不匹配") {
+		t.Fatalf("plan freeze accepted mutated live simulation overlay: %v", err)
+	}
+}
+
 func TestLegacyPlanWithoutCheckpointKeepsImportCompatibility(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {

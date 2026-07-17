@@ -83,7 +83,7 @@ const ChapterWordsDeviationThreshold = 0.20
 type Violation struct {
 	Rule      string   `json:"rule"`                // forbidden_chars / forbidden_phrases / fatigue_words / chapter_words / project_contamination / deprecated_story_engine / content_count_mismatch / awkward_simile / dangling_order_word / state_clause_pile / semantic_perplexity_low / ending_aphorism_question / micro_action_overuse / dramatic_negation_overuse / paragraph_start_repetition / not_but_overuse / precise_measure_overuse / patch_phrase_overuse / minor_mistake_overuse / isolated_sentence_overuse / supporting_quip_overuse / vague_quantifier_overuse / dialogue_conveyor_overuse / pov_interiority_thin / system_message_inline / ascii_chinese_dialogue_quote
 	Target    string   `json:"target,omitempty"`    // 具体违规对象（哪个词/字符）；chapter_words 留空
-	Limit     any      `json:"limit,omitempty"`     // 阈值；fatigue_words=int / chapter_words="2100-3000" / forbidden_*=空
+	Limit     any      `json:"limit,omitempty"`     // 阈值；fatigue_words=int / chapter_words="2000-3300" / forbidden_*=空
 	Actual    any      `json:"actual"`              // 实际值；fatigue_words/forbidden_*=出现次数 / chapter_words=本章字数
 	Deviation float64  `json:"deviation,omitempty"` // chapter_words 偏差率（0~1），其他规则留空
 	Severity  Severity `json:"severity"`            // error / warning

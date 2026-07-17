@@ -930,7 +930,9 @@ func TestLoadPipelineStateInvalidatesExplicitPromptChange(t *testing.T) {
 	if err := savePipelineState(path, previous); err != nil {
 		t.Fatal(err)
 	}
-	state, err := loadOrInitPipelineState(path, previous.Stages, "新创作指令", "sha256:runtime-a", false)
+	state, err := loadOrInitPipelineState(
+		path, previous.Stages, "新创作指令", "sha256:runtime-a", "sha256:run-a", false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -950,12 +952,51 @@ func TestLoadPipelineStateInvalidatesRuntimePromptFingerprintChange(t *testing.T
 	if err := savePipelineState(path, previous); err != nil {
 		t.Fatal(err)
 	}
-	state, err := loadOrInitPipelineState(path, previous.Stages, "", "sha256:runtime-b", false)
+	state, err := loadOrInitPipelineState(
+		path, previous.Stages, "", "sha256:runtime-b", "sha256:run-a", false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(state.Completed) != 0 || state.Prompt != previous.Prompt || state.InputDigest != "sha256:runtime-b" {
 		t.Fatalf("runtime drift must reset while preserving prompt: %+v", state)
+	}
+}
+
+func TestLoadPipelineStateInvalidatesRunIdentityChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pipeline.json")
+	previous := &domain.PipelineState{
+		Stages:      []string{"preplan", "plan", "render"},
+		Completed:   []string{"preplan", "plan", "render"},
+		Prompt:      "创作指令",
+		InputDigest: "sha256:runtime-a",
+		RunIdentity: pipelineRunIdentityDigest(pipelineFlags{Start: 1, End: 1, Budget: time.Minute}),
+	}
+	if err := savePipelineState(path, previous); err != nil {
+		t.Fatal(err)
+	}
+	nextIdentity := pipelineRunIdentityDigest(pipelineFlags{Start: 2, End: 2, Budget: 2 * time.Minute})
+	state, err := loadOrInitPipelineState(
+		path, previous.Stages, "", previous.InputDigest, nextIdentity, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Completed) != 0 || state.Prompt != previous.Prompt || state.RunIdentity != nextIdentity {
+		t.Fatalf("run identity drift must reset completed stages while preserving prompt: %+v", state)
+	}
+}
+
+func TestPipelineRunIdentityBindsFromToAndBudget(t *testing.T) {
+	base := pipelineRunIdentityDigest(pipelineFlags{Start: 1, End: 3, Budget: time.Minute})
+	for name, flags := range map[string]pipelineFlags{
+		"from":   {Start: 2, End: 3, Budget: time.Minute},
+		"to":     {Start: 1, End: 4, Budget: time.Minute},
+		"budget": {Start: 1, End: 3, Budget: 2 * time.Minute},
+	} {
+		if got := pipelineRunIdentityDigest(flags); got == base {
+			t.Fatalf("%s change did not alter pipeline run identity", name)
+		}
 	}
 }
 
@@ -978,6 +1019,37 @@ func TestPipelineRunInputDigestBindsBrainstormArtifact(t *testing.T) {
 	if first == second {
 		t.Fatal("brainstorm drift must invalidate the pipeline input digest")
 	}
+}
+
+func TestPipelineRunInputDigestBindsReferencesAndStyles(t *testing.T) {
+	cfg := bootstrap.Config{
+		OutputDir: filepath.Join(t.TempDir(), "output", "novel"),
+		Provider:  "openai",
+		ModelName: "gpt-5.6-sol",
+		Style:     "default",
+	}
+	baseBundle := assets.Load("default")
+	baseDigest := pipelineRunInputDigest(cfg, baseBundle)
+
+	t.Run("references", func(t *testing.T) {
+		drifted := baseBundle
+		drifted.References.AntiAITone += "\n仅用于验证 reference 漂移会失效运行摘要。"
+		if got := pipelineRunInputDigest(cfg, drifted); got == baseDigest {
+			t.Fatal("reference drift must invalidate the pipeline input digest")
+		}
+	})
+
+	t.Run("styles", func(t *testing.T) {
+		drifted := baseBundle
+		drifted.Styles = make(map[string]string, len(baseBundle.Styles))
+		for name, body := range baseBundle.Styles {
+			drifted.Styles[name] = body
+		}
+		drifted.Styles["default"] += "\n仅用于验证 style 漂移会失效运行摘要。"
+		if got := pipelineRunInputDigest(cfg, drifted); got == baseDigest {
+			t.Fatal("style drift must invalidate the pipeline input digest")
+		}
+	})
 }
 
 func TestVerifyStoredPipelineArtifactDigestsRejectsDrift(t *testing.T) {
@@ -1069,6 +1141,13 @@ func TestPipelineRequestFullRerenderInvalidatesExistingDraftWithoutChangingPlan(
 		},
 	}
 	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(2),
+		"chapter_world_simulation",
+		"meta/chapter_simulations/002.json",
+	); err != nil {
 		t.Fatal(err)
 	}
 	plan := domain.ChapterPlan{
@@ -1336,12 +1415,21 @@ func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify zero-init: %v", err)
 	}
-	if !strings.Contains(evidence.Message, "historical zero-init evidence is stale after chapter one") {
-		t.Fatalf("message=%q, want historical stale evidence note", evidence.Message)
+	if !strings.Contains(evidence.Message, "completed before chapter one") {
+		t.Fatalf("message=%q, want immutable historical readiness note", evidence.Message)
 	}
-	for _, want := range []string{"meta/first_chapter_generation_readiness.json", "meta/world_tick.json", "meta/world_events.jsonl"} {
+	for _, want := range []string{
+		"meta/first_chapter_generation_readiness.json",
+		"meta/first_chapter_generation_readiness.md",
+		"meta/ch01_zero_init_plan.md",
+	} {
 		if !slices.Contains(evidence.Artifacts, want) {
 			t.Fatalf("zero-init evidence missing %s: %+v", want, evidence.Artifacts)
+		}
+	}
+	for _, mutable := range []string{"meta/world_tick.json", "meta/world_events.jsonl"} {
+		if slices.Contains(evidence.Artifacts, mutable) {
+			t.Fatalf("zero-init immutable evidence retained live ledger %s: %+v", mutable, evidence.Artifacts)
 		}
 	}
 }

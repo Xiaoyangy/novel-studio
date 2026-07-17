@@ -122,7 +122,9 @@ var knownRoles = map[string]bool{
 // Config 小说应用配置。
 type Config struct {
 	// 运行时字段（不序列化到 JSON）
-	OutputDir string `json:"-"` // 输出根目录
+	OutputDir            string `json:"-"` // 输出根目录
+	DisableLiveRAG       bool   `json:"-"` // 冻结 render 会话：不初始化 embedding/Qdrant 或实时召回
+	DisableModelFailover bool   `json:"-"` // sealed render：只允许配置的主 provider/model，不降级
 
 	// 默认 LLM 配置
 	Provider  string `json:"provider"` // 默认 provider（Providers map 中的 key）

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -287,13 +288,136 @@ func (s *OutlineStore) expandArcUnlocked(volumeIdx, arcIdx int, chapters []domai
 	return volumes, nil
 }
 
-// appendVolumeUnlocked 内部方法，在 Store.AppendVolume 跨域协调中调用。
-func (s *OutlineStore) appendVolumeUnlocked(vol domain.VolumeOutline) ([]domain.VolumeOutline, error) {
+// reviseArcUnlocked replaces the chapter contracts of one already-expanded
+// arc without changing its reservation span or any global chapter position.
+// It is deliberately lower-level than policy: the save_foundation tool owns
+// the chapter0/receipt authorization, while this method owns structural safety.
+func (s *OutlineStore) reviseArcUnlocked(volumeIdx, arcIdx int, chapters []domain.OutlineEntry) ([]domain.VolumeOutline, error) {
 	var volumes []domain.VolumeOutline
 	if err := s.io.ReadJSONUnlocked("layered_outline.json", &volumes); err != nil {
 		return nil, fmt.Errorf("load layered_outline: %w", err)
 	}
-	if err := validateAppendVolume(volumes, vol); err != nil {
+	beforePositions := expandedArcStartPositions(volumes)
+	found := false
+	for vi := range volumes {
+		if volumes[vi].Index != volumeIdx {
+			continue
+		}
+		for ai := range volumes[vi].Arcs {
+			if volumes[vi].Arcs[ai].Index != arcIdx {
+				continue
+			}
+			target := &volumes[vi].Arcs[ai]
+			if !target.IsExpanded() {
+				return nil, fmt.Errorf("cannot revise unexpanded arc: volume=%d, arc=%d", volumeIdx, arcIdx)
+			}
+			if len(chapters) != len(target.Chapters) {
+				return nil, fmt.Errorf(
+					"revised chapter count %d must equal existing span %d for volume=%d, arc=%d; refusing to shift global chapter numbers",
+					len(chapters), len(target.Chapters), volumeIdx, arcIdx)
+			}
+			target.Chapters = chapters
+			target.EstimatedChapters = 0
+			found = true
+			break
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("arc not found: volume=%d, arc=%d", volumeIdx, arcIdx)
+	}
+	if err := ensureExpandedArcPositionsStable(beforePositions, volumes); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteJSONUnlocked("layered_outline.json", volumes); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteMarkdownUnlocked("layered_outline.md", renderLayeredOutline(volumes)); err != nil {
+		return nil, err
+	}
+	flat := domain.FlattenOutline(volumes)
+	if err := s.io.WriteJSONUnlocked("outline.json", flat); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteMarkdownUnlocked("outline.md", renderOutline(flat)); err != nil {
+		return nil, err
+	}
+	return volumes, nil
+}
+
+func (s *OutlineStore) mapArcContractsUnlocked(assignments []domain.ArcContractAssignment) ([]domain.VolumeOutline, error) {
+	var volumes []domain.VolumeOutline
+	if err := s.io.ReadJSONUnlocked("layered_outline.json", &volumes); err != nil {
+		return nil, fmt.Errorf("load layered_outline: %w", err)
+	}
+	type key struct{ volume, arc int }
+	want := make(map[key][]domain.StoryContractRef, len(assignments))
+	for _, assignment := range assignments {
+		k := key{assignment.Volume, assignment.Arc}
+		if assignment.Volume <= 0 || assignment.Arc <= 0 {
+			return nil, fmt.Errorf("map_contracts assignment requires positive volume/arc")
+		}
+		if _, exists := want[k]; exists {
+			return nil, fmt.Errorf("map_contracts duplicate assignment V%dA%d", assignment.Volume, assignment.Arc)
+		}
+		want[k] = append([]domain.StoryContractRef(nil), assignment.ContractRefs...)
+	}
+	beforePositions := expandedArcStartPositions(volumes)
+	arcCount := 0
+	for vi := range volumes {
+		for ai := range volumes[vi].Arcs {
+			arcCount++
+			k := key{volumes[vi].Index, volumes[vi].Arcs[ai].Index}
+			refs, ok := want[k]
+			if !ok {
+				return nil, fmt.Errorf("map_contracts missing assignment V%dA%d", k.volume, k.arc)
+			}
+			volumes[vi].Arcs[ai].ContractRefs = refs
+			delete(want, k)
+		}
+	}
+	if len(assignments) != arcCount || len(want) != 0 {
+		return nil, fmt.Errorf("map_contracts assignment set does not equal the complete arc set")
+	}
+	if err := ensureExpandedArcPositionsStable(beforePositions, volumes); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteJSONUnlocked("layered_outline.json", volumes); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteMarkdownUnlocked("layered_outline.md", renderLayeredOutline(volumes)); err != nil {
+		return nil, err
+	}
+	flat := domain.FlattenOutline(volumes)
+	if err := s.io.WriteJSONUnlocked("outline.json", flat); err != nil {
+		return nil, err
+	}
+	if err := s.io.WriteMarkdownUnlocked("outline.md", renderOutline(flat)); err != nil {
+		return nil, err
+	}
+	return volumes, nil
+}
+
+// appendVolumeUnlocked 内部方法，在 Store.AppendVolume 跨域协调中调用。
+func (s *OutlineStore) appendVolumeUnlocked(vol domain.VolumeOutline) ([]domain.VolumeOutline, error) {
+	return s.appendVolumeWithPolicyUnlocked(vol, true)
+}
+
+// appendVolumeSkeletonUnlocked is reserved for the receipt-gated outline-all
+// candidate. Every arc must be a positive fixed reservation; no chapter is
+// expanded during the skeleton phase.
+func (s *OutlineStore) appendVolumeSkeletonUnlocked(vol domain.VolumeOutline) ([]domain.VolumeOutline, error) {
+	return s.appendVolumeWithPolicyUnlocked(vol, false)
+}
+
+func (s *OutlineStore) appendVolumeWithPolicyUnlocked(vol domain.VolumeOutline, requireExpandedFirstArc bool) ([]domain.VolumeOutline, error) {
+	var volumes []domain.VolumeOutline
+	if err := s.io.ReadJSONUnlocked("layered_outline.json", &volumes); err != nil {
+		return nil, fmt.Errorf("load layered_outline: %w", err)
+	}
+	if err := validateAppendVolume(volumes, vol, requireExpandedFirstArc); err != nil {
 		return nil, err
 	}
 	beforePositions := expandedArcStartPositions(volumes)
@@ -364,7 +488,7 @@ func ensureExpandedArcPositionsStable(before map[layeredArcKey]expandedArcPositi
 	return nil
 }
 
-func validateAppendVolume(existing []domain.VolumeOutline, vol domain.VolumeOutline) error {
+func validateAppendVolume(existing []domain.VolumeOutline, vol domain.VolumeOutline, requireExpandedFirstArc bool) error {
 	if len(existing) > 0 {
 		maxIdx := existing[len(existing)-1].Index
 		if vol.Index <= maxIdx {
@@ -374,8 +498,26 @@ func validateAppendVolume(existing []domain.VolumeOutline, vol domain.VolumeOutl
 	if len(vol.Arcs) == 0 {
 		return fmt.Errorf("新卷必须至少包含一个弧")
 	}
-	if !vol.Arcs[0].IsExpanded() {
+	if requireExpandedFirstArc && !vol.Arcs[0].IsExpanded() {
 		return fmt.Errorf("新卷的首弧必须包含详细章节")
+	}
+	if !requireExpandedFirstArc {
+		spans := make([]int, 0, len(vol.Arcs))
+		total := 0
+		for _, arc := range vol.Arcs {
+			if arc.IsExpanded() || arc.EstimatedChapters <= 0 {
+				return fmt.Errorf("outline-all 骨架卷的每个弧必须只含正数 estimated_chapters 预留，不得提前展开")
+			}
+			spans = append(spans, arc.EstimatedChapters)
+			total += arc.EstimatedChapters
+		}
+		want, err := domain.RecommendedOutlineAllArcSpans(total)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(spans, want) {
+			return fmt.Errorf("outline-all 骨架卷弧跨度=%v，必须使用确定性单次展开分配=%v", spans, want)
+		}
 	}
 	return nil
 }

@@ -76,6 +76,8 @@ type ChapterCausalSimulation struct {
 	CharacterArcTests   []CharacterArcTest           `json:"character_arc_tests,omitempty"`         // 本章如何测试人物 Want/Lie/Need/Truth 和合理犯错
 	ReaderRewardPlan    ReaderRewardPlan             `json:"reader_reward_plan,omitempty"`          // 读者奖励、小胜利、新债务和前几章兑现阶梯
 	ReaderRetentionPlan ReaderRetentionPlan          `json:"reader_retention_plan,omitempty"`       // 章节计划的显性/隐性/延后/删压缩筛选，防止把大纲清单全写进正文
+	RenderCapacity      *ChapterRenderCapacity       `json:"render_capacity,omitempty"`             // 弧级正式推演的正文承载力合同：场景脊柱、字数预算与反注水策略
+	ArcTransition       ArcChapterTransitionContract `json:"arc_transition_contract,omitempty"`     // 弧内显式承接：上一章后果如何被本章因果拍消费，以及本章留给下一章的后果
 	EvidenceChains      []EvidenceReturnChain        `json:"evidence_return_chains,omitempty"`      // 离屏/后台事件如何以证据回到主视角
 	EndingContract      EndingConsequenceContract    `json:"ending_consequence_contract,omitempty"` // 章末必须落成的后果契约
 	DormantPolicy       []DormantCharacterPolicy     `json:"dormant_character_policy,omitempty"`    // 暂不出场角色的最小推进/静止理由
@@ -106,6 +108,20 @@ type ChapterCausalSimulation struct {
 	DecisionPoints      []string                     `json:"decision_points,omitempty"`             // 必须落成选择的节点
 	OutcomeShift        []string                     `json:"outcome_shift,omitempty"`               // 章末相较开章必须改变的状态
 	SceneConstraints    []string                     `json:"scene_constraints,omitempty"`           // 写作限制：视角、证据边界、不能提前解释的内容
+}
+
+// ArcChapterTransitionContract is authored by the Planner, not inferred from
+// generic goal/hook prose. A non-first chapter copies its predecessor's exact
+// outgoing identity/text and names the exact causal-beat cause that consumes
+// it. Every projected chapter also publishes one outgoing consequence; inside
+// the arc the next chapter must consume it, while the arc-final value remains
+// explicit terminal evidence rather than an invented hook.
+type ArcChapterTransitionContract struct {
+	IncomingConsequenceID   string `json:"incoming_consequence_id,omitempty"`
+	IncomingConsequenceText string `json:"incoming_consequence_text,omitempty"`
+	ConsumedByCause         string `json:"consumed_by_cause,omitempty"`
+	OutgoingConsequenceID   string `json:"outgoing_consequence_id,omitempty"`
+	OutgoingConsequenceText string `json:"outgoing_consequence_text,omitempty"`
 }
 
 // LiteraryRenderingPlan 约束既定事件如何进入主视角正文，而不追加剧情义务。

@@ -268,3 +268,40 @@ func TestSaveWorldTickStoryDayAnchoring(t *testing.T) {
 		t.Fatalf("story_day 应按 days_per_chapter 回填为 8，got %v", events[0].StoryDay)
 	}
 }
+
+func TestSaveWorldTickStoryDayPrefersStructuredContractSchedule(t *testing.T) {
+	tool, s := newWorldTickTool(t)
+	if err := s.WorldSim.SaveStoryCalendar(domain.StoryCalendar{DaysPerChapter: 2}); err != nil {
+		t.Fatalf("save calendar: %v", err)
+	}
+	if err := s.WorldSim.SaveStoryTimeContract(domain.StoryTimeContract{
+		Source:                domain.StoryTimeSourceOutlineAll,
+		TargetChapters:        10,
+		DurationDaysMin:       15,
+		DurationDaysMax:       15,
+		NominalDaysPerChapter: 1.5,
+		ArcSchedule: []domain.StoryTimeArcSchedule{
+			{Volume: 1, Arc: 1, StartChapter: 1, EndChapter: 4, StartDay: 0, EndDay: 6},
+		},
+		ChapterSchedule: []domain.StoryTimeChapterSchedule{
+			{Chapter: 2, StartDay: 1, EndDay: 2.25},
+		},
+	}); err != nil {
+		t.Fatalf("save time contract: %v", err)
+	}
+	execWorldTick(t, tool, `{
+		"volume":1, "arc":1, "through_chapter":6,
+		"events":[
+			{"chapter":2,"actors":["沈青"],"summary":"精确章节日程","visibility_chapter":3},
+			{"chapter":3,"actors":["沈青"],"summary":"弧级日程插值","visibility_chapter":4},
+			{"chapter":6,"actors":["沈青"],"summary":"合同平均值回退","visibility_chapter":7}
+		]
+	}`)
+	events, err := s.WorldSim.LoadWorldEvents()
+	if err != nil || len(events) != 3 {
+		t.Fatalf("load events: %v n=%d", err, len(events))
+	}
+	if events[0].StoryDay != 2.25 || events[1].StoryDay != 4.5 || events[2].StoryDay != 9 {
+		t.Fatalf("story days should resolve chapter > arc > nominal, got %+v", events)
+	}
+}

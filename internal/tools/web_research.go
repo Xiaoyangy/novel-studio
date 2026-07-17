@@ -75,6 +75,9 @@ type webSearchHit struct {
 }
 
 func (t *WebResearchTool) Execute(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if err := guardOutlineAllDynamicMaterialExecution(t.store, t.Name()); err != nil {
+		return nil, err
+	}
 	var args webResearchArgs
 	if err := unmarshalToolArgs(raw, &args); err != nil {
 		return nil, err

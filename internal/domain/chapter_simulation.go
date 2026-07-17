@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // ChapterWorldSimulation is the prewriting source of truth for one chapter.
 // The world advances first; the POV plan is derived from ProtagonistProjection.
 type ChapterWorldSimulation struct {
@@ -13,8 +15,42 @@ type ChapterWorldSimulation struct {
 	ProtagonistProjection ProtagonistDecisionProjection `json:"protagonist_projection"`
 	RewriteSource         *ChapterRewriteSource         `json:"rewrite_source,omitempty"`
 	RewriteFactCoverage   []ChapterRewriteFactCoverage  `json:"rewrite_fact_coverage,omitempty"`
+	AuthorityReceipt      *SimulationAuthorityReceipt   `json:"authority_receipt,omitempty"`
 	GeneratedAt           string                        `json:"generated_at,omitempty"`
 	Sources               []string                      `json:"sources,omitempty"`
+}
+
+const (
+	SimulationAuthorityReceiptVersion = "project-all-grounded-authority.v1"
+	SimulationAuthorityModeGrounded   = "project_all_grounded"
+)
+
+// SimulationAuthorityReceipt is a server-built provenance proof for the only
+// path that may turn zero-chapter/projected state into fresh character choices.
+// It is not accepted from model tool arguments. The receipt is included in the
+// simulation ID and later in the immutable projected chapter bundle.
+type SimulationAuthorityReceipt struct {
+	Version                    string    `json:"version"`
+	Mode                       string    `json:"mode"`
+	GenerationID               string    `json:"generation_id"`
+	Chapter                    int       `json:"chapter"`
+	ThroughChapter             int       `json:"through_chapter"`
+	PlanningContextDigest      string    `json:"planning_context_digest"`
+	ProjectedStateRoot         string    `json:"projected_state_root"`
+	FoundationSnapshotRoot     string    `json:"foundation_snapshot_root"`
+	AuthorityInputRoot         string    `json:"authority_input_root"`
+	InitialDynamicsSHA256      string    `json:"initial_dynamics_sha256,omitempty"`
+	PriorWorldDeltaSHA256      string    `json:"prior_world_delta_sha256,omitempty"`
+	StateChangesSHA256         string    `json:"state_changes_sha256,omitempty"`
+	GroundedCharacters         []string  `json:"grounded_characters"`
+	HoldBaselineCharacters     []string  `json:"hold_baseline_characters"`
+	GroundedDecisionRoot       string    `json:"grounded_decision_root,omitempty"`
+	ContextAccessReceiptDigest string    `json:"context_access_receipt_digest,omitempty"`
+	RewriteSourceAbsent        bool      `json:"rewrite_source_absent"`
+	LockOwner                  string    `json:"lock_owner"`
+	LockProcessID              int       `json:"lock_process_id"`
+	LockAcquiredAt             time.Time `json:"lock_acquired_at"`
+	ReceiptDigest              string    `json:"receipt_digest,omitempty"`
 }
 
 // ChapterRewriteSource pins a rewrite simulation to the exact committed body,

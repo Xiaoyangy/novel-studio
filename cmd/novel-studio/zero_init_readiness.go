@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		"relationship_state.initial.json", "foreshadow_ledger.initial.json", "meta/initial_review_lessons.md",
 		"meta/character_return_plan.json", "meta/crowd_role_policy.json", "meta/prewrite_storycraft_plan.json", "meta/prewrite_storycraft_plan.md",
 		"meta/world_background_plan.json", "meta/world_background_plan.md",
+		"meta/story_time_contract.json", "meta/story_calendar.json",
 		"drafts/01.zero_init.plan.json", "meta/ch01_zero_init_plan.md",
 	}
 	var missing []string
@@ -34,6 +36,9 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	var warnings []string
 	st := store.NewStore(dir)
 	if policy, err := st.LoadSimulationRestartPolicy(); err == nil && policy != nil && policy.Active {
+		if !zeroRestartPolicyHasTimeSources(policy) {
+			issues = append(issues, "simulation_restart_policy.allowed_seed_sources 缺少 story_time_contract/story_calendar")
+		}
 		if progress, perr := st.Progress.Load(); perr == nil && progress != nil {
 			if len(progress.CompletedChapters) > 0 && strings.TrimSpace(progress.GenerationID) != strings.TrimSpace(policy.GenerationID) {
 				warnings = append(warnings, fmt.Sprintf("meta/progress.json 仍有旧 completed_chapters=%d 且 generation_id=%q；正式重启写第1章前请运行 --zero-init --reset-simulation-state，或确认已手动切换活动状态。", len(progress.CompletedChapters), progress.GenerationID))
@@ -77,6 +82,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	}
 	// Task 051：initial_character_dynamics 必须覆盖 主角∪FirstCast∪core/important 全员（阻塞）。
 	issues = append(issues, zeroCheckDynamicsCoverage(dir)...)
+	issues = append(issues, zeroCheckStoryTimeContract(dir)...)
 	// Task 053：模板同质与声口细字段缺失（warning，不阻塞——特化由 Architect 做）。
 	// Task 054：core/important 角色 psych 缺失（warning，保持 psych 可选口径）。
 	warnings = append(warnings, zeroCheckTemplateHomogeneity(dir)...)
@@ -89,11 +95,72 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		Missing:          missing,
 		Issues:           issues,
 		Warnings:         warnings,
+		StoryTime:        zeroStoryTimeEvidence(dir),
 		RAG:              ragStats,
 		GeneratedAt:      time.Now().Format(time.RFC3339),
 		Path:             filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"),
 	}
 	return readiness
+}
+
+func zeroStoryTimeEvidence(dir string) zeroInitStoryTimeEvidence {
+	st := store.NewStore(dir)
+	contract, err := st.WorldSim.LoadStoryTimeContract()
+	if err != nil || contract == nil {
+		return zeroInitStoryTimeEvidence{}
+	}
+	evidence := zeroInitStoryTimeEvidence{
+		Validated:              true,
+		Source:                 contract.Source,
+		TargetChapters:         contract.TargetChapters,
+		DurationDaysMin:        contract.DurationDaysMin,
+		DurationDaysMax:        contract.DurationDaysMax,
+		NominalDaysPerChapter:  contract.NominalDaysPerChapter,
+		ArcScheduleEntries:     len(contract.ArcSchedule),
+		ChapterScheduleEntries: len(contract.ChapterSchedule),
+		CoreDigest:             contract.CoreDigest,
+		ScheduleDigest:         contract.ScheduleDigest,
+	}
+	if calendar, loadErr := st.WorldSim.LoadStoryCalendar(); loadErr == nil && calendar != nil {
+		evidence.CalendarSynced = math.Abs(calendar.DaysPerChapter-contract.NominalDaysPerChapter) <= 1e-9
+	}
+	return evidence
+}
+
+func zeroCheckStoryTimeContract(dir string) []string {
+	st := store.NewStore(dir)
+	contract, err := st.WorldSim.LoadStoryTimeContract()
+	if err != nil {
+		return []string{"meta/story_time_contract.json 校验失败：" + err.Error()}
+	}
+	if contract == nil {
+		// 文件缺失由 required/missing 精确报告。
+		return nil
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return []string{"读取 meta/progress.json 以校验故事时间合同失败"}
+	}
+	target := zeroStoryTimeTargetChapters(st, progress, nil)
+	var issues []string
+	if target > 0 && contract.TargetChapters != target {
+		issues = append(issues, fmt.Sprintf(
+			"story_time_contract.target_chapters=%d 与全书大纲/进度目标=%d 不一致",
+			contract.TargetChapters,
+			target,
+		))
+	}
+	calendar, err := st.WorldSim.LoadStoryCalendar()
+	if err != nil {
+		issues = append(issues, "meta/story_calendar.json 读取失败")
+	} else if calendar != nil && math.Abs(calendar.DaysPerChapter-contract.NominalDaysPerChapter) > 1e-9 {
+		issues = append(issues, fmt.Sprintf(
+			"story_calendar.days_per_chapter=%.6f 未从 story_time_contract.nominal_days_per_chapter=%.6f 导出",
+			calendar.DaysPerChapter,
+			contract.NominalDaysPerChapter,
+		))
+	}
+	return issues
 }
 
 func zeroValidateChapterPlan(plan domain.ChapterPlan) []string {
@@ -107,6 +174,9 @@ func zeroValidateChapterPlan(plan domain.ChapterPlan) []string {
 	}
 	if !zeroContextSourceContains(sim.ContextSources, "world_foundation") {
 		issues = append(issues, "causal_simulation.context_sources 缺少 world_foundation")
+	}
+	if !zeroContextSourceContains(sim.ContextSources, "story_time_contract") {
+		issues = append(issues, "causal_simulation.context_sources 缺少 story_time_contract")
 	}
 	if !zeroContextSourceContains(sim.ContextSources, "character_dossiers") {
 		issues = append(issues, "causal_simulation.context_sources 缺少 character_dossiers")
@@ -440,6 +510,9 @@ func zeroExistingManifestReady(dir string) bool {
 	if !zeroContextSourceContains(manifest.ContextSources, "world_background_plan") {
 		return false
 	}
+	if !zeroContextSourceContains(manifest.ContextSources, "story_time_contract") {
+		return false
+	}
 	if manifest.RAGPolicy == nil {
 		return false
 	}
@@ -521,7 +594,22 @@ func zeroExistingRestartPolicyMatches(dir, generationID string) bool {
 	if err != nil || json.Unmarshal(data, &policy) != nil {
 		return false
 	}
-	return strings.TrimSpace(policy.GenerationID) == strings.TrimSpace(generationID)
+	return strings.TrimSpace(policy.GenerationID) == strings.TrimSpace(generationID) &&
+		zeroRestartPolicyHasTimeSources(&policy)
+}
+
+func zeroRestartPolicyHasTimeSources(policy *domain.SimulationRestartPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	hasContract := false
+	hasCalendar := false
+	for _, source := range policy.AllowedSeedSources {
+		source = filepath.ToSlash(strings.TrimSpace(source))
+		hasContract = hasContract || source == "meta/story_time_contract.json"
+		hasCalendar = hasCalendar || source == "meta/story_calendar.json"
+	}
+	return hasContract && hasCalendar
 }
 
 func zeroAntiAIPlanReady(plan domain.AntiAIExecutionPlan) bool {
@@ -673,6 +761,16 @@ func zeroInitialCharacters(project zeroInitProject) []domain.Character {
 		}
 		switch strings.TrimSpace(c.Tier) {
 		case "core", "important", "":
+			add(c)
+		}
+	}
+	// A secondary actor who is explicitly reserved in a later outline is still
+	// part of the full-book simulation. If zero-init omits that actor, the
+	// project-all authority guard can only freeze them forever when their first
+	// real chapter arrives. Seed every named future participant now; dormant
+	// actors remain off-screen until their first_mention boundary.
+	for _, c := range project.Characters {
+		if project.FirstMentions[strings.TrimSpace(c.Name)] > 0 {
 			add(c)
 		}
 	}
@@ -1358,6 +1456,14 @@ func renderZeroReadiness(r zeroInitReadiness) string {
 			fmt.Fprintf(&b, "- %s\n", warning)
 		}
 	}
+	b.WriteString("\n## Story time contract\n\n")
+	fmt.Fprintf(&b, "- validated: %v\n", r.StoryTime.Validated)
+	fmt.Fprintf(&b, "- source: %s\n", r.StoryTime.Source)
+	fmt.Fprintf(&b, "- target_chapters: %d\n", r.StoryTime.TargetChapters)
+	fmt.Fprintf(&b, "- duration_days: %.3f - %.3f\n", r.StoryTime.DurationDaysMin, r.StoryTime.DurationDaysMax)
+	fmt.Fprintf(&b, "- nominal_days_per_chapter: %.6f\n", r.StoryTime.NominalDaysPerChapter)
+	fmt.Fprintf(&b, "- schedule_entries: arc=%d chapter=%d\n", r.StoryTime.ArcScheduleEntries, r.StoryTime.ChapterScheduleEntries)
+	fmt.Fprintf(&b, "- calendar_synced: %v\n", r.StoryTime.CalendarSynced)
 	b.WriteString("\n## RAG\n\n")
 	fmt.Fprintf(&b, "- enabled: %v\n", r.RAG.Enabled)
 	fmt.Fprintf(&b, "- files: %d\n", r.RAG.Files)
@@ -1369,14 +1475,22 @@ func renderZeroReadiness(r zeroInitReadiness) string {
 }
 
 // zeroReadinessRequiredNames 返回 dynamics/voice 必须覆盖的角色集合：
-// 主角 ∪ 第一章点名 ∪ 全部 core/important（tier 空按 important）。
+// 主角 ∪ 大纲点名角色 ∪ 全部 core/important（tier 空按 important）。
 func zeroReadinessRequiredNames(dir string) []string {
 	st := store.NewStore(dir)
 	chars, err := st.Characters.Load()
 	if err != nil || len(chars) == 0 {
 		return nil
 	}
-	project := zeroInitProject{Characters: chars}
+	outline, _ := st.Outline.LoadOutline()
+	project := zeroInitProject{
+		Characters:    chars,
+		FirstMentions: zeroCharacterFirstMentions(outline, chars),
+	}
+	if len(outline) > 0 {
+		project.FirstChapter = outline[0]
+		project.FirstCast = zeroFirstChapterCast(outline[0], chars)
+	}
 	var names []string
 	for _, c := range zeroInitialCharacters(project) {
 		names = append(names, strings.TrimSpace(c.Name))
@@ -1417,10 +1531,10 @@ func zeroCheckDynamicsCoverage(dir string) []string {
 	}
 	var issues []string
 	if len(missingDyn) > 0 {
-		issues = append(issues, fmt.Sprintf("initial_character_dynamics.characters 未覆盖 core/important 角色：%s", strings.Join(missingDyn, "、")))
+		issues = append(issues, fmt.Sprintf("initial_character_dynamics.characters 未覆盖全书推演所需角色：%s", strings.Join(missingDyn, "、")))
 	}
 	if len(missingVoice) > 0 {
-		issues = append(issues, fmt.Sprintf("initial_character_dynamics.voice_logic 未覆盖 core/important 角色：%s", strings.Join(missingVoice, "、")))
+		issues = append(issues, fmt.Sprintf("initial_character_dynamics.voice_logic 未覆盖全书推演所需角色：%s", strings.Join(missingVoice, "、")))
 	}
 	return issues
 }

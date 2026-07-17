@@ -97,7 +97,13 @@ func taskLogPath(taskID string) string {
 	return filepath.Join("meta", "runtime", "tasks", taskID+".log")
 }
 
-// Reset 清空运行时队列和任务日志。
+// Reset 清空瞬态运行时队列和任务日志。
+//
+// pipeline_execution.json 是跨 Host.Start 生命周期的阶段能力租约，不属于
+// coordinator 的瞬态队列。Host 在每次 Prompt 前都会调用 Reset；若这里删除该
+// 文件，外层 foundation/project-all/render 锁会在模型第一次工具调用前消失，
+// sealed 工具随后只能把合法调用判成“绕过 generation”。活动租约必须保留，
+// 过期或死进程租约由 LoadPipelineExecution 的原子清理负责。
 func (s *RuntimeStore) Reset() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,12 +117,6 @@ func (s *RuntimeStore) Reset() error {
 	}
 	if err := os.RemoveAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks")); err != nil {
 		errs = append(errs, err.Error())
-	}
-	pipelineExecutionProcessMu.Lock()
-	executionRemoveErr := os.Remove(filepath.Join(s.io.dir, pipelineExecutionPath))
-	pipelineExecutionProcessMu.Unlock()
-	if executionRemoveErr != nil && !os.IsNotExist(executionRemoveErr) {
-		errs = append(errs, executionRemoveErr.Error())
 	}
 	if err := os.MkdirAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks"), 0o755); err != nil {
 		errs = append(errs, err.Error())

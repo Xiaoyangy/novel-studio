@@ -43,7 +43,7 @@ func (t *SaveFoundationTool) WithRAGVectorWriter(writer rag.VectorWriter) *SaveF
 
 func (t *SaveFoundationTool) Name() string { return "save_foundation" }
 func (t *SaveFoundationTool) Description() string {
-	return "保存小说基础设定（premise/outline/characters/world_rules/book_world/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / book_world / expand_arc / append_volume / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。book_world 保存地图、地点、路线和势力图谱；expand_arc 展开骨架弧的详细章节（需 volume + arc）；append_volume 追加新卷（content 为完整 VolumeOutline JSON，含弧结构）；update_compass 更新终局方向（content 为 StoryCompass JSON）；complete_book 宣告全书完结（content 传空对象 {}，直接推 Phase=Complete；调用前必须先通过终卷判定清单，且无返工队列）。scale 可选，仅允许 short / mid / long。"
+	return "保存小说基础设定（premise/outline/characters/world_rules/book_world/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / book_world / append_volume / map_contracts / expand_arc / revise_arc / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。map_contracts 只在 outline-all chapter0 receipt 下为完整弧集分配结构化终局/长线回执；expand_arc 展开骨架弧的详细章节（需 volume + arc）；revise_arc 只能在 outline-all chapter0 receipt 下原位替换已展开弧，严禁改变 span；append_volume 追加新卷；update_compass 更新终局方向；complete_book 宣告全书完结。scale 可选，仅允许 short / mid / long。"
 }
 func (t *SaveFoundationTool) Label() string { return "保存设定" }
 
@@ -53,7 +53,7 @@ func (t *SaveFoundationTool) ConcurrencySafe(_ json.RawMessage) bool { return fa
 
 func (t *SaveFoundationTool) Schema() map[string]any {
 	return schema.Object(
-		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "book_world", "world_codex", "volume_codex", "expand_arc", "append_volume", "update_compass", "complete_book")).Required(),
+		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "book_world", "world_codex", "volume_codex", "append_volume", "map_contracts", "expand_arc", "revise_arc", "update_compass", "complete_book")).Required(),
 		// content 语义上必填，但不进 JSON-schema required：长内容被截断时
 		// 参数会整体失效为空，schema 层的 InputValidationError 只会说"缺参数"，
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
@@ -62,8 +62,8 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
-		schema.Property("volume", schema.Int("目标卷序号（expand_arc / volume_codex 时必传）")),
-		schema.Property("arc", schema.Int("目标弧序号（仅 expand_arc 时必传）")),
+		schema.Property("volume", schema.Int("目标卷序号（expand_arc / revise_arc / outline-all append_volume / volume_codex 时必传）")),
+		schema.Property("arc", schema.Int("目标弧序号（expand_arc / revise_arc 时必传）")),
 		schema.Property("change_reason", schema.String("world_codex 修订时必传：为什么必须改（正文矛盾/新卷需要/用户指令）")),
 		schema.Property("change_evidence", schema.String("world_codex 修订时必传：依据——章节事实、审阅结论或用户原话")),
 	)
@@ -84,6 +84,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
+	}
+	if err := guardOutlineAllFoundationType(t.store, a.Type, a.Scale); err != nil {
+		return nil, err
 	}
 	content, err := normalizeFoundationContent(a.Content)
 	if err != nil {
@@ -228,6 +231,29 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		result["volume"] = vc.Volume
 		result["tier_ceiling"] = vc.TierCeiling
 
+	case "map_contracts":
+		var assignments []domain.ArcContractAssignment
+		if err := decode("map_contracts", &assignments); err != nil {
+			return nil, err
+		}
+		volumes, err := t.store.Outline.LoadLayeredOutline()
+		if err != nil {
+			return nil, err
+		}
+		if err := guardOutlineAllFoundationMutation(t.store, domain.OutlineAllPendingAction{
+			Type:                domain.OutlineAllActionMapContracts,
+			ExpectedChapterSpan: domain.TotalChapters(volumes),
+		}); err != nil {
+			return nil, err
+		}
+		if err := validateOutlineAllMapContractsContent(t.store, assignments); err != nil {
+			return nil, err
+		}
+		if err := t.store.MapArcContracts(assignments); err != nil {
+			return nil, fmt.Errorf("map arc contracts: %w: %w", errs.ErrStoreWrite, err)
+		}
+		result["assignments"] = len(assignments)
+
 	case "expand_arc":
 		if a.Volume <= 0 || a.Arc <= 0 {
 			return nil, fmt.Errorf("expand_arc requires volume and arc parameters: %w", errs.ErrToolArgs)
@@ -239,8 +265,52 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := validateLightheartedOutlineTitles(t.store, chapters); err != nil {
 			return nil, err
 		}
+		if err := guardOutlineAllFoundationMutation(t.store, domain.OutlineAllPendingAction{
+			Type:                domain.OutlineAllActionExpandArc,
+			Volume:              a.Volume,
+			Arc:                 a.Arc,
+			ExpectedChapterSpan: len(chapters),
+		}); err != nil {
+			return nil, err
+		}
+		if err := validateOutlineAllArcMutationContent(
+			t.store, domain.OutlineAllActionExpandArc, a.Volume, a.Arc, chapters,
+		); err != nil {
+			return nil, err
+		}
 		if err := t.store.ExpandArc(a.Volume, a.Arc, chapters); err != nil {
 			return nil, fmt.Errorf("expand arc: %w: %w", errs.ErrStoreWrite, err)
+		}
+		result["volume"] = a.Volume
+		result["arc"] = a.Arc
+		result["chapters"] = len(chapters)
+
+	case "revise_arc":
+		if a.Volume <= 0 || a.Arc <= 0 {
+			return nil, fmt.Errorf("revise_arc requires volume and arc parameters: %w", errs.ErrToolArgs)
+		}
+		var chapters []domain.OutlineEntry
+		if err := decode("revise_arc chapters", &chapters); err != nil {
+			return nil, err
+		}
+		if err := validateLightheartedOutlineTitles(t.store, chapters); err != nil {
+			return nil, err
+		}
+		if err := guardOutlineAllFoundationMutation(t.store, domain.OutlineAllPendingAction{
+			Type:                domain.OutlineAllActionReviseArc,
+			Volume:              a.Volume,
+			Arc:                 a.Arc,
+			ExpectedChapterSpan: len(chapters),
+		}); err != nil {
+			return nil, err
+		}
+		if err := validateOutlineAllArcMutationContent(
+			t.store, domain.OutlineAllActionReviseArc, a.Volume, a.Arc, chapters,
+		); err != nil {
+			return nil, err
+		}
+		if err := t.store.ReviseArc(a.Volume, a.Arc, chapters); err != nil {
+			return nil, fmt.Errorf("revise arc: %w: %w", errs.ErrStoreWrite, err)
 		}
 		result["volume"] = a.Volume
 		result["arc"] = a.Arc
@@ -254,10 +324,31 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("append_volume", &vol); err != nil {
 			return nil, err
 		}
+		chapterSpan := 0
+		for _, arc := range vol.Arcs {
+			chapterSpan += arc.ChapterSpan()
+		}
+		if err := guardOutlineAllFoundationMutation(t.store, domain.OutlineAllPendingAction{
+			Type:                domain.OutlineAllActionAppendVolume,
+			Volume:              vol.Index,
+			ExpectedVolumeIndex: vol.Index,
+			ExpectedChapterSpan: chapterSpan,
+		}); err != nil {
+			return nil, err
+		}
+		outlineAll, err := validateOutlineAllAppendVolumeContent(t.store, vol)
+		if err != nil {
+			return nil, err
+		}
 		if err := validateLightheartedLayeredTitles(t.store, []domain.VolumeOutline{vol}); err != nil {
 			return nil, err
 		}
-		if err := t.store.AppendVolume(vol); err != nil {
+		if outlineAll {
+			err = t.store.AppendVolumeSkeleton(vol)
+		} else {
+			err = t.store.AppendVolume(vol)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("append volume: %w: %w", errs.ErrStoreWrite, err)
 		}
 		result["volume"] = vol.Index
@@ -268,6 +359,8 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		}
 		if chCount > 0 {
 			result["chapters"] = chCount
+		} else if outlineAll {
+			result["reserved_chapters"] = chapterSpan
 		}
 
 	case "complete_book":
@@ -320,12 +413,12 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		result["last_updated"] = compass.LastUpdated
 
 	default:
-		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/book_world/expand_arc/append_volume/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
+		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/book_world/append_volume/map_contracts/expand_arc/revise_arc/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
 	}
 
 	// checkpoint
 	scope := domain.GlobalScope()
-	if a.Type == "expand_arc" {
+	if a.Type == "expand_arc" || a.Type == "revise_arc" {
 		scope = domain.ArcScope(a.Volume, a.Arc)
 	} else if a.Type == "append_volume" {
 		scope = domain.GlobalScope()
@@ -333,9 +426,18 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	if _, err := t.store.Checkpoints.AppendArtifact(scope, a.Type, foundationArtifact(a.Type)); err != nil {
 		return nil, fmt.Errorf("checkpoint foundation %s: %w: %w", a.Type, errs.ErrStoreWrite, err)
 	}
-	ragIndexed, ragErr := t.sedimentFoundationRAG(ctx, a.Type, content)
-	if ragErr != nil {
-		result["rag_error"] = ragErr.Error()
+	outlineAllMode, modeErr := outlineAllExecutionModeActive(t.store)
+	if modeErr != nil {
+		return nil, modeErr
+	}
+	result["outline_all"] = outlineAllMode
+	ragIndexed := false
+	if !outlineAllMode {
+		var ragErr error
+		ragIndexed, ragErr = t.sedimentFoundationRAG(ctx, a.Type, content)
+		if ragErr != nil {
+			result["rag_error"] = ragErr.Error()
+		}
 	}
 	result["rag_indexed"] = ragIndexed
 
@@ -345,7 +447,7 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	ready := len(remaining) == 0
 	result["remaining"] = remaining
 	result["foundation_ready"] = ready
-	if ready {
+	if ready && !outlineAllMode {
 		if p, _ := t.store.Progress.Load(); p != nil &&
 			p.Phase != domain.PhaseWriting && p.Phase != domain.PhaseComplete {
 			_ = t.store.Progress.UpdatePhase(domain.PhaseWriting)

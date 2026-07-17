@@ -180,6 +180,33 @@ func (s *WorldSimStore) LoadTick() (*domain.WorldTick, error) {
 	return &t, nil
 }
 
+const storyTimeContractPath = "meta/story_time_contract.json"
+
+// SaveStoryTimeContract / LoadStoryTimeContract 读写全书结构化时间合同。
+// Save 会重算双摘要；Load 会校验核心承诺、日程和双摘要，避免手改 JSON
+// 后让 world tick 在未察觉的情况下使用被篡改的故事日坐标。
+func (s *WorldSimStore) SaveStoryTimeContract(contract domain.StoryTimeContract) error {
+	finalized, err := domain.FinalizeStoryTimeContract(contract)
+	if err != nil {
+		return err
+	}
+	return s.io.WriteJSON(storyTimeContractPath, finalized)
+}
+
+func (s *WorldSimStore) LoadStoryTimeContract() (*domain.StoryTimeContract, error) {
+	var contract domain.StoryTimeContract
+	if err := s.io.ReadJSON(storyTimeContractPath, &contract); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if err := contract.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid story time contract: %w", err)
+	}
+	return &contract, nil
+}
+
 // SaveStoryCalendar / LoadStoryCalendar 故事内时间轴基线读写；缺失返回 nil。
 func (s *WorldSimStore) SaveStoryCalendar(c domain.StoryCalendar) error {
 	return s.io.WriteJSON("meta/story_calendar.json", c)

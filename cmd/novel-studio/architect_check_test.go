@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -75,6 +76,50 @@ func TestArchitectReadinessRejectsDanglingFactionRelations(t *testing.T) {
 	}
 	if got := strings.Join(readiness.Issues, "\n"); !strings.Contains(got, "store_ops") {
 		t.Fatalf("expected dangling target issue, got %v", readiness.Issues)
+	}
+}
+
+func TestArchitectReadinessUsesLayeredOutlineAsFreshnessAuthority(t *testing.T) {
+	dir := t.TempDir()
+	writeArchitectCheckFile(t, dir, "layered_outline.json", `[{"index":1,"arcs":[]}]`)
+	writeArchitectCheckFile(t, dir, "outline.json", `[{"chapter":1,"title":"derived"}]`)
+	generatedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	before := generatedAt.Add(-10 * time.Second)
+	if err := os.Chtimes(
+		filepath.Join(dir, "layered_outline.json"),
+		before,
+		before,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeArchitectReadiness(dir, architectReadiness{
+		Ready:         true,
+		SchemaVersion: architectReadinessSchemaVersion,
+		GeneratedAt:   generatedAt.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := generatedAt.Add(10 * time.Second)
+	if err := os.Chtimes(
+		filepath.Join(dir, "outline.json"),
+		after,
+		after,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := architectReadinessState(dir); !ok {
+		t.Fatalf("derived flat outline invalidated layered readiness: %s", reason)
+	}
+
+	if err := os.Chtimes(
+		filepath.Join(dir, "layered_outline.json"),
+		after,
+		after,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := architectReadinessState(dir); ok {
+		t.Fatal("authored layered outline change did not invalidate readiness")
 	}
 }
 

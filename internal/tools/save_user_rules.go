@@ -8,6 +8,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/rules"
+	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/userrules"
 	"github.com/voocel/agentcore/schema"
 )
@@ -23,11 +24,12 @@ import (
 // 归一化失败不报错（降级为 raw preferences），只有落盘失败才返回 tool error——
 // 技术细节不应抛回 Coordinator 当流程错误。
 type SaveUserRulesTool struct {
-	svc *userrules.Service
+	svc   *userrules.Service
+	store *store.Store
 }
 
-func NewSaveUserRulesTool(svc *userrules.Service) *SaveUserRulesTool {
-	return &SaveUserRulesTool{svc: svc}
+func NewSaveUserRulesTool(svc *userrules.Service, st *store.Store) *SaveUserRulesTool {
+	return &SaveUserRulesTool{svc: svc, store: st}
 }
 
 func (t *SaveUserRulesTool) Name() string  { return "save_user_rules" }
@@ -66,6 +68,9 @@ func (t *SaveUserRulesTool) Execute(ctx context.Context, args json.RawMessage) (
 	text := strings.TrimSpace(a.Text)
 	if text == "" {
 		return nil, fmt.Errorf("text 不能为空: %w", errs.ErrToolArgs)
+	}
+	if err := guardPipelineGlobalPlanningExecution(t.store, t.Name()); err != nil {
+		return nil, err
 	}
 
 	// 归一化失败只会把该条降级为 raw preferences（不报错）；只有落盘失败才返回 tool error。

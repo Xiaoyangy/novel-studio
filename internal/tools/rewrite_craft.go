@@ -28,11 +28,70 @@ const (
 	benchmarkCraftSourceType   = "benchmark_craft_recall"
 )
 
+func projectAllCraftNeeds(st *store.Store, chapter int) ([]domain.CraftRecallNeed, error) {
+	if st == nil || chapter <= 0 {
+		return nil, fmt.Errorf("project-all craft needs require store and chapter")
+	}
+	outline, err := st.Outline.GetChapterOutline(chapter)
+	if err != nil || outline == nil {
+		return nil, fmt.Errorf("load chapter %d outline for project-all craft needs: %w", chapter, err)
+	}
+	bounded := func(value string, limit int) string {
+		value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+		runes := []rune(value)
+		if len(runes) > limit {
+			value = string(runes[:limit])
+		}
+		return value
+	}
+	focusParts := compactStrings([]string{
+		bounded(outline.Title, 32),
+		bounded(outline.CoreEvent, 72),
+		bounded(outline.Hook, 48),
+	})
+	sceneParts := make([]string, 0, 2)
+	for _, scene := range outline.Scenes {
+		if scene = bounded(scene, 48); scene != "" {
+			sceneParts = append(sceneParts, scene)
+		}
+		if len(sceneParts) == 2 {
+			break
+		}
+	}
+	focus := strings.Join(focusParts, " ")
+	sceneFocus := strings.Join(sceneParts, " ")
+	probe := strings.ToLower(strings.Join([]string{focus, sceneFocus}, " "))
+	secondaryField := rag.CraftFieldSceneCraft
+	secondaryID := "project-all-scene"
+	secondaryBase := "场景调度 空间压力 环境承载 误判 后果 过场省略"
+	if rewriteCraftContainsAny(probe, "对白", "对话", "交涉", "谈判", "争执", "质问", "审讯", "会面", "饭局", "开口", "询问") {
+		secondaryField = rag.CraftFieldDialogue
+		secondaryID = "project-all-dialogue"
+		secondaryBase = "对白摩擦 潜台词 打断 漏答 权力转移 声口差异 信息释放"
+	}
+	trigger := fmt.Sprintf("outline.json#chapter=%d", chapter)
+	needs := []domain.CraftRecallNeed{
+		{
+			ID:          "project-all-methodology",
+			Field:       string(rag.CraftFieldMethodology),
+			Topic:       strings.TrimSpace("人物主观因果 章节节奏 信息延迟 场景后果 叙事功能变化 " + focus),
+			TriggerRefs: []string{trigger, "project_all.required.methodology"},
+		},
+		{
+			ID:          secondaryID,
+			Field:       string(secondaryField),
+			Topic:       strings.TrimSpace(strings.Join([]string{secondaryBase, focus, sceneFocus}, " ")),
+			TriggerRefs: []string{trigger, "project_all.required.dialogue_or_scene"},
+		},
+	}
+	return needs, nil
+}
+
 func deriveRewriteCraftNeeds(st *store.Store, chapter int) []domain.CraftRecallNeed {
 	if st == nil || chapter <= 0 {
 		return nil
 	}
-	source, _, _, err := loadChapterRewriteSource(st, chapter)
+	source, _, brief, err := loadChapterRewriteSource(st, chapter)
 	if err != nil || source == nil {
 		return nil
 	}
@@ -64,6 +123,12 @@ func deriveRewriteCraftNeeds(st *store.Store, chapter int) []domain.CraftRecallN
 			add(string(rag.CraftFieldSceneCraft), ref)
 		}
 	}
+	// The rewrite brief is the current, source-bound repair contract even when
+	// the review artifact that originally produced it refers to an older body
+	// SHA. Ignoring it here made a valid current rewrite lose methodology and
+	// dialogue craft recall precisely when the old exact-body review had been
+	// superseded.
+	classify(brief, "rewrite_brief")
 
 	if review, err := st.World.LoadReview(chapter); err == nil && review != nil && currentBody(review.BodySHA256) {
 		classify(review.Summary, "review.summary")
@@ -155,9 +220,194 @@ func loadRewriteCraftGate(dir string, chapter int, bodySHA string) *mechanicalGa
 	return nil
 }
 
+func projectAllCraftReceiptInputs(
+	st *store.Store,
+	chapter int,
+) (generationID, planningContextDigest string, active bool, err error) {
+	if st == nil || chapter <= 0 {
+		return "", "", false, nil
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return "", "", false, err
+	}
+	if lock == nil || lock.Mode != domain.PipelineExecutionProjectAll {
+		return "", "", false, nil
+	}
+	if err := requireCurrentPipelineExecutionProcess(lock, "project-all craft receipt"); err != nil {
+		return "", "", false, err
+	}
+	if lock.TargetChapter != chapter {
+		return "", "", false, fmt.Errorf("project-all craft receipt chapter=%d does not match execution target=%d: %w",
+			chapter, lock.TargetChapter, errs.ErrToolPrecondition)
+	}
+	planningContext, _, err := loadProjectAllStateForExecution(st, chapter)
+	if err != nil {
+		return "", "", false, err
+	}
+	if planningContext == nil {
+		return "", "", false, fmt.Errorf("project-all craft receipt requires authoritative planning context: %w", errs.ErrToolPrecondition)
+	}
+	return planningContext.GenerationID, planningContext.ContextDigest, true, nil
+}
+
+// EnsureProjectAllCraftReceipt materializes the mandatory, content-addressed
+// method recall before a fresh project-all plan is finalized. The project index
+// itself must be nonempty; individual chapterized needs may still record
+// explicit no_material. Persistence and audit failures are fatal.
+func EnsureProjectAllCraftReceipt(
+	st *store.Store,
+	chapter int,
+	generationID string,
+	planningContextDigest string,
+) (*domain.CraftRecallReceipt, error) {
+	actualGeneration, actualContext, active, err := projectAllCraftReceiptInputs(st, chapter)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, fmt.Errorf("project-all craft receipt requires an active project-all execution lease: %w", errs.ErrToolPrecondition)
+	}
+	if strings.TrimSpace(generationID) != actualGeneration ||
+		strings.TrimSpace(planningContextDigest) != actualContext {
+		return nil, fmt.Errorf("project-all craft receipt generation/planning context drift: %w", errs.ErrToolPrecondition)
+	}
+	state, err := st.RAG.LoadIndexStateReadOnly()
+	if err != nil {
+		return nil, fmt.Errorf("load project-all craft RAG index: %w", err)
+	}
+	if state == nil || len(state.Chunks) == 0 {
+		return nil, fmt.Errorf("project-all requires a non-empty meta/rag/index_state.json before planning chapter %d: %w",
+			chapter, errs.ErrToolPrecondition)
+	}
+	needs, err := projectAllCraftNeeds(st, chapter)
+	if err != nil {
+		return nil, err
+	}
+	indexIdentity := craftIndexIdentity(state)
+	id := projectAllCraftReceiptID(chapter, actualGeneration, actualContext, indexIdentity, needs)
+	if existing, loadErr := st.RAG.LoadCraftRecallReceipt(id); loadErr != nil {
+		return nil, loadErr
+	} else if projectAllCraftReceiptMatches(existing, chapter, actualGeneration, actualContext, indexIdentity, needs) {
+		if auditErr := ensureRewriteCraftReceiptAudit(st, *existing); auditErr != nil {
+			return nil, auditErr
+		}
+		return existing, nil
+	} else if existing != nil {
+		return nil, fmt.Errorf("project-all craft receipt id collision or immutable payload drift for %s", id)
+	}
+
+	receipt := domain.CraftRecallReceipt{
+		Version:               rewriteCraftReceiptVersion,
+		ID:                    id,
+		Chapter:               chapter,
+		Stage:                 domain.ProjectAllCraftReceiptStage,
+		GenerationID:          actualGeneration,
+		PlanningContextDigest: actualContext,
+		IndexIdentity:         indexIdentity,
+		Enforcement:           true,
+		CreatedAt:             time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if state != nil {
+		receipt.IndexUpdatedAt = state.UpdatedAt
+	}
+	for _, need := range needs {
+		attempt := domain.CraftRecallReceiptAttempt{Need: need, NoMaterial: true}
+		if state != nil && len(state.Chunks) > 0 {
+			result := rag.NewCraftCatalog(state.Chunks).RecallWithOptions(
+				rag.CraftDesignField(need.Field),
+				need.Topic,
+				3,
+				rag.CraftRecallOptions{Stage: rag.StagePlan, RequireRelevant: true, SafeRewrite: true},
+			)
+			for _, hit := range result.Hits {
+				chunk := rag.RehashChunk(hit.Chunk)
+				attempt.Hits = append(attempt.Hits, domain.CraftRecallReceiptHit{
+					Ref:         craftReceiptHitRef(id, chunk),
+					ChunkID:     chunk.ID,
+					ChunkHash:   chunk.Hash,
+					SourcePath:  chunk.SourcePath,
+					SourceKind:  chunk.SourceKind,
+					Facet:       chunk.Facet,
+					Summary:     compactCraftSummary(chunk.Summary),
+					Score:       hit.Score,
+					UsageStages: craftReceiptUsageStages(chunk),
+				})
+			}
+			attempt.NoMaterial = len(attempt.Hits) == 0
+			attempt.FilteredCount = result.FilteredCount
+			attempt.FilteredReason = result.FilteredReason
+		}
+		receipt.Attempts = append(receipt.Attempts, attempt)
+	}
+	receipt.PayloadSHA256 = craftReceiptPayloadHash(receipt)
+	if err := domain.ValidateProjectAllCraftRecallReceipt(receipt); err != nil {
+		return nil, err
+	}
+	if err := st.RAG.SaveCraftRecallReceipt(receipt); err != nil {
+		return nil, fmt.Errorf("save project-all craft recall receipt: %w", err)
+	}
+	if err := ensureRewriteCraftReceiptAudit(st, receipt); err != nil {
+		return nil, fmt.Errorf("append project-all craft recall audit: %w", err)
+	}
+	return &receipt, nil
+}
+
+func EnsureProjectAllCraftReceiptForCurrentContext(
+	st *store.Store,
+	chapter int,
+) (*domain.CraftRecallReceipt, error) {
+	generationID, planningContextDigest, active, err := projectAllCraftReceiptInputs(st, chapter)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, fmt.Errorf("project-all craft receipt requires an active project-all execution lease: %w", errs.ErrToolPrecondition)
+	}
+	return EnsureProjectAllCraftReceipt(st, chapter, generationID, planningContextDigest)
+}
+
+func projectAllCraftReceiptID(
+	chapter int,
+	generationID string,
+	planningContextDigest string,
+	indexIdentity string,
+	needs []domain.CraftRecallNeed,
+) string {
+	payload, _ := json.Marshal(struct {
+		Chapter               int
+		GenerationID          string
+		PlanningContextDigest string
+		IndexIdentity         string
+		Needs                 []domain.CraftRecallNeed
+	}{chapter, generationID, planningContextDigest, indexIdentity, needs})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:12])
+}
+
+func projectAllCraftReceiptMatches(
+	receipt *domain.CraftRecallReceipt,
+	chapter int,
+	generationID string,
+	planningContextDigest string,
+	indexIdentity string,
+	needs []domain.CraftRecallNeed,
+) bool {
+	return receipt != nil && domain.ValidateProjectAllCraftRecallReceipt(*receipt) == nil &&
+		receipt.Chapter == chapter && receipt.GenerationID == strings.TrimSpace(generationID) &&
+		receipt.PlanningContextDigest == strings.TrimSpace(planningContextDigest) &&
+		receipt.IndexIdentity == indexIdentity && craftReceiptNeedsMatch(receipt.Attempts, needs) &&
+		receipt.ID == projectAllCraftReceiptID(chapter, generationID, planningContextDigest, indexIdentity, needs)
+}
+
 func ensureRewriteCraftReceipt(st *store.Store, chapter int, preferredID string) (*domain.CraftRecallReceipt, error) {
 	if st == nil || chapter <= 0 {
 		return nil, nil
+	}
+	if generationID, planningContextDigest, active, err := projectAllCraftReceiptInputs(st, chapter); err != nil {
+		return nil, err
+	} else if active {
+		return EnsureProjectAllCraftReceipt(st, chapter, generationID, planningContextDigest)
 	}
 	source, _, _, err := loadChapterRewriteSource(st, chapter)
 	if err != nil || source == nil {
@@ -273,6 +523,7 @@ func craftReceiptMatchesRewrite(
 	return receipt != nil && source != nil && receipt.Version == rewriteCraftReceiptVersion &&
 		receipt.Enforcement && receipt.Chapter == chapter && receipt.Stage == rewriteCraftStagePlan &&
 		strings.TrimSpace(receipt.GenerationID) == strings.TrimSpace(generationID) &&
+		strings.TrimSpace(receipt.PlanningContextDigest) == "" &&
 		receipt.RewriteBodyPath == source.BodyPath && receipt.RewriteBodySHA256 == source.BodySHA256 &&
 		receipt.RewriteBriefPath == source.BriefPath && receipt.RewriteBriefSHA256 == source.BriefSHA256 &&
 		receipt.IndexIdentity == indexIdentity && craftReceiptNeedsMatch(receipt.Attempts, needs) &&
@@ -317,10 +568,7 @@ func craftReceiptNeedsMatch(attempts []domain.CraftRecallReceiptAttempt, needs [
 }
 
 func craftReceiptPayloadHash(receipt domain.CraftRecallReceipt) string {
-	receipt.PayloadSHA256 = ""
-	raw, _ := json.Marshal(receipt)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	return domain.ComputeCraftRecallReceiptPayloadSHA256(receipt)
 }
 
 const rewriteCraftSafeCorpusPolicy = "rewrite-craft-safe-corpus-v5-field-aligned-primary-diversity"
@@ -438,9 +686,10 @@ func craftReceiptAuditEntry(receipt domain.CraftRecallReceipt) map[string]any {
 	return map[string]any{
 		"at": receipt.CreatedAt, "receipt_id": receipt.ID, "stage": receipt.Stage,
 		"chapter": receipt.Chapter, "generation_id": receipt.GenerationID,
-		"rewrite_body_sha256":  receipt.RewriteBodySHA256,
-		"rewrite_brief_sha256": receipt.RewriteBriefSHA256,
-		"index_identity":       receipt.IndexIdentity, "payload_sha256": receipt.PayloadSHA256,
+		"planning_context_digest": receipt.PlanningContextDigest,
+		"rewrite_body_sha256":     receipt.RewriteBodySHA256,
+		"rewrite_brief_sha256":    receipt.RewriteBriefSHA256,
+		"index_identity":          receipt.IndexIdentity, "payload_sha256": receipt.PayloadSHA256,
 		"automatic": true, "attempts": attempts,
 	}
 }
@@ -449,17 +698,23 @@ func craftReceiptContext(receipt *domain.CraftRecallReceipt) map[string]any {
 	if receipt == nil {
 		return nil
 	}
+	policy := "只选择与本章返工问题直接相关的手法；每个有 hits 的 need.id 在 external_reference_plan 恰好写一行，query_or_need 原样写该 need.id，同 need 采用的精确 hit.ref 全部合入 source_refs。calibration_reference/craft_technique 命中统一写 source_type=craft_recall，benchmark_reference 命中写 source_type=benchmark_craft_recall，禁止把 hit.source_kind 当 source_type。必须填写场景化 usable_details、transformation_rule 与 do_not_use；只迁移写法，不复制素材情节、人名、地名或专有设定。"
+	if receipt.Stage == domain.ProjectAllCraftReceiptStage {
+		policy = "这是 project-all 当前章的强制 planning receipt。每个有 hits 的 need.id 必须在 external_reference_plan 恰好写一行，query_or_need 必须逐字等于 need.id，至少采用一个属于该 need 的精确 hit.ref。必须填写本章化 usable_details、transformation_rule 与 do_not_use；no_material need 不得伪造引用。只迁移写法，不复制素材情节、人名、地名或专有设定。"
+	}
 	return map[string]any{
 		"receipt_id":   receipt.ID,
+		"stage":        receipt.Stage,
 		"source_token": craftReceiptSourceToken(receipt.ID),
 		"binding": map[string]any{
 			"chapter": receipt.Chapter, "generation_id": receipt.GenerationID,
-			"rewrite_body_sha256":  receipt.RewriteBodySHA256,
-			"rewrite_brief_sha256": receipt.RewriteBriefSHA256,
-			"index_identity":       receipt.IndexIdentity,
+			"planning_context_digest": receipt.PlanningContextDigest,
+			"rewrite_body_sha256":     receipt.RewriteBodySHA256,
+			"rewrite_brief_sha256":    receipt.RewriteBriefSHA256,
+			"index_identity":          receipt.IndexIdentity,
 		},
 		"attempts":           receipt.Attempts,
-		"consumption_policy": "只选择与本章返工问题直接相关的手法；每个有 hits 的 need.id 在 external_reference_plan 恰好写一行，query_or_need 原样写该 need.id，同 need 采用的精确 hit.ref 全部合入 source_refs。calibration_reference/craft_technique 命中统一写 source_type=craft_recall，benchmark_reference 命中写 source_type=benchmark_craft_recall，禁止把 hit.source_kind 当 source_type。必须填写场景化 usable_details、transformation_rule 与 do_not_use；只迁移写法，不复制素材情节、人名、地名或专有设定。",
+		"consumption_policy": policy,
 	}
 }
 
@@ -506,6 +761,9 @@ func validateRewriteCraftConsumption(st *store.Store, plan domain.ChapterPlan) e
 	}
 	if receipt == nil || !receipt.Enforcement {
 		return fmt.Errorf("第 %d 章引用的 craft receipt %s 不存在或不是当前自动门禁收据: %w", plan.Chapter, id, errs.ErrToolPrecondition)
+	}
+	if receipt.Stage == domain.ProjectAllCraftReceiptStage {
+		return ValidateProjectAllCraftPlanCurrent(st, plan, receipt)
 	}
 	source, _, _, err := loadChapterRewriteSource(st, plan.Chapter)
 	if err != nil {
@@ -616,6 +874,59 @@ func validateRewriteCraftConsumption(st *store.Store, plan domain.ChapterPlan) e
 		pack, _ := json.Marshal(craftReceiptContext(receipt))
 		return fmt.Errorf("第 %d 章当前 rewrite craft receipt 尚未进入计划，缺少 needs=%s。请只补 external_reference_plan，精确使用 pack 中 hit.ref 并写成本章场景化手法；不要重新调用 craft_recall。craft_pack=%s: %w",
 			plan.Chapter, strings.Join(missing, ","), pack, errs.ErrToolPrecondition)
+	}
+	return nil
+}
+
+// ValidateProjectAllCraftPlanCurrent is the stage-aware project-all gate used
+// after Planner finalization. While the isolated execution lease is active it
+// also proves the receipt was created from the exact current index and
+// projected planning context; outside that lease (promote/render) it validates
+// only the already-sealed content-addressed receipt and transformed plan refs.
+func ValidateProjectAllCraftPlanCurrent(
+	st *store.Store,
+	plan domain.ChapterPlan,
+	receipt *domain.CraftRecallReceipt,
+) error {
+	if st == nil || receipt == nil {
+		return fmt.Errorf("第 %d 章 project-all craft receipt 缺失: %w", plan.Chapter, errs.ErrToolPrecondition)
+	}
+	if err := domain.ValidateProjectAllCraftRecallReceipt(*receipt); err != nil {
+		return fmt.Errorf("第 %d 章 project-all craft receipt 非法: %w", plan.Chapter, err)
+	}
+	if receipt.Chapter != plan.Chapter {
+		return fmt.Errorf("第 %d 章 project-all craft receipt chapter=%d 不匹配: %w",
+			plan.Chapter, receipt.Chapter, errs.ErrToolPrecondition)
+	}
+	if generationID, contextDigest, active, err := projectAllCraftReceiptInputs(st, plan.Chapter); err != nil {
+		return err
+	} else if active {
+		state, loadErr := st.RAG.LoadIndexStateReadOnly()
+		if loadErr != nil {
+			return fmt.Errorf("load current project-all craft RAG index: %w", loadErr)
+		}
+		if state == nil || len(state.Chunks) == 0 {
+			return fmt.Errorf("第 %d 章 project-all craft index missing or empty: %w", plan.Chapter, errs.ErrToolPrecondition)
+		}
+		needs, needsErr := projectAllCraftNeeds(st, plan.Chapter)
+		if needsErr != nil {
+			return needsErr
+		}
+		if !projectAllCraftReceiptMatches(
+			receipt,
+			plan.Chapter,
+			generationID,
+			contextDigest,
+			craftIndexIdentity(state),
+			needs,
+		) {
+			return fmt.Errorf("第 %d 章 project-all craft receipt 与当前 generation/planning-context/index 不匹配: %w",
+				plan.Chapter, errs.ErrToolPrecondition)
+		}
+	}
+	if err := domain.ValidateProjectAllCraftPlanConsumptionV2(plan, *receipt); err != nil {
+		return fmt.Errorf("第 %d 章 project-all craft receipt 未完整进入 external_reference_plan: %w",
+			plan.Chapter, err)
 	}
 	return nil
 }

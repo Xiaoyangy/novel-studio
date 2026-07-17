@@ -59,6 +59,9 @@ func (t *CraftRecallTool) Schema() map[string]any {
 }
 
 func (t *CraftRecallTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if err := guardOutlineAllDynamicMaterialExecution(t.store, t.Name()); err != nil {
+		return nil, err
+	}
 	var a struct {
 		Field   string `json:"field"`
 		Topic   string `json:"topic"`

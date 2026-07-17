@@ -83,7 +83,7 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	if err := store.Init(); err != nil {
 		return nil, fmt.Errorf("init store: %w", err)
 	}
-	if enabled, err := bootstrap.EnsureRAGQdrant(context.Background(), cfg); err != nil {
+	if enabled, err := ensureHostRAG(context.Background(), cfg); err != nil {
 		return nil, fmt.Errorf("启动本机 Qdrant 失败: %w", err)
 	} else if enabled {
 		slog.Info("Qdrant 已就绪", "module", "rag")
@@ -194,6 +194,13 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	}
 
 	return h, nil
+}
+
+func ensureHostRAG(ctx context.Context, cfg bootstrap.Config) (bool, error) {
+	if cfg.DisableLiveRAG {
+		return false, nil
+	}
+	return bootstrap.EnsureRAGQdrant(ctx, cfg)
 }
 
 // ── 生命周期 ──

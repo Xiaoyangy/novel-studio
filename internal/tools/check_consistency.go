@@ -29,9 +29,10 @@ func (t *CheckConsistencyTool) Description() string {
 }
 func (t *CheckConsistencyTool) Label() string { return "一致性检查" }
 
-// 只读工具（仅追加 checkpoint 事件，不改状态），可被并发调度。
-func (t *CheckConsistencyTool) ReadOnly(_ json.RawMessage) bool        { return true }
-func (t *CheckConsistencyTool) ConcurrencySafe(_ json.RawMessage) bool { return true }
+// 会写 exact-body hard-consistency receipt，并可能追加 structural-block
+// checkpoint；必须按共享故事状态的单写者顺序执行。
+func (t *CheckConsistencyTool) ReadOnly(_ json.RawMessage) bool        { return false }
+func (t *CheckConsistencyTool) ConcurrencySafe(_ json.RawMessage) bool { return false }
 
 func (t *CheckConsistencyTool) Schema() map[string]any {
 	return schema.Object(
@@ -48,6 +49,13 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 	if a.Chapter <= 0 {
 		return nil, fmt.Errorf("chapter must be > 0: %w", errs.ErrToolArgs)
+	}
+	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
+		return nil, err
+	}
+	loadLiveContext, err := consistencyMayLoadLiveContext(t.store)
+	if err != nil {
+		return nil, err
 	}
 
 	result := map[string]any{"chapter": a.Chapter}
@@ -147,46 +155,54 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 			rawAIGCGate.RawLocalGatePercent, rawAIGCGate.PassExclusivePercent, nextAction))
 	}
 
-	// 对照数据：保留全局性的一致性检查数据，避免重复加载 novel_context 已有的窗口数据
-	if rules, _ := t.store.World.LoadWorldRules(); len(rules) > 0 {
-		result["world_rules"] = rules
-	}
-	if world, _ := t.store.World.LoadBookWorld(); world != nil {
-		result["book_world"] = world
-	}
-	if foreshadow, _ := t.store.World.LoadActiveForeshadow(); len(foreshadow) > 0 {
-		result["foreshadow_ledger"] = foreshadow
-	}
-	if relationships, _ := t.store.World.LoadRelationships(); len(relationships) > 0 {
-		result["relationships"] = relationships
-	}
-	if chars, _ := t.store.Characters.Load(); len(chars) > 0 {
-		aliasMap := make(map[string]string)
-		for _, c := range chars {
-			for _, alias := range c.Aliases {
-				aliasMap[alias] = c.Name
+	// Outside a frozen render lease this remains a general diagnostic tool and
+	// may load current canon. During render, however, those same reads would be
+	// a dynamic prose input that bypasses the sealed context. The Drafter
+	// already received the plan-time snapshot, so keep only exact-body and
+	// plan-bound deterministic checks below.
+	if loadLiveContext {
+		if rules, _ := t.store.World.LoadWorldRules(); len(rules) > 0 {
+			result["world_rules"] = rules
+		}
+		if world, _ := t.store.World.LoadBookWorld(); world != nil {
+			result["book_world"] = world
+		}
+		if foreshadow, _ := t.store.World.LoadActiveForeshadow(); len(foreshadow) > 0 {
+			result["foreshadow_ledger"] = foreshadow
+		}
+		if relationships, _ := t.store.World.LoadRelationships(); len(relationships) > 0 {
+			result["relationships"] = relationships
+		}
+		if chars, _ := t.store.Characters.Load(); len(chars) > 0 {
+			aliasMap := make(map[string]string)
+			for _, c := range chars {
+				for _, alias := range c.Aliases {
+					aliasMap[alias] = c.Name
+				}
+			}
+			if len(aliasMap) > 0 {
+				result["alias_map"] = aliasMap
 			}
 		}
-		if len(aliasMap) > 0 {
-			result["alias_map"] = aliasMap
+		if summaries, _ := t.store.Summaries.LoadRecentSummaries(a.Chapter, 2); len(summaries) > 0 {
+			result["recent_summaries"] = summaries
 		}
-	}
-	if summaries, _ := t.store.Summaries.LoadRecentSummaries(a.Chapter, 2); len(summaries) > 0 {
-		result["recent_summaries"] = summaries
-	}
-	if participants := participantsFromConsistencyResult(result); len(participants) > 0 {
-		if audit, _ := t.store.ResourceLedger.AuditForParticipants(participants); len(audit.Booked) > 0 || len(audit.Pending) > 0 {
-			result["resource_audit"] = audit
+		if participants := participantsFromConsistencyResult(result); len(participants) > 0 {
+			if audit, _ := t.store.ResourceLedger.AuditForParticipants(participants); len(audit.Booked) > 0 || len(audit.Pending) > 0 {
+				result["resource_audit"] = audit
+			}
 		}
-	}
-	if warnings, _ := t.store.ResourceLedger.AuditTextForPendingFacts(content); len(warnings) > 0 {
-		result["resource_warnings"] = warnings
-	}
-	// Task 074：确定性对账结果先行——存亡/位置/资源/时序/别名五类机器筛查，
-	// 每条带原文短引证据；你（LLM）的职责是复核这些并补机器看不见的语义矛盾。
-	if reconcile := consistencyReconcile(t.store, a.Chapter, content, nil); len(reconcile) > 0 {
-		result["machine_reconcile"] = reconcile
-		result["machine_reconcile_usage"] = "机器对账（warning 级事实）：逐条对照原文证据确认真伪；确认为真的矛盾必须在返回问题里列出并给修复建议"
+		if warnings, _ := t.store.ResourceLedger.AuditTextForPendingFacts(content); len(warnings) > 0 {
+			result["resource_warnings"] = warnings
+		}
+		// Task 074：确定性对账结果先行——存亡/位置/资源/时序/别名五类机器筛查，
+		// 每条带原文短引证据；你（LLM）的职责是复核这些并补机器看不见的语义矛盾。
+		if reconcile := consistencyReconcile(t.store, a.Chapter, content, nil); len(reconcile) > 0 {
+			result["machine_reconcile"] = reconcile
+			result["machine_reconcile_usage"] = "机器对账（warning 级事实）：逐条对照原文证据确认真伪；确认为真的矛盾必须在返回问题里列出并给修复建议"
+		}
+	} else {
+		result["consistency_context_policy"] = "frozen_render_context_only"
 	}
 
 	// 计划范围核对：计划是正文的唯一范围依据，正文不得超出。加载本章计划 + finalize 阶段
@@ -203,9 +219,11 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 		result["reader_attraction_check"] = attractionEvidence
 		result["reader_attraction_check_usage"] = "opening_candidate、humor_candidates、payoff_candidates 与 trend_candidates 都是写前备选，不逐项对账，也不因缺少某个候选而返工。只按整章读者效果判断开篇是否抓人、轻松项目是否有自然的人物反应、核心结果是否可见；候选可重排、替换或省略。只有 trend_misuses 非空时才核对实际误用"
 	}
-	if warnings, _ := t.store.Drafts.LoadChapterPlanConsistencyWarnings(a.Chapter); len(warnings) > 0 {
-		result["plan_consistency_warnings"] = warnings
-		result["plan_consistency_warnings_usage"] = "计划阶段遗留的一致性疑点：正文必须已妥善处理（如新角色已交代来历、别名统一）；未处理的要修正"
+	if loadLiveContext {
+		if warnings, _ := t.store.Drafts.LoadChapterPlanConsistencyWarnings(a.Chapter); len(warnings) > 0 {
+			result["plan_consistency_warnings"] = warnings
+			result["plan_consistency_warnings_usage"] = "计划阶段遗留的一致性疑点：正文必须已妥善处理（如新角色已交代来历、别名统一）；未处理的要修正"
+		}
 	}
 	if len(hardGateViolations) > 0 {
 		result["hard_gate_violations"] = hardGateViolations
@@ -218,6 +236,17 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	result["hard_consistency_receipt"] = hardReceipt
 
 	return json.Marshal(result)
+}
+
+func consistencyMayLoadLiveContext(st *store.Store) (bool, error) {
+	if st == nil {
+		return true, nil
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return false, fmt.Errorf("check_consistency 读取 pipeline execution lock: %w", err)
+	}
+	return lock == nil || lock.Mode != domain.PipelineExecutionRender, nil
 }
 
 func proseRenderingViolations(content string) []qualityrules.Violation {

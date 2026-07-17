@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -116,7 +117,21 @@ func TestBuildCodexPromptCompactsOversizedContext(t *testing.T) {
 
 func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 	renderPacket := map[string]any{
-		"goal": "保留本章关键选择",
+		"version": 11,
+		"goal":    "保留本章关键选择",
+		"fact_anchors": []map[string]any{{
+			"fact":           "TRANSFORMED_FACT_ANCHOR_MUST_SURVIVE",
+			"transformed_as": "让角色从现场价签读出差异",
+			"source_ref":     "rag:fact-receipt:17",
+			"authority":      "receipt_bound",
+		}},
+		"craft_methods": []map[string]any{{
+			"receipt_id":          "CRAFT_RECEIPT_MUST_SURVIVE",
+			"candidate_moves":     []string{"TRANSFORMED_CRAFT_MOVE_MUST_SURVIVE"},
+			"transformation_rule": "改成当前人物的临场选择",
+			"hard_avoid":          []string{"不得复原样例桥段"},
+		}},
+		"rag_recall": []string{"RAW_RAG_INSIDE_PACKET_MUST_NOT_LEAK"},
 		"style_contract": map[string]any{
 			"profile_id":             "county-light-comedy-system-single-romance",
 			"dialogue_breath_policy": "PINNED_STYLE_FULL_BREATH_GROUP",
@@ -144,6 +159,7 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 		"rewrite_brief":     map[string]any{"marker": "REWRITE_BRIEF_MUST_NOT_LEAK"},
 		"chapter_draft":     map[string]any{"marker": "CHAPTER_DRAFT_STATE_MUST_NOT_LEAK"},
 		"characters":        map[string]any{"marker": "FULL_CHARACTER_LIST_MUST_NOT_LEAK"},
+		"rag_recall":        []string{"RAW_ROOT_RAG_RECALL_MUST_NOT_LEAK"},
 		"render_packet":     renderPacket,
 		"literary_render_contract": map[string]any{
 			"marker": "FALLBACK_LITERARY_CONTRACT_MUST_NOT_WIN",
@@ -160,6 +176,9 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 			"writing_engine":  map[string]any{"voice": "林澈冷幽默"},
 			"retrieval_trace": strings.Repeat("无关检索轨迹", 20_000),
 		},
+		"selected_memory": map[string]any{
+			"rag_recall": []string{"RAW_SELECTED_MEMORY_RAG_MUST_NOT_LEAK"},
+		},
 	}
 	raw, _ := json.Marshal(payload)
 	msgs := []agentcore.Message{{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(string(raw))}}}
@@ -168,6 +187,7 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 		"保留本章关键选择", "literary_render_contract", "许栀", "先留意对方避开的称呼",
 		"dialogue-subtext", "让答非所问暴露隐瞒", "literary-rendering#dialogue-subtext", "rag:chunk:scene-17",
 		"style_contract", "PINNED_STYLE_FULL_BREATH_GROUP", "PINNED_STYLE_SINGLE_HEROINE_BOUNDARY",
+		"TRANSFORMED_FACT_ANCHOR_MUST_SURVIVE", "CRAFT_RECEIPT_MUST_SURVIVE", "TRANSFORMED_CRAFT_MOVE_MUST_SURVIVE",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("pruned prose prompt missing %q", want)
@@ -191,6 +211,7 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 		"已通过外审仍不应干扰正文", "林澈冷幽默", "FULL_CRAFT_SOURCE_MUST_NOT_LEAK",
 		"FALLBACK_LITERARY_CONTRACT_MUST_NOT_WIN", "FALLBACK_CRAFT_CARD_MUST_NOT_WIN", "fallback:source-ref-must-not-win",
 		"FALLBACK_STYLE_CONTRACT_MUST_NOT_WIN",
+		"RAW_ROOT_RAG_RECALL_MUST_NOT_LEAK", "RAW_SELECTED_MEMORY_RAG_MUST_NOT_LEAK", "RAW_RAG_INSIDE_PACKET_MUST_NOT_LEAK",
 	} {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("pruned prose prompt kept %q", forbidden)
@@ -198,6 +219,32 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 	}
 	if got := len([]rune(prompt)); got > codexProsePromptRuneBudget+2000 {
 		t.Fatalf("pruned prose prompt too large: %d", got)
+	}
+}
+
+func TestProseContextWhitelistExcludesRawRAGRecall(t *testing.T) {
+	if slices.Contains(proseContextKeys, "rag_recall") {
+		t.Fatal("raw rag_recall must remain planning-only")
+	}
+	raw := `{"render_packet":{"version":11,"fact_anchors":[{"fact":"SAFE_FACT"}],"craft_methods":[{"receipt_id":"SAFE_RECEIPT"}]},"rag_recall":["RAW_ROOT"],"selected_memory":{"rag_recall":["RAW_NESTED"]}}`
+	selected, ok := selectProseToolContext(raw)
+	if !ok {
+		t.Fatal("valid context JSON was not recognized")
+	}
+	encoded, err := json.Marshal(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, want := range []string{"SAFE_FACT", "SAFE_RECEIPT"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("v11 converted RAG field %q was dropped: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"RAW_ROOT", "RAW_NESTED", `"rag_recall"`} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("raw RAG leaked through prose whitelist: %q in %s", forbidden, text)
+		}
 	}
 }
 
@@ -401,7 +448,7 @@ func TestBuildProsePromptExcludesFullLiteraryReferencePack(t *testing.T) {
 	}
 }
 
-func TestBuildProsePromptKeepsOnlyBlockingExternalAdvice(t *testing.T) {
+func TestBuildProsePromptDropsLiveExternalAdviceAfterPlanFreeze(t *testing.T) {
 	payload := map[string]any{"draft_external_ai_review": map[string]any{
 		"blocking":          true,
 		"evidence":          []string{"角色轮流解释步骤"},
@@ -410,12 +457,9 @@ func TestBuildProsePromptKeepsOnlyBlockingExternalAdvice(t *testing.T) {
 	}}
 	raw, _ := json.Marshal(payload)
 	prompt := buildProsePrompt([]agentcore.Message{{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(string(raw))}}})
-	if !strings.Contains(prompt, "角色轮流解释步骤") {
-		t.Fatalf("blocking review evidence should reach prose renderer: %s", prompt)
-	}
-	for _, forbidden := range []string{"老丁忘带护套", "邻摊抱怨", "照抄这一句示例台词"} {
+	for _, forbidden := range []string{"角色轮流解释步骤", "老丁忘带护套", "邻摊抱怨", "照抄这一句示例台词"} {
 		if strings.Contains(prompt, forbidden) {
-			t.Fatalf("external review prescription leaked into prose prompt: %q in %s", forbidden, prompt)
+			t.Fatalf("live external review leaked past the frozen render packet: %q in %s", forbidden, prompt)
 		}
 	}
 }
@@ -442,7 +486,7 @@ func TestProseCacheRoundTripIsBoundToPromptModelAndEffort(t *testing.T) {
 	}
 }
 
-func TestCompactProseMessageKeepsSanitizedRewriteBrief(t *testing.T) {
+func TestCompactProseMessageDropsLiveRewriteBrief(t *testing.T) {
 	payload := map[string]any{
 		"working_memory": map[string]any{
 			"render_packet": map[string]any{"chapter": 2, "title": "想买辆皮卡"},
@@ -458,9 +502,9 @@ func TestCompactProseMessageKeepsSanitizedRewriteBrief(t *testing.T) {
 	}
 	msg := agentcore.Message{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: string(raw)}}}
 	got := compactProseMessageText(msg, string(raw))
-	for _, want := range []string{"rewrite_brief", "采购只留一个票据异常", "示例动作不是剧情指令"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("prose context dropped %q: %s", want, got)
+	for _, forbidden := range []string{"rewrite_brief", "采购只留一个票据异常", "示例动作不是剧情指令"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("live rewrite brief leaked past the frozen render packet %q: %s", forbidden, got)
 		}
 	}
 }
@@ -507,6 +551,8 @@ func TestBuildProsePromptDoesNotForceGenericSystemRefusal(t *testing.T) {
 		"不是必须逐项拍出来的镜头", "不要把结果写成验收录像", "普通连接句",
 		"不要为了“像人”强加", "非人物媒介、界面或传话声音", "visible_to_pov=false",
 		"可发言的功能角色", "计划、审核和流程术语", "没有术语也可能像报告",
+		"render_packet v11", "fact_anchors", "craft_methods", "raw rag_recall",
+		"不得调用 craft_recall", "退回 plan",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prose prompt missing %q", want)
@@ -539,6 +585,7 @@ func TestBuildProsePromptKeepsOneLeanHumanFacingBrief(t *testing.T) {
 	for _, want := range []string{
 		"先写人，再写事", "不是必须逐项拍出来的镜头", "不要把结果写成验收录像",
 		"允许感受多停一会儿", "不要为了“像人”强加",
+		"render_packet v11", "fact_anchors", "craft_methods", "退回 plan",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("lean prose brief lost human-facing boundary %q", want)

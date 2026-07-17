@@ -306,7 +306,7 @@ func ValidateReusableCausalPlanForRerender(s *store.Store, chapter int) error {
 		return fmt.Errorf("第 %d 章 plan 未绑定当前 world_simulation_id=%s", chapter, sim.SimulationID)
 	}
 	if strings.TrimSpace(causal.ProtagonistDecision) == "" ||
-		strings.TrimSpace(causal.ProtagonistDecision) != strings.TrimSpace(sim.ProtagonistProjection.ChosenDecision) {
+		strings.TrimSpace(causal.ProtagonistDecision) != effectiveProtagonistDecision(sim.ProtagonistProjection) {
 		return fmt.Errorf("第 %d 章 plan 主角决定与世界推演投影不一致", chapter)
 	}
 	if !contextSourcesContain(causal.ContextSources, sim.SimulationID) ||
@@ -359,10 +359,10 @@ func validateReusableCausalInputs(s *store.Store, plan domain.ChapterPlan, sim d
 		return nil
 	}
 	if !sourceTokenPresent(sim.Sources, instruction.Token) {
-		return fmt.Errorf("world simulation.sources 缺少当前 chapter_pipeline_instruction token=%s", instruction.Token)
+		return fmt.Errorf("world simulation.sources 缺少当前 chapter_pipeline_instruction binding")
 	}
 	if !sourceTokenPresent(plan.CausalSimulation.ContextSources, instruction.Token) {
-		return fmt.Errorf("plan context_sources 缺少当前 chapter_pipeline_instruction token=%s", instruction.Token)
+		return fmt.Errorf("plan context_sources 缺少当前 chapter_pipeline_instruction binding")
 	}
 	return nil
 }

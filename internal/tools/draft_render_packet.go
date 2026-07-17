@@ -21,6 +21,7 @@ type draftRenderPacket struct {
 	Chapter                 int                              `json:"chapter"`
 	Heading                 string                           `json:"heading"`
 	WordBudget              *draftWordBudget                 `json:"word_budget,omitempty"`
+	RenderCapacity          *draftRenderCapacity             `json:"render_capacity,omitempty"`
 	Title                   string                           `json:"title,omitempty"`
 	Goal                    string                           `json:"goal,omitempty"`
 	Conflict                string                           `json:"conflict,omitempty"`
@@ -93,12 +94,32 @@ type draftWordBudget struct {
 	ExactBoundary bool   `json:"exact_boundary"`
 }
 
+// draftRenderCapacity is the only projection of the upstream capacity
+// contract exposed to prose generation. It carries a lean causal scene spine,
+// not the complete planning dossier or a paragraph-by-paragraph checklist.
+type draftRenderCapacity struct {
+	TotalTargetRunes  int                     `json:"total_target_runes"`
+	SceneSpine        []draftRenderSceneSpine `json:"scene_spine"`
+	AntiPaddingPolicy string                  `json:"anti_padding_policy"`
+}
+
+type draftRenderSceneSpine struct {
+	SceneID             string   `json:"scene_id"`
+	TargetRunes         int      `json:"target_runes"`
+	POVObjective        string   `json:"pov_objective"`
+	ActiveOpposition    string   `json:"active_opposition"`
+	Turn                string   `json:"turn"`
+	ExitConsequence     string   `json:"exit_consequence"`
+	ConcreteActionBeats []string `json:"concrete_action_beats"`
+}
+
 type draftEntertainmentPlan struct {
 	OpeningBeat          string   `json:"opening_beat,omitempty"`
 	HumorBeats           []string `json:"humor_beats,omitempty"`
 	ImmediatePayoffs     []string `json:"immediate_payoffs,omitempty"`
 	ProcedureCompression string   `json:"procedure_compression,omitempty"`
 	CompanionVoiceBeat   string   `json:"companion_voice_beat,omitempty"`
+	ForbiddenComedy      []string `json:"forbidden_comedy,omitempty"`
 }
 
 type draftTrendLanguagePlan struct {
@@ -359,11 +380,6 @@ func applyPlanningContextProfile(result map[string]any) {
 
 func applyDraftContextProfile(result map[string]any) {
 	working, _ := result["working_memory"].(map[string]any)
-	// Capture the rewrite authority before turning the source into a receipt.
-	// The formal plan may contain typography-only copies added by later repair
-	// rounds; the committed rewrite source is the preferred spelling of each
-	// protected fact.
-	sourcePreserveFacts := draftRewriteSourcePreserveFacts(result, working)
 	// Drafter consumes only the finalized protagonist projection. The full
 	// all-character authority roster was validated before plan finalization and
 	// remains on disk; retain its source-bound receipt instead of replaying it.
@@ -374,13 +390,13 @@ func applyDraftContextProfile(result map[string]any) {
 		compactDraftRewriteSource(working)
 		compactDraftRewriteBrief(working)
 	}
-	sanitizeDraftExternalReview(result)
 	plan := chapterPlanFromContext(result, working)
 	if plan != nil {
 		packet := newDraftRenderPacket(*plan)
-		packet.PreserveFacts = proseFacingPreserveFacts(
-			canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts),
-		)
+		// Plan finalization copied and validated the exact rewrite-source facts.
+		// Re-reading a mutable review brief here would create a live overlay after
+		// freeze, so the formal plan is the only prose fact authority.
+		packet.PreserveFacts = proseFacingPreserveFacts(packet.PreserveFacts)
 		compactDraftPacketForProse(&packet)
 		packet.WordBudget = draftWordBudgetFromContext(result)
 		packet.StyleContract = newDraftStyleContract(result)
@@ -452,6 +468,10 @@ func applyDraftContextProfile(result map[string]any) {
 	for _, key := range []string{
 		"ai_voice_redflags", "ai_voice_redflags_policy", "chapter_ai_voice_metrics",
 		"genre_style_profile", "literary_rendering_cards", "writing_engine", "style_rules",
+		"draft_external_ai_review", "draft_external_ai_review_policy", "rewrite_brief",
+		"relationship_state", "character_snapshots", "chapter_participants",
+		"review_lessons", "story_threads", "resource_audit", "foreshadow_ledger",
+		"recent_state_changes", "position", "style_stats",
 	} {
 		deleteContextKey(result, key)
 	}
@@ -465,6 +485,7 @@ func applyDraftContextProfile(result map[string]any) {
 		"chapter_world_deltas", "character_stage_records", "side_character_journeys",
 		"premise", "world_rules", "characters", "character_dossiers",
 		"future_outline_window", "next_chapter_outline",
+		"project_all_state", "project_all_state_policy",
 	} {
 		deleteContextKey(result, key)
 	}
@@ -479,11 +500,8 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 	if result == nil || plan == nil {
 		return
 	}
-	sourcePreserveFacts := draftRewriteSourcePreserveFacts(result, working)
 	packet := newDraftRenderPacket(*plan)
-	packet.PreserveFacts = proseFacingPreserveFacts(
-		canonicalDraftPreserveFacts(sourcePreserveFacts, packet.PreserveFacts),
-	)
+	packet.PreserveFacts = proseFacingPreserveFacts(packet.PreserveFacts)
 	compactDraftPacketForProse(&packet)
 	packet.StyleContract = newDraftStyleContract(result)
 	if simulation, ok := result["chapter_world_simulation"].(map[string]any); ok {
@@ -532,7 +550,6 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 	if working != nil {
 		compactDraftRewriteAuthority(working, "formal_plan_receipt.rewrite_source")
 	}
-	sanitizeDraftExternalReview(result)
 	sanitizeDraftWorldSimulation(result, true, true, draftRenderPacketAuthorityPath(working))
 	// The transformed craft methods and their receipt/source refs now live in
 	// render_packet. Keep the raw recall pack only if no formal method was
@@ -544,6 +561,8 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 	for _, key := range []string{
 		"ai_voice_redflags", "ai_voice_redflags_policy", "chapter_ai_voice_metrics",
 		"genre_style_profile", "literary_rendering_cards", "writing_engine", "style_rules",
+		"draft_external_ai_review", "draft_external_ai_review_policy", "rewrite_brief",
+		"relationship_state", "character_snapshots", "chapter_participants",
 	} {
 		deleteContextKey(result, key)
 	}
@@ -753,6 +772,8 @@ func compactFinalizedContextBackground(result map[string]any) {
 		"ecological_map", "cultural_footnotes", "cultural_footnotes_usage",
 		"horizon_events", "horizon_events_usage", "character_dossier_policy",
 		"references", "retrieval_trace", "rag_recall",
+		"draft_external_ai_review", "draft_external_ai_review_policy", "rewrite_brief",
+		"relationship_state", "character_snapshots", "chapter_participants",
 	} {
 		deleteContextKey(result, key)
 	}
@@ -1424,10 +1445,13 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 	voices := make([]draftVoiceCard, 0, len(sim.VoiceLogic))
 	for _, voice := range sim.VoiceLogic {
 		voices = append(voices, draftVoiceCard{
-			Character:         voice.Character,
-			KnowledgeBoundary: firstRenderClause(voice.KnowledgeBoundary),
-			DictionAndRhythm:  firstRenderClause(voice.DictionAndRhythm),
-			ForbiddenMoves:    limitRenderStrings(voice.ForbiddenMoves, 1),
+			Character:          voice.Character,
+			SpeechPrinciple:    firstRenderClause(voice.SpeechPrinciple),
+			HiddenSubtext:      firstRenderClause(voice.HiddenSubtext),
+			KnowledgeBoundary:  strings.TrimSpace(voice.KnowledgeBoundary),
+			RelationshipStance: firstRenderClause(voice.RelationshipStance),
+			DictionAndRhythm:   firstRenderClause(voice.DictionAndRhythm),
+			ForbiddenMoves:     compactStrings(voice.ForbiddenMoves),
 		})
 	}
 	firstAppearances := make(map[string]bool, len(sim.CharacterKit))
@@ -1472,6 +1496,8 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		}
 	}
 	protagonist := draftPlanFocalizer(sim)
+	dialogueScenes := leanDraftDialogueScenes(sim.DialogueBlueprints)
+	visualCards := selectEntranceVisualCards(visuals, 8)
 	projection := leanDraftProjection(draftProtagonistProjection{
 		Protagonist:     protagonist,
 		ChosenDecision:  sim.ProtagonistDecision,
@@ -1489,6 +1515,7 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		Version:        11,
 		Chapter:        plan.Chapter,
 		Heading:        strings.TrimSpace(fmt.Sprintf("第%d章 %s", plan.Chapter, strings.TrimSpace(plan.Title))),
+		RenderCapacity: leanDraftRenderCapacity(sim.RenderCapacity),
 		Title:          plan.Title,
 		Goal:           firstRenderClause(plan.Goal),
 		Conflict:       firstRenderClause(plan.Conflict),
@@ -1503,20 +1530,23 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		PayoffPoints:          limitRenderStrings(softPayoffDirections, 2),
 		SceneAnchors:          sampleRenderStrings(softSceneAnchors, 2),
 		CandidateBeats:        draftRetentionCandidateBeats(sim.ReaderRetentionPlan.SurfaceBeats, mandatoryBeats),
-		RevealBudget:          limitRenderStrings(compactStrings(sim.ReaderRetentionPlan.RevealBudget), 3),
+		RevealBudget:          compactStrings(sim.ReaderRetentionPlan.RevealBudget),
 		CutOrCompress:         limitRenderStrings(compactStrings(sim.ReaderRetentionPlan.CutOrCompress), 3),
 		PageTurnQuestions:     sampleRenderStrings(sim.ReaderRetentionPlan.PageTurnQuestions, 1),
 		ProtagonistProjection: projection,
+		EntertainmentPlan:     leanEntertainmentPlan(sim.EntertainmentPlan),
+		TrendLanguagePlan:     leanTrendLanguagePlan(sim.TrendLanguage),
+		LongformOpening:       leanLongformOpening(sim.LongformOpening),
 		// The full anti_ai_execution_plan remains mandatory upstream. Only story
 		// event timing that may not exist elsewhere crosses the prose boundary.
 		EventTimingSafeguards: proseEventTimingSafeguards(sim.AntiAIPlan),
-		VoiceCards:            selectEssentialVoiceCards(voices),
+		VoiceCards:            selectEssentialVoiceCards(voices, protagonist, dialogueScenes, visualCards, 5),
 		// A first chapter can introduce the protagonist, love interest, parents,
 		// pressure character and two or three local anchors in one continuous
 		// opening. Keep enough cards for every meaningful entrance instead of
 		// silently dropping the later (often more important) arrivals.
-		VisualCards:            selectEntranceVisualCards(visuals, 8),
-		DialogueScenes:         leanDraftDialogueScenes(sim.DialogueBlueprints),
+		VisualCards:            visualCards,
+		DialogueScenes:         dialogueScenes,
 		EmotionalLenses:        leanDraftEmotionalLenses(sim, protagonist),
 		RelationshipLenses:     sampleRenderValues(relationshipLenses, 1),
 		LiteraryRenderContract: literaryContract,
@@ -1539,6 +1569,32 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 	return packet
 }
 
+func leanDraftRenderCapacity(capacity *domain.ChapterRenderCapacity) *draftRenderCapacity {
+	if capacity == nil {
+		return nil
+	}
+	spine := make([]draftRenderSceneSpine, 0, min(len(capacity.SceneUnits), domain.MaxRenderCapacityScenes))
+	for _, scene := range capacity.SceneUnits {
+		if len(spine) >= domain.MaxRenderCapacityScenes {
+			break
+		}
+		spine = append(spine, draftRenderSceneSpine{
+			SceneID:             strings.TrimSpace(scene.SceneID),
+			TargetRunes:         scene.TargetRunes,
+			POVObjective:        firstRenderClause(scene.POVObjective),
+			ActiveOpposition:    firstRenderClause(scene.ActiveOpposition),
+			Turn:                firstRenderClause(scene.Turn),
+			ExitConsequence:     firstRenderClause(scene.ExitConsequence),
+			ConcreteActionBeats: limitRenderStrings(compactStrings(scene.ConcreteActionBeats), domain.MinConcreteActionBeatsScene),
+		})
+	}
+	return &draftRenderCapacity{
+		TotalTargetRunes:  capacity.TotalTargetRunes,
+		SceneSpine:        spine,
+		AntiPaddingPolicy: truncateRunes(strings.TrimSpace(capacity.AntiPaddingPolicy), 240),
+	}
+}
+
 func compactDraftPacketForProse(packet *draftRenderPacket) {
 	if packet == nil {
 		return
@@ -1550,7 +1606,7 @@ func compactDraftPacketForProse(packet *draftRenderPacket) {
 	packet.ProtagonistProjection.ObservableEffects = nil
 	packet.EventTimingSafeguards = proseEventTimingSafeguardsFromPacket(packet.EventTimingSafeguards)
 	packet.CandidateBeats = limitCandidateBeats(packet.CandidateBeats, 3)
-	packet.RevealBudget = limitRenderStrings(compactStrings(packet.RevealBudget), 3)
+	packet.RevealBudget = compactStrings(packet.RevealBudget)
 	packet.CutOrCompress = limitRenderStrings(compactStrings(packet.CutOrCompress), 3)
 	packet.PageTurnQuestions = sampleRenderStrings(packet.PageTurnQuestions, 1)
 	packet.FactAnchors = sampleRenderValues(packet.FactAnchors, 3)
@@ -1847,7 +1903,10 @@ func draftFactAnchors(sim domain.ChapterCausalSimulation) []draftFactAnchor {
 }
 
 func rewriteCraftNeedID(query string) string {
-	for _, id := range []string{"rewrite-methodology", "rewrite-dialogue", "rewrite-scene"} {
+	for _, id := range []string{
+		"project-all-methodology", "project-all-dialogue", "project-all-scene",
+		"rewrite-methodology", "rewrite-dialogue", "rewrite-scene",
+	} {
 		if strings.Contains(query, id) {
 			return id
 		}
@@ -1863,7 +1922,7 @@ func newDraftLiteraryRenderContract(plan domain.ChapterPlan, protagonist string)
 			Source:                "explicit_plan",
 			Focalizer:             firstRenderClause(literary.Focalizer),
 			NarrativeAccess:       string(literary.NarrativeAccess),
-			KnowledgeBoundary:     firstRenderClause(literary.KnowledgeBoundary),
+			KnowledgeBoundary:     strings.TrimSpace(literary.KnowledgeBoundary),
 			PerceptualBias:        firstRenderClause(literary.PerceptualBias),
 			SummaryOmissionPolicy: firstRenderClause(literary.SummaryOmissionPolicy),
 			Afterimage:            firstRenderClause(literary.Afterimage),
@@ -1914,7 +1973,7 @@ func newDraftLiteraryRenderContract(plan domain.ChapterPlan, protagonist string)
 	}
 
 	if voice, ok := draftVoiceForCharacter(sim.VoiceLogic, focalizer); ok {
-		if boundary := firstRenderClause(voice.KnowledgeBoundary); boundary != "" {
+		if boundary := strings.TrimSpace(voice.KnowledgeBoundary); boundary != "" {
 			contract.KnowledgeBoundary = boundary
 		}
 		move := firstNonemptyRenderClause(voice.SubtextStrategy, voice.HiddenSubtext, voice.SpeechPrinciple)
@@ -2077,33 +2136,94 @@ func draftVisibilityFromSimulation(simulation map[string]any) (visible, excluded
 	return compactStrings(visible), compactStrings(excluded)
 }
 
-func selectEssentialVoiceCards(values []draftVoiceCard) []draftVoiceCard {
-	if len(values) == 0 {
+// selectEssentialVoiceCards keeps voice guidance only for characters who can
+// actually affect the retained prose packet. Source ordering is not relevance:
+// a large cast roster often lists an off-screen elder or the system before the
+// focalizer and the people who speak in this chapter.
+//
+// Priority is causal and stable: focalizer, participants in the retained
+// dialogue scenes, then human first appearances. A system/interface voice only
+// survives when one of the first two sources explicitly names it; it never
+// consumes a slot merely because it appears early in VoiceLogic.
+func selectEssentialVoiceCards(
+	values []draftVoiceCard,
+	focalizer string,
+	dialogueScenes []draftDialogueScene,
+	visualCards []draftVisualCard,
+	limit int,
+) []draftVoiceCard {
+	if len(values) == 0 || limit <= 0 {
 		return nil
 	}
-	out := make([]draftVoiceCard, 0, 3)
-	add := func(value draftVoiceCard) {
-		for _, existing := range out {
-			if existing.Character == value.Character {
-				return
-			}
+
+	byCharacter := make(map[string]draftVoiceCard, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value.Character)
+		if name == "" {
+			continue
 		}
+		if _, exists := byCharacter[name]; !exists {
+			value.Character = name
+			byCharacter[name] = value
+		}
+	}
+
+	out := make([]draftVoiceCard, 0, min(limit, len(values)))
+	selected := make(map[string]struct{}, limit)
+	addCharacter := func(character string) {
+		if len(out) >= limit {
+			return
+		}
+		character = strings.TrimSpace(character)
+		if character == "" {
+			return
+		}
+		if _, exists := selected[character]; exists {
+			return
+		}
+		value, exists := byCharacter[character]
+		if !exists {
+			return
+		}
+		selected[character] = struct{}{}
 		out = append(out, value)
 	}
-	add(values[0])
-	if len(values) > 1 {
-		add(values[1])
-	}
-	for _, value := range values {
-		if strings.Contains(value.Character, "系统") {
-			add(value)
-			break
+
+	addCharacter(focalizer)
+	for _, scene := range dialogueScenes {
+		for _, participant := range scene.Participants {
+			addCharacter(participant)
 		}
 	}
-	if len(out) > 3 {
-		out = out[:3]
+	for _, visual := range visualCards {
+		if !visual.FirstAppearance || isSystemOrInterfaceVoice(visual.Character) {
+			continue
+		}
+		addCharacter(visual.Character)
+	}
+
+	// Legacy plans can have only VoiceLogic, without explicit POV/dialogue/
+	// entrance fields. Preserve one human card as a compatibility fallback, but
+	// never promote a system card without on-page relevance.
+	if len(out) == 0 {
+		for _, value := range values {
+			if isSystemOrInterfaceVoice(value.Character) {
+				continue
+			}
+			addCharacter(value.Character)
+			if len(out) > 0 {
+				break
+			}
+		}
 	}
 	return out
+}
+
+func isSystemOrInterfaceVoice(character string) bool {
+	character = strings.TrimSpace(character)
+	return strings.Contains(character, "系统") ||
+		strings.Contains(character, "手机界面") ||
+		strings.Contains(character, "任务界面")
 }
 
 func firstRenderClause(text string) string {
@@ -2252,11 +2372,15 @@ var (
 
 func leanEntertainmentPlan(plan domain.ReaderEntertainmentPlan) draftEntertainmentPlan {
 	return draftEntertainmentPlan{
-		OpeningBeat:          firstRenderClause(plan.OpeningBeat),
-		HumorBeats:           sampleRenderStrings(plan.HumorBeats, 1),
+		OpeningBeat: firstRenderClause(plan.OpeningBeat),
+		// Humor beats are planning evidence, not prescribed jokes. Keeping them
+		// verbatim makes the Drafter force a gag even when the live interaction
+		// already carries lighter, more human texture.
+		HumorBeats:           nil,
 		ImmediatePayoffs:     limitRenderStrings(plan.ImmediatePayoffs, 1),
 		ProcedureCompression: firstRenderClause(plan.ProcedureCompression),
 		CompanionVoiceBeat:   firstRenderClause(plan.CompanionVoiceBeat),
+		ForbiddenComedy:      limitRenderStrings(plan.ForbiddenComedy, 5),
 	}
 }
 
@@ -2325,7 +2449,7 @@ func leanDraftDialogueScenes(scenes []domain.DialogueSceneBlueprint) []draftDial
 			SceneID:           strings.TrimSpace(scene.SceneID),
 			ScenePressure:     firstRenderClause(scene.ScenePressure),
 			RelationshipFrame: firstRenderClause(scene.RelationshipFrame),
-			Participants:      limitRenderStrings(scene.Participants, 4),
+			Participants:      draftDialogueParticipants(scene, 4),
 			LocationAnchor:    firstRenderClause(scene.LocationAnchor),
 			DialogueObjective: firstRenderClause(scene.DialogueObjective),
 			ExitBeat:          firstRenderClause(scene.ExitBeat),
@@ -2333,6 +2457,23 @@ func leanDraftDialogueScenes(scenes []domain.DialogueSceneBlueprint) []draftDial
 		})
 	}
 	return sampleRenderValues(projected, 2)
+}
+
+// draftDialogueParticipants retains only speaker identity, not turn tactics.
+// Older plans frequently omitted Participants while naming speakers in
+// EntrySpeaker, ObjectiveTactics or TurnProgression. Recovering those names
+// lets the render packet select the matching voice cards without leaking the
+// discarded line/action choreography.
+func draftDialogueParticipants(scene domain.DialogueSceneBlueprint, limit int) []string {
+	values := append([]string(nil), scene.Participants...)
+	values = append(values, scene.EntrySpeaker)
+	for _, tactic := range scene.ObjectiveTactics {
+		values = append(values, tactic.Character)
+	}
+	for _, turn := range scene.TurnProgression {
+		values = append(values, turn.Speaker)
+	}
+	return limitRenderStrings(values, limit)
 }
 
 // leanDraftEmotionalLenses exposes only focalizer-owned subjective causality.

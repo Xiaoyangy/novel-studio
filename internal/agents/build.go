@@ -227,21 +227,23 @@ func BuildCoordinator(
 	commitChapter := tools.NewCommitChapterTool(store)
 	saveFoundation := tools.NewSaveFoundationTool(store)
 	saveReview := tools.NewSaveReviewTool(store)
-	if qdrantClient, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
-		slog.Warn("Qdrant 初始化失败，将回退本地 RAG", "module", "rag", "err", err)
-	} else if enabled {
-		contextTool.WithRAGVectorSearcher(qdrantClient)
-		commitChapter.WithRAGVectorWriter(qdrantClient)
-		saveFoundation.WithRAGVectorWriter(qdrantClient)
-		saveReview.WithRAGVectorWriter(qdrantClient)
-	}
-	if embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg); err != nil {
-		slog.Warn("RAG embedding 初始化失败，将回退本地关键词召回", "module", "rag", "err", err)
-	} else if enabled {
-		contextTool.WithRAGEmbedder(embedder)
-		commitChapter.WithRAGEmbedder(embedder)
-		saveFoundation.WithRAGEmbedder(embedder)
-		saveReview.WithRAGEmbedder(embedder)
+	if !cfg.DisableLiveRAG {
+		if qdrantClient, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
+			slog.Warn("Qdrant 初始化失败，将回退本地 RAG", "module", "rag", "err", err)
+		} else if enabled {
+			contextTool.WithRAGVectorSearcher(qdrantClient)
+			commitChapter.WithRAGVectorWriter(qdrantClient)
+			saveFoundation.WithRAGVectorWriter(qdrantClient)
+			saveReview.WithRAGVectorWriter(qdrantClient)
+		}
+		if embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg); err != nil {
+			slog.Warn("RAG embedding 初始化失败，将回退本地关键词召回", "module", "rag", "err", err)
+		} else if enabled {
+			contextTool.WithRAGEmbedder(embedder)
+			commitChapter.WithRAGEmbedder(embedder)
+			saveFoundation.WithRAGEmbedder(embedder)
+			saveReview.WithRAGEmbedder(embedder)
+		}
 	}
 	// 用户规则服务：归一化各来源 → 确定性合并 → 落盘本书快照。Coordinator 的
 	// save_user_rules 工具复用它做运行中更新；归一化用 Default 模型（与 Host 开书侧一致）。
@@ -285,9 +287,13 @@ func BuildCoordinator(
 		contextTool,
 		tools.NewSimulateChapterWorldTool(store),
 	}
-	drafterTools := []agentcore.Tool{
+	drafterTools := frozenRenderTools([]agentcore.Tool{
 		contextTool,
 		readChapter,
+		// Keep shared dynamic-research tools in the candidate list so the
+		// capability filter is covered by tests and remains fail-closed if this
+		// list is refactored. Frozen prose may consume only receipt-backed
+		// transformations already present in render_packet.
 		craftRecall,
 		webResearch,
 		tools.NewDraftChapterTool(store),
@@ -296,7 +302,7 @@ func BuildCoordinator(
 		tools.NewEditChapterTool(store),
 		tools.NewCheckConsistencyTool(store),
 		commitChapter,
-	}
+	})
 	draftFinalizerTools := []agentcore.Tool{
 		contextTool,
 		readChapter,
@@ -324,14 +330,20 @@ func BuildCoordinator(
 		)
 	}
 
-	architectModel := models.ForRoleWithFailover("architect", reportFailover)
-	writerModel := writersampler.New(models.ForRoleWithFailover("writer", reportFailover))
-	drafterModel := writersampler.New(models.ForRoleWithFailover("drafter", reportFailover))
+	roleModel := func(role string) agentcore.ChatModel {
+		if cfg.DisableModelFailover {
+			return models.ForRole(role)
+		}
+		return models.ForRoleWithFailover(role, reportFailover)
+	}
+	architectModel := roleModel("architect")
+	writerModel := writersampler.New(roleModel("writer"))
+	drafterModel := writersampler.New(roleModel("drafter"))
 	// Task 067：三采样 pairwise 终选用 reviewer 角色（异族裁判；未配置回落 editor）。
-	writerModel.Judge = models.ForRoleWithFailover("reviewer", reportFailover)
-	drafterModel.Judge = models.ForRoleWithFailover("reviewer", reportFailover)
-	editorModel := models.ForRoleWithFailover("editor", reportFailover)
-	coordinatorModel := models.ForRoleWithFailover("coordinator", reportFailover)
+	writerModel.Judge = roleModel("reviewer")
+	drafterModel.Judge = roleModel("reviewer")
+	editorModel := roleModel("editor")
+	coordinatorModel := roleModel("coordinator")
 
 	// Coordinator 的 ContextManager 在 Agent 构造时一次性生成，按启动模型解析。
 	// 运行中 /model 切换到更小窗口的模型时，建议用户显式配置 context_window 兜底。
@@ -567,7 +579,7 @@ func BuildCoordinator(
 	agent := agentcore.NewAgent(
 		agentcore.WithModel(coordinatorModel),
 		agentcore.WithSystemPrompt(bundle.Prompts.Coordinator),
-		agentcore.WithTools(subagentTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc), tools.NewReopenBookTool(store)),
+		agentcore.WithTools(subagentTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
 		agentcore.WithMaxTurns(100_000),
 		agentcore.WithOnMessage(coordinatorOnMessage),
 		agentcore.WithToolsAreIdempotent(false),
@@ -580,6 +592,8 @@ func BuildCoordinator(
 		// phase=complete 时硬拦截 subagent 派发，防止 Writer 死循环。
 		agentcore.WithToolGate(combineToolGates(
 			singleSubagentModeGate(),
+			pipelineRenderAgentGate(store),
+			pipelineOutlineAllAgentGate(store),
 			completePhaseGate(store),
 			writerExpandedChapterGate(store),
 			writerZeroInitGate(store),
@@ -614,6 +628,64 @@ func BuildCoordinator(
 	}
 
 	return agent, askUser, restore, coordinatorEngine, applyThinking
+}
+
+// pipelineOutlineAllAgentGate closes the dedicated execution capability at
+// the Coordinator dispatch boundary. All four mutation types, including
+// map_contracts/revise_arc, require architect_long and the one exact signed
+// marker that matches the active receipt.
+// HARNESS-METADATA: name=pipeline_outline_all_agent_gate class=business_logic note=全书推演仅允许receipt授权的architect_long单次结构变更
+func pipelineOutlineAllAgentGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" || st == nil {
+			return nil, nil
+		}
+		lock, err := st.Runtime.LoadPipelineExecution()
+		if err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "无法验证 outline-all execution lock：" + err.Error()}, nil
+		}
+		if lock == nil || lock.Mode != domain.PipelineExecutionOutlineAll {
+			return nil, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "outline-all 只能派 architect_long，且必须携带唯一签名 intent marker"}, nil
+		}
+		if args.Agent != "architect_long" {
+			return &agentcore.GateDecision{Allowed: false, Reason: fmt.Sprintf("outline-all 只授权 architect_long；收到 agent=%q", args.Agent)}, nil
+		}
+		action, err := domain.ParseOutlineAllIntent(args.Task)
+		if err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "outline-all subagent task intent 无效：" + err.Error()}, nil
+		}
+		authorized, err := tools.AuthorizeChapterZeroOutlineAllPendingAction(st, action)
+		if err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "outline-all subagent capability 无法验证：" + err.Error()}, nil
+		}
+		if !authorized {
+			return &agentcore.GateDecision{Allowed: false, Reason: "outline-all subagent task 与当前 pending receipt 不一致"}, nil
+		}
+		return nil, nil
+	}
+}
+
+func frozenRenderTools(candidates []agentcore.Tool) []agentcore.Tool {
+	out := make([]agentcore.Tool, 0, len(candidates))
+	for _, tool := range candidates {
+		if tool == nil {
+			continue
+		}
+		switch tool.Name() {
+		case "craft_recall", "web_research":
+			continue
+		default:
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func flowBoundaryMiddleware(onBoundary FlowBoundaryHook) agentcore.ToolMiddleware {
@@ -691,6 +763,51 @@ func singleSubagentModeGate() agentcore.ToolGate {
 			if json.Unmarshal(value, &background) == nil && background {
 				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 禁止后台 subagent 写共享故事状态；请使用同步 agent+task"}, nil
 			}
+		}
+		return nil, nil
+	}
+}
+
+// pipelineRenderAgentGate makes the process-wide render lease visible at the
+// Coordinator dispatch boundary. Tool-level guards remain the final authority,
+// but rejecting the wrong subagent here avoids an Architect/Writer session that
+// can do no valid work and might otherwise keep retrying.
+func pipelineRenderAgentGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" || st == nil {
+			return nil, nil
+		}
+		lock, err := st.Runtime.LoadPipelineExecution()
+		if err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  "无法验证 pipeline render execution lock，拒绝派发共享状态子代理：" + err.Error(),
+			}, nil
+		}
+		if lock == nil || lock.Mode != domain.PipelineExecutionRender {
+			return nil, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  fmt.Sprintf("render execution lock 只授权第 %d 章 Drafter；无法解析 subagent 参数", lock.TargetChapter),
+			}, nil
+		}
+		chapter := chapterFromTask(args.Task)
+		if (args.Agent != "drafter" && args.Agent != "draft_finalizer") || chapter != lock.TargetChapter {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason: fmt.Sprintf(
+					"render execution lock 只授权 drafter/draft_finalizer 处理第 %d 章；收到 agent=%q chapter=%d。禁止 Writer、World Simulator、Architect、Editor 或其他章节进入本次冻结渲染",
+					lock.TargetChapter,
+					args.Agent,
+					chapter,
+				),
+			}, nil
 		}
 		return nil, nil
 	}
@@ -800,6 +917,22 @@ func expandArcWorldTickGate(st *store.Store) agentcore.ToolGate {
 			!strings.Contains(args.Task, "展开") && !strings.Contains(args.Task, "追加") && !strings.Contains(args.Task, "下一弧") && !strings.Contains(args.Task, "下一卷") {
 			return nil, nil
 		}
+		// outline-all 是唯一受控例外：仅 sealed_two_pass_v2、active generation
+		// 尚无正文正史、host 签发的 building receipt 含单个 pending action，且
+		// receipt 与当前专用 OutlineAll lease/compass 逐字段一致时放行。任何缺失、
+		// 过期、复制或篡改都退回普通 rolling world-tick 门禁。
+		outlineAllIntent, intentErr := domain.ParseOutlineAllIntent(args.Task)
+		outlineAllAuthorized := false
+		var authErr error
+		if intentErr == nil {
+			outlineAllAuthorized, authErr = tools.ChapterZeroOutlineAllWorldTickBypassAuthorized(st, outlineAllIntent)
+		}
+		if authErr != nil {
+			slog.Warn("outline-all chapter-zero receipt 无法验证，继续执行普通 world-tick 门禁", "module", "agents.gate", "error", authErr)
+		} else if outlineAllAuthorized {
+			slog.Info("outline-all chapter-zero receipt 验证通过：仅放行当前单步全书大纲 mutation", "module", "agents.gate")
+			return nil, nil
+		}
 		if err := tools.EnsureWorldTickCurrent(st); err != nil {
 			return &agentcore.GateDecision{
 				Allowed: false,
@@ -838,6 +971,7 @@ func chapterFromTask(task string) int {
 type saveFoundationResult struct {
 	Type            string `json:"type"`
 	FoundationReady bool   `json:"foundation_ready"`
+	OutlineAll      bool   `json:"outline_all"`
 }
 
 func decodeSaveFoundationResult(toolName string, result json.RawMessage) saveFoundationResult {
@@ -851,6 +985,12 @@ func decodeSaveFoundationResult(toolName string, result json.RawMessage) saveFou
 
 func architectLongShouldStopAfterToolResult(toolName string, result json.RawMessage) bool {
 	r := decodeSaveFoundationResult(toolName, result)
+	if r.OutlineAll {
+		switch r.Type {
+		case "append_volume", "map_contracts", "expand_arc", "revise_arc":
+			return true
+		}
+	}
 	switch r.Type {
 	case "expand_arc", "complete_book":
 		return true

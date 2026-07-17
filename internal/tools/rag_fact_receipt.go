@@ -139,15 +139,42 @@ func bindLatestRAGFactReceiptToPlan(st *store.Store, plan *domain.ChapterPlan) e
 	return nil
 }
 
-// ValidateRAGFactPlanCurrent proves both provenance and freshness. Only chunks
-// selected by the receipt participate, so an unrelated additive index update
-// does not invalidate a staged plan.
+// ValidateRAGFactPlanCurrent proves both provenance and live-index freshness.
+// Only chunks selected by the receipt participate, so an unrelated additive
+// index update does not invalidate a staged plan.
 func ValidateRAGFactPlanCurrent(st *store.Store, plan domain.ChapterPlan) error {
+	return validateRAGFactPlan(st, plan, ragFactPlanValidation{})
+}
+
+// ValidateRAGFactPlanSealed replays every plan/receipt provenance,
+// transformation and render-anchor check without requiring the selected chunk
+// to remain in the mutable live index. Callers must independently prove that
+// the receipt came from the exact sealed bundle being rendered.
+func ValidateRAGFactPlanSealed(st *store.Store, plan domain.ChapterPlan) error {
+	return validateRAGFactPlan(st, plan, ragFactPlanValidation{
+		skipLiveIndexMembership: true,
+	})
+}
+
+type ragFactPlanValidation struct {
+	skipLiveIndexMembership bool
+	sealedReceipt           *domain.RAGFactReceipt
+}
+
+func validateRAGFactPlan(
+	st *store.Store,
+	plan domain.ChapterPlan,
+	validation ragFactPlanValidation,
+) error {
 	receiptID, factsSHA, count, err := ragFactReceiptIdentityFromSources(plan.CausalSimulation.ContextSources)
 	if err != nil {
 		return err
 	}
 	hasFactReferences := planHasRAGFactReferences(plan)
+	if planUsesRAGFactReceiptAsLiterarySource(plan) {
+		return fmt.Errorf("第 %d 章把普通事实 RAG receipt 当作 literary source；必须先通过 external_reference_plan/grounding_details/reality_support_plan 转成可投影现场事实: %w",
+			plan.Chapter, errs.ErrToolPrecondition)
+	}
 	if planClaimsUntraceableRAGFacts(plan) {
 		return fmt.Errorf("第 %d 章普通事实 RAG 引用未使用当前 rag_fact_receipt hit ref，来源不可追溯: %w",
 			plan.Chapter, errs.ErrToolPrecondition)
@@ -158,18 +185,30 @@ func ValidateRAGFactPlanCurrent(st *store.Store, plan domain.ChapterPlan) error 
 		}
 		return nil
 	}
-	receipt, err := st.RAG.LoadRAGFactReceipt(receiptID)
-	if err != nil {
-		return fmt.Errorf("load RAG fact receipt %s: %w", receiptID, err)
+	var receipt *domain.RAGFactReceipt
+	if validation.sealedReceipt != nil {
+		exact := *validation.sealedReceipt
+		receipt = &exact
+	} else {
+		receipt, err = st.RAG.LoadRAGFactReceipt(receiptID)
+		if err != nil {
+			return fmt.Errorf("load RAG fact receipt %s: %w", receiptID, err)
+		}
 	}
-	if receipt == nil || receipt.Chapter != plan.Chapter {
+	if receipt == nil || receipt.ID != receiptID || receipt.Chapter != plan.Chapter {
 		return fmt.Errorf("第 %d 章 RAG fact receipt %s 不存在或章节不匹配: %w", plan.Chapter, receiptID, errs.ErrToolPrecondition)
 	}
 	if receipt.SelectedFactsSHA256 != factsSHA {
 		return fmt.Errorf("第 %d 章 RAG fact receipt selected facts hash 不匹配: %w", plan.Chapter, errs.ErrToolPrecondition)
 	}
-	if err := validateRAGFactReceiptCurrent(st, *receipt); err != nil {
-		return err
+	if validation.skipLiveIndexMembership {
+		if err := domain.ValidateRAGFactReceipt(*receipt); err != nil {
+			return fmt.Errorf("invalid sealed RAG fact receipt %s: %w", receipt.ID, err)
+		}
+	} else {
+		if err := validateRAGFactReceiptCurrent(st, *receipt); err != nil {
+			return err
+		}
 	}
 	if !receipt.NoMaterial && !hasFactReferences {
 		return fmt.Errorf("第 %d 章 RAG fact receipt %s 选中了 %d 个事实 chunk，但 formal plan 没有通过 external_reference_plan/grounding_details/reality_support_plan 消费任何 hit ref；禁止把 RAG 只当挂名来源: %w",
@@ -197,6 +236,22 @@ func ValidateRAGFactPlanCurrent(st *store.Store, plan domain.ChapterPlan) error 
 	}
 	if err := validateRAGFactTransformations(plan); err != nil {
 		return err
+	}
+	if !receipt.NoMaterial {
+		packet := newDraftRenderPacket(plan)
+		hasProjectedAnchor := false
+		for _, anchor := range packet.FactAnchors {
+			if anchor.Authority == "rag_fact_receipt" &&
+				strings.HasPrefix(strings.TrimSpace(anchor.SourceRef), domain.RAGFactReceiptTokenPrefix) &&
+				strings.TrimSpace(anchor.Fact) != "" {
+				hasProjectedAnchor = true
+				break
+			}
+		}
+		if !hasProjectedAnchor {
+			return fmt.Errorf("第 %d 章 RAG fact receipt 已登记引用，但 v11 render_packet 没有任何可消费的 receipt-backed fact anchor；必须重做本章化转换: %w",
+				plan.Chapter, errs.ErrToolPrecondition)
+		}
 	}
 	return nil
 }
@@ -277,17 +332,27 @@ func planRAGFactReferences(plan domain.ChapterPlan) []string {
 	for _, support := range plan.CausalSimulation.RealitySupport {
 		add(support.SourceRef)
 	}
-	if literary := plan.CausalSimulation.LiteraryRendering; literary != nil {
-		for _, ref := range literary.SourceRefs {
-			add(ref)
+	return refs
+}
+
+func planUsesRAGFactReceiptAsLiterarySource(plan domain.ChapterPlan) bool {
+	literary := plan.CausalSimulation.LiteraryRendering
+	if literary == nil {
+		return false
+	}
+	for _, ref := range literary.SourceRefs {
+		if strings.HasPrefix(strings.TrimSpace(ref), domain.RAGFactReceiptTokenPrefix) {
+			return true
 		}
-		for _, lens := range literary.ActiveLenses {
-			for _, ref := range lens.SourceRefs {
-				add(ref)
+	}
+	for _, lens := range literary.ActiveLenses {
+		for _, ref := range lens.SourceRefs {
+			if strings.HasPrefix(strings.TrimSpace(ref), domain.RAGFactReceiptTokenPrefix) {
+				return true
 			}
 		}
 	}
-	return refs
+	return false
 }
 
 func planClaimsUntraceableRAGFacts(plan domain.ChapterPlan) bool {
@@ -296,7 +361,7 @@ func planClaimsUntraceableRAGFacts(plan domain.ChapterPlan) bool {
 		if strings.Contains(sourceType, "craft") {
 			continue
 		}
-		if sourceType == "rag" || strings.Contains(sourceType, "fact_rag") || strings.Contains(sourceType, "rag_fact") {
+		if isRAGFactSourceType(sourceType) {
 			if len(external.SourceRefs) == 0 {
 				return true
 			}
@@ -315,16 +380,38 @@ func planClaimsUntraceableRAGFacts(plan domain.ChapterPlan) bool {
 	return false
 }
 
+func isRAGFactSourceType(sourceType string) bool {
+	sourceType = strings.ToLower(strings.TrimSpace(sourceType))
+	if strings.Contains(sourceType, "craft") {
+		return false
+	}
+	return sourceType == "rag" ||
+		strings.Contains(sourceType, "rag_recall") ||
+		strings.Contains(sourceType, "fact_rag") ||
+		strings.Contains(sourceType, "rag_fact")
+}
+
 func validateRAGFactTransformations(plan domain.ChapterPlan) error {
 	for i, external := range plan.CausalSimulation.ExternalRefs {
 		sourceType := strings.ToLower(strings.TrimSpace(external.SourceType))
-		if strings.Contains(sourceType, "craft") ||
-			(sourceType != "rag" && !strings.Contains(sourceType, "fact_rag") && !strings.Contains(sourceType, "rag_fact")) {
+		usesReceiptHit := false
+		for _, ref := range external.SourceRefs {
+			if strings.HasPrefix(strings.TrimSpace(ref), domain.RAGFactReceiptTokenPrefix) {
+				usesReceiptHit = true
+				break
+			}
+		}
+		claimsFactRAG := isRAGFactSourceType(sourceType)
+		if strings.Contains(sourceType, "craft") && usesReceiptHit {
+			return fmt.Errorf("第 %d 章 external_reference_plan[%d] 把普通事实 receipt hit 标成 craft；必须按事实来源转换，不能绕过 usable_details/transformation_rule/do_not_use: %w",
+				plan.Chapter, i, errs.ErrToolPrecondition)
+		}
+		if !usesReceiptHit && !claimsFactRAG {
 			continue
 		}
 		if strings.TrimSpace(external.QueryOrNeed) == "" || len(external.SourceRefs) == 0 ||
-			len(external.UsableDetails) == 0 || strings.TrimSpace(external.TransformationRule) == "" ||
-			len(external.DoNotUse) == 0 {
+			len(compactStrings(external.UsableDetails)) == 0 || strings.TrimSpace(external.TransformationRule) == "" ||
+			len(compactStrings(external.DoNotUse)) == 0 {
 			return fmt.Errorf("第 %d 章 external_reference_plan[%d] 的普通事实 RAG 必须完整填写 query/source_refs/usable_details/transformation_rule/do_not_use: %w",
 				plan.Chapter, i, errs.ErrToolPrecondition)
 		}
@@ -336,6 +423,17 @@ func validateRAGFactTransformations(plan domain.ChapterPlan) error {
 		if strings.TrimSpace(grounding.Detail) == "" || strings.TrimSpace(grounding.TransformedAs) == "" ||
 			strings.TrimSpace(grounding.SceneAnchor) == "" {
 			return fmt.Errorf("第 %d 章 grounding_details[%d] 的 receipt-backed fact 必须填写 detail/transformed_as/scene_anchor: %w",
+				plan.Chapter, i, errs.ErrToolPrecondition)
+		}
+	}
+	for i, support := range plan.CausalSimulation.RealitySupport {
+		if !strings.HasPrefix(strings.TrimSpace(support.SourceRef), domain.RAGFactReceiptTokenPrefix) {
+			continue
+		}
+		if strings.TrimSpace(support.Domain) == "" || strings.TrimSpace(support.UsableDetail) == "" ||
+			strings.TrimSpace(support.TransformedAs) == "" || strings.TrimSpace(support.ChapterUse) == "" ||
+			len(compactStrings(support.ForbiddenDirectUse)) == 0 {
+			return fmt.Errorf("第 %d 章 reality_support_plan[%d] 的 receipt-backed fact 必须填写 domain/usable_detail/transformed_as/chapter_use/forbidden_direct_use: %w",
 				plan.Chapter, i, errs.ErrToolPrecondition)
 		}
 	}

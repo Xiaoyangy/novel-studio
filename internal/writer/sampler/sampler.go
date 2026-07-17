@@ -17,6 +17,25 @@ import (
 
 const candidateCount = 3
 
+// ProtocolDigest binds sealed render receipts to the prose sampling and
+// pairwise-judge protocol. Bump Version whenever selection semantics change.
+func ProtocolDigest() string {
+	digest, _ := domain.DeterministicPlanningHash(struct {
+		Version             string `json:"version"`
+		CandidateCount      int    `json:"candidate_count"`
+		PairwiseRounds      int    `json:"pairwise_rounds"`
+		PairwiseRuneLimit   int    `json:"pairwise_rune_limit"`
+		PairwiseInstruction string `json:"pairwise_instruction"`
+	}{
+		Version:             "writer-sampler-protocol.v2",
+		CandidateCount:      candidateCount,
+		PairwiseRounds:      2,
+		PairwiseRuneLimit:   1800,
+		PairwiseInstruction: "更像人类作者、AI腔更少、叙事更扎实；只回答A或B；换位两轮一致才裁定",
+	})
+	return digest
+}
+
 // Model wraps the Writer model and chooses the roughest draft_chapter candidate.
 type Model struct {
 	// Judge pairwise 终选裁判（Task 067）：reviewer 角色模型，异族裁判防同族自偏。

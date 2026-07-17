@@ -16,7 +16,7 @@ func newDegradedTool(t *testing.T) (*SaveUserRulesTool, *store.Store) {
 	t.Helper()
 	st := store.NewStore(t.TempDir())
 	svc := userrules.NewService(st, nil, rules.LoadOptions{})
-	return NewSaveUserRulesTool(svc), st
+	return NewSaveUserRulesTool(svc, st), st
 }
 
 // 核心契约：归一化失败（技术细节）绝不抛回 Coordinator，只降级 + 返回事实 + 落盘。

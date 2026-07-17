@@ -721,9 +721,10 @@ func TestAutomatedHardPolicyRejectsMissingOrMalformedIdentity(t *testing.T) {
 			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
 			ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
 		},
-		"incomplete legacy pair": {
+		"incomplete explicit pair": {
 			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
-			BlockUntilExternalRetest: true, RequiredDetector: "automated-detector",
+			ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+			RequiredDetector:     "automated-detector",
 		},
 		"invalid trigger sha": {
 			Chapter: 1, EvaluatedBodySHA256: strings.Repeat("a", 64),
@@ -791,7 +792,7 @@ func TestLocalStructuralMarkerDoesNotCarryOptionalSamplingIdentity(t *testing.T)
 	}
 }
 
-func TestLegacyBlockFlagLoadsAsAutomatedHardPolicy(t *testing.T) {
+func TestLegacyBlockFlagLoadsAsOptionalSamplingPolicy(t *testing.T) {
 	dir := t.TempDir()
 	path := draftExternalRerenderRequirementPath(dir, 1)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -812,9 +813,9 @@ func TestLegacyBlockFlagLoadsAsAutomatedHardPolicy(t *testing.T) {
 	}
 	got, err := loadDraftExternalRerenderRequirement(dir, 1)
 	if err != nil || got == nil ||
-		got.ExternalRetestPolicy != DraftExternalRetestPolicyAutomatedHard ||
-		!got.BlockUntilExternalRetest || !RequiresRegisteredExternalRetest(got) {
-		t.Fatalf("legacy hard marker did not normalize safely: requirement=%+v err=%v", got, err)
+		got.ExternalRetestPolicy != DraftExternalRetestPolicySamplingOptional ||
+		got.BlockUntilExternalRetest || RequiresRegisteredExternalRetest(got) {
+		t.Fatalf("legacy block alias became an implicit production dependency: requirement=%+v err=%v", got, err)
 	}
 	if err := SetDraftExternalRerenderRequirement(dir, *got); err != nil {
 		t.Fatal(err)
@@ -823,8 +824,9 @@ func TestLegacyBlockFlagLoadsAsAutomatedHardPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"external_retest_policy": "automated_hard"`) {
-		t.Fatalf("rewritten legacy marker omitted explicit hard policy: %s", raw)
+	if !strings.Contains(string(raw), `"external_retest_policy": "sampling_optional"`) ||
+		strings.Contains(string(raw), `"block_until_external_retest": true`) {
+		t.Fatalf("rewritten legacy marker did not retire implicit hard policy: %s", raw)
 	}
 }
 
@@ -962,9 +964,9 @@ func TestExplicitAutomatedExternalRetestOptInRemainsDurableAcrossNewGateReason(t
 		RequiredExternalRetests: []DraftExternalRetestIdentity{{
 			Detector: "automated-detector", Mode: "whole", TriggerBodySHA256: strings.Repeat("a", 64),
 		}},
-		BlockUntilExternalRetest: true,
-		AdviceComplete:           true,
-		RevisionPlan:             []string{"整章重渲染"},
+		ExternalRetestPolicy: DraftExternalRetestPolicyAutomatedHard,
+		AdviceComplete:       true,
+		RevisionPlan:         []string{"整章重渲染"},
 	}
 	if err := SetDraftExternalRerenderRequirement(dir, initial); err != nil {
 		t.Fatal(err)

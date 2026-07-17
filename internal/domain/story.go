@@ -13,11 +13,12 @@ type Novel struct {
 
 // OutlineEntry 大纲条目，对应一章。
 type OutlineEntry struct {
-	Chapter   int      `json:"chapter"`
-	Title     string   `json:"title"`
-	CoreEvent string   `json:"core_event"`
-	Hook      string   `json:"hook"`
-	Scenes    []string `json:"scenes"`
+	Chapter      int                `json:"chapter"`
+	Title        string             `json:"title"`
+	CoreEvent    string             `json:"core_event"`
+	Hook         string             `json:"hook"`
+	Scenes       []string           `json:"scenes"`
+	ContractRefs []StoryContractRef `json:"contract_refs,omitempty"`
 }
 
 // Character 角色档案。
@@ -51,6 +52,7 @@ func (v *VolumeOutline) IsExpanded() bool { return len(v.Arcs) > 0 }
 type StoryCompass struct {
 	EndingDirection string   `json:"ending_direction"`          // 终局方向（主题性描述）
 	OpenThreads     []string `json:"open_threads,omitempty"`    // 活跃长线（需收束才能结局）
+	NonNegotiables  []string `json:"non_negotiables,omitempty"` // 全书规划不得推迟或删除的硬合同
 	EstimatedScale  string   `json:"estimated_scale,omitempty"` // 模糊规模（如"预计 4-6 卷"）
 	LastUpdated     int      `json:"last_updated,omitempty"`    // 更新时的已完成章节数
 }
@@ -60,10 +62,11 @@ type StoryCompass struct {
 // 这里手动读取字段，再把 string / []any / []string 三种形态都归一为 []string。
 func (c *StoryCompass) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		EndingDirection string `json:"ending_direction"`
-		OpenThreadsRaw  any    `json:"open_threads"`
-		EstimatedScale  string `json:"estimated_scale"`
-		LastUpdated     int    `json:"last_updated"`
+		EndingDirection   string `json:"ending_direction"`
+		OpenThreadsRaw    any    `json:"open_threads"`
+		NonNegotiablesRaw any    `json:"non_negotiables"`
+		EstimatedScale    string `json:"estimated_scale"`
+		LastUpdated       int    `json:"last_updated"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("compass unmarshal: %w", err)
@@ -71,12 +74,18 @@ func (c *StoryCompass) UnmarshalJSON(data []byte) error {
 	c.EndingDirection = raw.EndingDirection
 	c.EstimatedScale = raw.EstimatedScale
 	c.LastUpdated = raw.LastUpdated
-	switch v := raw.OpenThreadsRaw.(type) {
+	c.OpenThreads = normalizeCompassStringList(raw.OpenThreadsRaw)
+	c.NonNegotiables = normalizeCompassStringList(raw.NonNegotiablesRaw)
+	return nil
+}
+
+func normalizeCompassStringList(value any) []string {
+	switch v := value.(type) {
 	case nil:
-		c.OpenThreads = nil
+		return nil
 	case string:
 		if v != "" {
-			c.OpenThreads = []string{v}
+			return []string{v}
 		}
 	case []any:
 		out := make([]string, 0, len(v))
@@ -85,20 +94,41 @@ func (c *StoryCompass) UnmarshalJSON(data []byte) error {
 				out = append(out, s)
 			}
 		}
-		c.OpenThreads = out
+		return out
 	case []string:
-		c.OpenThreads = v
+		return v
 	}
 	return nil
 }
 
 // ArcOutline 弧级大纲。
 type ArcOutline struct {
-	Index             int            `json:"index"` // 卷内弧序号
-	Title             string         `json:"title"`
-	Goal              string         `json:"goal"`                         // 弧目标（起承转合）
-	EstimatedChapters int            `json:"estimated_chapters,omitempty"` // 骨架弧的预估章数（展开后清零）
-	Chapters          []OutlineEntry `json:"chapters"`
+	Index             int                `json:"index"` // 卷内弧序号
+	Title             string             `json:"title"`
+	Goal              string             `json:"goal"`                         // 弧目标（起承转合）
+	EstimatedChapters int                `json:"estimated_chapters,omitempty"` // 骨架弧的预估章数（展开后清零）
+	Chapters          []OutlineEntry     `json:"chapters"`
+	ContractRefs      []StoryContractRef `json:"contract_refs,omitempty"`
+}
+
+// StoryContractRef is a structural receipt, not prose. Architect binds a
+// compass obligation to one planned payoff chapter without copying the source
+// sentence into title/core_event/hook.
+type StoryContractRef struct {
+	ID                   string `json:"id"`
+	Kind                 string `json:"kind"`
+	SourceDigest         string `json:"source_digest"`
+	PlannedPayoffChapter int    `json:"planned_payoff_chapter"`
+	PlannedResolution    string `json:"planned_resolution,omitempty"`
+}
+
+// ArcContractAssignment is the only payload accepted by outline-all's
+// map_contracts mutation. It changes structural payoff receipts, never story
+// text, reservations, or chapter numbering.
+type ArcContractAssignment struct {
+	Volume       int                `json:"volume"`
+	Arc          int                `json:"arc"`
+	ContractRefs []StoryContractRef `json:"contract_refs,omitempty"`
 }
 
 // IsExpanded 判断弧是否已展开（有详细章节）。

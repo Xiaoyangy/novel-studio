@@ -2,13 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
@@ -34,6 +37,8 @@ func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
 		"drafts/01.zero_init.plan.json",
 		"meta/ch01_zero_init_plan.md",
 		"meta/first_chapter_generation_readiness.md",
+		"meta/story_time_contract.json",
+		"meta/story_calendar.json",
 	}
 	for _, rel := range required {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
@@ -127,6 +132,95 @@ func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
 	}
 	if strings.Contains(string(worldData), "白骨财神") || strings.Contains(string(worldData), "江禾") {
 		t.Fatalf("zero-init book_world should not promote future characters as first-chapter pressure: %s", string(worldData))
+	}
+}
+
+func TestZeroInitDerives420ChapterStoryTimeContractAndCalendar(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+	compass, err := st.Outline.LoadCompass()
+	if err != nil || compass == nil {
+		t.Fatalf("LoadCompass: %+v err=%v", compass, err)
+	}
+	compass.EstimatedScale = "预计100-130万字，约8-10卷，360-480章；主线时间跨度约3年半到4年"
+	if err := st.Outline.SaveCompass(*compass); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Title: "全书最终规划",
+		Arcs: []domain.ArcOutline{{
+			Index:             1,
+			Title:             "全书章位合同",
+			Goal:              "测试最终目标总章数",
+			EstimatedChapters: 420,
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	architectReadiness := assessArchitectReadiness(dir)
+	if !architectReadiness.Ready {
+		t.Fatalf("architect readiness after final outline: missing=%v issues=%v", architectReadiness.Missing, architectReadiness.Issues)
+	}
+	if err := writeArchitectReadiness(dir, architectReadiness); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := zeroInitPipeline(cliOptions{}, []string{"--dir", dir, "--rebuild-rag=false"}); err != nil {
+		t.Fatalf("zeroInitPipeline: %v", err)
+	}
+	contract, err := st.WorldSim.LoadStoryTimeContract()
+	if err != nil || contract == nil {
+		t.Fatalf("LoadStoryTimeContract: %+v err=%v", contract, err)
+	}
+	wantNominal := 3.75 * domain.StoryDaysPerYear / 420
+	if contract.TargetChapters != 420 || math.Abs(contract.NominalDaysPerChapter-wantNominal) > 1e-9 {
+		t.Fatalf("contract = %+v want target=420 nominal=%.9f", contract, wantNominal)
+	}
+	calendar, err := st.WorldSim.LoadStoryCalendar()
+	if err != nil || calendar == nil || math.Abs(calendar.DaysPerChapter-wantNominal) > 1e-9 {
+		t.Fatalf("calendar must derive nominal from contract: %+v err=%v", calendar, err)
+	}
+	readiness := assessZeroInitReadiness(dir, zeroInitRAGStats{})
+	if !readiness.Ready || !readiness.StoryTime.Validated || !readiness.StoryTime.CalendarSynced ||
+		readiness.StoryTime.TargetChapters != 420 || readiness.StoryTime.CoreDigest == "" ||
+		readiness.StoryTime.ScheduleDigest == "" {
+		t.Fatalf("readiness must carry validated story-time evidence: %+v", readiness)
+	}
+}
+
+func TestZeroInitPipelinePreservesFoundationExecutionLock(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	if err := activatePipelineSealedTwoPassModeAtOutput(dir); err != nil {
+		t.Fatalf("activate sealed mode: %v", err)
+	}
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const owner = "zero-init-lock-regression"
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionFoundation,
+		TargetChapter: 1,
+		Owner:         owner,
+	}); err != nil {
+		t.Fatalf("acquire foundation lock: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Runtime.ReleasePipelineExecution(owner) })
+
+	if err := zeroInitPipeline(cliOptions{}, []string{
+		"--dir", dir,
+		"--reset-simulation-state",
+		"--rebuild-rag=false",
+	}); err != nil {
+		t.Fatalf("zeroInitPipeline: %v", err)
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil {
+		t.Fatalf("load foundation lock after zero-init: %v", err)
+	}
+	if lock == nil || lock.Owner != owner || lock.Mode != domain.PipelineExecutionFoundation {
+		t.Fatalf("zero-init removed or replaced foundation lock: %+v", lock)
 	}
 }
 
@@ -521,6 +615,250 @@ func TestZeroInitialCharactersKeepsLeadsAndProtagonistGroupSeparate(t *testing.T
 		if !seen[name] {
 			t.Fatalf("expected %s in initial characters, got %+v", name, got)
 		}
+	}
+}
+
+func TestZeroInitialCharactersIncludesSecondaryActorReservedByFutureOutline(t *testing.T) {
+	project := zeroInitProject{
+		Characters: []domain.Character{
+			{Name: "林澈", Role: "主角", Tier: "core"},
+			{Name: "罗成海", Role: "公开部门配角", Tier: "secondary"},
+			{Name: "路人甲", Role: "临时路人", Tier: "secondary"},
+		},
+		FirstMentions: map[string]int{
+			"林澈":  1,
+			"罗成海": 12,
+		},
+	}
+	got := zeroInitialCharacters(project)
+	var names []string
+	for _, character := range got {
+		names = append(names, character.Name)
+	}
+	if !slices.Contains(names, "罗成海") {
+		t.Fatalf("future outline actor was omitted from zero-chapter dynamics: %v", names)
+	}
+	if slices.Contains(names, "路人甲") {
+		t.Fatalf("unreserved secondary actor should not inflate the simulation seed: %v", names)
+	}
+}
+
+func TestPipelineZeroInitRefreshesFutureActorMissingBehindReadyReceipt(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+
+	characters, err := st.Characters.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	characters = append(characters, domain.Character{
+		Name:        "罗成海",
+		Role:        "公开部门配角",
+		Description: "负责核验后续公开记录的基层工作人员。",
+		Arc:         "从按表办事到愿意留下可复核证据。",
+		Traits:      []string{"谨慎", "守流程"},
+		Tier:        "secondary",
+		Psych:       zeroInitTestPsych("审慎"),
+	})
+	if err := st.Characters.Save(characters); err != nil {
+		t.Fatal(err)
+	}
+	outline, err := st.Outline.LoadOutline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outline = append(outline, domain.OutlineEntry{
+		Chapter:   2,
+		Title:     "公开记录",
+		CoreEvent: "罗成海按流程核验公开记录，并给江烬留下一条可复核回执。",
+		Hook:      "回执编号指向另一份欠费单。",
+		Scenes:    []string{"公开窗口"},
+	})
+	if err := st.Outline.SaveOutline(outline); err != nil {
+		t.Fatal(err)
+	}
+	architect := assessArchitectReadiness(dir)
+	if !architect.Ready {
+		t.Fatalf("expanded fixture architect readiness: missing=%v issues=%v", architect.Missing, architect.Issues)
+	}
+	if err := writeArchitectReadiness(dir, architect); err != nil {
+		t.Fatal(err)
+	}
+	if err := zeroInitPipeline(cliOptions{}, []string{
+		"--dir", dir,
+		"--reset-simulation-state",
+		"--rebuild-rag=false",
+	}); err != nil {
+		t.Fatalf("seed zero-init: %v", err)
+	}
+	if ok, reason := pipelineCurrentZeroInitReadinessState(dir); !ok {
+		t.Fatalf("fresh zero-init rejected: %s", reason)
+	}
+
+	dynamicsPath := filepath.Join(dir, "meta", "initial_character_dynamics.json")
+	data, err := os.ReadFile(dynamicsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dynamics zeroInitCharacterDynamicsDoc
+	if err := json.Unmarshal(data, &dynamics); err != nil {
+		t.Fatal(err)
+	}
+	dynamics.Characters = slices.DeleteFunc(dynamics.Characters, func(state domain.CharacterSimulationState) bool {
+		return state.Character == "罗成海"
+	})
+	dynamics.VoiceLogic = slices.DeleteFunc(dynamics.VoiceLogic, func(voice domain.CharacterVoiceLogic) bool {
+		return voice.Character == "罗成海"
+	})
+	data, err = json.MarshalIndent(dynamics, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dynamicsPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// This reproduces the production regression: the durable receipt and its
+	// foundation timestamps are still valid, but the newly required actor is
+	// absent from the already-generated dynamics.
+	if ok, reason := tools.ZeroInitReadinessState(dir); !ok {
+		t.Fatalf("fixture must retain the old ready receipt: %s", reason)
+	}
+	if ok, reason := pipelineCurrentZeroInitReadinessState(dir); ok || !strings.Contains(reason, "罗成海") {
+		t.Fatalf("current semantic coverage did not invalidate stale dynamics: ok=%v reason=%q", ok, reason)
+	}
+
+	args := append(pipelineZeroInitRegenerationArgs(dir), "--rebuild-rag=false")
+	if !slices.Contains(args, "--overwrite") {
+		t.Fatalf("chapter-zero regeneration must overwrite derived zero-init assets: %v", args)
+	}
+	if err := zeroInitPipeline(cliOptions{}, args); err != nil {
+		t.Fatalf("regenerate zero-init: %v", err)
+	}
+	if ok, reason := pipelineCurrentZeroInitReadinessState(dir); !ok {
+		t.Fatalf("regenerated zero-init rejected: %s", reason)
+	}
+	data, err = os.ReadFile(dynamicsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &dynamics); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(dynamics.Characters, func(state domain.CharacterSimulationState) bool {
+		return state.Character == "罗成海"
+	}) {
+		t.Fatalf("future actor still missing after chapter-zero regeneration: %+v", dynamics.Characters)
+	}
+}
+
+func TestPipelineZeroInitDoesNotRewritePublishedProject(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+	if err := st.Progress.Init("已出版测试书", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "第一章已经出版。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 8, "published", "main"); err != nil {
+		t.Fatal(err)
+	}
+	dynamicsPath := filepath.Join(dir, "meta", "initial_character_dynamics.json")
+	const publishedDynamics = `{"published_history":"must-not-be-rewritten"}`
+	if err := os.MkdirAll(filepath.Dir(dynamicsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dynamicsPath, []byte(publishedDynamics), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runRoot := filepath.Dir(filepath.Dir(dir))
+	configPath := filepath.Join(runRoot, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "provider": "ollama",
+  "model": "zero-init-published-test",
+  "providers": {
+    "ollama": {
+      "type": "openai",
+      "base_url": "http://127.0.0.1:11434/v1"
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineZeroInit(
+		cliOptions{ConfigPath: configPath, Dir: runRoot},
+		pipelineFlags{},
+		&domain.PipelineState{},
+	); err != nil {
+		t.Fatalf("published zero-init stage: %v", err)
+	}
+	data, err := os.ReadFile(dynamicsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != publishedDynamics {
+		t.Fatalf("published initial dynamics changed: got=%q want=%q", data, publishedDynamics)
+	}
+}
+
+func TestZeroWorldSimDoesNotRewritePublishedStoryTimeArtifacts(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+	if err := st.Progress.Init("已出版时间合同测试", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, "第一章已经出版。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 8, "published", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WorldSim.SaveStoryTimeContract(domain.StoryTimeContract{
+		Source:                domain.StoryTimeSourceExplicit,
+		TargetChapters:        2,
+		DurationDaysMin:       5,
+		DurationDaysMax:       7,
+		NominalDaysPerChapter: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WorldSim.SaveStoryCalendar(domain.StoryCalendar{
+		Era:            "出版后纪年不得改",
+		DaysPerChapter: 1.25,
+		Notes:          []string{"出版正文使用的既有时间轴"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contractPath := filepath.Join(dir, "meta", "story_time_contract.json")
+	calendarPath := filepath.Join(dir, "meta", "story_calendar.json")
+	beforeContract, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCalendar, err := os.ReadFile(calendarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := loadZeroInitProject(st, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeZeroWorldSimAssets(dir, project, true); err != nil {
+		t.Fatalf("writeZeroWorldSimAssets: %v", err)
+	}
+	afterContract, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterCalendar, err := os.ReadFile(calendarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterContract) != string(beforeContract) || string(afterCalendar) != string(beforeCalendar) {
+		t.Fatalf("published time artifacts changed:\ncontract before=%s after=%s\ncalendar before=%s after=%s",
+			beforeContract, afterContract, beforeCalendar, afterCalendar)
 	}
 }
 

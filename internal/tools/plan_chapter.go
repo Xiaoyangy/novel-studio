@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
@@ -29,7 +30,7 @@ func NewPlanChapterTool(store *store.Store) *PlanChapterTool {
 
 func (t *PlanChapterTool) Name() string { return "plan_chapter" }
 func (t *PlanChapterTool) Description() string {
-	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、文学渲染镜头合同、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、读者留存筛选、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；计划是素材池与边界，不是正文清单，必须明确哪些只留台账、哪些延后揭示、哪些压缩不写；文学渲染只选择本章真正有功能的卡并保留 source_refs，不得做成固定次数或九项全填；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
+	return "保存章节写作构思。必须基于 novel_context 的 simulation_restart_policy、world_foundation、character_dossiers、current_chapter_outline、future_outline_window、progression_snapshot.next_plan、project_progress、character_continuity、character_stage_records、chapter_world_deltas、resource_audit、writing_engine、user_rules、reference_pack.references、prewrite_storycraft_plan、RAG trace、web_reference_brief 和必要的网络检索推导本章任务；novel_context 若返回 planning_context_access_receipt，必须把 source_token 放入 causal_simulation.context_sources，且 token 本身不能替代服务端回执。若存在推演重启策略，旧章节/旧资源/旧人物经历只能当背景种子，不能作为新 canon 事实。causal_simulation 只能补充角色/世界因果推演、人物 voice_logic、dialogue_scene_blueprints、文学渲染镜头合同、写作规范执行、人物弧测试、情感逻辑、关系/恋爱情感弧、视觉设计、读者奖励阶梯、读者留存筛选、证据回收链、章末后果契约、休眠角色策略、现实支撑计划、外部资料转化、热梗使用预算、全角色同时间线行动和审核失败后的 review_refinement，不能替代原章节契约、大纲和进度台账；计划是素材池与边界，不是正文清单，必须明确哪些只留台账、哪些延后揭示、哪些压缩不写；文学渲染只选择本章真正有功能的卡并保留 source_refs，不得做成固定次数或九项全填；禁止凭空开章。Agent 自主决定规划粒度，不强制场景拆分"
 }
 func (t *PlanChapterTool) Label() string { return "规划章节" }
 
@@ -208,7 +209,7 @@ func ensureChapterPlannable(s *store.Store, chapter int) (skipped json.RawMessag
 // finalizeChapterPlan 完整校验并落盘章节计划：写 plan 文件、置章节 in_progress、
 // 记 checkpoint、透出事件编织冲突。plan_chapter 单发与 plan_details finalize 共用。
 func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan bool) (json.RawMessage, error) {
-	applyOutlineAnchorsToPlan(s, &plan)
+	applyOutlineAnchorsToPlan(s, &plan, isRewritePlan)
 	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
 		return nil, err
 	}
@@ -220,6 +221,15 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 	}
 	normalizeRewriteBriefRefinement(s, &plan)
 	normalizeChapterAttractionPlan(s, &plan)
+	if err := validateProjectAllRevealBudget(s, plan); err != nil {
+		return nil, err
+	}
+	if err := validateProjectAllRenderCapacity(s, plan); err != nil {
+		return nil, err
+	}
+	if err := validateProjectAllArcTransition(s, plan); err != nil {
+		return nil, err
+	}
 	plan.Contract.RequiredBeats = compactStrings(plan.Contract.RequiredBeats)
 	if len(plan.Contract.RequiredBeats) > 4 {
 		return nil, fmt.Errorf("第 %d 章 required_beats=%d，正文显性结果最多 4 项；请把同一选择、兑现或关系变化合并，离屏角色决定留在 causal_simulation: %w",
@@ -251,6 +261,18 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 			plan.Chapter, strings.Join(hardIssues, "\n- "), errs.ErrToolPrecondition)
 	}
 
+	if err := consumePlanningContextAccessReceipt(
+		s,
+		plan.Chapter,
+		domain.PlanningContextAccessPlan,
+		plan.CausalSimulation.ContextSources,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"第 %d 章 plan finalize 缺少本轮成功 novel_context(planning) 的服务端访问证明: %w",
+			plan.Chapter,
+			err,
+		)
+	}
 	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
 		return nil, fmt.Errorf("save chapter plan: %w", err)
 	}
@@ -292,6 +314,96 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 		}
 	}
 	return json.Marshal(result)
+}
+
+func validateProjectAllRevealBudget(s *store.Store, plan domain.ChapterPlan) error {
+	if s == nil {
+		return nil
+	}
+	lock, err := s.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return err
+	}
+	if lock == nil || lock.Mode != domain.PipelineExecutionProjectAll {
+		return nil
+	}
+	if err := requireCurrentPipelineExecutionProcess(lock, "plan finalize"); err != nil {
+		return err
+	}
+	for i, item := range compactStrings(plan.CausalSimulation.ReaderRetentionPlan.RevealBudget) {
+		if !projectAllRevealBudgetItemMechanicallyEnforceable(item) {
+			return fmt.Errorf(
+				"第 %d 章 reveal_budget[%d]=%q 不是可机械执行的禁揭事实；每个分句都必须改写为“不揭示 X / 不解释 Y / 不提前给出 Z”，且 X/Y/Z 至少包含 4 个有效字符: %w",
+				plan.Chapter,
+				i,
+				item,
+				errs.ErrToolPrecondition,
+			)
+		}
+	}
+	return nil
+}
+
+func validateProjectAllArcTransition(s *store.Store, plan domain.ChapterPlan) error {
+	if s == nil {
+		return nil
+	}
+	lock, err := s.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return err
+	}
+	if lock == nil || lock.Mode != domain.PipelineExecutionProjectAll {
+		return nil
+	}
+	if err := requireCurrentPipelineExecutionProcess(lock, "plan arc transition finalize"); err != nil {
+		return err
+	}
+	context, _, err := loadProjectAllStateForExecution(s, plan.Chapter)
+	if err != nil {
+		return err
+	}
+	if context == nil {
+		return fmt.Errorf("第 %d 章 project-all 缺少 authoritative planning context，无法校验弧内承接: %w", plan.Chapter, errs.ErrToolPrecondition)
+	}
+	if err := domain.ValidateArcChapterTransitionContract(plan, context.PredecessorContract); err != nil {
+		return fmt.Errorf("第 %d 章 project-all arc_transition_contract 不可封存：%v: %w", plan.Chapter, err, errs.ErrToolPrecondition)
+	}
+	return nil
+}
+
+func projectAllRevealBudgetItemMechanicallyEnforceable(item string) bool {
+	clauses := strings.FieldsFunc(item, func(r rune) bool {
+		switch r {
+		case '\n', '\r', '。', '；', '，', ',', ';':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(clauses) == 0 {
+		return false
+	}
+	markers := []string{
+		"不提前给出", "不提前揭示", "不提前", "不解释", "不揭示",
+		"不说明", "不公开", "不点破", "不交代", "不写成", "不写",
+		"不允许", "不得", "禁止", "不可", "不能", "不要", "避免",
+		"尚未", "仍未", "未曾",
+	}
+	for _, clause := range clauses {
+		clause = strings.TrimSpace(clause)
+		probe, found := clause, false
+		for _, marker := range markers {
+			if index := strings.Index(clause, marker); index >= 0 {
+				probe = strings.TrimSpace(clause[:index] + clause[index+len(marker):])
+				found = true
+				break
+			}
+		}
+		if !found || utf8.RuneCountInString(strings.TrimSpace(probe)) < 4 {
+			return false
+		}
+	}
+	return true
 }
 
 func applyRewriteAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) error {
@@ -364,7 +476,7 @@ func sanitizeProjectDiagnosticListForPlan(s *store.Store, items []string) []stri
 	return sanitized
 }
 
-func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
+func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan, rewrite bool) {
 	if s == nil || plan == nil || plan.Chapter <= 0 {
 		return
 	}
@@ -375,6 +487,12 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
 	if title := strings.TrimSpace(entry.Title); title != "" {
 		plan.Title = title
 	}
+	// The rewrite structure is bound to the current committed body, rewrite
+	// brief and finalized world simulation. Preserve its corrected goal/hook;
+	// only the stable chapter title may come from an older outline entry.
+	if rewrite {
+		return
+	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		plan.Goal = "完整兑现本章大纲核心事件：" + event
 	}
@@ -384,6 +502,40 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan) {
 	}
 	if hook := strings.TrimSpace(entry.Hook); hook != "" {
 		plan.Hook = hook
+	}
+	applyProjectAllOutlineObligations(plan, entry.Scenes)
+}
+
+func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string) {
+	if plan == nil {
+		return
+	}
+	var hard []string
+	var simulationOnly []string
+	for _, scene := range scenes {
+		scene = strings.TrimSpace(scene)
+		switch {
+		case strings.HasPrefix(scene, "[project-all hard-obligation:"):
+			hard = appendUniqueString(hard, scene)
+		case strings.HasPrefix(scene, "[project-all simulation-obligation:"):
+			simulationOnly = appendUniqueString(simulationOnly, scene)
+		}
+	}
+	if len(hard) > 0 {
+		// One composite beat preserves the global 2-4 result-level beat budget
+		// while making every prior sealed promise an exact render obligation.
+		plan.Contract.RequiredBeats = appendUniqueString(
+			plan.Contract.RequiredBeats,
+			"跨章封版义务（不可遗漏）："+strings.Join(hard, "；"),
+		)
+	}
+	if len(simulationOnly) > 0 {
+		// Hidden/offscreen obligations constrain continuity but must not be
+		// promoted into visible POV beats before their evidence path arrives.
+		plan.Contract.ContinuityChecks = appendUniqueString(
+			plan.Contract.ContinuityChecks,
+			"跨章场外义务（只推进世界状态，不得越过 POV 知识边界）："+strings.Join(simulationOnly, "；"),
+		)
 	}
 }
 
@@ -1449,6 +1601,33 @@ func causalSimulationSchema(strict bool) map[string]any {
 	return focusedCausalSimulationSchema()
 }
 
+func renderCapacitySchema() map[string]any {
+	sceneUnit := schema.Object(
+		schema.Property("scene_id", schema.String("场景单元稳定标识；同章不得重复")).Required(),
+		schema.Property("target_runes", schema.Int("该场景的自然承载目标字数，必须300-1400；是容量估算，不是段落硬配额")).Required(),
+		schema.Property("pov_objective", schema.String("POV 人物在此场当下要拿到的具体结果")).Required(),
+		schema.Property("active_opposition", schema.String("正在现场阻止目标的人、制度、关系、时间或物理阻力")).Required(),
+		schema.Property("turn", schema.String("由台词、动作、证据或代价引发的场景转折")).Required(),
+		schema.Property("exit_consequence", schema.String("离开此场时已发生、会推动下一场的具体后果")).Required(),
+		schema.Property("concrete_action_beats", schema.Array("至少3个可在页面上看见的独立动作拍或现场证据；不写心情标签、抽象目标或同义反复", schema.String("具体行动/现场证据"))).Required(),
+	)
+	return schema.Object(
+		schema.Property("total_target_runes", schema.Int("必须等于全部 scene_units.target_runes 之和，且落入 user_rules.chapter_words 闭区间")).Required(),
+		schema.Property("scene_units", schema.Array("3-6个能够自然支撑本章字数的场景单元；不得用重复解释或空对话凑数", sceneUnit)).Required(),
+		schema.Property("anti_padding_policy", schema.String("反注水政策：明确哪些流程压缩/离屏，字数不足时只加深选择、阻力、可见后果和人物反应，禁止重复心理、同义对话、解释台账或新增无因果场景")).Required(),
+	)
+}
+
+func arcTransitionContractSchema() map[string]any {
+	return schema.Object(
+		schema.Property("incoming_consequence_id", schema.String("仅弧内非首章填写：逐字复制 project_all_state.predecessor_contract.outgoing_consequence_id；弧首章留空")),
+		schema.Property("incoming_consequence_text", schema.String("仅弧内非首章填写：逐字复制 project_all_state.predecessor_contract.outgoing_consequence_text；不得概括或改写")),
+		schema.Property("consumed_by_cause", schema.String("仅弧内非首章填写：本章 causal_beats 中实际消费上一章后果的 cause，必须与某一 causal_beats[].cause 逐字相同")),
+		schema.Property("outgoing_consequence_id", schema.String("project-all 每章必填且弧内唯一的稳定后果 ID；不能复用上一章 ID")).Required(),
+		schema.Property("outgoing_consequence_text", schema.String("project-all 每章必填：本章结束后已经发生、会约束下一章选择的具体后果；不得拿 goal/hook 代替")).Required(),
+	)
+}
+
 func focusedCausalSimulationSchema() map[string]any {
 	initialState := schema.Object(
 		schema.Property("character", schema.String("角色实名")).Required(),
@@ -1562,7 +1741,7 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("serial_engine", schema.String("支撑长篇连载的升级发动机")).Required(),
 		schema.Property("reader_reward_loop", schema.Array("反复兑现的奖励类型", schema.String(""))).Required(),
 		schema.Property("long_range_promises", schema.Array("长线承诺与回收周期", longRangePromise)).Required(),
-		schema.Property("reveal_budget", schema.Array("第一章克制不解释的内容", schema.String(""))).Required(),
+		schema.Property("reveal_budget", schema.Array("第一章禁揭事实；每项及每个分句都写成“不揭示 X / 不解释 Y / 不提前给出 Z”，X/Y/Z 至少 4 个有效字符", schema.String(""))).Required(),
 		schema.Property("first_chapter_proof", schema.Array("第一章证明连载可持续的页面证据", schema.String(""))).Required(),
 		schema.Property("retention_risks", schema.Array("第一章流失风险与规避动作", schema.String(""))).Required(),
 	)
@@ -1584,7 +1763,7 @@ func focusedCausalSimulationSchema() map[string]any {
 	retentionPlan := schema.Object(
 		schema.Property("surface_beats", schema.Array("2-4 个正文候选节拍；只选足以完成 required_beats 的最少部分", retentionBeat)).Required(),
 		schema.Property("latent_context", schema.Array("只留后台的上下文", schema.String(""))),
-		schema.Property("reveal_budget", schema.Array("延后解释的内容", schema.String(""))),
+		schema.Property("reveal_budget", schema.Array("延后解释的禁揭事实；每个分句都用明确否定式点名被禁事实", schema.String(""))),
 		schema.Property("cut_or_compress", schema.Array("删除或压缩内容", schema.String(""))).Required(),
 		schema.Property("page_turn_questions", schema.Array("带入下一章的问题", schema.String(""))).Required(),
 	)
@@ -1611,7 +1790,7 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺")),
 		schema.Property("chapter_function", schema.String("本章在全书中的功能")),
-		schema.Property("context_sources", schema.Array("本次实际使用的上下文来源；存在 chapter_pipeline_instruction 时必须绑定其 source_token", schema.String(""))),
+		schema.Property("context_sources", schema.Array("本次实际使用的上下文来源；存在 chapter_pipeline_instruction 或 planning_context_access_receipt 时必须绑定其 source_token", schema.String(""))),
 		schema.Property("initial_state", schema.Array("最多2项：主角，必要时加当章关系核心", initialState)),
 		schema.Property("offscreen_character_stage", schema.Array("仅写本章相关人物；非本章角色不必填", offscreenStage)),
 		schema.Property("environment_state", schema.Array("现场环境和物件状态", environmentState)),
@@ -1628,6 +1807,8 @@ func focusedCausalSimulationSchema() map[string]any {
 		schema.Property("longform_opening", longformOpening),
 		schema.Property("reader_reward_plan", rewardPlan),
 		schema.Property("reader_retention_plan", retentionPlan),
+		schema.Property("render_capacity", renderCapacitySchema()),
+		schema.Property("arc_transition_contract", arcTransitionContractSchema()),
 		schema.Property("ending_consequence_contract", endingContract),
 		schema.Property("review_refinement", reviewRefinement),
 		schema.Property("world_rules_in_force", schema.Array("本章实际施压的规则", schema.String(""))),
@@ -1863,7 +2044,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 	externalReferencePlan := schema.Object(
 		schema.Property("query_or_need", schema.String("本章需要的外部资料、行业流程、当代生活细节或网络语境；没有使用时说明不用的理由")).Required(),
 		schema.Property("source_type", schema.String("资料类型。普通资料可写 web_search、official、news、platform_trend、project_web_reference_brief、RAG、local_reference；消费 rewrite_craft_pack 时只能写 canonical 值：calibration_reference/craft_technique 命中写 craft_recall，benchmark_reference 命中写 benchmark_craft_recall，禁止照抄 source_kind")).Required(),
-		schema.Property("source_refs", schema.Array("来源链接、检索词、reference_pack 路径或 RAG trace id；消费 rewrite_craft_pack 时每个 need.id 恰好一行，并把该 need 采用的精确 hit.ref 全部合入本数组", schema.String(""))).Required(),
+		schema.Property("source_refs", schema.Array("来源链接、检索词、reference_pack 路径或精确 RAG receipt hit.ref；普通事实必须使用 rag_fact_receipt.hits.ref 并填写本章化 usable_details/transformation_rule/do_not_use，不能只挂 ref；消费 rewrite_craft_pack 时每个 need.id 恰好一行，并把该 need 采用的精确 hit.ref 全部合入本数组", schema.String(""))).Required(),
 		schema.Property("retrieved_at", schema.String("检索或简报日期；没有实时检索时写项目简报日期/未知并说明需要刷新")).Required(),
 		schema.Property("freshness_requirement", schema.String("时效要求：最新/近90天/年度盘点/稳定常识/无需最新，并说明原因")).Required(),
 		schema.Property("usable_details", schema.Array("可转化成正文的细节：物件、界面、流程、口语、空间、价格、制度压力", schema.String(""))).Required(),
@@ -1933,7 +2114,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("serial_engine", schema.String("能支撑百万字连续推进的发动机：资源/敌人/地图/规则/关系如何不断升级")),
 		schema.Property("reader_reward_loop", schema.Array("读者在3章、10章、30章、每卷会反复获得的奖励类型", schema.String(""))),
 		schema.Property("long_range_promises", schema.Array("第一章必须埋下的长线承诺及回收周期", longRangePromise)),
-		schema.Property("reveal_budget", schema.Array("第一章必须克制不解释的内容，只露证据或问题，不提前给答案", schema.String(""))),
+		schema.Property("reveal_budget", schema.Array("第一章必须克制的禁揭事实；每个分句都写成“不揭示 X / 不解释 Y / 不提前给出 Z”，禁止混入正向口号", schema.String(""))),
 		schema.Property("first_chapter_proof", schema.Array("第一章证明百万字设计可持续的证据：主角方法、世界扩展口、长期敌人/账单/资产/关系线等", schema.String(""))),
 		schema.Property("retention_risks", schema.Array("第一章最容易导致读者流失的风险和规避方式", schema.String(""))),
 	)
@@ -1974,7 +2155,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 	readerRetentionPlan := schema.Object(
 		schema.Property("surface_beats", schema.Array("从全量计划中筛出的 2-4 个页面候选节拍；Drafter 只选足以完成 required_beats 的最少部分，禁止全部照抄", retentionSurfaceBeat)).Required(),
 		schema.Property("latent_context", schema.Array("只留在台账/角色逻辑里的内容：可约束行为，但本章不显性解释、不让旁白摊开", schema.String(""))).Required(),
-		schema.Property("reveal_budget", schema.Array("本章必须延后、只露半截或只通过证据暗示的信息；避免把大纲答案一次讲完", schema.String(""))).Required(),
+		schema.Property("reveal_budget", schema.Array("本章必须延后的禁揭事实；每个分句都用“不揭示 X / 不解释 Y / 不提前给出 Z”点名禁区，避免把大纲答案一次讲完", schema.String(""))).Required(),
 		schema.Property("cut_or_compress", schema.Array("若正文出现会变成结构化清单、说明书或 AI 味的计划材料；应删除、合并进动作或压成半句", schema.String(""))).Required(),
 		schema.Property("page_turn_questions", schema.Array("读者读完本章会想继续看的具体问题；必须落到人/物/代价/选择，不写抽象金句", schema.String(""))).Required(),
 	)
@@ -2199,7 +2380,7 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		schema.Property("protagonist_decision", schema.String("全角色世界模拟投影出的主角选择，必须原样引用")),
 		schema.Property("project_promise", schema.String("本章承接的整本书核心承诺，例如女性夺回解释权、可见事实回收、升级爽点等")),
 		schema.Property("chapter_function", schema.String("本章在全书/卷/弧中的功能；第一章必须写明开局承诺、核心问题和主角初始选择")),
-		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；存在 chapter_pipeline_instruction 时必须绑定其 source_token；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
+		schema.Property("context_sources", schema.Array("本次推演实际使用的上下文来源；存在 chapter_pipeline_instruction 或 planning_context_access_receipt 时必须绑定其 source_token；若存在重启策略必须列出 simulation_restart_policy，并至少列出 world_foundation、character_dossiers、current_chapter_outline、future_outline_window、chapter_contract/progression_snapshot、characters、world_rules/book_world、recent_summaries/previous_tail、character_continuity/character_stage_records/chapter_world_deltas、resource_audit/foreshadow/relationship_state、prewrite_storycraft_plan、user_rules/writing_engine、reference_pack.references、selected_memory.rag_recall、web_reference_brief/web_search 中实际可见的项", schema.String(""))),
 		req(schema.Property("writing_norms_applied", schema.Array("本章写作规范执行计划：必须覆盖 writing_engine/user_rules/anti_ai_tone/human_feel_craft/writing_techniques_digest/web_reference_guidelines/longform_ai_detector 中实际可见且相关的规则", writingNormApplication))),
 		req(schema.Property("anti_ai_execution_plan", antiAIExecutionPlan)),
 		req(schema.Property("external_reference_plan", schema.Array("外部资料、网络检索、项目 web_reference_brief 和 RAG 召回如何进入正文；不用网络资料也要说明不用原因", externalReferencePlan))),
@@ -2211,6 +2392,8 @@ func legacyCausalSimulationSchema(strict bool) map[string]any {
 		req(schema.Property("character_arc_tests", schema.Array("人物 Want/Lie/Need/Truth、本章合理犯错和纠错触发；主角必须覆盖，关键配角按章节压力覆盖", characterArcTest))),
 		req(schema.Property("reader_reward_plan", readerRewardPlan)),
 		req(schema.Property("reader_retention_plan", readerRetentionPlan)),
+		schema.Property("render_capacity", renderCapacitySchema()),
+		schema.Property("arc_transition_contract", arcTransitionContractSchema()),
 		req(schema.Property("evidence_return_chains", schema.Array("主角视角外事件如何以证据回到主线，保证梗、伏笔和配角线可回收", evidenceReturnChain))),
 		req(schema.Property("ending_consequence_contract", endingContract)),
 		req(schema.Property("dormant_character_policy", schema.Array("未出场/休眠/暂不推进角色的最小状态和后续检查；没有休眠角色也要写 none 占位", dormantPolicy))),

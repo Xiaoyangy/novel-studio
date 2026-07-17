@@ -15,9 +15,9 @@
 
 ## 当前青山县运行快照（2026-07-16）
 
-第一章 active candidate 是实际文件 `drafts/01.draft.md`，SHA-256 为 `c2c1c36243c086a296aec6d8ca5eef7c35e6072f6b33087f1bd87f9307587a0f`。该同稿在运行时 edit gate 中得到 `raw_local_gate_percent=2.54%`，当前 Python 审计入口独立复算为 `2.75%`，两者都严格 `<4%`；DeepSeek 裸正文结果为 `human_like / low / 2%`、`blocking=false`。自动 AIGC 门禁已经通过，可继续为当前 SHA 生成 exact-body hard consistency receipt，随后 commit。
+第一章活动候选是实际文件 `drafts/01.draft.md`，SHA-256 为 `c2c1c36243c086a296aec6d8ca5eef7c35e6072f6b33087f1bd87f9307587a0f`。该同稿在运行时 edit gate 中得到 `raw_local_gate_percent=2.54%`，当前 Python 审计入口独立复算为 `2.75%`，两者都严格 `<4%`；DeepSeek 裸正文结果为 `human_like / low / 2%`、`blocking=false`。这些自动证据仍保留为同哈希审计记录，但用户随后报告该精确字节的整篇单段朱雀抽查值为 `0.82`（即 `82%`），该事件已按 `user_reported` 登记，因此只否决 `c2c1...` 这一版并触发一次整章返工，不能继续把它当作待 consistency / commit 的通过候选。
 
-当前 `zhuque/novel-whole-text-single-segment` 同哈希状态是“未抽查 / 未知”，不是“已通过”，也不是生产阻塞。系统与助手绝不调用朱雀网页或处理验证码，即使此前取得过许可也不自动化；只校验和登记用户主动报告的结果。现有 `drafts/01.hard_consistency.json` 仍绑定上一版 `d723...` 失败稿，不能跨 body epoch 复用，因此下一步是直接为 `c2c1...` 重跑 consistency，而不是等待朱雀。旧第一章 `0.86` 与第二章 `0.83` 只绑定各自旧正式正文 SHA，继续作为一次返工触发证据，不是这个候选的分数。
+当前 `c2c1...` 的 `zhuque/novel-whole-text-single-segment` 状态是“用户报告 `0.82`，已触发该版一次整章返工”，不是“未抽查 / 未知”，也不是要求后续每个版本继续复测的长期门禁。系统与助手绝不调用朱雀网页或处理验证码，即使此前取得过许可也不自动化；只校验和登记用户主动报告的结果。下一步是生成新 SHA 的替换稿，并仅依靠本地 AIGC、同哈希 DeepSeek、Editor / review 与 exact-body hard consistency 自动闭环；新 SHA 不等待朱雀，也不继承 `0.82`。旧第一章 `0.86` 与第二章 `0.83` 仍只绑定各自旧正式正文 SHA，继续作为各自一次返工触发证据。
 
 ## 登记命令
 

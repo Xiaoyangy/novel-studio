@@ -16,13 +16,25 @@ import (
 
 func setExternalSamplingPolicyTestMarker(t *testing.T, st *store.Store, chapter int, hard bool) {
 	t.Helper()
+	detector := "zhuque"
+	mode := "novel-whole-text-single-segment"
+	if hard {
+		detector = "automated-detector"
+		mode = "whole"
+	}
 	if err := SetDraftExternalRerenderRequirement(st.Dir(), DraftExternalRerenderRequirement{
-		Chapter:                  chapter,
-		EvaluatedBodySHA256:      strings.Repeat("a", 64),
-		Source:                   "registered_external_detection",
-		Evaluator:                draftExternalEvaluatorRegistered,
-		RequiredDetector:         "zhuque",
-		RequiredMode:             "novel-whole-text-single-segment",
+		Chapter:             chapter,
+		EvaluatedBodySHA256: strings.Repeat("a", 64),
+		Source:              "registered_external_detection",
+		Evaluator:           draftExternalEvaluatorRegistered,
+		RequiredDetector:    detector,
+		RequiredMode:        mode,
+		ExternalRetestPolicy: func() DraftExternalRetestPolicy {
+			if hard {
+				return DraftExternalRetestPolicyAutomatedHard
+			}
+			return DraftExternalRetestPolicySamplingOptional
+		}(),
 		BlockUntilExternalRetest: hard,
 		PassExclusivePercent:     4,
 		AdviceComplete:           true,
@@ -78,6 +90,12 @@ func TestExternalSamplingPolicySanitizesLegacyPlanWithoutLosingRewriteEvidence(t
 		t.Fatal(err)
 	}
 	setExternalSamplingPolicyTestMarker(t, st, 1, false)
+	optional, err := loadDraftExternalRerenderRequirement(st.Dir(), 1)
+	if err != nil || optional == nil ||
+		RequiresRegisteredExternalRetest(optional) ||
+		!strings.Contains(strings.Join(RegisteredExternalRetestLabels(optional), ","), "zhuque/novel-whole-text-single-segment") {
+		t.Fatalf("manual zhuque sampling marker became a blocking automated gate: requirement=%+v err=%v", optional, err)
+	}
 	plan := domain.ChapterPlan{Chapter: 1}
 	loop := &plan.CausalSimulation.ReviewRefinement
 	loop.FailureModes = []string{"朱雀抽查旧 SHA 结果 86%，该高分触发整章重写"}
@@ -108,13 +126,20 @@ func TestExternalSamplingPolicyLeavesExplicitAutomatedHardPlanUntouched(t *testi
 		t.Fatal(err)
 	}
 	setExternalSamplingPolicyTestMarker(t, st, 1, true)
+	automated, err := loadDraftExternalRerenderRequirement(st.Dir(), 1)
+	if err != nil || automated == nil ||
+		!RequiresRegisteredExternalRetest(automated) ||
+		!strings.Contains(strings.Join(RegisteredExternalRetestLabels(automated), ","), "automated-detector/whole") ||
+		strings.Contains(strings.Join(RegisteredExternalRetestLabels(automated), ","), "zhuque/") {
+		t.Fatalf("automated_hard marker did not stay separate from manual zhuque sampling: requirement=%+v err=%v", automated, err)
+	}
 	plan := domain.ChapterPlan{Chapter: 1}
 	plan.CausalSimulation.ReviewRefinement = domain.ReviewRefinementLoop{
 		AcceptanceChecks: []string{
-			"新 SHA 必须用同一 detector/mode 复测严格 <4%",
-			"新 SHA 朱雀严格 <4% 才可提交",
+			"新 SHA 必须用 automated-detector/whole 做同哈希复测并严格 <4%",
+			"显式自动检测服务严格 <4% 才可提交",
 		},
-		StopCondition: "外部平台合格后方可交付",
+		StopCondition: "显式 automated_hard 门禁合格后方可交付",
 	}
 	before := plan.CausalSimulation.ReviewRefinement
 
@@ -292,7 +317,7 @@ func TestNovelContextSanitizesPersistedPlanAndBriefBeforePlanningMerge(t *testin
 	}
 }
 
-func TestNovelContextDraftProfileSanitizesDraftExternalReviewReceipt(t *testing.T) {
+func TestNovelContextDraftProfileConsumesOnlyFrozenPlanNotLiveSamplingReview(t *testing.T) {
 	st := newRewriteCraftTestStore(t, true)
 	receipt, err := ensureRewriteCraftReceipt(st, 1, "")
 	if err != nil {
@@ -323,16 +348,25 @@ func TestNovelContextDraftProfileSanitizesDraftExternalReviewReceipt(t *testing.
 			t.Fatalf("draft novel_context leaked retired sampling gate %q:\n%s", retired, payload)
 		}
 	}
-	for _, retained := range []string{
+	for _, liveOverlay := range []string{
 		"zhuque/whole 抽查 86%",
-		"当前精确 SHA 的高分已触发一次整章重渲染",
 		"registered_external_sampling_trigger:zhuque/whole",
-		"对白承压证据仍需保留",
-		"同哈希 DeepSeek",
 	} {
-		if !strings.Contains(payload, retained) {
-			t.Fatalf("draft novel_context lost current sampling contract %q:\n%s", retained, payload)
+		if strings.Contains(payload, liveOverlay) {
+			t.Fatalf("draft novel_context retained post-freeze live overlay %q:\n%s", liveOverlay, payload)
 		}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, liveKey := range []string{"draft_external_ai_review", "rewrite_brief"} {
+		if hasContextKey(decoded, liveKey) {
+			t.Fatalf("draft novel_context retained post-freeze live key %q:\n%s", liveKey, payload)
+		}
+	}
+	if !strings.Contains(payload, `"render_packet"`) || !strings.Contains(payload, `"formal_plan_receipt"`) {
+		t.Fatalf("draft novel_context lost frozen plan authorities:\n%s", payload)
 	}
 }
 

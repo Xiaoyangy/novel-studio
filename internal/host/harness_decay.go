@@ -68,6 +68,12 @@ var HarnessRegistry = map[string]HarnessMetadata{
 		DecayClass: DecayBusinessLogic,
 		DecayNote:  "业务不变量，永远保留",
 	},
+	"pipeline_outline_all_agent_gate": {
+		Name:       "pipeline_outline_all_agent_gate",
+		Reason:     "outline-all 独占窗口只允许 architect_long 消费与当前 receipt 完全一致的单次结构 mutation",
+		DecayClass: DecayBusinessLogic,
+		DecayNote:  "结构发布能力边界与模型能力无关，永远保留",
+	},
 	"writer_expanded_chapter_gate": {
 		Name:       "writer_expanded_chapter_gate",
 		Reason:     "阻止 Writer 写没有已展开大纲的章节（防越界续写）",

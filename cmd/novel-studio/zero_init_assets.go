@@ -2205,6 +2205,7 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 			ContextSources: []string{
 				"premise", "current_chapter_outline", "characters", "world_rules", "book_world",
 				"simulation_restart_policy", "world_foundation", "character_dossiers",
+				"meta/story_time_contract.json", "meta/story_calendar.json",
 				"meta/initial_character_dynamics", "relationship_state.initial", "meta/initial_resource_ledger",
 				"foreshadow_ledger.initial", "meta/crowd_role_policy", "meta/prewrite_storycraft_plan", "meta/world_background_plan", "meta/initial_review_lessons",
 				"reference_pack.references", "dialogue_writing", "web_reference_guidelines", "meta/web_reference_brief.md 或当轮 web_search 证据",

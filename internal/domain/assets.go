@@ -266,21 +266,22 @@ type CraftRecallReceiptAttempt struct {
 // Enforcement is set only by the new automatic preflight; historical plans that
 // have no matching receipt remain valid.
 type CraftRecallReceipt struct {
-	Version            int                         `json:"version"`
-	ID                 string                      `json:"id"`
-	Chapter            int                         `json:"chapter"`
-	Stage              string                      `json:"stage"`
-	GenerationID       string                      `json:"generation_id,omitempty"`
-	RewriteBodyPath    string                      `json:"rewrite_body_path"`
-	RewriteBodySHA256  string                      `json:"rewrite_body_sha256"`
-	RewriteBriefPath   string                      `json:"rewrite_brief_path"`
-	RewriteBriefSHA256 string                      `json:"rewrite_brief_sha256"`
-	IndexIdentity      string                      `json:"index_identity"`
-	IndexUpdatedAt     string                      `json:"index_updated_at,omitempty"`
-	PayloadSHA256      string                      `json:"payload_sha256"`
-	Enforcement        bool                        `json:"enforcement"`
-	CreatedAt          string                      `json:"created_at"`
-	Attempts           []CraftRecallReceiptAttempt `json:"attempts,omitempty"`
+	Version               int                         `json:"version"`
+	ID                    string                      `json:"id"`
+	Chapter               int                         `json:"chapter"`
+	Stage                 string                      `json:"stage"`
+	GenerationID          string                      `json:"generation_id,omitempty"`
+	PlanningContextDigest string                      `json:"planning_context_digest,omitempty"`
+	RewriteBodyPath       string                      `json:"rewrite_body_path"`
+	RewriteBodySHA256     string                      `json:"rewrite_body_sha256"`
+	RewriteBriefPath      string                      `json:"rewrite_brief_path"`
+	RewriteBriefSHA256    string                      `json:"rewrite_brief_sha256"`
+	IndexIdentity         string                      `json:"index_identity"`
+	IndexUpdatedAt        string                      `json:"index_updated_at,omitempty"`
+	PayloadSHA256         string                      `json:"payload_sha256"`
+	Enforcement           bool                        `json:"enforcement"`
+	CreatedAt             string                      `json:"created_at"`
+	Attempts              []CraftRecallReceiptAttempt `json:"attempts,omitempty"`
 }
 
 type RAGPendingUpserts struct {

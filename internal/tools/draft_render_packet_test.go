@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -88,6 +89,15 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 				AvailableOptions: []string{"当场炫耀", "离席验证"}, PlanConstraints: []string{"先点按钮再付款"},
 			},
 		},
+		"selected_memory": map[string]any{
+			"review_lessons": []string{"渲染时临时追加的审稿经验"},
+			"story_threads":  []string{"未写进正式 plan 的故事线"},
+		},
+		"episodic_memory": map[string]any{
+			"resource_audit":       "实时资源审计",
+			"foreshadow_ledger":    "实时伏笔表",
+			"recent_state_changes": "实时状态变化",
+		},
 	}
 
 	applyChapterContextProfile(result, "draft")
@@ -98,6 +108,14 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	}
 	if _, mirrored := result["render_packet"]; mirrored {
 		t.Fatal("draft profile duplicated render_packet outside canonical working_memory")
+	}
+	for _, liveKey := range []string{
+		"review_lessons", "story_threads", "resource_audit",
+		"foreshadow_ledger", "recent_state_changes",
+	} {
+		if hasContextKey(result, liveKey) {
+			t.Fatalf("draft profile retained live overlay %q outside frozen render packet", liveKey)
+		}
 	}
 	if len(packet.MandatoryBeats) != 1 || len(packet.OptionalStyleBeats) != 0 {
 		t.Fatalf("mandatory/optional = %#v / %#v", packet.MandatoryBeats, packet.OptionalStyleBeats)
@@ -217,6 +235,110 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 	}
 	if hasContextKey(result, "chapter_contract") {
 		t.Fatal("draft profile must not retain a duplicate chapter_contract beside render_packet")
+	}
+}
+
+func TestDraftRenderPacketSelectsVoiceCardsByOnPageMotiveAndKeepsHardVoiceBoundaries(t *testing.T) {
+	knowledgeBoundary := "林澈只知道贺骁还在听；不知道沈知遥已经看过票据；也不能推断系统会不会追加条件。"
+	forbiddenMoves := []string{
+		"不得解释系统原理",
+		"不得替沈知遥说出未公开动机",
+		"不得把试探说成承诺",
+		"不得用同一种短句节奏回答所有人",
+	}
+	revealBudget := []string{
+		"本章只确认借车请求已经提出",
+		"不确认贺骁最终是否借车",
+		"不解释沈知遥看过哪些票据",
+		"不揭露系统追加条件",
+		"不提前说明下一章复看结果",
+	}
+	voice := func(character string) domain.CharacterVoiceLogic {
+		return domain.CharacterVoiceLogic{
+			Character: character, SpeechPrinciple: character + "按自己的利害开口",
+			KnowledgeBoundary: character + "只知道现场公开信息",
+			ForbiddenMoves:    []string{"不得替作者解释"},
+		}
+	}
+	voices := []domain.CharacterVoiceLogic{
+		voice("离屏长辈"),
+		voice("系统"),
+		{
+			Character: "林澈", SpeechPrinciple: "先确认对方听见了什么，再决定说到哪一步",
+			HiddenSubtext:     "既怕被拒绝，也不肯用旧交情逼人",
+			KnowledgeBoundary: knowledgeBoundary, RelationshipStance: "请求帮助但不给对方预设答案",
+			DictionAndRhythm: "说明用途时完整，碰到承诺边界时收短",
+			ForbiddenMoves:   forbiddenMoves,
+		},
+		voice("贺骁"),
+		voice("沈知遥"),
+		voice("新摊主"),
+		voice("新邻居"),
+		voice("未登场供应商"),
+	}
+	visuals := []domain.CharacterVisualDesign{
+		{Character: "新摊主", Silhouette: "围裙外还套着旧夹克"},
+		{Character: "新邻居", Silhouette: "抱着纸箱站在门边"},
+		{Character: "系统", Silhouette: "手机上的提示框"},
+	}
+	kits := []domain.CharacterKitEntry{
+		{Character: "新摊主", FirstAppearance: true},
+		{Character: "新邻居", FirstAppearance: true},
+		{Character: "系统", FirstAppearance: true},
+	}
+	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
+		InitialState: []domain.CharacterSimulationState{{Character: "林澈"}},
+		VoiceLogic:   voices,
+		DialogueBlueprints: []domain.DialogueSceneBlueprint{{
+			SceneID: "ending-call", DialogueMode: "phone", Participants: []string{"贺骁", "沈知遥"},
+			RelationshipFrame: "朋友请求帮助时仍给彼此留边界",
+		}},
+		VisualDesign: visuals,
+		CharacterKit: kits,
+		ReaderRetentionPlan: domain.ReaderRetentionPlan{
+			RevealBudget: revealBudget,
+		},
+	}}
+
+	packet := newDraftRenderPacket(plan)
+	gotCharacters := make([]string, 0, len(packet.VoiceCards))
+	for _, card := range packet.VoiceCards {
+		gotCharacters = append(gotCharacters, card.Character)
+	}
+	wantCharacters := []string{"林澈", "贺骁", "沈知遥", "新摊主", "新邻居"}
+	if !reflect.DeepEqual(gotCharacters, wantCharacters) {
+		t.Fatalf("voice selection must follow focalizer, retained dialogue participants, then relevant first appearances: got=%v want=%v", gotCharacters, wantCharacters)
+	}
+	if packet.VoiceCards[0].KnowledgeBoundary != knowledgeBoundary {
+		t.Fatalf("multi-clause knowledge boundary was truncated: %q", packet.VoiceCards[0].KnowledgeBoundary)
+	}
+	if packet.LiteraryRenderContract.KnowledgeBoundary != knowledgeBoundary {
+		t.Fatalf("literary focalization contract truncated the same multi-clause knowledge boundary: %q", packet.LiteraryRenderContract.KnowledgeBoundary)
+	}
+	if !reflect.DeepEqual(packet.VoiceCards[0].ForbiddenMoves, forbiddenMoves) {
+		t.Fatalf("three-or-more hard voice prohibitions were sampled: got=%v want=%v", packet.VoiceCards[0].ForbiddenMoves, forbiddenMoves)
+	}
+	if !reflect.DeepEqual(packet.RevealBudget, revealBudget) {
+		t.Fatalf("full reveal budget was truncated: got=%v want=%v", packet.RevealBudget, revealBudget)
+	}
+	if slices.Contains(gotCharacters, "离屏长辈") || slices.Contains(gotCharacters, "系统") || slices.Contains(gotCharacters, "未登场供应商") {
+		t.Fatalf("source order or an irrelevant system consumed a voice slot: %v", gotCharacters)
+	}
+
+	systemRelevant := plan
+	systemRelevant.CausalSimulation.DialogueBlueprints = []domain.DialogueSceneBlueprint{{
+		SceneID: "specific-system-response", DialogueMode: "stimulus_response",
+		Participants: []string{"系统"}, DialogueObjective: "只回应林澈刚提交的具体问题",
+	}}
+	systemRelevant.CausalSimulation.VisualDesign = nil
+	systemRelevant.CausalSimulation.CharacterKit = nil
+	relevantPacket := newDraftRenderPacket(systemRelevant)
+	relevantCharacters := make([]string, 0, len(relevantPacket.VoiceCards))
+	for _, card := range relevantPacket.VoiceCards {
+		relevantCharacters = append(relevantCharacters, card.Character)
+	}
+	if !slices.Contains(relevantCharacters, "系统") {
+		t.Fatalf("system voice explicitly retained as an on-page participant was lost: %v", relevantCharacters)
 	}
 }
 
@@ -736,13 +858,30 @@ func TestDraftRenderPacketDropsSurfaceBeatExplicitlyProjectedFromRequiredOutcome
 func TestDraftRenderPacketKeepsHumorPlanOutOfProseObligations(t *testing.T) {
 	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
 		EntertainmentPlan: domain.ReaderEntertainmentPlan{
-			HumorBeats: []string{"opening joke", "front-loaded echo", "closing callback"},
+			OpeningBeat:          "从人物压力和未说完的话开场",
+			HumorBeats:           []string{"opening joke", "front-loaded echo", "closing callback"},
+			ImmediatePayoffs:     []string{"普通顾客完成真实采用"},
+			ProcedureCompression: "手续只保留改变人物判断的结果",
+			CompanionVoiceBeat:   "系统只在主角主动查看时短促接话",
+			ForbiddenComedy:      []string{"不得拿失业羞辱主角"},
+		},
+		LongformOpening: domain.LongformOpeningDesign{
+			TargetReader:      "县城经营读者",
+			OpeningHook:       "饭桌压力撞上受限额度",
+			FirstChapterProof: []string{"能力与限制同章可见"},
+			RetentionRisks:    []string{"流程过密"},
 		},
 	}}
 
 	packet := newDraftRenderPacket(plan)
 	if len(packet.EntertainmentPlan.HumorBeats) != 0 {
 		t.Fatalf("prescribed jokes must remain optional planning evidence: %#v", packet.EntertainmentPlan.HumorBeats)
+	}
+	if packet.EntertainmentPlan.OpeningBeat == "" ||
+		packet.EntertainmentPlan.ProcedureCompression == "" ||
+		len(packet.EntertainmentPlan.ForbiddenComedy) == 0 ||
+		packet.LongformOpening.OpeningHook == "" {
+		t.Fatalf("prose packet lost non-prescriptive attraction guidance: %+v %+v", packet.EntertainmentPlan, packet.LongformOpening)
 	}
 }
 

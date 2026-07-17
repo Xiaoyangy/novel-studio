@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/assets"
+	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/entry/headless"
@@ -31,6 +32,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
+	writersampler "github.com/chenhongyang/novel-studio/internal/writer/sampler"
 )
 
 func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
@@ -1071,8 +1073,18 @@ func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (strin
 	return b.String(), nil
 }
 
-func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
+func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) (returnErr error) {
 	_ = state
+	liveDir, releaseControl, err := acquirePublishedOutlineAllStageForInvocation(opts)
+	if err != nil {
+		return fmt.Errorf("zero-init requires published outline-all: %w", err)
+	}
+	defer releasePublishedOutlineAllStage(releaseControl, "pipeline zero-init", &returnErr)
+	if liveDir != "" {
+		if err := requirePublishedOutlineAllChapterZeroProgressWithControlHeld(liveDir); err != nil {
+			return fmt.Errorf("zero-init requires chapter-zero published outline-all progress: %w", err)
+		}
+	}
 	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
@@ -1095,19 +1107,53 @@ func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.Pipeli
 	if ok, reason := architectReadinessState(cfg.OutputDir); !ok {
 		return fmt.Errorf("zero-init 阶段必须在 Architect readiness 通过后执行：%s", reason)
 	}
-	if ok, _ := tools.ZeroInitReadinessState(cfg.OutputDir); ok {
+	if ok, _ := pipelineCurrentZeroInitReadinessState(cfg.OutputDir); ok {
 		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] readiness 已就绪，跳过 zero-init")
 		return pipelineEnsureInitialWorldTick(cfg, bundle)
 	}
-	_, reason := tools.ZeroInitReadinessState(cfg.OutputDir)
+	_, reason := pipelineCurrentZeroInitReadinessState(cfg.OutputDir)
 	fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 执行 zero-init：%s\n", reason)
-	if err := zeroInitPipeline(opts, []string{"--dir", cfg.OutputDir, "--reset-simulation-state"}); err != nil {
+	if err := zeroInitPipeline(opts, pipelineZeroInitRegenerationArgs(cfg.OutputDir)); err != nil {
 		return fmt.Errorf("zero-init 阶段失败: %w", err)
 	}
-	if ok, why := tools.ZeroInitReadinessState(cfg.OutputDir); !ok {
+	if ok, why := pipelineCurrentZeroInitReadinessState(cfg.OutputDir); !ok {
 		return fmt.Errorf("zero-init 后 readiness 仍未就绪：%s", why)
 	}
 	return pipelineEnsureInitialWorldTick(cfg, bundle)
+}
+
+// pipelineCurrentZeroInitReadinessState combines the durable readiness
+// receipt/foundation freshness guard with the current generator's semantic
+// coverage contract. The latter matters when a new binary expands
+// zeroInitialCharacters (for example, a secondary actor reserved by a later
+// outline): an older ready:true receipt cannot prove that the existing
+// initial_character_dynamics.json contains the newly required actor.
+//
+// Callers must first establish ChapterOnePendingFirstWrite. Published projects
+// intentionally keep their historical zero-init evidence and are never
+// silently rewritten through this check.
+func pipelineCurrentZeroInitReadinessState(outputDir string) (bool, string) {
+	if ok, reason := tools.ZeroInitReadinessState(outputDir); !ok {
+		return false, reason
+	}
+	current := assessZeroInitReadiness(outputDir, zeroInitRAGStats{})
+	if current.Ready {
+		return true, ""
+	}
+	return false, fmt.Sprintf(
+		"当前 zero-init 语义复核未通过（missing=%d issues=%d）：%s",
+		len(current.Missing),
+		len(current.Issues),
+		strings.Join(current.Issues, "；"),
+	)
+}
+
+func pipelineZeroInitRegenerationArgs(outputDir string) []string {
+	return []string{
+		"--dir", outputDir,
+		"--reset-simulation-state",
+		"--overwrite",
+	}
 }
 
 func pipelineEnsureArchitectReadiness(opts cliOptions, outputDir string) error {
@@ -1678,19 +1724,51 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 	if err != nil {
 		return err
 	}
-	if err := ensurePipelineRAGReady(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "[pipeline:write] RAG 写作前检查失败：%v\n", err)
-		return err
+	return pipelineWriteConfigured(opts, flags, state, cfg, bundle)
+}
+
+// pipelineWriteConfigured runs the ordinary writer route against an already
+// normalized configuration. Sealed render uses this entrypoint with an exact
+// candidate output directory, so a draft/commit/review failure cannot mutate
+// the live canonical tree.
+func pipelineWriteConfigured(
+	opts cliOptions,
+	flags pipelineFlags,
+	state *domain.PipelineState,
+	cfg bootstrap.Config,
+	bundle assets.Bundle,
+) error {
+	if flags.RenderOnly {
+		// A sealed prose pass is reproducible only when every Coordinator,
+		// Drafter and sampling-Judge request stays on its configured primary
+		// provider/model. Provider failure stops this attempt; it may not
+		// silently change the model that realizes the immutable bundle.
+		cfg.DisableModelFailover = true
+	}
+	if !flags.RenderOnly {
+		if err := ensurePipelineRAGReady(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "[pipeline:write] RAG 写作前检查失败：%v\n", err)
+			return err
+		}
 	}
 	if err := pipelineRequirePrewritingReady(cfg.OutputDir); err != nil {
 		return err
 	}
-	if queued, queueErr := pipelineQueueCurrentExternalSamplingFailures(store.NewStore(cfg.OutputDir), 0, 0); queueErr != nil {
-		return queueErr
-	} else if len(queued) > 0 {
-		fmt.Fprintf(os.Stderr, "[pipeline:write] 已发现当前精确 SHA 的用户外部抽查高分并送入整章返工队列：%v\n", queued)
+	if !flags.RenderOnly {
+		if queued, queueErr := pipelineQueueCurrentExternalSamplingFailures(store.NewStore(cfg.OutputDir), 0, 0); queueErr != nil {
+			return queueErr
+		} else if len(queued) > 0 {
+			fmt.Fprintf(os.Stderr, "[pipeline:write] 已发现当前精确 SHA 的用户外部抽查高分并送入整章返工队列：%v\n", queued)
+		}
 	}
-	const maxWriteRuns = 4
+	maxWriteRuns := 4
+	if flags.RenderOnly {
+		// A frozen render is one execution attempt, not a generic Writer
+		// self-healing loop. Any stop or structural budget exhaustion returns to
+		// the caller with the exact plan intact; it must never create/finalize a
+		// staged plan or silently start a fresh planning session.
+		maxWriteRuns = 1
+	}
 	for run := 1; run <= maxWriteRuns; run++ {
 		currentStore := store.NewStore(cfg.OutputDir)
 		if flags.RenderOnly && flags.StopAfterCommit > 0 {
@@ -1702,10 +1780,12 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
 			return nil
 		}
-		if judged, err := pipelineJudgePendingDraftHash(opts, cfg.OutputDir, prog); err != nil {
-			return err
-		} else if judged {
-			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+		if !flags.RenderOnly {
+			if judged, err := pipelineJudgePendingDraftHash(opts, cfg.OutputDir, prog); err != nil {
+				return err
+			} else if judged {
+				prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+			}
 		}
 		// zero-init（--reset-simulation-state）会切换 progress 的推演线，
 		// 必须重载后再做推演线一致性检查，否则拿旧快照误报不一致。
@@ -1713,32 +1793,36 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
 			return err
 		}
-		needsFresh, err := pipelineNeedsFreshWritingSession(cfg.OutputDir, prog)
-		if err != nil {
-			return err
-		}
 		prompt := ""
-		if needsFresh {
-			if err := pipelinePrepareFreshWritingSession(cfg.OutputDir, 1); err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, "[pipeline:write] 第 1 章从当前 Architect/zero-init 事实启动写作路由")
-		} else if run == 1 {
-			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
-				return err
-			}
-			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
-			if pipelineWriteGoalReached(prog, flags.WriteTo) {
-				return nil
-			}
-			fmt.Fprintln(os.Stderr, "[pipeline:write] 检测到已有进度，恢复创作")
+		if flags.RenderOnly {
+			fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章只消费已冻结 plan；禁止 fresh-session、staged-plan finalize 与任何临时规划\n", flags.StopAfterCommit)
 		} else {
-			if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
+			needsFresh, err := pipelineNeedsFreshWritingSession(cfg.OutputDir, prog)
+			if err != nil {
 				return err
 			}
-			prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
-			if pipelineWriteGoalReached(prog, flags.WriteTo) {
-				return nil
+			if needsFresh {
+				if err := pipelinePrepareFreshWritingSession(cfg.OutputDir, 1); err != nil {
+					return err
+				}
+				fmt.Fprintln(os.Stderr, "[pipeline:write] 第 1 章从当前 Architect/zero-init 事实启动写作路由")
+			} else if run == 1 {
+				if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
+					return err
+				}
+				prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+				if pipelineWriteGoalReached(prog, flags.WriteTo) {
+					return nil
+				}
+				fmt.Fprintln(os.Stderr, "[pipeline:write] 检测到已有进度，恢复创作")
+			} else {
+				if err := pipelineFinalizeStagedPlans(cfg.OutputDir, flags.WriteTo); err != nil {
+					return err
+				}
+				prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+				if pipelineWriteGoalReached(prog, flags.WriteTo) {
+					return nil
+				}
 			}
 		}
 		commitSeqBefore := latestPipelineChapterCommitSeq(cfg.OutputDir, flags.StopAfterCommit)
@@ -1752,6 +1836,7 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 			StopAfterRewriteCommit:    flags.StopAfterCommit,
 			StopOnRenderReplanChapter: stopOnRenderReplan,
 			SkipQueueReplay:           true,
+			DisableLiveRAG:            flags.RenderOnly,
 		}); err != nil {
 			return err
 		}
@@ -1764,6 +1849,9 @@ func pipelineWrite(opts cliOptions, flags pipelineFlags, state *domain.PipelineS
 		}
 		// 未达标：可能是零章卡点收工（下轮循环顶部自动 zero-init），
 		// 也可能是 provider/工具瞬时错误——都走同一条自愈路径：续跑。
+		if flags.RenderOnly {
+			return fmt.Errorf("render-only 第 %d 章单次冻结执行未产生目标 commit；已保留正式 plan，禁止自动续跑或重规划", flags.StopAfterCommit)
+		}
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
@@ -2503,12 +2591,35 @@ func resolveStages(raw string) ([]string, error) {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / zero-init / preplan / plan / render / write / review / rewrite / deliver）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / deliver）", s)
 		}
 		stages = append(stages, s)
 	}
 	if len(stages) == 0 {
 		return nil, fmt.Errorf("--stages 为空")
+	}
+	outlineIndex := -1
+	for i, stage := range stages {
+		if stage != "outline-all" {
+			continue
+		}
+		if outlineIndex >= 0 {
+			return nil, fmt.Errorf("outline-all 只能在同一流水线阶段图中出现一次")
+		}
+		outlineIndex = i
+	}
+	if outlineIndex >= 0 {
+		for i, stage := range stages {
+			if stage == "architect" && i > outlineIndex {
+				return nil, fmt.Errorf("architect 必须先于 outline-all")
+			}
+			switch stage {
+			case "zero-init", "preplan", "project-all", "seal", "promote", "plan", "render", "write", "review", "rewrite", "deliver":
+				if i < outlineIndex {
+					return nil, fmt.Errorf("阶段 %s 不能先于 outline-all", stage)
+				}
+			}
+		}
 	}
 	return stages, nil
 }
@@ -2519,6 +2630,10 @@ func normalizePipelineStageName(s string) string {
 		return "zero-init"
 	case "batch-plan", "batch_plan", "pre-plan":
 		return "preplan"
+	case "projectall", "project_all", "all-plan", "all_plan":
+		return "project-all"
+	case "outlineall", "outline_all", "full-outline", "full_outline":
+		return "outline-all"
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
 	}
@@ -2557,10 +2672,20 @@ func resolvePipelinePromptFromFlags(flags pipelineFlags) (string, error) {
 	return strings.TrimSpace(flags.Prompt), nil
 }
 
-// loadOrInitPipelineState 读取已有状态；--restart、阶段列表、显式创作指令或
-// 模型/prompt 协议指纹变化时重置，避免旧产物被当成新输入的完成证据。
-func loadOrInitPipelineState(path string, stages []string, prompt, inputDigest string, restart bool) (*domain.PipelineState, error) {
-	fresh := &domain.PipelineState{Stages: stages, Prompt: prompt, InputDigest: inputDigest}
+// loadOrInitPipelineState 读取已有状态；--restart、阶段列表、显式创作指令、
+// 模型/prompt 协议指纹或运行范围变化时重置，避免旧产物被当成新输入的完成证据。
+func loadOrInitPipelineState(
+	path string,
+	stages []string,
+	prompt, inputDigest, runIdentity string,
+	restart bool,
+) (*domain.PipelineState, error) {
+	fresh := &domain.PipelineState{
+		Stages:      stages,
+		Prompt:      prompt,
+		InputDigest: inputDigest,
+		RunIdentity: runIdentity,
+	}
 	if restart {
 		return fresh, nil
 	}
@@ -2578,7 +2703,12 @@ func loadOrInitPipelineState(path string, stages []string, prompt, inputDigest s
 	// 阶段列表变了：旧的 completed 不再适用，按新列表重来（但保留已捕获的 prompt）。
 	if !sameStages(prev.Stages, stages) {
 		fmt.Fprintln(os.Stderr, "[pipeline] 阶段列表已变化，重置进度（保留已有创作指令）")
-		next := &domain.PipelineState{Stages: stages, Prompt: prev.Prompt, InputDigest: inputDigest}
+		next := &domain.PipelineState{
+			Stages:      stages,
+			Prompt:      prev.Prompt,
+			InputDigest: inputDigest,
+			RunIdentity: runIdentity,
+		}
 		if prompt != "" {
 			next.Prompt = prompt
 		}
@@ -2596,8 +2726,16 @@ func loadOrInitPipelineState(path string, stages []string, prompt, inputDigest s
 		}
 		return fresh, nil
 	}
+	if prev.RunIdentity != "" && runIdentity != "" && prev.RunIdentity != runIdentity {
+		fmt.Fprintln(os.Stderr, "[pipeline] --from/--to/--budget 等运行范围已变化，重置阶段证据")
+		if prompt == "" {
+			fresh.Prompt = prev.Prompt
+		}
+		return fresh, nil
+	}
 	// 旧 schema 首次升级时保留已验证产物并建立后续比较基线。
 	prev.InputDigest = inputDigest
+	prev.RunIdentity = runIdentity
 	if prompt != "" {
 		prev.Prompt = prompt
 	}
@@ -2653,19 +2791,146 @@ func pipelineRunInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
 		Style           string
 		Roles           map[string]bootstrap.RoleConfig
 		Prompts         assets.Prompts
+		References      tools.References
+		Styles          map[string]string
 		BrainstormSHA   string
 	}{
-		Schema:          "pipeline-input-v2-20260711",
+		Schema:          "pipeline-input-v3-20260716",
 		Provider:        cfg.Provider,
 		Model:           cfg.ModelName,
 		ReasoningEffort: cfg.ReasoningEffort,
 		Style:           cfg.Style,
 		Roles:           cfg.Roles,
 		Prompts:         bundle.Prompts,
+		References:      bundle.References,
+		Styles:          bundle.Styles,
 		BrainstormSHA:   brainstormSHA,
 	})
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// pipelineProjectAllInputDigest is intentionally narrower than the legacy
+// whole-pipeline digest. Editor/reviewer/drafter changes do not alter a world
+// simulation or POV plan and therefore must not invalidate an expensive sealed
+// full-book projection.
+func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
+	writer := resolvedPipelineRoleConfig(cfg, "writer")
+	contextWindow, _ := cfg.ResolveContextWindow(writer.Model)
+	payload, _ := json.Marshal(struct {
+		Schema          string
+		Provider        string
+		Model           string
+		ReasoningEffort string
+		ContextWindow   int
+		Role            bootstrap.RoleConfig
+		Style           string
+		PlannerPrompt   string
+		AgentProtocol   string
+		References      tools.References
+		Styles          map[string]string
+		Embedding       struct {
+			Enabled   bool   `json:"enabled"`
+			LocalGGUF string `json:"local_gguf"`
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+			BaseURL   string `json:"base_url"`
+		} `json:"embedding"`
+		SeedContract string
+	}{
+		Schema:          "project-all-input-v1-20260716",
+		Provider:        cfg.Provider,
+		Model:           cfg.ModelName,
+		ReasoningEffort: cfg.ReasoningEffort,
+		ContextWindow:   contextWindow,
+		Role:            writer,
+		Style:           cfg.Style,
+		PlannerPrompt:   bundle.Prompts.Planner,
+		AgentProtocol:   agents.ProjectAllPlanningProtocolDigest(bundle.Prompts.Planner),
+		References:      bundle.References,
+		Styles:          bundle.Styles,
+		Embedding: struct {
+			Enabled   bool   `json:"enabled"`
+			LocalGGUF string `json:"local_gguf"`
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+			BaseURL   string `json:"base_url"`
+		}{
+			Enabled:   cfg.RAG.Embedding.Enabled,
+			LocalGGUF: cfg.RAG.Embedding.LocalGGUF,
+			Provider:  cfg.RAG.Embedding.Provider,
+			Model:     cfg.RAG.Embedding.Model,
+			BaseURL:   cfg.RAG.Embedding.BaseURL,
+		},
+		SeedContract: pipelineProjectAllSeedContract,
+	})
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// pipelineRenderInputDigest binds every model/prompt/protocol that can change
+// prose bytes before the candidate is committed. Post-write Editor review is
+// separately exact-body bound and does not belong to this digest.
+func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
+	drafter := resolvedPipelineRoleConfig(cfg, "drafter")
+	coordinator := resolvedPipelineRoleConfig(cfg, "coordinator")
+	reviewer := resolvedPipelineRoleConfig(cfg, "reviewer")
+	contextWindow, _ := cfg.ResolveContextWindow(drafter.Model)
+	coordinatorContextWindow, _ := cfg.ResolveContextWindow(coordinator.Model)
+	selectedStyle := bundle.Styles[cfg.Style]
+	payload, _ := json.Marshal(struct {
+		Schema                   string
+		Provider                 string
+		Model                    string
+		ReasoningEffort          string
+		ContextWindow            int
+		Role                     bootstrap.RoleConfig
+		CoordinatorRole          bootstrap.RoleConfig
+		CoordinatorContextWindow int
+		ReviewerRole             bootstrap.RoleConfig
+		Style                    string
+		StyleBody                string
+		DrafterPrompt            string
+		CoordinatorPrompt        string
+		SamplingProtocol         string
+		StrictPrimaryModels      bool
+		RenderToolProtocol       string
+	}{
+		Schema:                   "sealed-render-input-v2-20260716",
+		Provider:                 cfg.Provider,
+		Model:                    cfg.ModelName,
+		ReasoningEffort:          cfg.ReasoningEffort,
+		ContextWindow:            contextWindow,
+		Role:                     drafter,
+		CoordinatorRole:          coordinator,
+		CoordinatorContextWindow: coordinatorContextWindow,
+		ReviewerRole:             reviewer,
+		Style:                    cfg.Style,
+		StyleBody:                selectedStyle,
+		DrafterPrompt:            bundle.Prompts.Drafter,
+		CoordinatorPrompt:        bundle.Prompts.Coordinator,
+		SamplingProtocol:         writersampler.ProtocolDigest(),
+		StrictPrimaryModels:      true,
+		RenderToolProtocol:       "frozen-render-tools.v2:no-planner,no-live-rag,no-web;draft,read,check,commit;server-owned-hidden-delta",
+	})
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func resolvedPipelineRoleConfig(cfg bootstrap.Config, role string) bootstrap.RoleConfig {
+	if configured, ok := cfg.Roles[role]; ok {
+		return configured
+	}
+	if role == "drafter" {
+		if writer, ok := cfg.Roles["writer"]; ok {
+			return writer
+		}
+	}
+	return bootstrap.RoleConfig{
+		Provider:        cfg.Provider,
+		Model:           cfg.ModelName,
+		ReasoningEffort: cfg.ReasoningEffort,
+	}
 }
 
 func sameStages(a, b []string) bool {

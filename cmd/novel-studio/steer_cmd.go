@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
 func parseSteerFlags(argv []string) ([]string, error) {
@@ -46,6 +49,17 @@ func steerPipeline(opts cliOptions, args []string) error {
 	text := strings.TrimSpace(strings.Join(rest, " "))
 	if text == "" {
 		return fmt.Errorf("--steer 需要一条干预指令文本，例如：--steer \"加快节奏\"")
+	}
+	cfg, _, err := loadCfgBundle(opts)
+	if err != nil {
+		return err
+	}
+	if mode, modeErr := store.NewStore(cfg.OutputDir).LoadWritingPipelineMode(); modeErr != nil {
+		return fmt.Errorf("--steer 读取 writing pipeline mode: %w", modeErr)
+	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		return fmt.Errorf(
+			"项目已启用 sealed_two_pass_v2，不能把临时 --steer 注入封存计划或正文渲染；请把指令写入稳定创作规则后用 --pipeline --stages preplan,project-all,seal --restart 重推全书",
+		)
 	}
 
 	eng, cleanup, err := newExistingHost(opts)

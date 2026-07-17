@@ -306,6 +306,54 @@ func TestAppendVolumeValidation(t *testing.T) {
 	}
 }
 
+func TestAppendVolumeSkeletonAndReviseArcPreserveStableChapterSpace(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base := []domain.VolumeOutline{{Index: 1, Title: "base", Arcs: []domain.ArcOutline{{
+		Index: 1, Title: "expanded", Chapters: []domain.OutlineEntry{
+			{Title: "one", CoreEvent: "old-one"}, {Title: "two", CoreEvent: "old-two"},
+		},
+	}}}}
+	if err := s.Outline.SaveLayeredOutline(base); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SaveOutline(domain.FlattenOutline(base)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendVolumeSkeleton(domain.VolumeOutline{Index: 2, Title: "skeleton", Arcs: []domain.ArcOutline{
+		{Index: 1, Title: "reserved-a", EstimatedChapters: 12},
+		{Index: 2, Title: "reserved-b", EstimatedChapters: 12},
+	}}); err != nil {
+		t.Fatalf("AppendVolumeSkeleton: %v", err)
+	}
+	if err := s.ReviseArc(1, 1, []domain.OutlineEntry{
+		{Title: "new-one", CoreEvent: "new-one-event"},
+		{Title: "new-two", CoreEvent: "new-two-event"},
+	}); err != nil {
+		t.Fatalf("ReviseArc: %v", err)
+	}
+	volumes, err := s.Outline.LoadLayeredOutline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := domain.TotalChapters(volumes); got != 26 {
+		t.Fatalf("total=%d want 26", got)
+	}
+	if volumes[1].Arcs[0].IsExpanded() || volumes[1].Arcs[0].EstimatedChapters != 12 {
+		t.Fatalf("skeleton reservation changed: %+v", volumes[1].Arcs[0])
+	}
+	flat := domain.FlattenOutline(volumes)
+	if len(flat) != 2 || flat[0].Chapter != 1 || flat[1].Chapter != 2 || flat[0].Title != "new-one" {
+		t.Fatalf("flat=%+v", flat)
+	}
+	if err := s.ReviseArc(1, 1, []domain.OutlineEntry{{Title: "would-shrink"}}); err == nil {
+		t.Fatal("ReviseArc accepted span change")
+	}
+}
+
 // 注：原先用 Final 卷拒绝 append 的语义已下沉到 save_foundation 层（Phase=Complete 拒绝），
 // 见 save_foundation_test.go::TestSaveFoundationAppendVolumeRejectsAfterComplete。
 // store 层只保留结构性校验（Index 递增 / 首弧含章节等）。

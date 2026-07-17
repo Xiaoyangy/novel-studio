@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
@@ -51,7 +52,23 @@ func CurrentChapterPlanCausalCheckpoint(st *store.Store, chapter int) (*domain.C
 	if err != nil {
 		return nil, err
 	}
-	simulation := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "chapter_world_simulation")
+	formalPlan, err := st.Drafts.LoadChapterPlan(chapter)
+	if err != nil {
+		return nil, fmt.Errorf("读取第 %d 章正式 plan 以核对 causal binding 失败: %w: %w",
+			chapter, errs.ErrStoreRead, err)
+	}
+	requiresSimulation := chapterWorldSimulationRequired(st) ||
+		(formalPlan != nil && strings.TrimSpace(formalPlan.CausalSimulation.WorldSimulationID) != "")
+	if !requiresSimulation {
+		// Legacy projects may retain an optional, pre-checkpoint simulation
+		// artifact after disabling the causal-simulation contract. It is not a
+		// render input unless the current project or formal plan binds it.
+		return plan, nil
+	}
+	simulation, err := CurrentChapterWorldSimulationCheckpoint(st, chapter)
+	if err != nil {
+		return nil, err
+	}
 	if simulation != nil && simulation.Seq > plan.Seq {
 		return nil, fmt.Errorf(
 			"第 %d 章 chapter_world_simulation checkpoint(seq=%d) 晚于当前正式 plan checkpoint(seq=%d)；必须基于该 simulation 重新 finalize POV plan 后才能写入正文: %w",
@@ -59,4 +76,41 @@ func CurrentChapterPlanCausalCheckpoint(st *store.Store, chapter int) (*domain.C
 		)
 	}
 	return plan, nil
+}
+
+// CurrentChapterWorldSimulationCheckpoint proves that the live world-simulation
+// artifact still has the exact bytes finalized by its checkpoint. Sequence
+// ordering alone cannot freeze render inputs: editing visibility/projection
+// fields in place would otherwise alter the Drafter packet without changing the
+// formal plan digest.
+func CurrentChapterWorldSimulationCheckpoint(st *store.Store, chapter int) (*domain.Checkpoint, error) {
+	if st == nil || chapter <= 0 {
+		return nil, fmt.Errorf("invalid chapter %d: %w", chapter, errs.ErrToolArgs)
+	}
+	scope := domain.ChapterScope(chapter)
+	cp := st.Checkpoints.LatestByStep(scope, "chapter_world_simulation")
+	artifact := fmt.Sprintf("meta/chapter_simulations/%03d.json", chapter)
+	path := filepath.Join(st.Dir(), filepath.FromSlash(artifact))
+	raw, readErr := os.ReadFile(path)
+	if cp == nil {
+		if os.IsNotExist(readErr) {
+			return nil, nil
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("读取第 %d 章 world simulation artifact 失败: %w: %w", chapter, errs.ErrStoreRead, readErr)
+		}
+		return nil, fmt.Errorf("第 %d 章 world simulation 已存在但没有 checkpoint，禁止作为冻结计划的 live overlay: %w",
+			chapter, errs.ErrToolPrecondition)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("读取第 %d 章 world simulation artifact %s 失败: %w: %w",
+			chapter, artifact, errs.ErrStoreRead, readErr)
+	}
+	sum := sha256.Sum256(raw)
+	wantDigest := fmt.Sprintf("sha256:%x", sum)
+	if cp.Artifact != artifact || cp.Digest != wantDigest {
+		return nil, fmt.Errorf("第 %d 章 world simulation 与 checkpoint 不匹配（artifact=%q digest=%s current=%s）；visibility/projection 可能在 finalize 后漂移: %w",
+			chapter, cp.Artifact, cp.Digest, wantDigest, errs.ErrToolPrecondition)
+	}
+	return cp, nil
 }

@@ -140,6 +140,41 @@ func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	}
 }
 
+func TestRewriteStructureKeepsSourceBoundGoalAndHookInsteadOfStaleOutline(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "稳定章名",
+		CoreEvent: "旧大纲写成沈知遥先制止错误走线",
+		Hook:      "旧大纲把待确认资源写成即将到位",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	structure := map[string]any{
+		"title": "模型临时章名",
+		"goal":  "林澈先发现风险、叫停并让老丁完成退线，沈知遥随后只复核自纠结果。",
+		"hook":  "贺骁接通电话但尚未答复，皮卡继续保持待确认。",
+	}
+	applyOutlineAnchorsToStructure(st, 1, structure, true)
+	if got := structure["title"]; got != "稳定章名" {
+		t.Fatalf("rewrite must still inherit the stable outline title: %#v", got)
+	}
+	if got := structure["goal"]; got != "林澈先发现风险、叫停并让老丁完成退线，沈知遥随后只复核自纠结果。" {
+		t.Fatalf("stale outline overwrote the current rewrite goal: %#v", got)
+	}
+	if got := structure["hook"]; got != "贺骁接通电话但尚未答复，皮卡继续保持待确认。" {
+		t.Fatalf("stale outline overwrote the current rewrite hook: %#v", got)
+	}
+
+	applyOutlineAnchorsToStructure(st, 1, structure, false)
+	if got := structure["goal"]; got != "完整兑现本章大纲核心事件：旧大纲写成沈知遥先制止错误走线" {
+		t.Fatalf("new chapter must remain pinned to outline scope: %#v", got)
+	}
+	if got := structure["hook"]; got != "旧大纲把待确认资源写成即将到位" {
+		t.Fatalf("new chapter must remain pinned to outline hook: %#v", got)
+	}
+}
+
 func TestFinalPlanGoalFollowsWorldSimulationDecision(t *testing.T) {
 	st := newPhaseTestStore(t)
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
@@ -151,12 +186,37 @@ func TestFinalPlanGoalFollowsWorldSimulationDecision(t *testing.T) {
 		WorldSimulationID:   "ch001-test",
 		ProtagonistDecision: "扩到十家后守住十家边界，拒绝第十一摊",
 	}}
-	applyOutlineAnchorsToPlan(st, &plan)
+	applyOutlineAnchorsToPlan(st, &plan, false)
 	if want := "落实本轮世界模拟后的主角选择：扩到十家后守住十家边界，拒绝第十一摊"; plan.Goal != want {
 		t.Fatalf("goal = %q, want %q", plan.Goal, want)
 	}
 	if plan.Title != "旧大纲标题" || plan.Hook != "打开下一步" {
 		t.Fatalf("title and hook should remain outline anchors: %+v", plan)
+	}
+}
+
+func TestFinalRewritePlanKeepsSourceBoundGoalAndHook(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "稳定标题",
+		CoreEvent: "旧大纲错误地让沈知遥先制止",
+		Hook:      "旧大纲提前写皮卡已经到位",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{
+		Chapter: 1,
+		Goal:    "林澈先发现风险并主动停扩",
+		Hook:    "借车请求仍未获答复",
+		CausalSimulation: domain.ChapterCausalSimulation{
+			WorldSimulationID:   "ch001-current",
+			ProtagonistDecision: "先停扩，再等待现实运力答复",
+		},
+	}
+	applyOutlineAnchorsToPlan(st, &plan, true)
+	if plan.Title != "稳定标题" || plan.Goal != "林澈先发现风险并主动停扩" || plan.Hook != "借车请求仍未获答复" {
+		t.Fatalf("rewrite finalization replayed stale outline goal/hook: %+v", plan)
 	}
 }
 
@@ -490,6 +550,30 @@ func TestPlanDetailsSourceFactsOverrideModelSpellingAndOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("source-first fact %d mismatch: got=%q want=%q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestPlanDetailsSourceAnchorsProjectHumanReadableProtagonistDecision(t *testing.T) {
+	st := newPhaseTestStore(t)
+	merged := map[string]any{
+		"protagonist_decision": "模型提交的值会由服务端来源锚点统一",
+	}
+	simulation := &domain.ChapterWorldSimulation{
+		Chapter:      1,
+		SimulationID: "sim-1",
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			ChosenDecision: "保留已自纠的安全部分，继续小范围试点并等待借车答复",
+			AvailableOptions: []string{
+				"保留已自纠的安全部分，继续小范围试点并等待借车答复",
+			},
+		},
+	}
+
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, simulation, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := merged["protagonist_decision"]; got != simulation.ProtagonistProjection.AvailableOptions[0] {
+		t.Fatalf("formal plan leaked authority sentinel instead of projected choice: %q", got)
 	}
 }
 

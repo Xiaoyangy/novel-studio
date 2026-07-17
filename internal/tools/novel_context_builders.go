@@ -21,6 +21,7 @@ import (
 
 type contextBuildState struct {
 	chapter             int
+	requestedProfile    string
 	profile             domain.ContextProfile
 	progress            *domain.Progress
 	runMeta             *domain.RunMeta
@@ -226,10 +227,11 @@ func (t *ContextTool) buildBaseContext(result map[string]any, warn func(string, 
 	}
 }
 
-func (t *ContextTool) prepareChapterContext(chapter int, envelope *chapterContextEnvelope, warn func(string, error)) contextBuildState {
+func (t *ContextTool) prepareChapterContext(chapter int, requestedProfile string, envelope *chapterContextEnvelope, warn func(string, error)) contextBuildState {
 	state := contextBuildState{
-		chapter: chapter,
-		profile: domain.NewContextProfile(0),
+		chapter:          chapter,
+		requestedProfile: strings.TrimSpace(requestedProfile),
+		profile:          domain.NewContextProfile(0),
 	}
 
 	progress, err := t.store.Progress.Load()
@@ -684,6 +686,7 @@ func hasChapterCausalSimulation(sim domain.ChapterCausalSimulation) bool {
 		len(sim.CharacterArcTests) > 0 ||
 		hasReaderRewardPlan(sim.ReaderRewardPlan) ||
 		hasReaderRetentionPlan(sim.ReaderRetentionPlan) ||
+		sim.RenderCapacity != nil ||
 		len(sim.EvidenceChains) > 0 ||
 		hasEndingConsequenceContract(sim.EndingContract) ||
 		len(sim.DormantPolicy) > 0 ||
@@ -745,7 +748,7 @@ func hasLongformOpeningDesign(opening domain.LongformOpeningDesign) bool {
 		len(opening.RetentionRisks) > 0
 }
 
-func (t *ContextTool) buildChapterContext(ctx context.Context, result map[string]any, state contextBuildState, warn func(string, error)) {
+func (t *ContextTool) buildChapterContext(ctx context.Context, result map[string]any, state contextBuildState, warn func(string, error)) error {
 	envelope := newChapterContextEnvelope()
 	result["memory_policy"] = domain.NewChapterMemoryPolicy(state.progress, state.profile, state.currentEntry != nil)
 
@@ -758,9 +761,12 @@ func (t *ContextTool) buildChapterContext(ctx context.Context, result map[string
 	t.buildChapterEpisodicMemory(&envelope, state, warn)
 	t.buildChapterWorkingMemory(&envelope, state, warn)
 	t.buildChapterReferencePack(&envelope, state, warn)
-	t.buildChapterSelectedMemory(ctx, &envelope, state, warn)
+	if err := t.buildChapterSelectedMemory(ctx, &envelope, state, warn); err != nil {
+		return err
+	}
 	t.buildStyleStats(&envelope, state)
 	envelope.apply(result)
+	return nil
 }
 
 // buildStyleStats 对全部已完成章节做全书级风格统计，注入 episodic_memory.style_stats。
@@ -1027,9 +1033,13 @@ func (t *ContextTool) buildMethodologyContext(working map[string]any) {
 		working["physics_axioms"] = pa
 		working["physics_axioms_usage"] = "physics_axioms 是物理一致性公理：涉及赶路/传信/物价/季节/境界时先对照本表（距离速度、信息传播天数、物价、境界序列、物候、保质期），check_consistency 阶段须复核"
 	}
+	if contract, err := t.store.WorldSim.LoadStoryTimeContract(); err == nil && contract != nil {
+		working["story_time_contract"] = contract
+		working["story_time_contract_usage"] = "story_time_contract 冻结全书目标章数与故事跨度；时间落点优先服从 chapter_schedule，其次 arc_schedule，二者缺失时才按 nominal_days_per_chapter 线性估算，不得自行把平均值写死为 2 天/章"
+	}
 	if cal, err := t.store.WorldSim.LoadStoryCalendar(); err == nil && cal != nil && !cal.IsEmpty() {
 		working["story_calendar"] = cal
-		working["story_calendar_usage"] = "story_calendar 是故事内时间基线：正文的日期/季节/节令须与之一致；一章约覆盖 days_per_chapter 天，跨章时间跳跃要交代"
+		working["story_calendar_usage"] = "story_calendar 承载纪年、开场日期与季节；days_per_chapter 是时间合同导出的平均回退值，跨章时间跳跃仍须交代"
 	}
 	// Task 059 注入（生成链路）：slop 规避清单——Writer 写作时即对照规避，
 	// 命中会在提交时被机械检测标红；返工链路在 rewrite brief 里再注入一次。
@@ -1123,6 +1133,10 @@ func (t *ContextTool) buildWorldSimulationPlanning(planning map[string]any, warn
 	}
 	if cal, err := t.store.WorldSim.LoadStoryCalendar(); err == nil && cal != nil && !cal.IsEmpty() {
 		sim["story_calendar"] = cal
+	}
+	if contract, err := t.store.WorldSim.LoadStoryTimeContract(); err == nil && contract != nil {
+		sim["story_time_contract"] = contract
+		sim["story_time_contract_usage"] = "世界事件 story_day 优先按 chapter_schedule/arc_schedule 定位；缺失具体 schedule 才按 nominal_days_per_chapter 估算"
 	}
 	if len(agenda.Agendas) > 0 {
 		sim["offscreen_agenda"] = agenda.Agendas
@@ -1333,31 +1347,40 @@ func compactCharacterContinuitySnapshot(ledger *domain.CharacterContinuityLedger
 	return snapshot
 }
 
-func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) {
+func (t *ContextTool) buildChapterSelectedMemory(ctx context.Context, envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) error {
 	if len(state.storyThreads) > 0 {
 		envelope.Selected["story_threads"] = state.storyThreads
 	}
-	ragItems, trace, cacheHit := t.selectRAGRecall(ctx, state)
-	if len(ragItems) > 0 {
-		envelope.Selected["rag_recall"] = ragItems
-		envelope.References["retrieval_trace"] = trace
-		if trace != nil && !cacheHit {
-			_ = t.store.RAG.AppendTrace(*trace)
+	// Frozen prose consumes only the plan-bound receipt transformations already
+	// projected into render_packet. A draft-profile recall would create a newer
+	// latest receipt that the formal plan never consumed, then discard its raw
+	// hits during profile compaction. Skip both retrieval and persistence.
+	if state.requestedProfile != "draft" {
+		ragItems, trace, cacheHit := t.selectRAGRecall(ctx, state)
+		if len(ragItems) > 0 {
+			envelope.Selected["rag_recall"] = ragItems
+			envelope.References["retrieval_trace"] = trace
+			if trace != nil && !cacheHit {
+				_ = t.store.RAG.AppendTrace(*trace)
+			}
+		} else if trace != nil && len(trace.Matches) > 0 {
+			envelope.References["retrieval_trace"] = trace
+			if !cacheHit {
+				_ = t.store.RAG.AppendTrace(*trace)
+			}
 		}
-	} else if trace != nil && len(trace.Matches) > 0 {
-		envelope.References["retrieval_trace"] = trace
-		if !cacheHit {
-			_ = t.store.RAG.AppendTrace(*trace)
+		if receipt, err := persistChapterRAGFactReceipt(t.store, state, trace); err != nil {
+			return fmt.Errorf("persist chapter RAG fact receipt: %w", err)
+		} else if receipt == nil {
+			return fmt.Errorf("persist chapter RAG fact receipt returned nil for chapter %d profile=%s", state.chapter, state.requestedProfile)
+		} else {
+			envelope.References["rag_fact_receipt"] = ragFactReceiptContext(receipt)
 		}
-	}
-	if receipt, err := persistChapterRAGFactReceipt(t.store, state, trace); err != nil {
-		warn("rag_fact_receipt", err)
-	} else if receipt != nil {
-		envelope.References["rag_fact_receipt"] = ragFactReceiptContext(receipt)
 	}
 	if lessons := t.selectReviewLessons(state.chapter, warn); len(lessons) > 0 {
 		envelope.Selected["review_lessons"] = lessons
 	}
+	return nil
 }
 
 func (t *ContextTool) buildChapterEpisodicMemory(envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) {

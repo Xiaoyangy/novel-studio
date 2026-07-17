@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,6 +109,72 @@ func TestRAGFactReceiptPlanningToRenderChainAndFreshness(t *testing.T) {
 	if err := ValidateRAGFactPlanCurrent(st, unconsumed); err == nil || !strings.Contains(err.Error(), "没有通过") {
 		t.Fatalf("non-empty RAG receipt must be materially consumed by the formal plan: %v", err)
 	}
+	hangingRef := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+		ContextSources: []string{receipt.SourceToken()},
+		ExternalRefs: []domain.ExternalReferencePlan{{
+			QueryOrNeed: "rag receipt", SourceType: "rag_recall", SourceRefs: []string{receipt.Hits[0].Ref},
+		}},
+	}}
+	if err := ValidateRAGFactPlanCurrent(st, hangingRef); err == nil ||
+		!strings.Contains(err.Error(), "usable_details/transformation_rule/do_not_use") {
+		t.Fatalf("an exact hit ref without a scene transformation still only hangs RAG on the plan: %v", err)
+	}
+	hangingRef.CausalSimulation.ExternalRefs[0].UsableDetails = []string{" "}
+	hangingRef.CausalSimulation.ExternalRefs[0].TransformationRule = "转成当前场景动作"
+	hangingRef.CausalSimulation.ExternalRefs[0].DoNotUse = []string{""}
+	if err := ValidateRAGFactPlanCurrent(st, hangingRef); err == nil ||
+		!strings.Contains(err.Error(), "usable_details/transformation_rule/do_not_use") {
+		t.Fatalf("blank transformation slices bypassed fact consumption: %v", err)
+	}
+	hangingRef.CausalSimulation.ExternalRefs[0].UsableDetails = []string{"欠费单需先确认"}
+	hangingRef.CausalSimulation.ExternalRefs[0].TransformationRule = "转成承租人先确认欠费单、再交接钥匙的现场动作"
+	hangingRef.CausalSimulation.ExternalRefs[0].DoNotUse = []string{"不复制召回摘要或来源人物"}
+	if err := ValidateRAGFactPlanCurrent(st, hangingRef); err != nil {
+		t.Fatalf("complete rag_recall transformation should be accepted: %v", err)
+	}
+	unboundRecall := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+		ExternalRefs: []domain.ExternalReferencePlan{{
+			QueryOrNeed: "伪造召回",
+			SourceType:  "rag_recall",
+			SourceRefs:  []string{"local:index#chunk=unbound"},
+			UsableDetails: []string{
+				"看似完整的事实",
+			},
+			TransformationRule: "写进当前场景",
+			DoNotUse:           []string{"不复制原文"},
+		}},
+	}}
+	if err := ValidateRAGFactPlanCurrent(st, unboundRecall); err == nil ||
+		!strings.Contains(err.Error(), "不可追溯") {
+		t.Fatalf("rag_recall without an exact receipt token/ref bypassed provenance: %v", err)
+	}
+	literaryOnly := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+		ContextSources: []string{receipt.SourceToken()},
+		LiteraryRendering: &domain.LiteraryRenderingPlan{
+			Focalizer: "林澈", NarrativeAccess: domain.LiteraryNarrativeAccessInternal,
+			KnowledgeBoundary: "只写现场", PerceptualBias: "先看票据", SummaryOmissionPolicy: "压缩手续",
+			Afterimage: "钥匙留在桌上", SourceRefs: []string{receipt.Hits[0].Ref},
+		},
+	}}
+	if err := ValidateRAGFactPlanCurrent(st, literaryOnly); err == nil ||
+		!strings.Contains(err.Error(), "literary source") {
+		t.Fatalf("literary metadata falsely satisfied fact-anchor consumption: %v", err)
+	}
+	realityOnly := domain.ChapterPlan{Chapter: 1, CausalSimulation: domain.ChapterCausalSimulation{
+		ContextSources: []string{receipt.SourceToken()},
+		RealitySupport: []domain.RealitySupportPlan{{
+			SourceRef: receipt.Hits[0].Ref, Domain: "商铺交接", UsableDetail: "欠费单先确认",
+			TransformedAs: "承租人把单据推回桌面", ChapterUse: "钥匙交接",
+		}},
+	}}
+	if err := ValidateRAGFactPlanCurrent(st, realityOnly); err == nil ||
+		!strings.Contains(err.Error(), "forbidden_direct_use") {
+		t.Fatalf("incomplete reality support bypassed fact transformation: %v", err)
+	}
+	realityOnly.CausalSimulation.RealitySupport[0].ForbiddenDirectUse = []string{"不复制来源摘要"}
+	if err := ValidateRAGFactPlanCurrent(st, realityOnly); err != nil {
+		t.Fatalf("complete receipt-backed reality support should project an anchor: %v", err)
+	}
 	packet := newDraftRenderPacket(plan)
 	packetJSON, _ := json.Marshal(packet)
 	if !strings.Contains(string(packetJSON), "欠费单需先确认") ||
@@ -186,6 +254,50 @@ func TestRAGFactReceiptNoMaterialIsExplicit(t *testing.T) {
 	}
 	if err := ValidateRAGFactPlanCurrent(st, plan); err != nil {
 		t.Fatalf("explicit no_material plan should remain valid: %v", err)
+	}
+}
+
+func TestNonDraftContextFailsClosedWhenRAGFactReceiptCannotPersist(t *testing.T) {
+	st := newRAGFactReceiptTestStore(t, nil)
+	blocked := filepath.Join(st.Dir(), "meta", "rag", "fact_receipts")
+	if err := os.WriteFile(blocked, []byte("blocks receipt directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "persist chapter RAG fact receipt") {
+		t.Fatalf("non-draft context continued after receipt persistence failure: %v", err)
+	}
+}
+
+func TestDraftProfileDoesNotRetrieveOrReplaceLatestRAGFactReceipt(t *testing.T) {
+	st := newRAGFactReceiptTestStore(t, []domain.RAGChunk{{
+		ID: "fact:night-rent", SourcePath: "summaries/00.json", SourceKind: "chapter_summary_facts",
+		Facet: "plot", Text: "钥匙交接前先确认欠费单。", Summary: "交接顺序。",
+	}})
+	tool := NewContextTool(st, References{}, "default")
+	envelope := newChapterContextEnvelope()
+	state := contextBuildState{
+		chapter:          1,
+		requestedProfile: "draft",
+		profile:          domain.NewContextProfile(3),
+		progress:         &domain.Progress{TotalChapters: 3},
+		currentEntry:     &domain.OutlineEntry{Chapter: 1, Title: "夜租商铺"},
+	}
+	tool.buildChapterSelectedMemory(context.Background(), &envelope, state, func(string, error) {})
+	if _, exists := envelope.Selected["rag_recall"]; exists {
+		t.Fatalf("draft profile performed a live RAG recall: %#v", envelope.Selected)
+	}
+	if _, exists := envelope.References["retrieval_trace"]; exists {
+		t.Fatalf("draft profile exposed a live retrieval trace: %#v", envelope.References)
+	}
+	receipt, err := st.RAG.LoadLatestRAGFactReceipt(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt != nil {
+		t.Fatalf("draft profile replaced latest plan-bound receipt: %+v", receipt)
 	}
 }
 

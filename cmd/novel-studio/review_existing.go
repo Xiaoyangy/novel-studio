@@ -124,6 +124,19 @@ func hasReviewExistingFlag(argv []string) bool {
 
 // reviewExistingPipeline 逐章 Editor 评审编排。
 func reviewExistingPipeline(opts cliOptions, args []string) error {
+	return reviewExistingPipelineAtOutput(opts, args, "", false)
+}
+
+// reviewExistingPipelineAtOutput evaluates an exact isolated output tree.
+// Sealed render candidates disable live RAG here: all inference inputs were
+// frozen before rendering, and a rejected candidate must not write vectors or
+// retrieval state into the canonical project's external index.
+func reviewExistingPipelineAtOutput(
+	opts cliOptions,
+	args []string,
+	exactOutputDir string,
+	disableLiveRAG bool,
+) error {
 	// --review-existing --help：路由 token 已在 main 里剥离（避免 Go flag 包
 	// 把它注册为 StringVar 后把 --help 当成它的值），此时再 hasHelpToken 打印 usage。
 	if hasHelpToken(args) {
@@ -156,9 +169,15 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 	if projDir == "" {
 		projDir, _ = os.Getwd()
 	}
-	if err := normalizeOutputDirForInvocation(&cfg, projDir); err != nil {
-		return err
+	if strings.TrimSpace(exactOutputDir) != "" {
+		cfg.OutputDir = filepath.Clean(exactOutputDir)
+		projDir = cfg.OutputDir
+	} else {
+		if err := normalizeOutputDirForInvocation(&cfg, projDir); err != nil {
+			return err
+		}
 	}
+	cfg.DisableLiveRAG = disableLiveRAG
 	rules.EnsureHomeRulesDir()
 	bundle := assets.Load(cfg.Style)
 	fmt.Fprintf(os.Stderr, "[review-existing] 工作目录: %s\n", projDir)
@@ -173,16 +192,18 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	st := store.NewStore(eng.Dir())
 	var ragEmbedder rag.Embedder
-	if embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "[review-existing] RAG embedding 初始化失败，仅写关键词索引：%v\n", err)
-	} else if enabled {
-		ragEmbedder = embedder
-	}
 	var ragVectorWriter rag.VectorWriter
-	if writer, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
-		fmt.Fprintf(os.Stderr, "[review-existing] Qdrant 初始化失败，仅写本地 RAG：%v\n", err)
-	} else if enabled {
-		ragVectorWriter = writer
+	if !cfg.DisableLiveRAG {
+		if embedder, enabled, err := bootstrap.NewRAGEmbedder(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] RAG embedding 初始化失败，仅写关键词索引：%v\n", err)
+		} else if enabled {
+			ragEmbedder = embedder
+		}
+		if writer, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] Qdrant 初始化失败，仅写本地 RAG：%v\n", err)
+		} else if enabled {
+			ragVectorWriter = writer
+		}
 	}
 
 	// 读 premise 拼 context
@@ -229,6 +250,11 @@ func reviewExistingPipeline(opts cliOptions, args []string) error {
 
 	successCount, failureCount := 0, 0
 	for _, chNum := range selectedChapters {
+		if err := st.ArcCycle().RequireChapterReviewArtifactsMutable(chNum); err != nil {
+			fmt.Fprintf(os.Stderr, "[review-existing] 跳过 ch%02d：%v\n", chNum, err)
+			failureCount++
+			continue
+		}
 		chPath := filepath.Join(chaptersDir, fmt.Sprintf("%02d.md", chNum))
 		body, err := os.ReadFile(chPath)
 		if err != nil {

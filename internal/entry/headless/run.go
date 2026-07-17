@@ -31,6 +31,7 @@ type Options struct {
 	StopAfterInitialWorldTick bool
 	PreserveUserRules         bool
 	SkipQueueReplay           bool
+	DisableLiveRAG            bool
 	Stdin                     io.Reader
 	Stdout                    io.Writer
 	Stderr                    io.Writer
@@ -53,6 +54,9 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		stdin = os.Stdin
 	}
 
+	if opts.DisableLiveRAG {
+		cfg.DisableLiveRAG = true
+	}
 	eng, err := host.New(cfg, bundle)
 	if err != nil {
 		return err

@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
@@ -33,6 +35,51 @@ const (
 	simulationAuthorityNotSpecified  = "not_specified_in_rewrite_source"
 )
 
+// effectiveProtagonistDecision removes authority-store sentinels from the POV
+// contract. A blocking protagonist may keep an exact no-inference sentinel in
+// character_decisions, but protagonist_projection must still contain an
+// independently authored, source-bound human-readable choice. Returning empty
+// when none exists makes simulation finalization fail closed instead of
+// laundering decision_reason or another internal sentinel into a formal plan.
+func effectiveProtagonistDecision(projection domain.ProtagonistDecisionProjection) string {
+	decision := strings.TrimSpace(projection.ChosenDecision)
+	if decision != "" && !simulationAuthorityDecisionPlaceholder(decision) {
+		return decision
+	}
+	return ""
+}
+
+func planningProtagonistProjection(projection domain.ProtagonistDecisionProjection) domain.ProtagonistDecisionProjection {
+	projection.ChosenDecision = effectiveProtagonistDecision(projection)
+	return projection
+}
+
+func simulationAuthorityDecisionPlaceholder(value string) bool {
+	switch strings.TrimSpace(value) {
+	case simulationAuthorityUnknown,
+		simulationAuthorityHoldBaseline,
+		simulationAuthorityWait,
+		simulationAuthorityMissing,
+		simulationAuthorityNoEffect,
+		simulationAuthorityUnchanged,
+		simulationAuthorityNotApplicable,
+		simulationAuthorityBlockedEffect,
+		simulationAuthorityNoImpact,
+		simulationAuthorityUnstated,
+		simulationAuthorityEvidenceOnly,
+		simulationAuthorityPreserve,
+		simulationAuthorityNoAlternative,
+		simulationAuthoritySourceResult,
+		simulationAuthoritySourceEffect,
+		simulationAuthorityDirectSource,
+		simulationAuthorityNoInference,
+		simulationAuthorityNotSpecified:
+		return true
+	default:
+		return false
+	}
+}
+
 // simulationCharacterAuthority is the compact, authoritative identity packet
 // paired one-for-one with simulation_characters. Full dossiers are too large
 // and easy to lose in the middle of a focused context; omitting them makes the
@@ -51,8 +98,10 @@ type simulationCharacterAuthority struct {
 	Arc                       string                       `json:"arc,omitempty"`
 	CurrentLocation           string                       `json:"current_location"`
 	CurrentStatus             string                       `json:"current_status"`
+	CurrentGoal               string                       `json:"current_goal,omitempty"`
 	CurrentAction             string                       `json:"current_action"`
 	CurrentPressure           string                       `json:"current_pressure"`
+	CurrentPressurePolicy     string                       `json:"current_pressure_policy,omitempty"`
 	NextIndependentMove       string                       `json:"next_independent_move"`
 	Resources                 []string                     `json:"resources,omitempty"`
 	Relationships             []string                     `json:"relationships,omitempty"`
@@ -70,6 +119,8 @@ type simulationCharacterAuthority struct {
 	HoldBaselineContract      map[string]any               `json:"hold_baseline_contract,omitempty"`
 	RewriteSourceEvidence     []string                     `json:"rewrite_source_evidence,omitempty"`
 	RewriteSourceOnlyContract map[string]any               `json:"rewrite_source_only_contract,omitempty"`
+	projectAllGrounded        bool                         `json:"-"`
+	baseBlocking              bool                         `json:"-"`
 }
 
 func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulationCharacterAuthority {
@@ -112,6 +163,8 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 			cast[name] = entry
 		}
 	}
+	projectAllInputs, projectAllErr := loadProjectAllAuthorityInputs(st, chapter)
+	projectAllFresh := projectAllErr == nil && projectAllInputs != nil
 
 	result := make([]simulationCharacterAuthority, 0, len(required))
 	for _, name := range required {
@@ -137,6 +190,8 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 			entry.Arc = strings.TrimSpace(character.Arc)
 			entry.AuthoritySources = append(entry.AuthoritySources, "characters.json:"+name)
 		}
+		projectAllGroundingComplete := false
+		projectAllResourceBoundary := false
 		if dossier, ok := dossiers[name]; ok {
 			entry.AuthoritySources = append(entry.AuthoritySources, "meta/characters/"+name+"/dossier.json")
 			if entry.Role == "" {
@@ -199,6 +254,70 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 				}
 			}
 		}
+		if projectAllFresh && entry.VisibleInCurrentChapter {
+			dynamics, hasDynamics := projectAllInputs.InitialDynamics[name]
+			switch {
+			case projectAllInputs.InitialDynamicsSeedActive:
+				if hasDynamics && completeInitialCharacterDynamics(dynamics) {
+					projectAllGroundingComplete = true
+					projectAllResourceBoundary = true
+					entry.CurrentGoal = strings.TrimSpace(dynamics.CurrentGoal)
+					entry.CurrentPressure = strings.TrimSpace(dynamics.Pressure)
+					entry.CurrentPressurePolicy = "outline_authorized_concise"
+					// LikelyAction is a shared zero-init template in many
+					// projects. ActionTendency is tied to the exact character
+					// card and is therefore the stronger grounding source.
+					entry.CurrentAction = firstAuthorityText(dynamics.ActionTendency, dynamics.LikelyAction)
+					entry.Resources = concreteInitialDynamicsResources(dynamics.Resources)
+					entry.DecisionModel = strings.TrimSpace(dynamics.DecisionFrame.DecisionRule)
+					entry.AuthoritySources = append(entry.AuthoritySources,
+						"meta/initial_character_dynamics.json:"+name,
+						projectAllStateContextPath+":"+projectAllInputs.Context.ContextDigest,
+					)
+				}
+			default:
+				continuity, hasContinuity := projectAllInputs.Continuity[name]
+				if hasContinuity && continuity.DecisionModel == "" &&
+					hasDynamics && completeInitialCharacterDynamics(dynamics) {
+					continuity.DecisionModel = strings.TrimSpace(dynamics.DecisionFrame.DecisionRule)
+					continuity.Sources = append(continuity.Sources,
+						"meta/initial_character_dynamics.json:"+name+":decision_frame",
+					)
+				}
+				if hasContinuity && completeProjectAllCharacterContinuity(continuity) {
+					projectAllGroundingComplete = true
+					projectAllResourceBoundary = continuity.ResourceBoundary
+					entry.CurrentLocation = firstAuthorityText(continuity.CurrentLocation, entry.CurrentLocation)
+					entry.CurrentStatus = firstAuthorityText(continuity.CurrentStatus, entry.CurrentStatus)
+					entry.CurrentGoal = strings.TrimSpace(continuity.CurrentGoal)
+					entry.CurrentPressure = strings.TrimSpace(continuity.CurrentPressure)
+					entry.CurrentPressurePolicy = "exact_continuity"
+					entry.CurrentAction = strings.TrimSpace(continuity.CurrentAction)
+					entry.Resources = compactStrings(continuity.Resources)
+					entry.KnowledgeBoundary = strings.TrimSpace(continuity.KnowledgeBoundary)
+					entry.DecisionModel = strings.TrimSpace(continuity.DecisionModel)
+					entry.AuthoritySources = append(entry.AuthoritySources, continuity.Sources...)
+				} else if !hasContinuity && hasDynamics &&
+					completeInitialCharacterDynamics(dynamics) {
+					// A character held offscreen by earlier chapters has no
+					// non-sentinel continuity yet. Its actor-specific zero seed
+					// remains valid for first entry; any real prior delta, even
+					// if incomplete, disables this fallback.
+					projectAllGroundingComplete = true
+					projectAllResourceBoundary = true
+					entry.CurrentGoal = strings.TrimSpace(dynamics.CurrentGoal)
+					entry.CurrentPressure = strings.TrimSpace(dynamics.Pressure)
+					entry.CurrentPressurePolicy = "outline_authorized_concise"
+					entry.CurrentAction = firstAuthorityText(dynamics.ActionTendency, dynamics.LikelyAction)
+					entry.Resources = concreteInitialDynamicsResources(dynamics.Resources)
+					entry.DecisionModel = strings.TrimSpace(dynamics.DecisionFrame.DecisionRule)
+					entry.AuthoritySources = append(entry.AuthoritySources,
+						"meta/initial_character_dynamics.json:"+name+":first_entry_fallback",
+						projectAllStateContextPath+":"+projectAllInputs.Context.ContextDigest,
+					)
+				}
+			}
+		}
 
 		if entry.CurrentLocation == simulationAuthorityUnknown {
 			entry.MissingAuthority = append(entry.MissingAuthority, "current_location")
@@ -212,10 +331,10 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		if entry.CurrentPressure == simulationAuthorityUnknown {
 			entry.MissingAuthority = append(entry.MissingAuthority, "pressure")
 		}
-		if len(entry.Desires) == 0 && entry.NextIndependentMove == simulationAuthorityUnknown {
+		if entry.CurrentGoal == "" && len(entry.Desires) == 0 && entry.NextIndependentMove == simulationAuthorityUnknown {
 			entry.MissingAuthority = append(entry.MissingAuthority, "current_goal")
 		}
-		if len(entry.Resources) == 0 {
+		if len(entry.Resources) == 0 && !projectAllResourceBoundary {
 			entry.MissingAuthority = append(entry.MissingAuthority, "resources")
 		}
 		if entry.KnowledgeBoundary == "" {
@@ -226,12 +345,22 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		}
 		entry.MissingAuthority = compactStrings(entry.MissingAuthority)
 		entry.RequiredKnowledgeBoundary = preserveKnowledgeBoundaryClauses(st, chapter, name)
-		entry.Blocking = len(entry.MissingAuthority) > 0 && entry.SimulationStatus != "already_present"
+		entry.baseBlocking = len(entry.MissingAuthority) > 0
+		entry.Blocking = entry.baseBlocking && entry.SimulationStatus != "already_present"
+		projectAllGrounded := projectAllGroundingComplete &&
+			onlyChapterLocalPlacementMissing(entry.MissingAuthority)
+		if projectAllGrounded {
+			entry.Blocking = false
+		}
+		entry.projectAllGrounded = projectAllGrounded
 		switch {
 		case entry.SimulationStatus == "already_present":
 			entry.AuthorityMode = "reuse_saved_decision"
 			entry.DecisionPolicy = "该角色决定已在当前 partial 落盘；只读校验，不得重发、改写或用本摘要覆盖。"
-		case entry.Blocking && entry.VisibleInCurrentChapter:
+		case projectAllGrounded:
+			entry.AuthorityMode = "project_all_grounded"
+			entry.DecisionPolicy = "本角色由服务端 project_all_grounded authority receipt 授权。必须使用 current_goal、current_pressure、resources、current_action、decision_model、本章大纲和当前 project_all_state 推演；project_all_state/连续态覆盖零章种子。current_goal 与 resources 逐项原样复制；knowledge_boundary 必须严格等于本对象的 knowledge_boundary 加 required_knowledge_boundaries，不得追加任何知识或秘密；current_pressure_policy=exact_continuity 时原样复制，=outline_authorized_concise 时从 current_pressure 或本章大纲中截取一条完整短句，不得概括。location 必须原样来自上一连续态、本章大纲或 book_world。decision 与 action 是输入侧合同，必须逐字来自 current_action/current_goal/本章大纲；available_options 的其他项、immediate_result、state_after、butterfly_effect.effect 与 protagonist_impact 可以写推演出的新文本，但必须保留至少两个输入因果锚点，不能引入输入中不存在的人名、地点、资源、数量、秘密、后台规则或世界机制。所有 projected output 会进入服务端 decision root、authority receipt、SimulationID 与后续 delta gate，禁止用一段合法前缀夹带新秘密。"
+		case entry.Blocking && entry.VisibleInCurrentChapter && !projectAllFresh:
 			entry.AuthorityMode = "rewrite_source_only"
 			entry.RewriteSourceEvidence = rewriteSourceEvidenceForCharacter(st, chapter, name)
 			entry.RewriteSourceOnlyContract = rewriteSourceOnlyContractPayload(name, chapter, entry.RewriteSourceEvidence, entry.RequiredKnowledgeBoundary)
@@ -251,6 +380,75 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		result = append(result, entry)
 	}
 	return result
+}
+
+func loadInitialCharacterDynamics(st *store.Store) map[string]domain.CharacterSimulationState {
+	result := map[string]domain.CharacterSimulationState{}
+	if st == nil {
+		return result
+	}
+	raw, err := os.ReadFile(filepath.Join(st.Dir(), "meta", "initial_character_dynamics.json"))
+	if err != nil {
+		return result
+	}
+	var document struct {
+		Characters []domain.CharacterSimulationState `json:"characters"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return result
+	}
+	for _, state := range document.Characters {
+		name := strings.TrimSpace(state.Character)
+		if name != "" {
+			result[name] = state
+		}
+	}
+	return result
+}
+
+func completeInitialCharacterDynamics(state domain.CharacterSimulationState) bool {
+	return strings.TrimSpace(state.Character) != "" &&
+		strings.TrimSpace(state.CurrentGoal) != "" &&
+		strings.TrimSpace(state.Pressure) != "" &&
+		strings.TrimSpace(state.ActionTendency) != "" &&
+		strings.TrimSpace(state.DecisionFrame.DecisionRule) != "" &&
+		len(compactStrings(state.KnowledgeLedger.KnownFacts)) > 0 &&
+		len(compactStrings(state.KnowledgeLedger.ForbiddenKnowledge)) > 0
+}
+
+func concreteInitialDynamicsResources(values []string) []string {
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		switch value {
+		case "", "角色卡既有经验", "第一章可见事实", "可复核的关系/资源台账",
+			"离屏日程与职业资源", "首次入场前已授权的关系台账":
+			continue
+		default:
+			result = appendAuthorityUnique(result, value)
+		}
+	}
+	return limitAuthorityStrings(result, 5)
+}
+
+func firstAuthorityText(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func onlyChapterLocalPlacementMissing(missing []string) bool {
+	for _, field := range missing {
+		switch strings.TrimSpace(field) {
+		case "current_location", "current_status":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateIncomingSimulationCharacterAuthority(st *store.Store, chapter int, decisions []domain.CharacterWorldDecision) error {
@@ -290,6 +488,10 @@ func validateIncomingSimulationCharacterAuthority(st *store.Store, chapter int, 
 			continue
 		}
 		switch entry.AuthorityMode {
+		case "project_all_grounded":
+			if err := validateProjectAllGroundedDecision(st, chapter, entry, decision); err != nil {
+				violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))
+			}
 		case "hold_baseline":
 			if err := validateHoldBaselineDecision(chapter, decision, entry.RequiredKnowledgeBoundary); err != nil {
 				violations = append(violations, fmt.Sprintf("%s: %v", decision.Character, err))

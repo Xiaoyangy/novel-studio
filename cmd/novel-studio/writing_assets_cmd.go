@@ -52,6 +52,11 @@ func writingAssetsPipeline(opts cliOptions, args []string) error {
 	if len(extra) > 0 {
 		action = extra[0]
 	}
+	if action != "list" {
+		if err := requireWritingAssetsMutationAllowed(st, action); err != nil {
+			return err
+		}
+	}
 	switch action {
 	case "list":
 		if len(extra) > 1 {
@@ -88,6 +93,46 @@ func writingAssetsPipeline(opts cliOptions, args []string) error {
 	default:
 		return fmt.Errorf("unknown writing-assets action %q", action)
 	}
+}
+
+func requireWritingAssetsMutationAllowed(st *store.Store, action string) error {
+	if st == nil {
+		return fmt.Errorf("writing-assets %s requires store", action)
+	}
+	if lock, err := st.Runtime.LoadPipelineExecution(); err != nil {
+		return err
+	} else if lock != nil {
+		return fmt.Errorf(
+			"writing-assets %s 不能在 execution lock 期间改写渲染依赖（mode=%s owner=%s）",
+			action,
+			lock.Mode,
+			lock.Owner,
+		)
+	}
+	mode, err := st.LoadWritingPipelineMode()
+	if err != nil || mode == nil || mode.Mode != domain.WritingPipelineModeSealedTwoPassV2 {
+		return err
+	}
+	projected := st.ProjectedV2()
+	if active, err := projected.LoadActiveGeneration(); err != nil {
+		return err
+	} else if active != nil {
+		return fmt.Errorf(
+			"writing-assets %s 会改写 active sealed generation %s 的渲染依赖；请在新一轮 project-all --restart 之前完成写法资产调整",
+			action,
+			active.GenerationID,
+		)
+	}
+	if cursor, err := projected.LoadProjectionCursor(); err != nil {
+		return err
+	} else if cursor != nil {
+		return fmt.Errorf(
+			"writing-assets %s 会改写正在构建或已封存 generation %s 的规划依赖；请先显式 --restart",
+			action,
+			cursor.GenerationID,
+		)
+	}
+	return nil
 }
 
 func seedDefaultWritingAssets(st *store.Store) error {

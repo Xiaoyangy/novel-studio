@@ -99,9 +99,15 @@ func (t *ContextTool) Description() string {
 }
 func (t *ContextTool) Label() string { return "加载上下文" }
 
-// 纯读工具，可被并发调度。
-func (t *ContextTool) ReadOnly(_ json.RawMessage) bool        { return true }
-func (t *ContextTool) ConcurrencySafe(_ json.RawMessage) bool { return true }
+// Phase-scoped project-all reads issue a durable server-side access receipt,
+// so those calls are serialized as writes. Other context profiles remain pure
+// reads and retain concurrent scheduling.
+func (t *ContextTool) ReadOnly(args json.RawMessage) bool {
+	return !planningContextAccessArgsMayWrite(args)
+}
+func (t *ContextTool) ConcurrencySafe(args json.RawMessage) bool {
+	return !planningContextAccessArgsMayWrite(args)
+}
 
 func (t *ContextTool) Schema() map[string]any {
 	return schema.Object(
@@ -111,12 +117,39 @@ func (t *ContextTool) Schema() map[string]any {
 }
 
 func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if err := guardOutlineAllDynamicMaterialExecution(t.store, t.Name()); err != nil {
+		return nil, err
+	}
 	var a struct {
 		Chapter int    `json:"chapter"`
 		Profile string `json:"profile"`
 	}
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
+	}
+	lock, err := t.store.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return nil, fmt.Errorf("novel_context 读取 pipeline execution lock: %w", err)
+	}
+	if lock != nil {
+		if err := requireCurrentPipelineExecutionProcess(lock, "novel_context"); err != nil {
+			return nil, err
+		}
+	}
+	if lock != nil && lock.Mode == domain.PipelineExecutionRender {
+		if a.Chapter != lock.TargetChapter || strings.TrimSpace(a.Profile) != "draft" {
+			return nil, fmt.Errorf(
+				"render execution lock 只允许 novel_context(chapter=%d, profile=draft)；收到 chapter=%d profile=%q。冻结渲染禁止 full/planning/world_simulation 与其他章节实时上下文",
+				lock.TargetChapter,
+				a.Chapter,
+				a.Profile,
+			)
+		}
+		raw, _, err := LoadFrozenDraftRenderContext(t.store, lock.TargetChapter, lock.PlanDigest)
+		if err != nil {
+			return nil, fmt.Errorf("render 加载冻结正文上下文失败: %w", err)
+		}
+		return raw, nil
 	}
 
 	requestedChapter := a.Chapter
@@ -132,8 +165,11 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 			if err := t.addChapterPipelineInstructionContext(staged, a.Chapter); err != nil {
 				return nil, fmt.Errorf("load chapter pipeline instruction: %w", err)
 			}
+			if err := t.addProjectAllStateContext(staged, a.Chapter); err != nil {
+				return nil, err
+			}
 			sanitizeExternalSamplingPolicyContext(t.store, a.Chapter, staged)
-			return finalizeContextResult(staged, a.Chapter, a.Profile)
+			return t.finalizeContextWithAccessReceipt(staged, a.Chapter, a.Profile)
 		}
 	}
 
@@ -165,12 +201,17 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		// Writer 路径：加载全量基础数据 + 章节上下文
 		t.buildBaseContext(result, warn)
 		seed := newChapterContextEnvelope()
-		state := t.prepareChapterContext(a.Chapter, &seed, warn)
+		state := t.prepareChapterContext(a.Chapter, a.Profile, &seed, warn)
 		seed.apply(result)
-		t.buildChapterContext(ctx, result, state, warn)
+		if err := t.buildChapterContext(ctx, result, state, warn); err != nil {
+			return nil, err
+		}
 		t.buildChapterWorldSimulationContext(result, a.Chapter, warn)
 		if err := t.addChapterPipelineInstructionContext(result, a.Chapter); err != nil {
 			return nil, fmt.Errorf("load chapter pipeline instruction: %w", err)
+		}
+		if err := t.addProjectAllStateContext(result, a.Chapter); err != nil {
+			return nil, err
 		}
 		if hasRewriteTarget {
 			// 返工只需要当前章契约、原文与 review brief。完整 outline 和未来章窗口会让
@@ -221,7 +262,7 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	if len(warnings) > 0 {
 		result["_warnings"] = warnings
 	}
-	return finalizeContextResult(result, a.Chapter, a.Profile)
+	return t.finalizeContextWithAccessReceipt(result, a.Chapter, a.Profile)
 }
 
 func contextBudget(chapter int, profile string) int {
@@ -343,7 +384,7 @@ func (t *ContextTool) ProbeRAGRecall(ctx context.Context, chapter int) ([]domain
 		return nil, nil, fmt.Errorf("RAG probe chapter 必须大于 0")
 	}
 	seed := newChapterContextEnvelope()
-	state := t.prepareChapterContext(chapter, &seed, func(string, error) {})
+	state := t.prepareChapterContext(chapter, "planning", &seed, func(string, error) {})
 	if state.currentEntry == nil && state.chapterPlan == nil {
 		return nil, nil, fmt.Errorf("RAG probe chapter %d 缺少大纲或章节计划", chapter)
 	}
@@ -440,7 +481,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			"time_window":            sim.TimeWindow,
 			"character_count":        len(sim.CharacterDecisions),
 			"character_decisions":    sim.CharacterDecisions,
-			"protagonist_projection": sim.ProtagonistProjection,
+			"protagonist_projection": planningProtagonistProjection(sim.ProtagonistProjection),
 			"rewrite_source":         sim.RewriteSource,
 			"rewrite_fact_coverage":  sim.RewriteFactCoverage,
 			"render_policy":          "character_decisions 仅用于全角色连续性与 commit 回填；正文只能渲染 protagonist_projection.observable_effects 和主角合法获得的信息，hidden/delayed 不得泄露。",
@@ -582,7 +623,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 					"status":                 "ready",
 					"simulation_id":          final.SimulationID,
 					"character_count":        len(final.CharacterDecisions),
-					"protagonist_projection": final.ProtagonistProjection,
+					"protagonist_projection": planningProtagonistProjection(final.ProtagonistProjection),
 					"rewrite_source":         final.RewriteSource,
 					"rewrite_fact_coverage":  final.RewriteFactCoverage,
 				}

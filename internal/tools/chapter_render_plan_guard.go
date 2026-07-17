@@ -70,7 +70,7 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 				chapter, err)
 		}
 	}
-	if err := ValidateRAGFactPlanCurrent(st, *plan); err != nil {
+	if err := validateRAGFactPlanForChapterRender(st, chapter, *plan); err != nil {
 		return guard, fmt.Errorf("第 %d 章正文写入前普通事实 RAG receipt 复验失败：%w", chapter, err)
 	}
 	if guard.RenderOnly {

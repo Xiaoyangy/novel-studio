@@ -113,6 +113,16 @@ func TestRuntimeStoreReset(t *testing.T) {
 		Event:   "stream_delta",
 		Summary: "delta",
 	})
+	if err := store.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionFoundation,
+		TargetChapter: 1,
+		Owner:         "runtime-reset-preserve",
+	}); err != nil {
+		t.Fatalf("AcquirePipelineExecution: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Runtime.ReleasePipelineExecution("runtime-reset-preserve")
+	})
 
 	if err := store.Runtime.Reset(); err != nil {
 		t.Fatalf("Reset: %v", err)
@@ -132,5 +142,12 @@ func TestRuntimeStoreReset(t *testing.T) {
 	}
 	if len(logs) != 0 {
 		t.Fatalf("expected empty task log after reset, got %d", len(logs))
+	}
+	lock, err := store.Runtime.LoadPipelineExecution()
+	if err != nil {
+		t.Fatalf("LoadPipelineExecution after reset: %v", err)
+	}
+	if lock == nil || lock.Owner != "runtime-reset-preserve" {
+		t.Fatalf("runtime reset removed active pipeline capability: %+v", lock)
 	}
 }

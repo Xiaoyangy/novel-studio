@@ -11,6 +11,7 @@ type PipelineState struct {
 	Completed   []string                         `json:"completed"`
 	Prompt      string                           `json:"prompt,omitempty"`
 	InputDigest string                           `json:"input_digest,omitempty"`
+	RunIdentity string                           `json:"run_identity,omitempty"`
 	UpdatedAt   time.Time                        `json:"updated_at"`
 	Evidence    map[string]PipelineStageEvidence `json:"evidence,omitempty"`
 }

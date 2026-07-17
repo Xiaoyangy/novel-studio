@@ -43,23 +43,24 @@ const (
 )
 
 type commitChapterArgs struct {
-	Chapter             int                           `json:"chapter"`
-	Summary             string                        `json:"summary"`
-	Characters          []string                      `json:"characters"`
-	KeyEvents           []string                      `json:"key_events"`
-	TimelineEvents      []domain.TimelineEvent        `json:"timeline_events"`
-	ForeshadowUpdates   []domain.ForeshadowUpdate     `json:"foreshadow_updates"`
-	RelationshipChanges []domain.RelationshipEntry    `json:"relationship_changes"`
-	StateChanges        []domain.StateChange          `json:"state_changes"`
-	CharacterStage      []domain.CharacterStageRecord `json:"character_stage_records"`
-	ResourceUpdates     []domain.ResourceClaim        `json:"resource_updates"`
-	ResourceProposals   []domain.ResourceClaim        `json:"resource_proposals"`
-	CastIntros          []domain.CastIntro            `json:"cast_intros"`
-	HookType            string                        `json:"hook_type"`
-	DominantStrand      string                        `json:"dominant_strand"`
-	OpeningDevice       string                        `json:"opening_device"`
-	EndingDevice        string                        `json:"ending_device"`
-	Feedback            *domain.OutlineFeedback       `json:"feedback"`
+	Chapter                  int                           `json:"chapter"`
+	Summary                  string                        `json:"summary"`
+	Characters               []string                      `json:"characters"`
+	KeyEvents                []string                      `json:"key_events"`
+	TimelineEvents           []domain.TimelineEvent        `json:"timeline_events"`
+	ForeshadowUpdates        []domain.ForeshadowUpdate     `json:"foreshadow_updates"`
+	RelationshipChanges      []domain.RelationshipEntry    `json:"relationship_changes"`
+	StateChanges             []domain.StateChange          `json:"state_changes"`
+	CharacterStage           []domain.CharacterStageRecord `json:"character_stage_records"`
+	ResourceUpdates          []domain.ResourceClaim        `json:"resource_updates"`
+	ResourceProposals        []domain.ResourceClaim        `json:"resource_proposals"`
+	CastIntros               []domain.CastIntro            `json:"cast_intros"`
+	HookType                 string                        `json:"hook_type"`
+	DominantStrand           string                        `json:"dominant_strand"`
+	OpeningDevice            string                        `json:"opening_device"`
+	EndingDevice             string                        `json:"ending_device"`
+	Feedback                 *domain.OutlineFeedback       `json:"feedback"`
+	SealedControlPlaneDigest string                        `json:"_sealed_control_plane_digest,omitempty"`
 	methodologyCommitExtras
 }
 
@@ -212,6 +213,9 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
 		return nil, err
+	}
+	if _, err := applySealedCommitControlPlane(t.store, &a); err != nil {
+		return nil, fmt.Errorf("sealed commit control plane: %w", err)
 	}
 	existingPending, err := t.store.Signals.LoadPendingCommit()
 	if err != nil {
@@ -388,7 +392,7 @@ func (t *CommitChapterTool) Execute(ctx context.Context, args json.RawMessage) (
 	if err := t.saveChapterWorldDelta(
 		a.Chapter, false, a.Summary, a.CharacterStage,
 		a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
-		a.ResourceUpdates, a.ResourceProposals,
+		a.ResourceUpdates, a.ResourceProposals, a.SealedControlPlaneDigest,
 	); err != nil {
 		return nil, fmt.Errorf("save chapter world delta: %w: %w", errs.ErrStoreWrite, err)
 	}
@@ -880,6 +884,7 @@ func (t *CommitChapterTool) saveChapterWorldDelta(
 	stateChanges []domain.StateChange,
 	resources []domain.ResourceClaim,
 	resourceProposals []domain.ResourceClaim,
+	sealedControlPlaneDigest string,
 ) error {
 	delta := domain.ChapterWorldDelta{
 		Version:      1,
@@ -889,6 +894,12 @@ func (t *CommitChapterTool) saveChapterWorldDelta(
 		Summary:      summary,
 		GeneratedAt:  time.Now().Format(time.RFC3339),
 		Sources:      []string{"commit_chapter", "character_stage_records", "timeline/resource/relationship/state deltas"},
+	}
+	if strings.TrimSpace(sealedControlPlaneDigest) != "" {
+		delta.Sources = append(
+			delta.Sources,
+			"server-sealed-control:"+strings.TrimSpace(sealedControlPlaneDigest),
+		)
 	}
 	for _, stage := range stages {
 		if strings.TrimSpace(stage.Character) == "" {
@@ -976,6 +987,33 @@ func (t *CommitChapterTool) saveChapterWorldDelta(
 }
 
 func currentGenerationID(s *store.Store) string {
+	// A sealed render realizes the planning-v2 generation, not the older
+	// simulation restart epoch stored in progress. Bind commit metadata to that
+	// exact generation so the post-render matcher can independently compare the
+	// durable ChapterWorldDelta with the promoted bundle.
+	if s != nil {
+		if lock, err := s.Runtime.LoadPipelineExecution(); err == nil &&
+			lock != nil &&
+			lock.Mode == domain.PipelineExecutionRender &&
+			lock.TargetChapter > 0 &&
+			strings.TrimSpace(lock.PlanDigest) != "" {
+			var frozen struct {
+				Chapter              int    `json:"chapter"`
+				PlanDigest           string `json:"plan_digest"`
+				ProjectionBinding    string `json:"projection_binding"`
+				PlanningGenerationID string `json:"planning_generation_id"`
+			}
+			raw, readErr := os.ReadFile(filepath.Join(s.Dir(), "meta", "planning", "current_frozen_plan.json"))
+			if readErr == nil &&
+				json.Unmarshal(raw, &frozen) == nil &&
+				frozen.ProjectionBinding == "sealed_v2" &&
+				frozen.Chapter == lock.TargetChapter &&
+				strings.TrimSpace(frozen.PlanDigest) == strings.TrimSpace(lock.PlanDigest) &&
+				strings.TrimSpace(frozen.PlanningGenerationID) != "" {
+				return strings.TrimSpace(frozen.PlanningGenerationID)
+			}
+		}
+	}
 	if progress, err := s.Progress.Load(); err == nil && progress != nil && strings.TrimSpace(progress.GenerationID) != "" {
 		return strings.TrimSpace(progress.GenerationID)
 	}
@@ -1312,7 +1350,7 @@ func (t *CommitChapterTool) resumeRewriteCommit(ctx context.Context, pending *do
 		if err := t.saveChapterWorldDelta(
 			chapter, true, a.Summary, a.CharacterStage,
 			a.TimelineEvents, a.ForeshadowUpdates, a.RelationshipChanges, a.StateChanges,
-			a.ResourceUpdates, a.ResourceProposals,
+			a.ResourceUpdates, a.ResourceProposals, a.SealedControlPlaneDigest,
 		); err != nil {
 			return nil, fmt.Errorf("rewrite: save chapter world delta: %w: %w", errs.ErrStoreWrite, err)
 		}

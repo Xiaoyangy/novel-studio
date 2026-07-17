@@ -154,7 +154,7 @@ func TestDraftStyleContractSoftensPersistedSceneAnchorQuota(t *testing.T) {
 	}
 }
 
-func TestDraftProfileKeepsOnlyBlockingExternalReviewEvidence(t *testing.T) {
+func TestDraftProfileDropsBlockingExternalReviewAfterPlanFreeze(t *testing.T) {
 	plan := domain.ChapterPlan{Chapter: 2, Title: "返工"}
 	working := map[string]any{
 		"chapter_plan": &plan,
@@ -171,13 +171,10 @@ func TestDraftProfileKeepsOnlyBlockingExternalReviewEvidence(t *testing.T) {
 
 	applyChapterContextProfile(result, "draft")
 
-	review, ok := working["draft_external_ai_review"].(map[string]any)
-	if !ok || review["blocking"] != true || review["summary"] != "对白像流程清单" {
-		t.Fatalf("blocking evidence was not retained: %#v", working["draft_external_ai_review"])
+	if _, exists := working["draft_external_ai_review"]; exists {
+		t.Fatalf("post-freeze blocking review remained a live prose overlay: %#v", working["draft_external_ai_review"])
 	}
-	for _, key := range []string{"revision_plan", "dialogue_fix_plan"} {
-		if _, exists := review[key]; exists {
-			t.Fatalf("external prose choreography %q leaked: %#v", key, review)
-		}
+	if _, exists := working["draft_external_ai_review_policy"]; exists {
+		t.Fatal("post-freeze external review policy remained in draft context")
 	}
 }

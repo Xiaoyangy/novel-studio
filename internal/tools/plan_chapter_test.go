@@ -270,7 +270,7 @@ func testCausalSimulation(rewrite bool) map[string]any {
 				"function_shift": "从流程阻拦转为物证异常，再转为追问代价",
 			}},
 			"latent_context":      []string{"内门执事调换名册的完整原因只约束离屏行动，不在本章摊开"},
-			"reveal_budget":       []string{"只露名册异常和登记弟子反应，不解释内门执事动机"},
+			"reveal_budget":       []string{"不解释内门执事操纵名册异常的动机"},
 			"cut_or_compress":     []string{"登记制度长篇说明", "所有离屏角色同时间线行动清单"},
 			"page_turn_questions": []string{"名册红字为什么刚好在林砚追问后出现？"},
 		},
@@ -1028,7 +1028,7 @@ func TestPlanChapterPersistsCausalSimulation(t *testing.T) {
 					"function_shift": "从求救压力转为交易验证，再转为新账单钩子",
 				}},
 				"latent_context":      []string{"阴司银行来源、白骨财神、蒋牧旧欠全貌只保留在台账和后续证据链"},
-				"reveal_budget":       []string{"只露代付对价未知，不解释黑卡系统和收租方组织"},
+				"reveal_budget":       []string{"不解释黑卡系统来源；不揭示收租方组织身份"},
 				"cut_or_compress":     []string{"黑卡功能清单", "住户/房号/旧欠背景一口气说明"},
 				"page_turn_questions": []string{"欠费单为什么会把江烬写成下一位承担者？"},
 			},
@@ -1607,6 +1607,28 @@ func TestPlanChapterPersistsCausalSimulation(t *testing.T) {
 	if len(plan.CausalSimulation.LongformOpening.LongRangePromises) != 1 ||
 		plan.CausalSimulation.LongformOpening.LongRangePromises[0].Promise != "冥府黑卡来源和账单审计" {
 		t.Fatalf("unexpected long range promises: %+v", plan.CausalSimulation.LongformOpening.LongRangePromises)
+	}
+}
+
+func TestProjectAllRevealBudgetItemMechanicallyEnforceable(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "explicit fact", value: "不解释系统资金的真实来源", want: true},
+		{name: "every clause explicit", value: "不揭示后台老板身份；不提前给出名单来源", want: true},
+		{name: "empty probe", value: "不解释", want: false},
+		{name: "short probe", value: "不解释它", want: false},
+		{name: "mixed positive clause", value: "不揭示后台老板身份；只写主角反应", want: false},
+		{name: "positive slogan", value: "控制本章信息揭示程度", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectAllRevealBudgetItemMechanicallyEnforceable(tt.value); got != tt.want {
+				t.Fatalf("projectAllRevealBudgetItemMechanicallyEnforceable(%q)=%v want %v", tt.value, got, tt.want)
+			}
+		})
 	}
 }
 

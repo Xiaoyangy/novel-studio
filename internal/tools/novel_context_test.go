@@ -2151,21 +2151,21 @@ func TestFinalizedChapterOneRealShapeProfilesFitPreferredBudgetAndKeepAuthority(
 			if strings.Contains(string(sourceJSON), exactFact) {
 				t.Fatalf("%s rewrite source repeated canonical fact text: %s", profile, sourceJSON)
 			}
-			brief := keptWorking["rewrite_brief"].(map[string]any)
-			if len(stringSliceFromAny(brief["required_corrections"])) == 0 || len(stringSliceFromAny(brief["whole_text_single_segment_gates"])) == 0 {
-				t.Fatalf("%s latest actionable rewrite brief was lost: %#v", profile, brief)
+			if _, exists := keptWorking["rewrite_brief"]; exists {
+				t.Fatalf("%s replayed mutable rewrite brief after formal plan freeze", profile)
 			}
 
-			world := payload["chapter_world_simulation"].(map[string]any)
-			if world["rewrite_fact_coverage_receipt"] != "formal_plan_receipt.rewrite_fact_coverage" {
-				t.Fatalf("%s world coverage was not folded to the canonical receipt: %#v", profile, world)
+			if world, exists := payload["chapter_world_simulation"].(map[string]any); exists {
+				if world["rewrite_fact_coverage_receipt"] != "formal_plan_receipt.rewrite_fact_coverage" {
+					t.Fatalf("%s world coverage was not folded to the canonical receipt: %#v", profile, world)
+				}
+				if _, duplicated := world["protagonist_projection"]; duplicated {
+					t.Fatalf("%s world simulation duplicated the packet projection: %#v", profile, world)
+				}
 			}
 			coverageReceipt := receipt["rewrite_fact_coverage"].(map[string]any)
 			if coverageReceipt["artifact"] != "meta/chapter_simulations/001.json" || coverageReceipt["fact_count"] == nil || len(coverageReceipt["facts_sha256"].(string)) != 64 {
 				t.Fatalf("%s coverage receipt lost artifact/count/digest: %#v", profile, coverageReceipt)
-			}
-			if _, duplicated := world["protagonist_projection"]; duplicated {
-				t.Fatalf("%s world simulation duplicated the packet projection: %#v", profile, world)
 			}
 			projectionJSON, _ := json.Marshal(packet["protagonist_projection"])
 			if !strings.Contains(string(projectionJSON), knowledgeFact) {
@@ -2331,8 +2331,19 @@ func TestFinalizedDraftContextCompactsRepeatedPreserveAuthoritiesUnder64KiB(t *t
 	keptWorking := payload["working_memory"].(map[string]any)
 	packet := keptWorking["render_packet"].(map[string]any)
 	gotFacts := stringSliceFromAny(packet["preserve_facts"])
-	if !slices.Equal(gotFacts, canonicalFacts) {
-		t.Fatalf("source-first exact facts changed or semantically collapsed:\nwant=%#v\ngot=%#v", canonicalFacts, gotFacts)
+	gotIdentities := make([]string, 0, len(gotFacts))
+	wantIdentities := make([]string, 0, len(canonicalFacts))
+	for _, fact := range gotFacts {
+		gotIdentities = append(gotIdentities, rewriteFactIdentity(fact))
+	}
+	for _, fact := range canonicalFacts {
+		wantIdentities = append(wantIdentities, rewriteFactIdentity(fact))
+	}
+	if !slices.Equal(gotIdentities, wantIdentities) {
+		t.Fatalf("frozen-plan preserve facts changed or semantically collapsed:\nwant=%#v\ngot=%#v", canonicalFacts, gotFacts)
+	}
+	if len(gotFacts) == 0 || gotFacts[0] != plannedFacts[0] {
+		t.Fatalf("draft must preserve the finalized plan's exact quote spelling, got=%#v", gotFacts)
 	}
 	seen := map[string]bool{}
 	for _, fact := range gotFacts {
@@ -2769,6 +2780,13 @@ func TestDraftContextExplicitRerenderReusesValidatedStaleSourcePlan(t *testing.T
 	if err := st.SaveChapterWorldSimulation(sim); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1),
+		"chapter_world_simulation",
+		"meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
 	plan := domain.ChapterPlan{
 		Chapter: 1, Title: "夜市试点", Goal: "做完首轮试点", Hook: "更多摊主来问",
 		Contract: domain.ChapterContract{RequiredBeats: []string{"首轮试点产生可见结果"}},
@@ -3167,20 +3185,6 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 	if err := s.Progress.Init("test", 8); err != nil {
 		t.Fatalf("InitProgress: %v", err)
 	}
-	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
-		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
-		Chunks: []domain.RAGChunk{{
-			ID:         "chunk:local-exact-night-rent",
-			SourcePath: "meta/local-index.md",
-			SourceKind: "note",
-			Facet:      "plot",
-			Context:    "夜租商铺 | 本地文件",
-			Summary:    "本地 index_state 里也有夜租商铺关键词。",
-			Text:       "夜租商铺、账单、试营业、第一份租约全部精确命中，但有 Qdrant 时不能混入本地文件召回。",
-		}},
-	}); err != nil {
-		t.Fatalf("SaveIndexState: %v", err)
-	}
 	qdrantChunk := rag.NormalizeChunk(domain.RAGChunk{
 		ID:         "chunk:qdrant-night-rent",
 		SourcePath: "meta/rag/qdrant.md",
@@ -3190,6 +3194,23 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 		Summary:    "租约、账单、资产收益要连续推进。",
 		Text:       "语义召回命中夜租商铺的资产链。",
 	})
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
+		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
+		Chunks: []domain.RAGChunk{
+			{
+				ID:         "chunk:local-exact-night-rent",
+				SourcePath: "meta/local-index.md",
+				SourceKind: "note",
+				Facet:      "plot",
+				Context:    "夜租商铺 | 本地文件",
+				Summary:    "本地 index_state 里也有夜租商铺关键词。",
+				Text:       "夜租商铺、账单、试营业、第一份租约全部精确命中，但有 Qdrant 时不能混入本地文件召回。",
+			},
+			qdrantChunk,
+		},
+	}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
 	tool := NewContextTool(s, References{}, "default").
 		WithRAGEmbedder(contextTestEmbedder{}).
 		WithRAGVectorSearcher(contextTestSearcher{hits: []rag.VectorSearchHit{{

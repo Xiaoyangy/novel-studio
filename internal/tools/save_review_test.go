@@ -1352,7 +1352,7 @@ func TestSaveReviewHistoryAndRegressionLoop(t *testing.T) {
 	_ = s.Progress.SetPendingRewrites(nil, "")
 	ctxTool := NewContextTool(s, References{}, "default")
 	seed := newChapterContextEnvelope()
-	ctxTool.prepareChapterContext(1, &seed, func(string, error) {})
+	ctxTool.prepareChapterContext(1, "", &seed, func(string, error) {})
 	if _, ok := seed.Working["previous_review"]; !ok {
 		t.Fatalf("复审应注入 previous_review: %v", seed.Working["previous_review"])
 	}
@@ -1383,7 +1383,7 @@ func TestSaveReviewHistoryAndRegressionLoop(t *testing.T) {
 	_ = s.Progress.SetPendingRewrites(nil, "")
 	_ = exec("accept")
 	seed2 := newChapterContextEnvelope()
-	ctxTool.prepareChapterContext(1, &seed2, func(string, error) {})
+	ctxTool.prepareChapterContext(1, "", &seed2, func(string, error) {})
 	if _, ok := seed2.Working["previous_review"]; ok {
 		t.Fatal("上轮已 accept 不应再注入复审块")
 	}
