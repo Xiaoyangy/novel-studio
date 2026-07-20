@@ -111,8 +111,16 @@ func detectCodexBinary() string {
 	}
 	for _, p := range []string{
 		"/Applications/Codex.app/Contents/Resources/codex",
+		// The OpenAI ChatGPT desktop app bundles the codex CLI; pick it up when
+		// codex is not on PATH (common when launched outside an interactive
+		// shell) so the pipeline can find a working exec CLI automatically.
+		"/Applications/ChatGPT.app/Contents/Resources/codex",
+		codexHomeBinary(),
 		"codex",
 	} {
+		if p == "" {
+			continue
+		}
 		if _, err := exec.LookPath(p); err == nil {
 			return p
 		}
@@ -121,6 +129,23 @@ func detectCodexBinary() string {
 		}
 	}
 	return "codex"
+}
+
+// codexHomeBinary returns a per-user codex install path if one exists, covering
+// common locations that are on an interactive shell's PATH but not the PATH of
+// a process launched outside that shell.
+func codexHomeBinary() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	for _, rel := range []string{".codex/bin/codex", ".local/bin/codex"} {
+		p := filepath.Join(home, rel)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 func (m *CodexModel) SupportsTools() bool  { return true }
