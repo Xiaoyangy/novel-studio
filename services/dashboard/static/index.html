@@ -1258,6 +1258,7 @@ function renderOffscreen(o) {
     </div></div>
     <div class="sec"><h3>势力进度钟（Blades 式，${(o.clocks || []).length}）</h3>
       ${clocks ? `<div class="clockgrid">${clocks}</div>` : '<div class="loading">暂无进度钟——弧边界 save_world_tick 时拨动。</div>'}
+      <div class="kv" style="margin-top:6px"><span class="k"></span><span style="color:var(--muted);font-size:12px">进度钟与离屏基线 tick 同源，只在 Architect 跨弧/卷 save_world_tick 时拨动；单弧完结的短篇它停在零章基线属正常，本章内的势力推进见上方「章节世界增量」。</span></div>
     </div>
     <div class="sec"><h3>角色位置与独立推进（近 ${(o.journeys || []).length} 条）</h3>
       ${journeys ? `<div class="journey-list">${journeys}</div>` : '<div class="loading">尚无配角经历沉淀。</div>'}
