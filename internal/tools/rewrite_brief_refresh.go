@@ -86,7 +86,8 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 	}
 
 	b.WriteString("\n## 必须修正\n\n")
-	if len(review.Issues) == 0 {
+	dimensionDiagnostics := actionableRewriteDimensionDiagnostics(&review, finalVerdict)
+	if len(review.Issues) == 0 && len(dimensionDiagnostics) == 0 {
 		b.WriteString("- 按最新评审总结完成目标范围内的返工。\n")
 	}
 	for _, issue := range review.Issues {
@@ -97,6 +98,15 @@ func refreshRewriteBriefFromReview(s *store.Store, review domain.ReviewEntry, fi
 		if suggestion := strings.TrimSpace(issue.Suggestion); suggestion != "" {
 			fmt.Fprintf(&b, "  - 修法：%s\n", suggestion)
 		}
+	}
+	// Issues sometimes contain only a cross-reference such as “详见第8维”,
+	// while the actionable rule-by-rule diagnosis lives in Dimensions.Comment.
+	// Keep these as top-level bullets so both rewrite planning and the sealed
+	// render overlay consume the exact Editor diagnosis rather than rerendering
+	// from a generic summary.
+	for _, diagnostic := range dimensionDiagnostics {
+		fmt.Fprintf(&b, "- [维度:%s/%s/%d] %s\n",
+			diagnostic.Dimension, diagnostic.Verdict, diagnostic.Score, diagnostic.Comment)
 	}
 
 	blockingRegistered := make([]reviewreport.RegisteredExternalDetection, 0, len(registeredDetections))

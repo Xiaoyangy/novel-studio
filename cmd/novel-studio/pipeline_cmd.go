@@ -41,7 +41,7 @@ var knownPipelineStages = map[string]bool{
 	"cocreate": true, "architect": true, "outline-all": true, "zero-init": true,
 	"preplan": true, "project-all": true, "seal": true, "promote": true,
 	"plan": true, "render": true,
-	"write": true, "review": true, "rewrite": true, "deliver": true,
+	"write": true, "review": true, "rewrite": true, "finalize": true, "deliver": true,
 }
 
 type pipelineFlags struct {
@@ -61,7 +61,9 @@ type pipelineFlags struct {
 	ForceRerender       bool
 	NewNovel            bool
 	RefreshArchitect    bool
+	ArchitectTarget     string
 	RefreshZeroInit     bool
+	RefreshRenderInput  bool
 	RenderOnly          bool
 	RebaseAllChapters   bool
 	OutlineRepairFile   string
@@ -73,9 +75,9 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
 		fmt.Fprintln(os.Stderr, "全书结构：outline-all 在第0章隔离工作区先完成全部卷/弧/章合同，再由 zero-init 与后续全书推演消费。")
-		fmt.Fprintln(os.Stderr, "弧式写作：preplan 保留全书稳定章位；project-all 每轮只推演当前一弧，seal 只封存本弧；随后 promote/render 逐章写、逐章审，本弧全部通过后才开放下一弧。")
+		fmt.Fprintln(os.Stderr, "弧式写作：preplan 保留全书稳定章位；project-all 每轮只推演当前一弧，seal 只封存本弧；随后 promote/render 逐章写、逐章审，本弧全部通过后才开放下一弧；短篇末章后显式执行 finalize 全文终审。")
 		fmt.Fprintln(os.Stderr, "兼容路径：preplan → plan → render 仍可逐章规划，但不等同于全书先推演。")
 		fmt.Fprintln(os.Stderr, "\n选项：")
 		fs.PrintDefaults()
@@ -96,7 +98,9 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.BoolVar(&f.ForceRerender, "force-rerender", false, "rewrite 阶段显式让现有 plan 重新渲染整章；保留世界推演，不伪造外判阻断")
 	fs.BoolVar(&f.NewNovel, "new-novel", false, "新建小说：先跑头脑风暴（web/RAG 调研 + 落盘 brainstorm.md），再据此初始化并写作")
 	fs.BoolVar(&f.RefreshArchitect, "refresh-architect", false, "已有 foundation 仍强制 Architect 按本次 prompt 重规划开篇/大纲；只在 architect 阶段生效")
+	fs.StringVar(&f.ArchitectTarget, "architect-target", "", "仅补跑指定 Architect foundation 项（premise/characters/world_rules/book_world/world_codex/update_compass/layered_outline）；须同时使用 --refresh-architect")
 	fs.BoolVar(&f.RefreshZeroInit, "refresh-zero-init", false, "已有正文时安全刷新 zero-init 开篇计划和 RAG，不覆盖活动资源/关系台账")
+	fs.BoolVar(&f.RefreshRenderInput, "refresh-render-input", false, "render 阶段显式升级尚未开始的 sealed 候选稿的 model/provider/prompt 绑定；保留 plan/context 并写入审计回执")
 	fs.BoolVar(&f.RebaseAllChapters, "rebase-all-chapters", false, "将现有正文和活动台账完整归档后，把正史安全回到第0章，再按逐弧闭环重推")
 	fs.StringVar(&f.OutlineRepairFile, "outline-repair-file", "", "fresh outline-all 前在隔离候选中应用 chapter-zero 定向大纲修复 manifest")
 	if err := fs.Parse(argv); err != nil {
@@ -146,6 +150,9 @@ func pipelinePipeline(opts cliOptions, args []string) error {
 		}
 		flags.OutlineRepairFile = path
 		flags.OutlineRepairDigest = digest
+	}
+	if flags.RefreshRenderInput && (len(stages) != 1 || stages[0] != "render") {
+		return fmt.Errorf("--refresh-render-input 只允许与单独 --stages render 一起使用")
 	}
 
 	prompt, err := resolvePipelinePrompt(flags, opts)
@@ -277,6 +284,19 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	if err != nil {
 		return err
 	}
+	// --prompt/--prompt-file is an invocation-wide contract, not an Architect-only
+	// hint. Downstream-only recovery (for example preplan -> project-all) must
+	// reconcile a literal per-chapter range before it snapshots user_rules into a
+	// planning generation; otherwise an older normalized summary can silently
+	// leave the system default 2000-3300 in force.
+	if changed, reconcileErr := pipelineReconcileExplicitPromptChapterWords(
+		store.NewStore(cfg.OutputDir),
+		prompt,
+	); reconcileErr != nil {
+		return reconcileErr
+	} else if changed {
+		fmt.Fprintln(os.Stderr, "[pipeline] 已从本次创作总令恢复明确的单章字数硬区间")
+	}
 	if slices.Contains(stages, "outline-all") || slices.Contains(stages, "project-all") {
 		if err := activatePipelineSealedTwoPassModeAtOutput(cfg.OutputDir); err != nil {
 			return err
@@ -287,6 +307,16 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
 		for _, forbidden := range []string{"plan", "write", "rewrite"} {
 			if slices.Contains(stages, forbidden) {
+				if forbidden == "plan" {
+					if allowErr := pipelineSealedConvergenceReplanAllowed(cfg.OutputDir, flags, stages); allowErr == nil {
+						continue
+					} else {
+						return fmt.Errorf(
+							"项目已启用 sealed planning，普通 plan 会绕过当前弧封存；仅 active promoted chapter 在 durable render ledger 达到上限后可单独执行 --stages plan --restart：%v",
+							allowErr,
+						)
+					}
+				}
 				return fmt.Errorf(
 					"项目已启用 sealed planning，阶段 %s 会绕过当前弧封存或改写已验收正文；只允许 project-all(当前弧) → seal(当前弧) → promote → render(逐章审核)",
 					forbidden,
@@ -339,6 +369,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	if len(state.Completed) > 0 {
 		fmt.Fprintf(os.Stderr, "[pipeline] 已完成（将跳过）：%s\n", strings.Join(state.Completed, ", "))
 	}
+	timingInvocationID := newPipelineTimingInvocationID(time.Now())
 
 	for _, stage := range state.Stages {
 		if renderRecoveryPending && state.Done(stage) &&
@@ -378,7 +409,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		if stage == "write" {
 			warnStaleZeroInitReadiness(cfg.OutputDir)
 		}
+		stageStarted := time.Now()
 		if err := runPipelineStage(stage, opts, flags, state, stageArgs); err != nil {
+			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "error", err)
 			// 不标记完成 → 下次重跑从这里继续。先落盘（可能 cocreate 已写入 prompt）。
 			_ = savePipelineState(statePath, state)
 			return fmt.Errorf("阶段 %s 失败（修复后重跑 --pipeline 即从此阶段继续）: %w", stage, err)
@@ -389,6 +422,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			evidence.Message = err.Error()
 			state.ClearDone(stage, evidence)
 			_ = savePipelineState(statePath, state)
+			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "verification_error", err)
 			return fmt.Errorf("阶段 %s 完成证据不足（未标记完成）: %w", stage, err)
 		}
 		evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
@@ -404,8 +438,10 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			renderRecoveryPending = false
 		}
 		if err := savePipelineState(statePath, state); err != nil {
+			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "checkpoint_error", err)
 			return fmt.Errorf("保存流水线状态失败: %w", err)
 		}
+		recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "ok", nil)
 		fmt.Fprintf(os.Stderr, "[pipeline] 阶段完成：%s\n", stage)
 	}
 	// render intentionally advances canon and marks the speculative all-book
@@ -465,13 +501,15 @@ func pipelineRunIdentityDigest(flags pipelineFlags) string {
 		To                  int    `json:"to"`
 		WriteTo             int    `json:"write_to"`
 		BudgetNanoseconds   int64  `json:"budget_nanoseconds"`
+		ArchitectTarget     string `json:"architect_target,omitempty"`
 		OutlineRepairDigest string `json:"outline_repair_digest,omitempty"`
 	}{
-		Schema:              "pipeline-run-identity.v1",
+		Schema:              "pipeline-run-identity.v3",
 		From:                flags.Start,
 		To:                  flags.End,
 		WriteTo:             flags.WriteTo,
 		BudgetNanoseconds:   int64(flags.Budget),
+		ArchitectTarget:     strings.TrimSpace(flags.ArchitectTarget),
 		OutlineRepairDigest: flags.OutlineRepairDigest,
 	})
 	sum := sha256.Sum256(payload)
@@ -523,12 +561,17 @@ func resetCompletedSplitPipelineCycle(outputDir string, state *domain.PipelineSt
 
 func resetCompletedSealedPipelineCycle(outputDir string, state *domain.PipelineState) (bool, error) {
 	if state == nil ||
-		!pipelineStateHasStage(state, "promote") ||
 		!pipelineStateHasStage(state, "render") ||
-		!state.Done("promote") ||
 		!state.Done("render") {
 		return false, nil
 	}
+	// A convergence replan deliberately runs as `plan --restart` followed by a
+	// render-only invocation.  On the last projected chapter that invocation is
+	// still the authority which publishes the final outcome and exact-body
+	// acceptance, so it must also be able to aggregate the immutable arc
+	// completion receipt.  Non-terminal chapter-cycle reset remains gated on a
+	// completed promote+render pair below.
+	promoteCompleted := pipelineStateHasStage(state, "promote") && state.Done("promote")
 	st := store.NewStore(outputDir)
 	projected := st.ProjectedV2()
 	active, err := projected.LoadActiveGeneration()
@@ -591,6 +634,12 @@ func resetCompletedSealedPipelineCycle(outputDir string, state *domain.PipelineS
 			reset = true
 		}
 		return reset, nil
+	}
+	if !promoteCompleted {
+		// A render-only convergence successor closes exactly its active chapter.
+		// Before the arc tail it must not masquerade as the ordinary mechanical
+		// promotion cycle or clear any coarse stage cursor.
+		return false, nil
 	}
 	for _, stage := range []string{"promote", "render"} {
 		state.ClearDone(stage, domain.PipelineStageEvidence{
@@ -822,6 +871,8 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		return reviewExistingPipeline(opts, stageArgs["review"])
 	case "rewrite":
 		return pipelineCausalRewrite(opts, flags, state, stageArgs["review"], stageArgs["rewrite"])
+	case "finalize":
+		return pipelineFinalize(opts, flags)
 	case "deliver":
 		cfg, _, err := loadCfgBundle(opts)
 		if err != nil {

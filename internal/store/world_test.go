@@ -301,6 +301,27 @@ func TestReview_GlobalScopeIsolation(t *testing.T) {
 	}
 }
 
+func TestReview_AcceptedGlobalReviewIsBoundToExactWholeBookBytes(t *testing.T) {
+	s := newTestStore(t)
+	for chapter, body := range map[int]string{1: "第一章正文。", 2: "第二章正文。"} {
+		if err := s.Drafts.SaveFinalChapter(chapter, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.World.SaveReview(domain.ReviewEntry{Chapter: 2, Scope: "global", Verdict: "accept"}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.World.HasAcceptedGlobalReview(2) {
+		t.Fatal("fresh global review should bind the exact ordered chapter bytes")
+	}
+	if err := s.Drafts.SaveFinalChapter(1, "第一章正文被改动。"); err != nil {
+		t.Fatal(err)
+	}
+	if s.World.HasAcceptedGlobalReview(2) {
+		t.Fatal("chapter drift must invalidate the accepted global review")
+	}
+}
+
 func TestReview_ArcScopeIsolation(t *testing.T) {
 	s := newTestStore(t)
 	_ = s.World.SaveReview(domain.ReviewEntry{Chapter: 8, Scope: "chapter", Verdict: "accept"})

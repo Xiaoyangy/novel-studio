@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
-	"github.com/chenhongyang/novel-studio/internal/reviewreport"
-	"github.com/chenhongyang/novel-studio/internal/rules"
 	storepkg "github.com/chenhongyang/novel-studio/internal/store"
 	toolspkg "github.com/chenhongyang/novel-studio/internal/tools"
 )
@@ -30,6 +28,7 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if err != nil || plan == nil {
 		return false
 	}
+	expressionOnlyReviewRerender := isRewrite && toolspkg.RenderOnlyReviewAllowsPlanReuse(store, chapter)
 	scope := domain.ChapterScope(chapter)
 	_, pipelineErr := os.Stat(filepath.Join(store.Dir(), "meta", "pipeline.json"))
 	checkpointStrict := pipelineErr == nil ||
@@ -41,10 +40,10 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 		}
 	}
 	worldRequired, worldReady, _ := toolspkg.ChapterWorldSimulationStatus(store, chapter)
-	if worldRequired && !worldReady {
+	if !expressionOnlyReviewRerender && worldRequired && !worldReady {
 		return false
 	}
-	if worldRequired {
+	if !expressionOnlyReviewRerender && worldRequired {
 		if simulation, simErr := store.LoadChapterWorldSimulation(chapter); simErr != nil || simulation == nil ||
 			strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID) {
 			return false
@@ -53,7 +52,14 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if toolspkg.ValidateChapterQuantityResultContract(store, *plan) != nil {
 		return false
 	}
-	if toolspkg.ValidateChapterAntiAIExecutionPlanForCurrentRepair(store, *plan, isRewrite) != nil {
+	// A fresh formal review can identify prose-only AIGC/presentation defects
+	// after the plan and its frozen render packet were sealed.  When every
+	// causal/character/contract dimension still passes, the exact-body semantic
+	// feedback overlay is the repair contract; requiring a newly planned
+	// anti_ai_execution_plan here would violate render-only and strand the sealed
+	// chapter.  All non-expression failures keep the ordinary strict gate.
+	if !expressionOnlyReviewRerender &&
+		toolspkg.ValidateChapterAntiAIExecutionPlanForCurrentRepair(store, *plan, isRewrite) != nil {
 		return false
 	}
 	if !toolspkg.ChapterAttractionPlanReadyForProject(store, *plan) {
@@ -62,11 +68,11 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	if !isRewrite {
 		return true
 	}
+	if expressionOnlyReviewRerender {
+		return true
+	}
 	if toolspkg.ValidateRewriteCraftPlanCurrent(store, *plan) != nil {
 		return false
-	}
-	if renderOnlyReviewAllowsPlanReuse(store, chapter) {
-		return true
 	}
 	body, err := store.Drafts.LoadChapterText(chapter)
 	if err != nil || strings.TrimSpace(body) == "" {
@@ -83,79 +89,6 @@ func chapterPlanReadyForDraft(store *storepkg.Store, chapter int, isRewrite bool
 	briefToken := fmt.Sprintf("rewrite_brief:%s#sha256=%x", briefPath, briefSum)
 	return slices.Contains(plan.CausalSimulation.ContextSources, bodyToken) &&
 		slices.Contains(plan.CausalSimulation.ContextSources, briefToken)
-}
-
-var planPreservingRenderRules = map[string]bool{
-	"aigc_ratio":                    true,
-	"abstract_system_reassurance":   true,
-	"dialogue_semicolon_formality":  true,
-	"dramatic_negation_overuse":     true,
-	"isolated_sentence_overuse":     true,
-	"micro_action_overuse":          true,
-	"not_but_overuse":               true,
-	"object_response_overuse":       true,
-	"object_response_rhythm_flat":   true,
-	"paragraph_start_repetition":    true,
-	"semicolon_overuse":             true,
-	"state_clause_pile":             true,
-	"stiff_trade_dialogue":          true,
-	"system_message_inline":         true,
-	"system_message_overpacked":     true,
-	"templated_dialogue_chain":      true,
-	"too_many_isolated_short_lines": true,
-}
-
-// renderOnlyReviewAllowsPlanReuse identifies rewrites that change expression,
-// paragraphing or dialogue presentation without changing the simulated world or
-// protagonist decision. Such chapters may go straight to the plan-bound draft
-// finalizer; factual, contract or character failures still require replanning.
-func renderOnlyReviewAllowsPlanReuse(st *storepkg.Store, chapter int) bool {
-	if st == nil || chapter <= 0 {
-		return false
-	}
-	body, err := st.Drafts.LoadChapterText(chapter)
-	if err != nil || strings.TrimSpace(body) == "" {
-		return false
-	}
-	bodyHash := reviewreport.BodySHA256(body)
-	review, err := st.World.LoadReview(chapter)
-	if err != nil || review == nil || review.BodySHA256 != bodyHash || review.ContractStatus != "met" || len(review.ContractMisses) > 0 {
-		return false
-	}
-	for _, dimension := range review.Dimensions {
-		switch dimension.Dimension {
-		case "consistency", "character", "pacing", "continuity", "foreshadow", "hook":
-			if dimension.Verdict != "pass" {
-				return false
-			}
-		}
-	}
-	for _, issue := range review.Issues {
-		if issue.Type != "aesthetic" && issue.Type != "ai_voice_detection" {
-			return false
-		}
-	}
-
-	gate, _, err := reviewreport.LoadMechanicalGate(st.Dir(), chapter)
-	if err != nil || gate == nil || gate.BodySHA256 != bodyHash || len(gate.RuleViolations) == 0 {
-		return false
-	}
-	blocking := review.Verdict == "rewrite" || review.Verdict == "polish"
-	if !blocking {
-		if progress, loadErr := st.Progress.Load(); loadErr == nil && progress != nil &&
-			progress.Flow == domain.FlowPolishing && slices.Contains(progress.PendingRewrites, chapter) {
-			blocking = true
-		}
-	}
-	for _, violation := range gate.RuleViolations {
-		if !planPreservingRenderRules[violation.Rule] {
-			return false
-		}
-		if violation.Severity == rules.SeverityError {
-			blocking = true
-		}
-	}
-	return blocking
 }
 
 // LoadState 从 Store 读取 Route 所需的全部事实。
@@ -180,8 +113,15 @@ func LoadState(store *storepkg.Store) State {
 	// 阶段拆分：判断下一个要处理章节的计划是否已就绪可渲染。
 	if len(progress.PendingRewrites) > 0 {
 		target := progress.PendingRewrites[0]
+		s.NextActionPipelineRender = pipelineRenderExecutionTargets(store, target)
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, target, true)
 		escalation := toolspkg.InspectRenderOnlyReplanEscalation(store, target)
+		if convergence, convergenceErr := toolspkg.InspectRenderConvergenceExhaustion(store, target); convergenceErr == nil && convergence.Required {
+			escalation.Required = true
+			escalation.Attempts = convergence.Attempts
+			escalation.Limit = convergence.Limit
+			escalation.Reason = convergence.Reason
+		}
 		s.NextActionStructuralReplanRequired = escalation.Required
 		s.NextActionStructuralReplanAttempts = escalation.Attempts
 		s.NextActionStructuralReplanLimit = escalation.Limit
@@ -206,8 +146,15 @@ func LoadState(store *storepkg.Store) State {
 		loadNextActionPlanStage(store, target, &s)
 		loadNextActionOutline(store, target, &s)
 	} else if next := progress.NextChapter(); next > 0 {
+		s.NextActionPipelineRender = pipelineRenderExecutionTargets(store, next)
 		s.NextActionPlanReady = chapterPlanReadyForDraft(store, next, false)
 		escalation := toolspkg.InspectRenderOnlyReplanEscalation(store, next)
+		if convergence, convergenceErr := toolspkg.InspectRenderConvergenceExhaustion(store, next); convergenceErr == nil && convergence.Required {
+			escalation.Required = true
+			escalation.Attempts = convergence.Attempts
+			escalation.Limit = convergence.Limit
+			escalation.Reason = convergence.Reason
+		}
 		s.NextActionStructuralReplanRequired = escalation.Required
 		s.NextActionStructuralReplanAttempts = escalation.Attempts
 		s.NextActionStructuralReplanLimit = escalation.Limit
@@ -228,7 +175,7 @@ func LoadState(store *storepkg.Store) State {
 	}
 
 	s.BookCompleteByChapters = domain.StructurallyComplete(progress)
-	if s.BookCompleteByChapters && !progress.Layered {
+	if s.BookCompleteByChapters {
 		meta, _ := store.RunMeta.Load()
 		s.NeedsFinalGlobalReview = domain.RequiresFinalGlobalReview(progress, meta)
 		s.HasFinalGlobalReview = store.World.HasAcceptedGlobalReview(progress.LatestCompleted())
@@ -251,6 +198,15 @@ func LoadState(store *storepkg.Store) State {
 	return s
 }
 
+func pipelineRenderExecutionTargets(st *storepkg.Store, chapter int) bool {
+	if st == nil || chapter <= 0 {
+		return false
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	return err == nil && lock != nil && lock.Mode == domain.PipelineExecutionRender &&
+		lock.TargetChapter == chapter
+}
+
 func loadDraftExternalGateState(st *storepkg.Store, chapter int, state *State) {
 	inspection, err := toolspkg.InspectDraftExternalGateWithStore(st, chapter)
 	if err != nil {
@@ -259,6 +215,7 @@ func loadDraftExternalGateState(st *storepkg.Store, chapter int, state *State) {
 	}
 	state.NextActionDraftExternalRerenderRequired = inspection.Status == toolspkg.DraftExternalGateRerenderAuthorized
 	state.NextActionDraftLocalSoftEditPending = inspection.LocalSoftEditPending
+	state.NextActionDraftLocalSoftBeforeJudge = inspection.LocalSoftEditBeforeJudge
 	state.NextActionDraftNamedPassFrozen = inspection.Status == toolspkg.DraftExternalGateApproved && inspection.CurrentHashNamedRetestsPassed
 	state.NextActionDraftExternalRejudgePending = !inspection.LocalSoftEditPending &&
 		(inspection.Status == toolspkg.DraftExternalGateRejudgePending ||
@@ -298,7 +255,9 @@ func loadNextActionPlanStage(store *storepkg.Store, chapter int, state *State) {
 	}
 	if meta, err := store.RunMeta.Load(); err == nil && meta != nil {
 		steer := strings.TrimSpace(meta.PendingSteer)
-		if strings.HasPrefix(steer, "Pipeline staged-plan repair") || strings.HasPrefix(steer, "Pipeline world-simulation repair") {
+		if strings.HasPrefix(steer, "Pipeline staged-plan repair") ||
+			strings.HasPrefix(steer, "Pipeline world-simulation repair") ||
+			strings.HasPrefix(steer, "Pipeline convergence replan") {
 			state.NextActionPlanRepairTask = steer
 		}
 	}

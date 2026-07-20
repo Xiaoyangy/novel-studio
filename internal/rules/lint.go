@@ -245,7 +245,7 @@ var uiTrialActionRe = regexp.MustCompile(`(?:试着?还[^。！？!?；;\n]{0,12
 var uiTrialContextRe = regexp.MustCompile(`(?:手机|页面|按钮|屏幕|系统|备注|提现|转账|信用卡|确认键)`)
 var dialogueActionLeadRe = regexp.MustCompile(`^(?:[^“「\n]{0,46})(?:夹着|端着|拿着|护住|划出|刚说了句|说了句|看见|抬起|抬眼|抬头|低头|推了|递了|敲了|收起|放下|咬了|喝了|指了|停了|看了|站起|坐下|把)(?:[^“「\n]{0,34})[：:，,]?[“「]`)
 var narrativeInteriorityMarkers = []string{
-	"心里", "心口", "胸口", "脑子里", "他以为", "她以为", "他觉得", "她觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来",
+	"心里", "心口", "胸口", "脑子里", "他以为", "她以为", "他觉得", "她觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "才发现", "第一反应", "强迫自己", "下意识", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来",
 }
 var narrativeLogisticsMarkers = []string{
 	"付款", "收款", "订单", "票据", "材料", "安装", "通道", "位置", "摊位", "试用", "额度", "规则", "核对", "记录", "交付", "扩摊", "运力",
@@ -1471,15 +1471,32 @@ func appendDialogueConveyorAndInteriority(vs []Violation, text string) []Violati
 				windowDialogue++
 			}
 		}
-		if windowDialogue >= 6 && countPhraseHits(strings.Join(window, "\n"), narrativeInteriorityMarkers) <= 1 {
+		if windowDialogue >= 6 && countMarkerParagraphHits(window, narrativeInteriorityMarkers) <= 1 {
 			denseWindows++
 		}
 	}
 	actionLeadRatio := float64(actionLeadCount) / float64(max(1, dialogueCount))
-	interiorityCount := countPhraseHits(text, narrativeInteriorityMarkers)
+	// Count subjective beats by paragraph, not by raw token frequency. Repeating
+	// one marker cannot manufacture the two independent changes of attention or
+	// choice required by this rule.
+	interiorityCount := countMarkerParagraphHits(paragraphs, narrativeInteriorityMarkers)
 	logisticsCount := countPhraseHits(text, narrativeLogisticsMarkers)
 	compactAllDialogue := len(paragraphs) <= 12 && dialogueCount == len(paragraphs)
-	compoundConveyor := actionLeadRatio >= 0.35 || logisticsCount >= 2 || compactAllDialogue
+	conveyorEvidenceCount := 0
+	if actionLeadRatio >= 0.35 {
+		conveyorEvidenceCount++
+	}
+	if logisticsCount >= 2 {
+		conveyorEvidenceCount++
+	}
+	if compactAllDialogue {
+		conveyorEvidenceCount++
+	}
+	// Domain nouns such as order, location, record and delivery are often the
+	// story's actual facts. Their frequency cannot by itself turn otherwise
+	// varied dialogue into a conveyor belt. Require a second topology/cadence
+	// signal, while retaining the two deliberately strong standalone shapes.
+	compoundConveyor := conveyorEvidenceCount >= 2 || actionLeadRatio >= 0.50 || compactAllDialogue
 	if (denseWindows > 0 && compoundConveyor) || (dialogueCount >= 10 && maxRun >= 5 && compoundConveyor) {
 		vs = append(vs, Violation{
 			Rule:     "dialogue_conveyor_overuse",
@@ -1491,7 +1508,7 @@ func appendDialogueConveyorAndInteriority(vs []Violation, text string) []Violati
 	}
 
 	hanziCount := countCJK(text)
-	if hanziCount >= 1800 && dialogueCount >= 8 && logisticsCount >= 8 && interiorityCount <= 3 {
+	if hanziCount >= 1800 && dialogueCount >= 8 && logisticsCount >= 8 && interiorityCount < 2 {
 		vs = append(vs, Violation{
 			Rule:     "pov_interiority_thin",
 			Target:   "对白/流程持续推进，但主视角误判、欲望冲突和事后余波不足",
@@ -1975,6 +1992,16 @@ func countPhraseHits(text string, phrases []string) int {
 			continue
 		}
 		total += strings.Count(text, phrase)
+	}
+	return total
+}
+
+func countMarkerParagraphHits(paragraphs []string, markers []string) int {
+	total := 0
+	for _, paragraph := range paragraphs {
+		if containsAnyPhrase(paragraph, markers) {
+			total++
+		}
 	}
 	return total
 }

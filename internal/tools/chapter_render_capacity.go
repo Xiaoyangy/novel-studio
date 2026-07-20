@@ -56,5 +56,113 @@ func validateProjectAllRenderCapacity(s *store.Store, plan domain.ChapterPlan) e
 			errs.ErrToolPrecondition,
 		)
 	}
+	if err := validateProjectAllBookRenderBudget(s, plan, rangeRule.Min, rangeRule.Max); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateProjectAllBookRenderBudget(
+	s *store.Store,
+	plan domain.ChapterPlan,
+	chapterMin, chapterMax int,
+) error {
+	receipt, err := s.LoadOutlineAllExecutionReceipt()
+	if err != nil || receipt == nil || receipt.TargetWords <= 0 || receipt.TargetChapters <= 0 {
+		return err
+	}
+	target, err := domain.ResolveBookScaleTarget(
+		receipt.EstimatedScale,
+		receipt.TargetVolumes,
+		receipt.TargetChapters,
+	)
+	if err != nil {
+		return fmt.Errorf("第 %d 章解析 outline-all 全书字数合同失败: %w", plan.Chapter, err)
+	}
+	if target.MinWords <= 0 || target.MaxWords <= 0 || plan.Chapter > target.TargetChapters {
+		return nil
+	}
+	priorRunes := 0
+	progress, progressErr := s.Progress.Load()
+	if progressErr != nil {
+		return progressErr
+	}
+	for chapter := 1; chapter < plan.Chapter; chapter++ {
+		if progress != nil && progress.ChapterWordCounts[chapter] > 0 {
+			priorRunes += progress.ChapterWordCounts[chapter]
+			continue
+		}
+		priorPlan, loadErr := s.Drafts.LoadChapterPlan(chapter)
+		if loadErr != nil {
+			return loadErr
+		}
+		if priorPlan == nil || priorPlan.CausalSimulation.RenderCapacity == nil {
+			return fmt.Errorf(
+				"第 %d 章全书字数预算缺少前章 %d 的 accepted body 或正式 render_capacity: %w",
+				plan.Chapter,
+				chapter,
+				errs.ErrToolPrecondition,
+			)
+		}
+		priorRunes += priorPlan.CausalSimulation.RenderCapacity.TotalTargetRunes
+	}
+	allowedMin, allowedMax := projectAllCurrentChapterCapacityBounds(
+		chapterMin,
+		chapterMax,
+		target,
+		plan.Chapter,
+		priorRunes,
+	)
+	current := plan.CausalSimulation.RenderCapacity.TotalTargetRunes
+	if allowedMin > allowedMax || current < allowedMin || current > allowedMax {
+		return fmt.Errorf(
+			"第 %d 章 project-all render_capacity=%d 破坏全书%d-%d字预算；此前累计%d，本章必须落在%d-%d，目标总量%d（约%d/章）: %w",
+			plan.Chapter,
+			current,
+			target.MinWords,
+			target.MaxWords,
+			priorRunes,
+			allowedMin,
+			allowedMax,
+			target.TargetWords,
+			target.TargetWordsPerChapter,
+			errs.ErrToolPrecondition,
+		)
+	}
+	return nil
+}
+
+func projectAllCurrentChapterCapacityBounds(
+	chapterMin, chapterMax int,
+	target domain.BookScaleTarget,
+	chapter, priorRunes int,
+) (int, int) {
+	remaining := target.TargetChapters - chapter
+	minAllowed := chapterMin
+	maxAllowed := chapterMax
+	if feasibleMin := target.MinWords - priorRunes - remaining*chapterMax; feasibleMin > minAllowed {
+		minAllowed = feasibleMin
+	}
+	if feasibleMax := target.MaxWords - priorRunes - remaining*chapterMin; feasibleMax < maxAllowed {
+		maxAllowed = feasibleMax
+	}
+	// Short fiction benefits from a cumulative midpoint envelope: it keeps the
+	// opening from spending the whole budget and forcing visibly starved final
+	// chapters. Longer books retain only the feasibility guard above so natural
+	// chapter variation can average out over many arcs.
+	if target.TargetChapters <= 32 && target.TargetWords > 0 {
+		targetCumulative := (target.TargetWords*chapter + target.TargetChapters/2) /
+			target.TargetChapters
+		tolerance := target.TargetWordsPerChapter / 10
+		if tolerance < 100 {
+			tolerance = 100
+		}
+		if centeredMin := targetCumulative - tolerance - priorRunes; centeredMin > minAllowed {
+			minAllowed = centeredMin
+		}
+		if centeredMax := targetCumulative + tolerance - priorRunes; centeredMax < maxAllowed {
+			maxAllowed = centeredMax
+		}
+	}
+	return minAllowed, maxAllowed
 }

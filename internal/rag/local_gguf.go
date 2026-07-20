@@ -49,10 +49,9 @@ func (c LocalGGUFConfig) baseURL() string {
 
 func localGGUFServerArgs(cfg LocalGGUFConfig) []string {
 	cfg.fillDefaults()
-	// Recent llama-server builds clamp n_batch and n_ubatch to the smaller
-	// value when embedding mode receives unequal sizes. A 128-token ubatch can
-	// then make the server exit on a normal 900-rune RAG chunk (roughly 1.1k
-	// Qwen tokens), so keep the two values equal.
+	// In embedding mode, recent llama-server builds effectively clamp n_batch
+	// and n_ubatch to the smaller value. Keep them equal and bounded so a normal
+	// 900-rune RAG chunk cannot make the server exit.
 	// Keep the batch bounded, but large enough for the project's chunk size.
 	batchSize := min(cfg.CtxSize, 2048)
 	ubatchSize := batchSize

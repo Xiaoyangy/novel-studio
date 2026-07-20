@@ -931,6 +931,106 @@ func ValidateProjectAllCraftPlanCurrent(
 	return nil
 }
 
+// MaterializeProjectAllCraftPlanConsumption fills only missing hit-bearing
+// project-all craft needs. The receipt remains the authority for exact refs;
+// the deterministic rows translate its safe method cards into plan-level
+// scene craft without copying source prose or inventing story facts. Existing
+// model-authored rows always win.
+func MaterializeProjectAllCraftPlanConsumption(
+	plan *domain.ChapterPlan,
+	receipt *domain.CraftRecallReceipt,
+) bool {
+	if plan == nil || receipt == nil || receipt.Stage != domain.ProjectAllCraftReceiptStage {
+		return false
+	}
+	consumed := make(map[string]struct{}, len(plan.CausalSimulation.ExternalRefs))
+	for _, row := range plan.CausalSimulation.ExternalRefs {
+		if need := strings.TrimSpace(row.QueryOrNeed); need != "" {
+			consumed[need] = struct{}{}
+		}
+	}
+	changed := false
+	for _, attempt := range receipt.Attempts {
+		needID := strings.TrimSpace(attempt.Need.ID)
+		if needID == "" || len(attempt.Hits) == 0 {
+			continue
+		}
+		if _, exists := consumed[needID]; exists {
+			continue
+		}
+		refs := make([]string, 0, len(attempt.Hits))
+		sourceType := craftSourceType
+		allBenchmark := true
+		for _, hit := range attempt.Hits {
+			refs = appendUniqueString(refs, hit.Ref)
+			if !strings.EqualFold(strings.TrimSpace(hit.SourceKind), rag.BenchmarkSourceKind) {
+				allBenchmark = false
+			}
+		}
+		if allBenchmark {
+			sourceType = benchmarkCraftSourceType
+		}
+		usable := []string{
+			"按选择成本分层释放本章既定信息，并让每场退出后果约束下一场选择。",
+			"用观察—判断—选择—结果链呈现主角主观因果，不由旁白代替人物作结论。",
+		}
+		if strings.Contains(strings.ToLower(attempt.Need.Field), "scene") {
+			usable = []string{
+				"用本章已确定的空间边界限制可见范围、接触对象与退出路径。",
+				"每轮只增加本章既定的真实代价，并在关键选择前减速取证、结果后压缩过场。",
+			}
+		}
+		plan.CausalSimulation.ExternalRefs = append(plan.CausalSimulation.ExternalRefs, domain.ExternalReferencePlan{
+			QueryOrNeed:          needID,
+			SourceType:           sourceType,
+			SourceRefs:           refs,
+			RetrievedAt:          receipt.CreatedAt,
+			FreshnessRequirement: "稳定写作方法；精确绑定当前 project-all craft receipt",
+			UsableDetails:        usable,
+			TransformationRule:   "只把 receipt 方法转化到本章既有 required_beats 与 scene_units；不复制来源人物、地名、情节或原句，不新增故事事实。",
+			DoNotUse: []string{
+				"不把方法卡写成正文说明或检查清单。",
+				"不复制来源中的人物、情节、地名或措辞。",
+				"不为了展示技巧增加无因果场景。",
+			},
+		})
+		consumed[needID] = struct{}{}
+		changed = true
+	}
+	return changed
+}
+
+// RepairProjectAllCraftPlanCurrent repairs a finalized plan whose last
+// plan_details patch replaced earlier craft rows, then writes a fresh causal
+// checkpoint so the artifact remains content-addressed and routable.
+func RepairProjectAllCraftPlanCurrent(
+	st *store.Store,
+	plan *domain.ChapterPlan,
+	receipt *domain.CraftRecallReceipt,
+) (bool, error) {
+	if st == nil || plan == nil || receipt == nil {
+		return false, nil
+	}
+	if !MaterializeProjectAllCraftPlanConsumption(plan, receipt) {
+		return false, nil
+	}
+	if err := ValidateProjectAllCraftPlanCurrent(st, *plan, receipt); err != nil {
+		return false, err
+	}
+	if err := st.Drafts.SaveChapterPlan(*plan); err != nil {
+		return false, fmt.Errorf("save repaired project-all chapter plan: %w", err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(plan.Chapter),
+		"plan",
+		fmt.Sprintf("drafts/%02d.plan.json", plan.Chapter),
+		"plan", "chapter_world_simulation", "review", "draft-structural-block",
+	); err != nil {
+		return false, fmt.Errorf("checkpoint repaired project-all chapter plan: %w", err)
+	}
+	return true, nil
+}
+
 func activeRewriteCraftReceiptRequired(st *store.Store, chapter int) bool {
 	if st == nil || chapter <= 0 {
 		return false

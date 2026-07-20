@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 	agentcoretools "github.com/voocel/agentcore/tools"
@@ -54,7 +55,7 @@ func (t *EditChapterTool) Description() string {
 	return "对章节草稿做定点字符串替换（打磨场景首选，比 draft_chapter 整章重写省 token）。" +
 		"找到 old_string 并替换为 new_string，要求精确匹配且唯一（多处匹配需 replace_all=true）。" +
 		"写入 drafts/{ch}.draft.md；drafts 不存在时自动从 chapters 播种。" +
-		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。若 DeepSeek provider judge 或用户当前哈希抽查高分要求结构级重渲染，本工具会拒绝，必须先用 draft_chapter(mode=write) 整章覆盖。若 DeepSeek provider judge 已通过当前哈希，但仍有本地非结构性门禁，本工具只允许改一处，落盘后必须立即停笔并让外层 pipeline 重新判定新哈希。用户报告的平台抽查结果不产生逐章复测义务；只有显式 automated_hard 自动外部门禁通过的载荷会冻结。"
+		"章节已完成且不在 PendingRewrites 队列中时拒绝执行。若 DeepSeek provider judge 或用户当前哈希抽查高分要求结构级重渲染，本工具会拒绝，必须先用 draft_chapter(mode=write) 整章覆盖。若当前哈希命中确定性、非 whole-text/segment 的本地软门禁（无论在首次 provider judge 之前还是恢复旧流程时发现），本工具只允许改一处，落盘后必须立即停笔并让外层 pipeline 只判定修改后的最终新哈希。用户报告的平台抽查结果不产生逐章复测义务；只有显式 automated_hard 自动外部门禁通过的载荷会冻结。"
 }
 
 func (t *EditChapterTool) Schema() map[string]any {
@@ -95,7 +96,7 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	if err := draftExternalGateEditPrecondition(a.Chapter, externalGateBefore); err != nil {
 		return nil, err
 	}
-	if escalation := InspectRenderOnlyReplanEscalation(t.store, a.Chapter); escalation.Required {
+	if escalation := InspectRenderOnlyReplanEscalation(t.store, a.Chapter); escalation.Required && !externalGateBefore.LocalSoftEditPending {
 		return nil, fmt.Errorf("第 %d 章同一因果计划下的整章结构失败已达到上限：%s；禁止用 edit_chapter 绕过重规划，必须先重新完成 chapter_world_simulation 与 POV plan: %w",
 			a.Chapter, escalation.Reason, errs.ErrToolPrecondition)
 	}
@@ -107,10 +108,14 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 			return nil, fmt.Errorf("第 %d 章已完成且不在 PendingRewrites 队列中，不能编辑；需修改请先由 editor 评审触发重写/打磨: %w", a.Chapter, errs.ErrToolPrecondition)
 		}
 	}
-	if _, err := validateCurrentChapterRenderPlan(t.store, a.Chapter); err != nil {
+	renderPlan, err := validateCurrentChapterRenderPlan(t.store, a.Chapter)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateCurrentPlanBodyEpoch(t.store, a.Chapter); err != nil {
+		return nil, err
+	}
+	if err := guardCommitReadyExpressionOnlyReplacementEdit(t.store, a.Chapter, renderPlan, externalGateBefore); err != nil {
 		return nil, err
 	}
 
@@ -140,6 +145,14 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	if err := requireDraftHardFactAnchors(t.store, a.Chapter, candidate); err != nil {
 		return nil, fmt.Errorf("第 %d 章 edit_chapter 候选未通过 hard-fact anchor 门禁，真实草稿与 checkpoint 均未改变: %w", a.Chapter, err)
 	}
+	if externalGateBefore.LocalSoftEditPending {
+		// Consume the plan/review-seed quota before mutating prose. This is
+		// intentionally fail-closed across crashes: a restarted process may never
+		// turn one bounded local repair into one repair per generated hash.
+		if err := consumeDraftLocalSoftEditQuota(t.store, a.Chapter); err != nil {
+			return nil, fmt.Errorf("consume local-soft edit quota: %w: %w", err, errs.ErrStoreWrite)
+		}
+	}
 	if err := beginDraftWriteIntent(t.store, a.Chapter, prior, candidate, "edit", nil); err != nil {
 		return nil, fmt.Errorf("begin edit write: %w: %w", err, errs.ErrStoreWrite)
 	}
@@ -167,7 +180,10 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 	if err := checkpointDraftStructuralBlock(t.store, a.Chapter, currentBody, aigcReport, aigcGate); err != nil {
 		return nil, fmt.Errorf("checkpoint edited draft structural block: %w: %w", errs.ErrStoreWrite, err)
 	}
-	localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(currentBody, aigcReport, aigcGate)
+	localStructuralRerender, err := draftAIGCWholeDraftRerenderRequired(t.store, a.Chapter, currentBody, aigcReport, aigcGate)
+	if err != nil {
+		return nil, fmt.Errorf("route edited draft AIGC gate: %w: %w", errs.ErrStoreRead, err)
+	}
 	if localStructuralRerender {
 		if err := persistDraftAIGCRerenderRequirement(t.store, a.Chapter, currentBody, aigcReport, aigcGate); err != nil {
 			return nil, fmt.Errorf("persist edited draft AIGC rerender requirement: %w: %w", errs.ErrStoreWrite, err)
@@ -197,11 +213,54 @@ func (t *EditChapterTool) Execute(ctx context.Context, args json.RawMessage) (js
 		passthrough["external_rejudge_required_now"] = true
 		passthrough["registered_external_retest_deferred"] = RequiresRegisteredExternalRetest(externalGateBefore.Requirement)
 		passthrough["stop_prose_modification"] = true
-		passthrough["next_step"] = "edit 已使当前哈希的 DeepSeek provider judge 通过结论失效：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，先由 DeepSeek provider judge 判定新哈希。用户外部抽查不作为后续放行前置"
+		if externalGateBefore.LocalSoftEditBeforeJudge {
+			passthrough["next_step"] = "首次 provider judge 前的唯一次确定性局部编辑已消费：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，只由 DeepSeek provider judge 判定新哈希（即修改后的最终哈希）。用户外部抽查不作为后续放行前置"
+		} else {
+			passthrough["next_step"] = "edit 已使当前哈希的 DeepSeek provider judge 通过结论失效：立即停止正文修改并把控制权交还外层 pipeline；禁止再次 edit_chapter、check_consistency 或 commit_chapter，先由 DeepSeek provider judge 判定新哈希。用户外部抽查不作为后续放行前置"
+		}
 	} else {
 		passthrough["next_step"] = "edit 已落盘。仍有硬伤可再次 edit_chapter；否则 check_consistency 后 commit_chapter"
 	}
 	return json.Marshal(passthrough)
+}
+
+// guardCommitReadyExpressionOnlyReplacementEdit closes the last subjective
+// polish loop in a sealed expression-only rewrite. The old formal review grants
+// one replacement body, not continuing authority to tweak an already accepted
+// replacement. Once that exact body has both a strict current-hash DeepSeek pass
+// and a successful exact-body hard-consistency receipt, the only legal prose
+// transition is commit_chapter.
+//
+// Every predicate is intentionally exact and conjunctive. In particular, a
+// missing/stale receipt, a current-hash DeepSeek rejection, or a newer formal
+// exact-body rejection leaves the existing edit/rerender routes untouched.
+func guardCommitReadyExpressionOnlyReplacementEdit(
+	st *store.Store,
+	chapter int,
+	renderPlan currentChapterRenderPlanGuard,
+	inspection DraftExternalGateInspection,
+) error {
+	if st == nil || chapter <= 0 || !renderPlan.IsRewrite || renderPlan.Plan == nil ||
+		inspection.Status != DraftExternalGateApproved {
+		return nil
+	}
+	body, err := st.Drafts.LoadDraft(chapter)
+	if err != nil || body == "" {
+		return nil
+	}
+	bodySHA := reviewreport.BodySHA256(body)
+	if inspection.CurrentBodySHA256 != bodySHA || inspection.EvaluatedBodySHA256 != bodySHA ||
+		expressionOnlyReviewPlanReusePhase(st, chapter, *renderPlan.Plan) != expressionOnlyReviewReuseReplacement {
+		return nil
+	}
+	if _, err := requirePassedDraftHardConsistencyReceipt(st, chapter, body); err != nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"第 %d 章 expression-only replacement 的当前精确哈希已通过 DeepSeek，且 exact-body hard consistency receipt 与当前 plan/checkpoint 均有效；旧 formal review/rewrite brief 已消费完毕，禁止继续 edit_chapter 主观小修，请直接 commit_chapter: %w",
+		chapter,
+		errs.ErrToolPrecondition,
+	)
 }
 
 func draftExternalGateEditPrecondition(chapter int, inspection DraftExternalGateInspection) error {
@@ -212,6 +271,9 @@ func draftExternalGateEditPrecondition(chapter int, inspection DraftExternalGate
 	case DraftExternalGateRerenderAuthorized:
 		return fmt.Errorf("%s: %w", draftExternalRerenderInstruction(inspection.Requirement), errs.ErrToolPrecondition)
 	case DraftExternalGateAdviceIncomplete:
+		if inspection.LocalSoftEditFailedClosed {
+			return fmt.Errorf("第 %d 章当前 plan/render seed 的本地软修 token 已消费，但没有更晚的 exact-body edit checkpoint 证明新正文落盘；疑似编辑写入失败或中断，禁止再次 edit_chapter，必须建立新 plan epoch 后再渲染: %w", chapter, errs.ErrToolPrecondition)
+		}
 		return fmt.Errorf("第 %d 章 DeepSeek provider judge 建议不完整，禁止局部编辑；先重新运行该 provider judge: %w", chapter, errs.ErrToolPrecondition)
 	case DraftExternalGateRejudgePending:
 		if !inspection.LocalSoftEditPending {

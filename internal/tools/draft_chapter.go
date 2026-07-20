@@ -71,6 +71,9 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if err := guardPipelineProseExecution(t.store, a.Chapter, t.Name()); err != nil {
 		return nil, err
 	}
+	if err := RequireRenderConvergenceAttemptAvailable(t.store, a.Chapter); err != nil {
+		return nil, fmt.Errorf("render convergence plan-stage boundary: %w: %w", err, errs.ErrToolPrecondition)
+	}
 	if a.Content == "" {
 		return nil, fmt.Errorf("content must not be empty: %w", errs.ErrToolArgs)
 	}
@@ -85,16 +88,33 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	if requirementErr != nil {
 		return nil, fmt.Errorf("读取草稿 AIGC 门禁: %w: %w", requirementErr, errs.ErrStoreRead)
 	}
+	settledSemanticRewrite := false
+	if externalGate.Status == DraftExternalGateRejudgePending &&
+		externalGate.LocalSoftEditPending && !externalGate.LocalSoftEditBeforeJudge {
+		var settlementErr error
+		settledSemanticRewrite, settlementErr = currentRenderConvergenceAttemptSettledBySemanticReject(t.store, a.Chapter)
+		if settlementErr != nil {
+			return nil, fmt.Errorf("inspect render convergence semantic settlement: %w: %w", settlementErr, errs.ErrStoreRead)
+		}
+	}
 	requirement := externalGate.Requirement
 	candidateSHA := reviewreport.BodySHA256(a.Content)
+	if err := rejectPreviouslyFailedRenderBody(t.store, a.Chapter, a.Content); err != nil {
+		return nil, fmt.Errorf("render convergence exact-body guard: %w: %w", err, errs.ErrToolPrecondition)
+	}
 	if draftCurrentHashNamedPassFrozen(externalGate) && !explicitRerender {
 		return nil, fmt.Errorf("第 %d 章当前草稿精确哈希已通过显式配置 automated_hard 的自动 detector/mode 严格 <4%% 门禁，正文已冻结；普通 draft_chapter 不得改变该载荷，只允许继续 check_consistency/commit_chapter。用户手工抽查不会进入此状态。若确需换稿，必须先产生新的整章重渲染授权或新的阻断要求: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
-	if externalGate.Status == DraftExternalGateRejudgePending && !explicitRerender {
+	if draftChapterRejudgePendingBlocksWrite(externalGate, explicitRerender, settledSemanticRewrite) {
 		return nil, fmt.Errorf("第 %d 章上一轮整章重渲染已产生新哈希，必须先运行 DeepSeek provider judge；该判定完成前禁止再次 draft_chapter: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if externalGate.Status == DraftExternalGateAdviceIncomplete && !explicitRerender {
 		return nil, fmt.Errorf("第 %d 章 DeepSeek provider judge 阻断但修改建议不完整，必须先重新运行该 provider judge；禁止盲目重渲染: %w", a.Chapter, errs.ErrToolPrecondition)
+	}
+	if !explicitRerender && externalGate.Status == DraftExternalGateApproved &&
+		RenderOnlyReviewAllowsPlanReuse(t.store, a.Chapter) &&
+		!ReviewRequiresFreshDraft(t.store, a.Chapter) {
+		return nil, fmt.Errorf("第 %d 章正式 review 的单次表达层重渲染已产生不同哈希并通过当前哈希外判；禁止再次 draft_chapter，下一步只能 check_consistency，并由本地 hard gate 决定一次 edit、整章重渲染或 commit（若新的阻断另行授权重渲染则例外）: %w", a.Chapter, errs.ErrToolPrecondition)
 	}
 	if a.Mode == "append" && (requirement != nil || explicitRerender) {
 		if requirement != nil {
@@ -176,7 +196,7 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 			return nil, err
 		}
 	}
-	if draftNeedsConsistencyCheck(t.store, a.Chapter) && requirement == nil {
+	if draftNeedsConsistencyCheck(t.store, a.Chapter) && requirement == nil && !renderOnlyRerender {
 		return nil, fmt.Errorf(
 			"第 %d 章已有草稿且尚未执行 check_consistency，禁止连续 draft_chapter；请先 read_chapter(source=draft)，再调用 check_consistency，若无硬伤直接 commit_chapter: %w",
 			a.Chapter, errs.ErrToolPrecondition,
@@ -252,7 +272,10 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		}
 		nextStep := draftQualityGateNextStep(wordContract, aigcGate)
 		hardGatePassed := wordContract.Passed && rawAIGCGate.Passed
-		localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(full, aigcReport, aigcGate)
+		localStructuralRerender, err := draftAIGCWholeDraftRerenderRequired(t.store, a.Chapter, full, aigcReport, aigcGate)
+		if err != nil {
+			return nil, fmt.Errorf("route appended draft AIGC gate: %w", err)
+		}
 		if localStructuralRerender {
 			nextStep = "停止本次正文修改；append 后的精确整章哈希触发本地 whole-text/segment 结构阻断。append 不能继续叠加修补，立即把控制权交还外层 pipeline 做有界整章重渲染或重规划。"
 			hardGatePassed = false
@@ -316,7 +339,10 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 		}
 		nextStep := draftQualityGateNextStep(wordContract, aigcGate)
 		hardGatePassed := wordContract.Passed && rawAIGCGate.Passed
-		localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(a.Content, aigcReport, aigcGate)
+		localStructuralRerender, err := draftAIGCWholeDraftRerenderRequired(t.store, a.Chapter, a.Content, aigcReport, aigcGate)
+		if err != nil {
+			return nil, fmt.Errorf("route current draft AIGC gate: %w", err)
+		}
 		if err := clearDraftWriteIntent(t.store.Dir(), a.Chapter); err != nil {
 			return nil, fmt.Errorf("complete draft write: %w", err)
 		}
@@ -368,8 +394,38 @@ func (t *DraftChapterTool) Execute(_ context.Context, args json.RawMessage) (jso
 	}
 }
 
+func draftChapterRejudgePendingBlocksWrite(
+	inspection DraftExternalGateInspection,
+	explicitRerender bool,
+	settledSemanticRewrite bool,
+) bool {
+	if inspection.Status != DraftExternalGateRejudgePending || explicitRerender {
+		return false
+	}
+	// A formal semantic rejection may supersede only the synthetic local-soft
+	// edit opportunity opened by that same review seed. It never waives an
+	// ordinary missing/stale current-hash provider judgment.
+	return !inspection.LocalSoftEditPending || inspection.LocalSoftEditBeforeJudge ||
+		!settledSemanticRewrite
+}
+
 func draftNeedsConsistencyCheck(st *store.Store, chapter int) bool {
 	if st == nil || chapter <= 0 {
+		return false
+	}
+	// Checkpoints are an audit trail, not proof that the mutable draft payload
+	// still exists.  A zero-cost/body preflight can losslessly quarantine an
+	// invalid draft while deliberately preserving its historical checkpoints.
+	// In that state the next bounded render must be allowed to create the
+	// replacement body; treating the old checkpoint as a live draft sends every
+	// subsequent Writer into the impossible "check before draft" loop.
+	draft, err := st.Drafts.LoadDraft(chapter)
+	if err != nil {
+		// Fail closed on a real store read error.  The caller will refuse an
+		// overwrite instead of guessing that the payload is absent.
+		return true
+	}
+	if strings.TrimSpace(draft) == "" {
 		return false
 	}
 	scope := domain.ChapterScope(chapter)
@@ -402,8 +458,15 @@ func validateDraftChapterHeading(plan domain.ChapterPlan, content string) error 
 		prefixes = append(prefixes, "第"+numeral+"章")
 	}
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(firstLine, prefix) && strings.TrimSpace(strings.TrimPrefix(firstLine, prefix)) == title {
-			return nil
+		if strings.HasPrefix(firstLine, prefix) {
+			remainder := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
+			if remainder == title || chapterTitleEquivalent(firstLine, title) {
+				// The equivalent-title fallback handles imported plans whose title
+				// is itself the generic chapter label (for example "第一章")
+				// without accepting a title-only heading that lacks its chapter
+				// number.
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("第 %d 章草稿首行必须是‘第N章 %s’，当前为 %q: %w", plan.Chapter, title, firstLine, errs.ErrToolPrecondition)
@@ -420,7 +483,7 @@ func validateDraftWorldVisibility(s *store.Store, chapter int, content string) e
 	var leaked []string
 	for _, decision := range sim.CharacterDecisions {
 		name := strings.TrimSpace(decision.Character)
-		if name != "" && !decision.VisibleToPOV && strings.Contains(content, name) {
+		if name != "" && !characterWorldDecisionNameObservableToPOV(*sim, decision) && strings.Contains(content, name) {
 			leaked = append(leaked, name)
 		}
 	}

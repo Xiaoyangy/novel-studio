@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -87,6 +88,150 @@ func TestManagedFullDraftStopsForCurrentHashDeepSeekBeforeCommit(t *testing.T) {
 	inspection, err = InspectDraftExternalGateWithStore(st, 1)
 	if err != nil || inspection.Status != DraftExternalGateApproved {
 		t.Fatalf("same-hash DeepSeek pass did not approve managed draft: inspection=%+v err=%v", inspection, err)
+	}
+}
+
+func TestManagedPassingHashStillRoutesThroughLocalGateWithoutPriorRerenderMarker(t *testing.T) {
+	if !draftCurrentHashNeedsLocalGateRouting(nil, true) {
+		t.Fatal("pipeline-managed current hash must classify local structural/soft state after DeepSeek pass")
+	}
+	if draftCurrentHashNeedsLocalGateRouting(nil, false) {
+		t.Fatal("legacy unmarked draft must retain compatibility when it has no rerender marker")
+	}
+}
+
+func TestManagedWholeTextProbabilityWaitsForExactJudgeWithoutRerenderArtifacts(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	prepareManagedDraftJudgePlan(t, st, 1)
+	body := "第一章 测试章\n\n林砚把登记册推回窗口，请值班员先核对公共监控的时间。"
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	report := aigc.Report{
+		AIGCPercent: 79.07, WholeTextSegmentGate: 79.07,
+		Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi},
+	}
+	gate := draftAIGCGateResult{
+		RawLocalGatePercent: 79.07, EffectiveGatePercent: 79.07,
+		PassExclusivePercent: 4, Enforced: true,
+		RewriteFocus: []string{"保留原始本地诊断，等待当前哈希外判。"},
+	}
+	if err := persistDraftAIGCRerenderRequirement(st, 1, body, report, gate); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointDraftStructuralBlock(st, 1, body, report, gate); err != nil {
+		t.Fatal(err)
+	}
+	if cp := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "draft-structural-block"); cp != nil {
+		t.Fatalf("provider-pending probability proxy consumed a structural attempt: %+v", cp)
+	}
+	marker := filepath.Join(st.Dir(), "reviews", "drafts", "01_full_rerender_required.json")
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("provider-pending probability proxy persisted rerender marker: %v", err)
+	}
+}
+
+func TestManagedLegacyMixedProbabilityMarkerRoutesJudgeThenOneLocalSoftEdit(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 3); err != nil {
+		t.Fatal(err)
+	}
+	prepareManagedDraftJudgePlan(t, st, 1)
+
+	content := `“先把桌子挪开。”林澈说。
+
+“价牌放左边。”沈知遥接话。
+
+“车只能跑一趟。”贺骁补充。
+
+“那就先装三家。”老丁回答。
+
+“剩下两家怎么办？”摊主追问。
+
+“下午再送。”林澈解释。
+
+“票据别忘了。”沈知遥提醒。
+
+“我现在就开。”老丁点头。`
+	report := aigc.Report{
+		AIGCPercent: 79.07, WholeTextSegmentGate: 79.07,
+		Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi},
+	}
+	gate := draftAIGCGateResult{
+		RawLocalGatePercent: 79.07, EffectiveGatePercent: 79.07,
+		PassExclusivePercent: 4, Enforced: true,
+	}
+	if !draftAIGCLocalProbabilityComponentCalibratable(content, report) ||
+		draftAIGCLocalProbabilityOnly(content, report) ||
+		len(draftAIGCExternalCurrentBodyBlockers(content)) == 0 {
+		t.Fatalf("fixture did not separate probability from statistical warnings: report=%+v blockers=%+v", report, draftAIGCExternalCurrentBodyBlockers(content))
+	}
+	if err := st.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	// This is the exact predicate used to downgrade an older current-body local
+	// marker from whole-rerender authority to provider-first recovery.
+	missingRouted, err := draftAIGCLocalMarkerProviderRouted(st, 1, content, report, gate)
+	if err != nil || !missingRouted {
+		t.Fatalf("missing exact judge did not route legacy marker to RejudgePending: routed=%v err=%v", missingRouted, err)
+	}
+	if err := persistDraftAIGCRerenderRequirement(st, 1, content, report, gate); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointDraftStructuralBlock(st, 1, content, report, gate); err != nil {
+		t.Fatal(err)
+	}
+	if cp := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "draft-structural-block"); cp != nil {
+		t.Fatalf("provider-pending mixed signal consumed a structural attempt: %+v", cp)
+	}
+	writeDraftExternalJudgeStatus(t, st.Dir(), 1, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(content), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	corroborated := corroborateDraftAIGCGate(st, 1, content, report, gate)
+	afterPassRouted, err := draftAIGCLocalMarkerProviderRouted(st, 1, content, report, corroborated)
+	if err != nil || !afterPassRouted {
+		t.Fatalf("exact pass did not retire legacy whole-rerender authority: routed=%v err=%v", afterPassRouted, err)
+	}
+	structural, soft := draftExternalLocalGateDisposition(content, report, corroborated)
+	if structural || !soft {
+		t.Fatalf("exact pass did not split probability from one local-soft warning repair: structural=%v soft=%v", structural, soft)
+	}
+	if required, routeErr := draftAIGCWholeDraftRerenderRequired(st, 1, content, report, corroborated); routeErr != nil || required {
+		t.Fatalf("resolved probability plus statistical warnings still requested a whole rerender: required=%v err=%v", required, routeErr)
+	}
+
+	hard := report
+	hard.ContentIntegrityFloor = 80
+	if draftAIGCLocalProbabilityComponentCalibratable(content, hard) {
+		t.Fatal("content-integrity evidence entered provider calibration")
+	}
+	hard.ContentIntegrityFloor = 0
+	hard.Stats.Hanzi = 1000
+	hard.Stats.Repeated12Extra = 100
+	if draftAIGCLocalProbabilityComponentCalibratable(content, hard) {
+		t.Fatal("extreme exact repetition entered provider calibration")
 	}
 }
 

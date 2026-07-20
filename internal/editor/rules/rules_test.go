@@ -14,7 +14,7 @@ func TestAnalyzeChapterFlagsAIVoicePatterns(t *testing.T) {
 
 风仿佛贴着墙走。卡莱尔说：“你手在抖。”
 
-钟声宛如从井底升起。她没有回答。
+钟声宛如从井底升起。她差点回答，话到嘴边却没有说完。
 
 月光像刀一样落在门缝上。门后又响了一声？`
 
@@ -36,6 +36,44 @@ func TestAnalyzeChapterFlagsAIVoicePatterns(t *testing.T) {
 	}
 }
 
+func TestAnalyzeChapterExcludesPlainChapterTitleFromNarrativeAnalysis(t *testing.T) {
+	text := `第6章 他等的从来不是外卖
+
+邵维把配送单压在桌角。纸边沾着半圈水。`
+
+	analysis := AnalyzeChapter(6, text, nil)
+	if analysis.Metrics.ParagraphCount != 1 {
+		t.Fatalf("plain chapter heading became a narrative paragraph: %+v", analysis.Metrics)
+	}
+	if analysis.Metrics.SentenceCount != 2 {
+		t.Fatalf("plain chapter heading became a narrative sentence: %+v", analysis.Metrics)
+	}
+	if hasRedFlag(analysis.RedFlags, "opening_single_sentence_aphorism") {
+		t.Fatalf("chapter title must not trigger opening aphorism rule: %+v", analysis.RedFlags)
+	}
+}
+
+func TestAphorismINeverAllowsFactualDenialButKeepsDeclaration(t *testing.T) {
+	factual := AnalyzeChapter(6, `第6章 他等的从来不是外卖
+
+邵维把协议推回去：“我从未持有许知遥的账户、银行卡或其他资产。”`, nil)
+	if hasRedFlag(factual.RedFlags, "aphorism_i_never") {
+		t.Fatalf("verifiable legal denial is not an aphorism: %+v", factual.RedFlags)
+	}
+
+	concrete := AnalyzeChapter(6, `程野问：“你进过西侧仓库吗？”
+
+邵维摇头：“我从未进入过那间仓库。”`, nil)
+	if hasRedFlag(concrete.RedFlags, "aphorism_i_never") {
+		t.Fatalf("concrete factual denial in dialogue is not an aphorism: %+v", concrete.RedFlags)
+	}
+
+	declaration := AnalyzeChapter(6, `她说：“我从未如此清醒地看见黑暗。”`, nil)
+	if !hasRedFlag(declaration.RedFlags, "aphorism_i_never") {
+		t.Fatalf("quotable declaration must remain an aphorism hit: %+v", declaration.RedFlags)
+	}
+}
+
 func TestAnalyzeChapterDoesNotRewardStockHandHesitation(t *testing.T) {
 	text := `付款页面已经打开，他的拇指却迟迟没落下。
 
@@ -48,6 +86,40 @@ func TestAnalyzeChapterDoesNotRewardStockHandHesitation(t *testing.T) {
 	cognitive := AnalyzeChapter(1, `他先说自己无所谓，又改口：“等等，我没把握。”`, nil)
 	if !cognitive.Metrics.ProtagonistWaver {
 		t.Fatalf("changed judgment should count as protagonist waver: %+v", cognitive.Metrics)
+	}
+}
+
+func TestProtagonistWaverRequiresOrderedImpulseAndOverride(t *testing.T) {
+	c6 := `程野看着那个时间，第一反应竟是还有三十六分钟。许知遥被留在镜头前等她，这个念头几乎替她作出了决定。
+
+她强迫自己再看一遍三份记录。`
+	if !AnalyzeChapter(6, c6, nil).Metrics.ProtagonistWaver {
+		t.Fatal("C6 impulse followed by deliberate re-check must count as a genuine waver")
+	}
+
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "impulse only", text: `她第一反应是立刻下车。`},
+		{name: "override before impulse", text: `她强迫自己先复核记录。
+
+随后她第一反应是下车。`},
+		{name: "override more than two paragraphs later", text: `她第一反应是下车。
+
+车灯扫过挡风玻璃。
+
+耳机里响起电流声。
+
+她强迫自己复核记录。`},
+		{name: "ordinary reflex", text: `她下意识把直播声音调大了一格，随后停住。`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if AnalyzeChapter(6, tt.text, nil).Metrics.ProtagonistWaver {
+				t.Fatalf("non-reversal fixture earned protagonist waver credit: %q", tt.text)
+			}
+		})
 	}
 }
 
@@ -222,6 +294,62 @@ func TestDialogueRatioLimitIsLengthAware(t *testing.T) {
 	}
 	if flags := redFlags(shortChapterNearLimit, nil); hasRedFlag(flags, "supporting_dialogue_ratio") {
 		t.Fatalf("near-limit short chapter should not be flagged: %+v", flags)
+	}
+}
+
+func TestDialogueStatsUsesOnlyOutsideQuoteFirstPersonAttribution(t *testing.T) {
+	inside := splitParagraphs(`贺铎说：“带原始影像过来。按我说的范围进来。”`)
+	insideStats := dialogueStats(inside)
+	if insideStats.DialogueChars == 0 || insideStats.SupportingChars != insideStats.DialogueChars || insideStats.SupportingTurns != 1 {
+		t.Fatalf("quote-internal 我说 must not be treated as attribution: %+v", insideStats)
+	}
+
+	lead := dialogueStats(splitParagraphs(`我说：“别动。”`))
+	if lead.DialogueChars == 0 || lead.SupportingChars != 0 || lead.SupportingTurns != 0 {
+		t.Fatalf("leading first-person attribution must exclude protagonist dialogue: %+v", lead)
+	}
+
+	tail := dialogueStats(splitParagraphs(`“回去。”我问。`))
+	if tail.DialogueChars == 0 || tail.SupportingChars != 0 || tail.SupportingTurns != 0 {
+		t.Fatalf("trailing first-person attribution must exclude protagonist dialogue: %+v", tail)
+	}
+}
+
+func TestSupportingDialogueRatioRequiresSparseInteractionTopology(t *testing.T) {
+	longNarration := strings.Repeat("公共画面留下正常交付记录，停车位里的灯光始终没有移动。", 3)
+	paragraphs := make([]string, 0, 20)
+	for _, quote := range []string{"停。", "别动。", "再看。", "现在不行。", "只记亲历。", "待核。"} {
+		paragraphs = append(paragraphs, longNarration+`姜岚说：“`+quote+`”`)
+	}
+	for i := 0; i < 14; i++ {
+		paragraphs = append(paragraphs, longNarration)
+	}
+	analysis := AnalyzeChapter(6, strings.Join(paragraphs, "\n\n"), nil)
+	if analysis.Metrics.DialogueRatio >= DialogueRatioLimit {
+		t.Fatalf("test fixture must remain below character-ratio limit: %+v", analysis.Metrics)
+	}
+	if analysis.Metrics.SupportingDialogueTurns < minimumSupportingDialogueTurns ||
+		analysis.Metrics.SupportingDialogueParagraphRatio < minimumSupportingDialogueParagraphRatio {
+		t.Fatalf("test fixture must provide dense terse interaction: %+v", analysis.Metrics)
+	}
+	if hasRedFlag(analysis.RedFlags, "supporting_dialogue_ratio") {
+		t.Fatalf("terse multi-turn confrontation must not be flagged by character ratio alone: %+v", analysis.RedFlags)
+	}
+}
+
+func TestSupportingDialogueRatioStillFlagsGenuinelySparseInteraction(t *testing.T) {
+	longNarration := strings.Repeat("公共画面留下正常交付记录，停车位里的灯光始终没有移动。", 3)
+	paragraphs := []string{longNarration + `姜岚说：“停。”`}
+	for i := 0; i < 19; i++ {
+		paragraphs = append(paragraphs, longNarration)
+	}
+	analysis := AnalyzeChapter(6, strings.Join(paragraphs, "\n\n"), nil)
+	if analysis.Metrics.SupportingDialogueTurns != 1 ||
+		analysis.Metrics.SupportingDialogueParagraphRatio >= minimumSupportingDialogueParagraphRatio {
+		t.Fatalf("test fixture must remain interaction-sparse: %+v", analysis.Metrics)
+	}
+	if !hasRedFlag(analysis.RedFlags, "supporting_dialogue_ratio") {
+		t.Fatalf("genuinely sparse supporting interaction must remain flagged: %+v", analysis.RedFlags)
 	}
 }
 

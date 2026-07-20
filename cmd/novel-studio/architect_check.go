@@ -324,17 +324,64 @@ func architectWorldCodexIssues(path string) []string {
 }
 
 func architectChapterRangeFromPremise(premise string) (int, int, bool) {
+	exactArabic := regexp.MustCompile(`(?:全书|正文|共|总计|规划|计划|建议|预计|预期|目标)\s*(\d{1,3})\s*章`)
+	if m := exactArabic.FindStringSubmatch(premise); len(m) == 2 {
+		if total, err := strconv.Atoi(m[1]); err == nil && total > 0 {
+			return total, total, true
+		}
+	}
+	exactChinese := regexp.MustCompile(`(?:全书|正文|共|总计|规划|计划|建议|预计|预期|目标)\s*([零〇一二两三四五六七八九十百]+)\s*章`)
+	if m := exactChinese.FindStringSubmatch(premise); len(m) == 2 {
+		if total, ok := architectChineseChapterNumber(m[1]); ok {
+			return total, total, true
+		}
+	}
 	re := regexp.MustCompile(`(\d{1,3})\s*[-—~到至]\s*(\d{1,3})\s*章`)
-	m := re.FindStringSubmatch(premise)
-	if len(m) != 3 {
-		return 0, 0, false
+	for _, idx := range re.FindAllStringSubmatchIndex(premise, -1) {
+		if len(idx) != 6 {
+			continue
+		}
+		// “第4—5章前/第4—5章完成”是章位，不是全书章数声明。
+		prefix := strings.TrimSpace(premise[:idx[0]])
+		if strings.HasSuffix(prefix, "第") {
+			continue
+		}
+		min, err1 := strconv.Atoi(premise[idx[2]:idx[3]])
+		max, err2 := strconv.Atoi(premise[idx[4]:idx[5]])
+		if err1 == nil && err2 == nil && min > 0 && max >= min {
+			return min, max, true
+		}
 	}
-	min, err1 := strconv.Atoi(m[1])
-	max, err2 := strconv.Atoi(m[2])
-	if err1 != nil || err2 != nil || min <= 0 || max < min {
-		return 0, 0, false
+	return 0, 0, false
+}
+
+func architectChineseChapterNumber(raw string) (int, bool) {
+	digits := map[rune]int{'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+	total, current := 0, 0
+	for _, r := range raw {
+		if value, ok := digits[r]; ok {
+			current = value
+			continue
+		}
+		switch r {
+		case '十':
+			if current == 0 {
+				current = 1
+			}
+			total += current * 10
+			current = 0
+		case '百':
+			if current == 0 {
+				current = 1
+			}
+			total += current * 100
+			current = 0
+		default:
+			return 0, false
+		}
 	}
-	return min, max, true
+	total += current
+	return total, total > 0
 }
 
 func writeArchitectReadiness(dir string, readiness architectReadiness) error {

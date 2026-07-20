@@ -46,7 +46,8 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 	if sim, err := s.LoadChapterWorldSimulation(plan.Chapter); err == nil && sim != nil {
 		hidden := map[string]struct{}{}
 		for _, decision := range sim.CharacterDecisions {
-			if name := strings.TrimSpace(decision.Character); name != "" && !decision.VisibleToPOV {
+			if name := strings.TrimSpace(decision.Character); name != "" &&
+				!characterWorldDecisionNameObservableToPOV(*sim, decision) {
 				hidden[name] = struct{}{}
 			}
 		}
@@ -56,6 +57,15 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 			}
 			for name := range hidden {
 				if strings.Contains(beat, name) {
+					// A hidden/dead character's already-visible documentary remains an
+					// object, not an actor.  Keep this exception deliberately narrow:
+					// every mention must be an immediate possessive/evidence noun,
+					// another observable named actor must be present, and that actor
+					// must perform an evidence-custody action.  Direct action/dialogue
+					// by the hidden character therefore continues to fail below.
+					if hiddenCharacterMentionIsEvidenceObject(beat, name, *sim) {
+						continue
+					}
 					hard = append(hard, fmt.Sprintf("POV 越界：required_beats 把世界模拟中 visible_to_pov=false 的角色 %q 直接写入本章行动 —— %q", name, strings.TrimSpace(beat)))
 				}
 			}
@@ -90,6 +100,82 @@ func checkChapterPlanConsistency(s *store.Store, plan domain.ChapterPlan) (hard 
 	}
 
 	return hard, warn
+}
+
+var hiddenCharacterEvidenceNouns = []string{
+	"材料", "证据", "物证", "遗物", "档案", "记录", "录音", "录像",
+	"视频", "照片", "文件", "资料", "笔记", "手稿", "遗书",
+}
+
+var evidenceCustodyActions = []string{
+	"封存", "保全", "调取", "移交", "核验", "复核", "查验", "登记",
+	"归档", "提取", "固定", "鉴定", "比对", "整理",
+}
+
+// hiddenCharacterMentionIsEvidenceObject distinguishes a reference to a
+// hidden/dead character's documentary material ("调查员封存甲的材料") from the
+// character acting in-scene ("甲提交材料" / "甲开口"). It intentionally
+// does not attempt general Chinese semantic parsing: ambiguity must stay hard.
+func hiddenCharacterMentionIsEvidenceObject(beat, hiddenName string, sim domain.ChapterWorldSimulation) bool {
+	beat = strings.TrimSpace(beat)
+	hiddenName = strings.TrimSpace(hiddenName)
+	if beat == "" || hiddenName == "" {
+		return false
+	}
+
+	// Every occurrence must be immediately owned by a documentary/evidence
+	// noun.  Thus a second direct-action or dialogue mention cannot hitchhike on
+	// an otherwise legitimate material reference in the same beat.
+	rest := beat
+	mentions := 0
+	for {
+		idx := strings.Index(rest, hiddenName)
+		if idx < 0 {
+			break
+		}
+		mentions++
+		after := strings.TrimSpace(rest[idx+len(hiddenName):])
+		after = strings.TrimSpace(strings.TrimPrefix(after, "的"))
+		if !hasAnyPrefix(after, hiddenCharacterEvidenceNouns) {
+			return false
+		}
+		rest = rest[idx+len(hiddenName):]
+	}
+	if mentions == 0 || !containsAnyText(beat, evidenceCustodyActions) {
+		return false
+	}
+
+	// The custody action must have an explicitly named, POV-observable actor
+	// other than the documentary's owner.  An omitted/ambiguous actor remains
+	// rejected rather than being guessed from prose.
+	for _, decision := range sim.CharacterDecisions {
+		actor := strings.TrimSpace(decision.Character)
+		if actor == "" || actor == hiddenName || !strings.Contains(beat, actor) {
+			continue
+		}
+		if characterWorldDecisionNameObservableToPOV(sim, decision) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyText(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteBeatIsExplicitlyOffscreen(beat string) bool {

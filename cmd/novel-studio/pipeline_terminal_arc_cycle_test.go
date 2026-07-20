@@ -3,12 +3,32 @@ package main
 import (
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestResetCompletedSealedPipelineCycleIgnoresOrdinaryRenderState(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	state := &domain.PipelineState{Stages: []string{"render"}}
+	state.MarkDone("render", domain.PipelineStageEvidence{Stage: "render", Status: "complete"})
+
+	reset, err := resetCompletedSealedPipelineCycle(st.Dir(), state)
+	if err != nil || reset {
+		t.Fatalf("ordinary render entered sealed completion: reset=%v err=%v", reset, err)
+	}
+	if !state.Done("render") {
+		t.Fatal("ordinary render stage was cleared by sealed completion logic")
+	}
+}
 
 func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) {
 	opts, st, identity := projectAllCmdTestInstallThreeChapterCLIProjection(t)
@@ -155,6 +175,55 @@ func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) 
 		},
 	); err != nil {
 		t.Fatal(err)
+	}
+
+	// A terminal convergence successor is rendered in a standalone `render`
+	// invocation after `plan --restart`; there is intentionally no completed
+	// promote stage in that new pipeline state.  Missing exact-body acceptance
+	// must still fail closed, then restoring it must publish exactly one
+	// idempotent arc completion receipt.
+	renderOnlyState := &domain.PipelineState{Stages: []string{"render"}}
+	renderOnlyState.MarkDone("render", domain.PipelineStageEvidence{Stage: "render", Status: "complete"})
+	acceptances, err := st.ArcCycle().ListChapterAcceptanceReceipts(generation.GenerationID)
+	if err != nil || len(acceptances) != generation.ExpectedChapterCount {
+		t.Fatalf("load terminal acceptances: receipts=%+v err=%v", acceptances, err)
+	}
+	lastAcceptance := acceptances[len(acceptances)-1]
+	lastAcceptancePath := filepath.Join(
+		st.Dir(),
+		"meta", "planning", "v3", "arc_cycle", "acceptances",
+		generation.GenerationID,
+		fmt.Sprintf("%06d", lastAcceptance.Chapter),
+		lastAcceptance.ReceiptDigest+".json",
+	)
+	if err := os.Remove(lastAcceptancePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Dir(lastAcceptancePath)); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := resetCompletedSealedPipelineCycle(st.Dir(), renderOnlyState); err == nil || reset ||
+		!strings.Contains(err.Error(), "逐章审核回执") {
+		t.Fatalf("terminal render-only completed without exact acceptance: reset=%v err=%v", reset, err)
+	}
+	if completions, err := st.ArcCycle().ListArcCompletionReceipts(generation.GenerationID); err != nil || len(completions) != 0 {
+		t.Fatalf("missing acceptance published terminal completion: receipts=%+v err=%v", completions, err)
+	}
+	if _, err := st.ArcCycle().SaveChapterAcceptanceReceipt(lastAcceptance); err != nil {
+		t.Fatalf("restore terminal acceptance: %v", err)
+	}
+	for invocation := 1; invocation <= 2; invocation++ {
+		reset, err := resetCompletedSealedPipelineCycle(st.Dir(), renderOnlyState)
+		if err != nil || reset {
+			t.Fatalf("terminal render-only completion %d: reset=%v err=%v", invocation, reset, err)
+		}
+		if !renderOnlyState.Done("render") {
+			t.Fatal("terminal render-only completion cleared the durable render stage")
+		}
+		completions, err := st.ArcCycle().ListArcCompletionReceipts(generation.GenerationID)
+		if err != nil || len(completions) != 1 {
+			t.Fatalf("terminal render-only completion %d published %+v: err=%v", invocation, completions, err)
+		}
 	}
 
 	state := &domain.PipelineState{Stages: []string{"preplan", "project-all", "seal", "promote", "render"}}

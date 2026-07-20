@@ -17,8 +17,9 @@ const (
 
 // RenderOnlyReplanEscalation explains why repeated whole-draft rendering can
 // no longer make useful progress against the current causal plan. Attempts are
-// distinct draft hashes after the newest plan/simulation/commit causal
-// boundary; retrying the same hash never consumes the budget. A rerender
+// distinct draft hashes after the newest plan/simulation causal boundary;
+// retrying the same hash never consumes the budget. A candidate commit happens
+// before formal review and therefore cannot reset a plan-owned retry budget. A rerender
 // request is authorization, not a causal reset, so repeating --force-rerender
 // cannot erase attempts accumulated against the same plan.
 type RenderOnlyReplanEscalation struct {
@@ -63,11 +64,19 @@ func InspectRenderOnlyReplanEscalation(s *store.Store, chapter int) RenderOnlyRe
 		result.Reason = fmt.Sprintf("同一因果计划下已有 %d 个不同整章哈希触发 whole-text/segment 结构阻断，达到迭代上限 %d", result.Attempts, result.Limit)
 		return result
 	}
+	// Once this causal epoch contains any explicit structural checkpoint, that
+	// journal is authoritative. Mixing its exact failures with the legacy draft-
+	// count heuristic would relabel passing drafts and bounded soft edits as
+	// structural failures, prematurely exhausting the render budget.
+	if len(structural) > 0 {
+		return result
+	}
 
 	// Compatibility path for runs created before draft-structural-block was
-	// introduced. Only a current same-hash, advice-complete rerender marker plus
-	// an independently reproduced whole-text/segment blocker may promote the
-	// uncommitted draft history to structural attempts.
+	// introduced. It is used only when this epoch has no explicit structural
+	// evidence at all. A current same-hash, advice-complete rerender marker plus
+	// an independently reproduced whole-text/segment blocker may then promote
+	// the uncommitted draft history to structural attempts.
 	if len(drafts) < result.Limit || !currentDraftHasWholeTextStructuralBlock(s, chapter) {
 		return result
 	}
@@ -78,15 +87,18 @@ func InspectRenderOnlyReplanEscalation(s *store.Store, chapter int) RenderOnlyRe
 }
 
 // renderOnlyCausalBoundary is the latest checkpoint that can legitimately
-// grant a fresh rendering budget. Explicit rerender requests deliberately do
-// not qualify: they reuse the existing causal projection.
+// grant a fresh rendering budget. Only a new plan or world simulation changes
+// the causal projection. Candidate commits happen before formal Editor review;
+// treating each one as a reset was the source of an unbounded
+// render->commit->review->rewrite loop. Explicit rerender requests likewise do
+// not qualify because they reuse the existing causal projection.
 func renderOnlyCausalBoundary(s *store.Store, chapter int) int64 {
 	if s == nil || chapter <= 0 {
 		return 0
 	}
 	scope := domain.ChapterScope(chapter)
 	var boundary int64
-	for _, step := range []string{"plan", "chapter_world_simulation", "commit"} {
+	for _, step := range []string{"plan", "chapter_world_simulation"} {
 		if cp := s.Checkpoints.LatestByStep(scope, step); cp != nil && cp.Seq > boundary {
 			boundary = cp.Seq
 		}

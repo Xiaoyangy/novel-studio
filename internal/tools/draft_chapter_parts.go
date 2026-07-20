@@ -235,7 +235,10 @@ func (t *MergeChapterPartsTool) Execute(_ context.Context, args json.RawMessage)
 			return nil, fmt.Errorf("persist merged draft AIGC rerender requirement: %w", err)
 		}
 	}
-	localStructuralRerender := draftAIGCHasWholeTextStructuralBlock(content, aigcReport, aigcGate)
+	localStructuralRerender, err := draftAIGCWholeDraftRerenderRequired(t.store, a.Chapter, content, aigcReport, aigcGate)
+	if err != nil {
+		return nil, fmt.Errorf("route merged draft AIGC gate: %w", err)
+	}
 	nextStep := draftQualityGateNextStep(wordContract, aigcGate)
 	if err := clearDraftWriteIntent(t.store.Dir(), a.Chapter); err != nil {
 		return nil, fmt.Errorf("complete merged draft write: %w", err)

@@ -12,6 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/rules"
@@ -79,12 +81,14 @@ func (n *Normalizer) Normalize(ctx context.Context, source, text string) rules.C
 		default:
 			raw := resp.Message.TextContent()
 			if out, ok := parseNormalizerJSON(raw); ok {
-				return rules.Candidate{
+				candidate := rules.Candidate{
 					Source:      source,
 					Structured:  out.Structured,
 					Preferences: strings.TrimSpace(out.Preferences),
 					Uncertain:   coerceUncertain(out.Uncertain),
 				}
+				applyExplicitChapterWords(&candidate, text)
+				return candidate
 			}
 			lastErr = "返回非合法 JSON"
 			// 反馈式重试：把上次的非法输出与纠正提示并入对话，让下一轮带着错误针对性
@@ -107,12 +111,57 @@ func (n *Normalizer) Normalize(ctx context.Context, source, text string) rules.C
 // degraded 构造一个降级候选：归一化失败时把原文当作风格偏好，不提炼任何机械规则。
 // uncertain 标注来源（便于回显"哪些来源未能解析"），但不含技术错误细节——技术错误只进日志。
 func degraded(source, text string) rules.Candidate {
-	return rules.Candidate{
+	candidate := rules.Candidate{
 		Source:      source,
 		Preferences: text,
 		Uncertain:   []string{source + "：归一化失败，已按原文作为风格偏好处理（未提炼机械规则）"},
 		Degraded:    true,
 	}
+	applyExplicitChapterWords(&candidate, text)
+	return candidate
+}
+
+var explicitChapterWordsRangeRE = regexp.MustCompile(`(?i)(?:单章|每章|章节字数|chapter_words)[^0-9]{0,24}([0-9]{3,6})\s*[-–—~～至到]\s*([0-9]{3,6})\s*(?:字|字符|words?|runes?)?`)
+
+// ExplicitChapterWords deterministically extracts an unambiguous per-chapter
+// range. The LLM normalizer remains responsible for contextual preferences,
+// but it may not downgrade a literal range such as “单章约2200—2600字” to an
+// uncertain note. Requiring an explicit per-chapter marker prevents a total
+// book range (for example “正文2.8万—3万字”) from being misclassified.
+func ExplicitChapterWords(text string) *rules.WordRange {
+	match := explicitChapterWordsRangeRE.FindStringSubmatch(strings.TrimSpace(text))
+	if len(match) != 3 {
+		return nil
+	}
+	minWords, minErr := strconv.Atoi(match[1])
+	maxWords, maxErr := strconv.Atoi(match[2])
+	if minErr != nil || maxErr != nil || minWords <= 0 || maxWords < minWords {
+		return nil
+	}
+	return &rules.WordRange{Min: minWords, Max: maxWords}
+}
+
+func applyExplicitChapterWords(candidate *rules.Candidate, text string) {
+	if candidate == nil {
+		return
+	}
+	rangeRule := ExplicitChapterWords(text)
+	if rangeRule == nil {
+		return
+	}
+	candidate.Structured.ChapterWords = rangeRule
+	filtered := candidate.Uncertain[:0]
+	for _, item := range candidate.Uncertain {
+		lower := strings.ToLower(item)
+		if strings.Contains(lower, "chapter_words") ||
+			strings.Contains(item, "单章") ||
+			strings.Contains(item, "每章") ||
+			strings.Contains(item, "章节字数") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	candidate.Uncertain = filtered
 }
 
 // normalizerOutput 是归一化器约定的 JSON 形态。

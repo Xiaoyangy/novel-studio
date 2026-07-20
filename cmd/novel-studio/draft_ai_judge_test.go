@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -76,12 +75,16 @@ func TestDraftChapterNumbersAndSelection(t *testing.T) {
 	}
 }
 
-func TestPassingDraftJudgePreservesReproducibleLocalStructuralMarker(t *testing.T) {
+func TestPassingDraftJudgeClearsLocalProbabilityMarker(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
-	body := "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到下一家。", 100)
+	body := `第一章 县城试点
+
+林澈把价牌压在玻璃柜边，先核对票据上的时间，再抬头问摊主当晚见过谁。雨水沿棚布落成断线，门口那辆车一直没有熄火。
+
+她没有顺着摊主的猜测记录，只把公共监控编号写进回执。电话那头传来一句确认，她折好纸页，留在灯下等下一份原始记录。`
 	if err := st.Drafts.SaveDraft(1, body); err != nil {
 		t.Fatal(err)
 	}
@@ -103,24 +106,24 @@ func TestPassingDraftJudgePreservesReproducibleLocalStructuralMarker(t *testing.
 	if err := os.WriteFile(filepath.Join(reviewDir, "01_deepseek_ai_judge.json"), passingStatus, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !toolspkg.CurrentDraftHasLocalStructuralBlock(st, 1) {
-		t.Fatal("fixture no longer reproduces a local whole-text/segment structural block")
+	if toolspkg.CurrentDraftHasLocalStructuralBlock(st, 1) {
+		t.Fatal("exact-body DeepSeek pass did not supersede the local whole-text/segment probability proxy")
 	}
 
 	cleared, err := clearDraftRerenderRequirementAfterPassingJudge(st, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared {
-		t.Fatal("independent DeepSeek pass cleared a reproducible local structural marker")
+	if !cleared {
+		t.Fatal("independent DeepSeek pass did not clear the diagnostic local probability marker")
 	}
 	marker := filepath.Join(reviewDir, "01_full_rerender_required.json")
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("local structural marker was not preserved: %v", err)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("diagnostic local probability marker still exists: %v", err)
 	}
 	inspection, err := toolspkg.InspectDraftExternalGateWithStore(st, 1)
-	if err != nil || inspection.Status != toolspkg.DraftExternalGateRerenderAuthorized {
-		t.Fatalf("passing judge unlocked locally blocked hash: inspection=%+v err=%v", inspection, err)
+	if err != nil || inspection.Status != toolspkg.DraftExternalGateApproved {
+		t.Fatalf("passing judge did not approve the exact hash: inspection=%+v err=%v", inspection, err)
 	}
 }
 

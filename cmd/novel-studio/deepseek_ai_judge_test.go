@@ -64,7 +64,7 @@ func (m *deepseekJudgeCaptureModel) GenerateStream(context.Context, []agentcore.
 
 func (m *deepseekJudgeCaptureModel) SupportsTools() bool { return false }
 
-func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
+func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndBoundedThinking(t *testing.T) {
 	model := &deepseekJudgeCaptureModel{}
 	chapter := "第一章 样本M17\n\n许闻溪把审计盒接上。\n\n“先别解释。”"
 
@@ -82,6 +82,9 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 	if artifact.CacheKey == "" || artifact.CachePolicy.ReviewProtocolVersion != deepseekAIJudgeReviewProtocolVersion {
 		t.Fatalf("artifact cache identity missing: %+v", artifact)
 	}
+	if deepseekAIJudgeReviewProtocolVersion != "review-existing/deepseek-ai-judge/v14" {
+		t.Fatalf("review protocol version = %q, want v14", deepseekAIJudgeReviewProtocolVersion)
+	}
 	if artifact.CachePolicy.SystemPromptSHA256 != reviewExistingSHA256(deepseekAIJudgeSystemPrompt) {
 		t.Fatalf("artifact system prompt fingerprint = %q", artifact.CachePolicy.SystemPromptSHA256)
 	}
@@ -95,11 +98,194 @@ func TestRunDeepSeekAIJudgeUsesRawChapterBodyAndMaxThinking(t *testing.T) {
 		t.Fatalf("user message leaked task description: %q", model.messages[1].TextContent())
 	}
 	cfg := agentcore.ResolveCallConfig(model.opts)
-	if cfg.ThinkingLevel != agentcore.ThinkingMax {
-		t.Fatalf("thinking level = %q, want max", cfg.ThinkingLevel)
+	if cfg.ThinkingLevel != agentcore.ThinkingLow {
+		t.Fatalf("thinking level = %q, want low", cfg.ThinkingLevel)
+	}
+	if cfg.MaxTokens != deepseekAIJudgeMaxOutputTokens {
+		t.Fatalf("max output tokens = %d, want %d", cfg.MaxTokens, deepseekAIJudgeMaxOutputTokens)
 	}
 	if !artifact.Blocking || artifact.Verdict != "ai_like" || artifact.AIProbabilityPercent != 70 {
 		t.Fatalf("artifact verdict/blocking = %+v", artifact)
+	}
+}
+
+type deepseekJudgeTimeoutThenSuccessModel struct {
+	calls   int
+	configs []agentcore.CallConfig
+}
+
+func (m *deepseekJudgeTimeoutThenSuccessModel) Generate(
+	ctx context.Context,
+	_ []agentcore.Message,
+	_ []agentcore.ToolSpec,
+	opts ...agentcore.CallOption,
+) (*agentcore.LLMResponse, error) {
+	m.calls++
+	m.configs = append(m.configs, agentcore.ResolveCallConfig(opts))
+	if m.calls == 1 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &agentcore.LLMResponse{Message: agentcore.Message{
+		Role:    agentcore.RoleAssistant,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(deepseekCompleteHumanResponse)},
+	}}, nil
+}
+
+func (m *deepseekJudgeTimeoutThenSuccessModel) GenerateStream(
+	context.Context,
+	[]agentcore.Message,
+	[]agentcore.ToolSpec,
+	...agentcore.CallOption,
+) (<-chan agentcore.StreamEvent, error) {
+	ch := make(chan agentcore.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (m *deepseekJudgeTimeoutThenSuccessModel) SupportsTools() bool { return false }
+
+type deepseekJudgeSequenceModel struct {
+	responses []string
+	messages  [][]agentcore.Message
+}
+
+func (m *deepseekJudgeSequenceModel) Generate(
+	_ context.Context,
+	messages []agentcore.Message,
+	_ []agentcore.ToolSpec,
+	_ ...agentcore.CallOption,
+) (*agentcore.LLMResponse, error) {
+	m.messages = append(m.messages, append([]agentcore.Message(nil), messages...))
+	index := len(m.messages) - 1
+	if index >= len(m.responses) {
+		index = len(m.responses) - 1
+	}
+	return &agentcore.LLMResponse{Message: agentcore.Message{
+		Role:    agentcore.RoleAssistant,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(m.responses[index])},
+	}}, nil
+}
+
+func (m *deepseekJudgeSequenceModel) GenerateStream(
+	context.Context,
+	[]agentcore.Message,
+	[]agentcore.ToolSpec,
+	...agentcore.CallOption,
+) (<-chan agentcore.StreamEvent, error) {
+	ch := make(chan agentcore.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (m *deepseekJudgeSequenceModel) SupportsTools() bool { return false }
+
+func TestDeepSeekAIJudgeAttemptBudgetsRequireUsefulRetryWindow(t *testing.T) {
+	tests := []struct {
+		name  string
+		total time.Duration
+		want  []time.Duration
+	}{
+		{name: "120s stays one full attempt", total: 120 * time.Second, want: []time.Duration{120 * time.Second}},
+		{name: "managed 180s stays one full attempt", total: 180 * time.Second, want: []time.Duration{180 * time.Second}},
+		{name: "below useful retry threshold stays one attempt", total: 239 * time.Second, want: []time.Duration{239 * time.Second}},
+		{name: "240s funds two useful attempts", total: 240 * time.Second, want: []time.Duration{120 * time.Second, 120 * time.Second}},
+		{name: "larger budget splits evenly", total: 300 * time.Second, want: []time.Duration{150 * time.Second, 150 * time.Second}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deepseekAIJudgeAttemptBudgets(tt.total, deepseekAIJudgeMinAttemptBudget, deepseekAIJudgeMaxAttempts)
+			if len(got) != len(tt.want) {
+				t.Fatalf("attempt budgets = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("attempt budgets = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestDeepSeekAIJudge120SecondBudgetUsesOneAttempt(t *testing.T) {
+	model := &reviewCacheModel{response: deepseekCompleteHumanResponse}
+	artifact, err := runDeepSeekAIJudge(
+		model,
+		deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true},
+		5,
+		"第五章\n\n她把手机扣在桌上。",
+		120*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.callCount() != 1 {
+		t.Fatalf("Generate calls=%d, want one full-budget attempt", model.callCount())
+	}
+	if artifact == nil || artifact.AttemptCount != 1 {
+		t.Fatalf("single-attempt artifact = %+v", artifact)
+	}
+}
+
+func TestDeepSeekAIJudgeUsesRemainingSingleAttemptBudgetForParseRepair(t *testing.T) {
+	model := &deepseekJudgeSequenceModel{responses: []string{
+		`{"verdict":"human_like","risk_level":"low","summary":"整体自然"}`,
+		deepseekCompleteHumanResponse,
+	}}
+	body := "第六章\n\n她把直播静音，听见门外的滚轮声。"
+	artifact, err := runDeepSeekAIJudgeWithMinAttemptBudget(
+		model,
+		deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true},
+		6,
+		body,
+		300*time.Millisecond,
+		200*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("parse repair should succeed inside the original total budget: %v", err)
+	}
+	if len(model.messages) != 2 || artifact == nil || artifact.AttemptCount != 2 || !artifact.AdviceComplete {
+		t.Fatalf("malformed first response did not receive one structural retry: calls=%d artifact=%+v", len(model.messages), artifact)
+	}
+	if !strings.Contains(artifact.ParseWarning, "missing ai_probability_percent") {
+		t.Fatalf("first-attempt parse warning was not retained for audit: %+v", artifact)
+	}
+	if !strings.Contains(model.messages[1][0].TextContent(), "上一轮响应未满足") {
+		t.Fatalf("second attempt did not receive the structural repair suffix: %q", model.messages[1][0].TextContent())
+	}
+	for attempt, messages := range model.messages {
+		if got := messages[1].TextContent(); got != body {
+			t.Fatalf("attempt %d user payload changed: got %q want %q", attempt+1, got, body)
+		}
+	}
+}
+
+func TestDeepSeekAIJudgeReservesBudgetForOneTimeoutRetry(t *testing.T) {
+	model := &deepseekJudgeTimeoutThenSuccessModel{}
+	artifact, err := runDeepSeekAIJudgeWithMinAttemptBudget(
+		model,
+		deepseekAIJudgeModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true},
+		5,
+		"第五章\n\n她把手机扣在桌上。",
+		200*time.Millisecond,
+		50*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("second reserved attempt should succeed: %v", err)
+	}
+	if model.calls != 2 || artifact == nil || artifact.AttemptCount != 2 || !artifact.AdviceComplete {
+		t.Fatalf("timeout retry did not preserve a second attempt: calls=%d artifact=%+v", model.calls, artifact)
+	}
+	if len(model.configs) != deepseekAIJudgeMaxAttempts {
+		t.Fatalf("captured call configs = %d, want %d", len(model.configs), deepseekAIJudgeMaxAttempts)
+	}
+	for i, cfg := range model.configs {
+		if cfg.MaxTokens != deepseekAIJudgeMaxOutputTokens {
+			t.Fatalf("attempt %d max output tokens = %d, want %d", i+1, cfg.MaxTokens, deepseekAIJudgeMaxOutputTokens)
+		}
+		if cfg.ThinkingLevel != deepseekAIJudgeReasoningEffort {
+			t.Fatalf("attempt %d thinking level = %q, want %q", i+1, cfg.ThinkingLevel, deepseekAIJudgeReasoningEffort)
+		}
 	}
 }
 
@@ -264,9 +450,9 @@ func TestDeepSeekCraftAdviceRejectsFakeFrictionAndDataOnlySystem(t *testing.T) {
 
 func TestRunDeepSeekAIJudgeRetriesAndBlocksIncompleteAdvice(t *testing.T) {
 	model := &reviewCacheModel{response: `{"verdict":"human_like","risk_level":"low","ai_probability_percent":3,"summary":"自然"}`}
-	artifact, err := runDeepSeekAIJudge(model, deepseekAIJudgeModelSelection{
+	artifact, err := runDeepSeekAIJudgeWithMinAttemptBudget(model, deepseekAIJudgeModelSelection{
 		Provider: "deepseek", Model: "deepseek-v4-pro", Explicit: true,
-	}, 1, "第一章\n\n林澈关上门。", time.Second)
+	}, 1, "第一章\n\n林澈关上门。", time.Second, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +461,68 @@ func TestRunDeepSeekAIJudgeRetriesAndBlocksIncompleteAdvice(t *testing.T) {
 	}
 	if artifact.AdviceComplete || !artifact.Blocking || artifact.AdviceWarning == "" {
 		t.Fatalf("incomplete advice must block after retry: %+v", artifact)
+	}
+}
+
+func TestDeepSeekJudgeNormalizesExplicitCleanPassToNoChangeAdvice(t *testing.T) {
+	artifact := &deepseekAIJudgeArtifact{RawResponse: `{
+		"verdict":"human_like",
+		"risk_level":"low",
+		"ai_probability_percent":2,
+		"confidence":"high",
+		"summary":"未发现明显 AI 写作痕迹，无需修改。",
+		"reasons":["未发现需要修改的 AI 特异问题。"],
+		"evidence":["人物判断由现场声音触发。","对白保留了各自的信息边界。"],
+		"revision_plan":[],
+		"dialogue_fix_plan":[],
+		"author_voice_plan":[],
+		"rag_rules":[]
+	}`}
+	parseDeepSeekAIJudgeResponse(artifact)
+	if !artifact.AdviceComplete || artifact.Blocking || artifact.AdviceWarning != "" {
+		t.Fatalf("explicit clean pass should normalize to nonblocking no-change advice: %+v", artifact)
+	}
+	if len(artifact.RevisionPlan) < 2 || len(artifact.DialogueFixPlan) < 1 ||
+		len(artifact.AuthorVoicePlan) < 1 || len(artifact.RAGRules) < 2 {
+		t.Fatalf("no-change normalization did not satisfy the advice contract: %+v", artifact)
+	}
+	for _, value := range append(append([]string{}, artifact.RevisionPlan...), artifact.DialogueFixPlan...) {
+		if !strings.Contains(value, "无需修改") {
+			t.Fatalf("normalization invented a substantive edit instead of no-change advice: %q", value)
+		}
+	}
+}
+
+func TestDeepSeekJudgeMissingAdviceStillFailsClosedForBlockingOrUnprovenResult(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "blocking score",
+			raw:  `{"verdict":"ai_like","risk_level":"high","ai_probability_percent":65,"summary":"发现明显 AI 痕迹。","reasons":["句法连续重复"],"evidence":["连续六段同构","角色反复复述规则"]}`,
+		},
+		{
+			name: "clean claim without enough evidence",
+			raw:  `{"verdict":"human_like","risk_level":"low","ai_probability_percent":2,"summary":"未发现明显 AI 写作痕迹，无需修改。","reasons":[],"evidence":["整体自然"]}`,
+		},
+		{
+			name: "partial substantive edit",
+			raw:  `{"verdict":"human_like","risk_level":"low","ai_probability_percent":2,"summary":"未发现明显 AI 写作痕迹，无需修改。","reasons":[],"evidence":["人物判断由现场触发","对白保留信息边界"],"revision_plan":["删掉结尾两段并重写关系位置"]}`,
+		},
+		{
+			name: "parse failure",
+			raw:  `{"verdict":"human_like","risk_level":"low","summary":"整体自然"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			artifact := &deepseekAIJudgeArtifact{RawResponse: tt.raw}
+			parseDeepSeekAIJudgeResponse(artifact)
+			if artifact.AdviceComplete || !artifact.Blocking || artifact.AdviceWarning == "" {
+				t.Fatalf("missing advice must remain fail-closed: %+v", artifact)
+			}
+		})
 	}
 }
 

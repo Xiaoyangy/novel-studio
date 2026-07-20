@@ -244,6 +244,7 @@ func TestBuildRevisionPlanKeepsAcceptedWarningsAsObservations(t *testing.T) {
 
 func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 	dir := t.TempDir()
+	bodySHA := "70e926d1f05451d8c66bddc0a7440378ca99907faf8c273b2641825604c35b6c"
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01.md"), `# 第001章 统一审核
 
 ## 是否需要改写：是
@@ -251,6 +252,7 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 `)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01.json"), `{
   "chapter": 1,
+  "body_sha256": "`+bodySHA+`",
   "scope": "chapter",
   "verdict": "accept",
   "contract_status": "met",
@@ -258,13 +260,20 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
     {"type": "aesthetic", "severity": "warning", "description": "配角对话可再加强"}
   ],
   "dimensions": [
+    {"dimension": "consistency", "score": 100, "verdict": "pass", "comment": "一致性成立"},
+    {"dimension": "character", "score": 100, "verdict": "pass", "comment": "人物成立"},
+    {"dimension": "pacing", "score": 100, "verdict": "pass", "comment": "节奏成立"},
+    {"dimension": "continuity", "score": 100, "verdict": "pass", "comment": "连续性成立"},
+    {"dimension": "foreshadow", "score": 100, "verdict": "pass", "comment": "伏笔成立"},
     {"dimension": "hook", "score": 100, "verdict": "pass", "comment": "钩子成立"},
-    {"dimension": "ai_voice_detection", "score": 80, "verdict": "pass", "comment": "仅余 warning"}
+    {"dimension": "aesthetic", "score": 100, "verdict": "pass", "comment": "美学成立"},
+    {"dimension": "ai_voice_detection", "score": 80, "verdict": "pass", "comment": "Red flag 1 supporting_dialogue_ratio severity warning；当前场景独处，配角信息只作转达，现有人物拒绝已有效打断流程，不构成阻断，无需改写。"}
   ],
   "summary": "编辑通过，仅建议打磨"
 }`)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_gate.json"), `{
   "chapter": 1,
+	  "body_sha256": "`+bodySHA+`",
 	  "aigc_report": {"aigc_percent": 3.8, "blended_aigc_percent": 3.8},
   "rule_violations": [
     {"rule": "fatigue_words", "severity": "warning", "actual": 2, "limit": 1}
@@ -272,6 +281,7 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 }`)
 	mustWriteFile(t, filepath.Join(dir, "reviews", "01_ai_voice_redflags.json"), `{
   "chapter": 1,
+  "body_sha256": "`+bodySHA+`",
   "red_flags": [
     {"rule": "supporting_dialogue_ratio", "severity": "warning", "actual": 0.17, "limit": 0.25}
   ]

@@ -128,10 +128,22 @@ func TestRoute_ExistingDraftUsesRestrictedFinalizer(t *testing.T) {
 	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
 	if got == nil || got.Agent != "draft_finalizer" || !strings.Contains(got.Task, "禁止重新整章生成") ||
 		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") || !strings.Contains(got.Task, "人工验收补充属于确定性约束") ||
-		!strings.Contains(got.Task, "任何 commit_chapter 失败后必须立即结束") ||
+		!strings.Contains(got.Task, "任一返回错误后必须立即结束") ||
 		!strings.Contains(got.Task, "DeepSeek provider judge 严格 <4%") ||
+		!strings.Contains(got.Task, "edit_chapter 无论成功或返回错误都必须立即结束") ||
 		!strings.Contains(got.Task, "用户外部平台只抽查，不要求替换稿跟随复测") {
 		t.Fatalf("existing draft should use restricted finalizer, got %+v", got)
+	}
+}
+
+func TestRoute_NewChapterExistingDraftStopsAfterFirstCommitFailure(t *testing.T) {
+	p := writingProgress([]int{1}, domain.FlowWriting)
+	got := Route(State{Progress: p, NextActionPlanReady: true, NextActionDraftReady: true})
+	if got == nil || got.Agent != "draft_finalizer" || got.Chapter != 2 ||
+		!strings.Contains(got.Task, "任一返回错误后必须立即结束") ||
+		!strings.Contains(got.Task, "禁止重试或再次 commit、check、read、context、edit") ||
+		!strings.Contains(got.Task, "novel_context(chapter=2, profile=draft)") {
+		t.Fatalf("new-chapter finalizer must stop after one failed commit and return control to pipeline, got %+v", got)
 	}
 }
 
@@ -222,6 +234,8 @@ func TestRoute_LocalSoftGateDispatchesExactlyOneEdit(t *testing.T) {
 			if got == nil || got.Agent != "draft_finalizer" || got.Chapter != test.chapter ||
 				!strings.Contains(got.Task, "最多调用一次 edit_chapter") ||
 				!strings.Contains(got.Task, "不得调用 commit_chapter") ||
+				!strings.Contains(got.Task, "任一返回错误时立即结束") ||
+				!strings.Contains(got.Task, "edit_chapter 无论成功或返回错误都必须立即结束") ||
 				!strings.Contains(got.Task, "DeepSeek provider judge 判定新哈希") ||
 				!strings.Contains(got.Task, "用户外部抽查不作为后续放行前置") {
 				t.Fatalf("local soft route must permit one edit and then stop fail-closed, got %+v", got)
@@ -539,6 +553,48 @@ func TestRoute_NormalContinue(t *testing.T) {
 	}
 }
 
+func TestRoute_PipelineRenderFirstDraftStopsBeforeAllGatesAndFinalizer(t *testing.T) {
+	p := writingProgress([]int{1, 2, 3, 4}, domain.FlowWriting)
+	p.TotalChapters = 12
+	got := Route(State{
+		Progress:                 p,
+		LastCompleted:            4,
+		HasChapterReview:         true,
+		NextActionPlanReady:      true,
+		NextActionPipelineRender: true,
+	})
+	if got == nil || got.Agent != "drafter" || got.Chapter != 5 {
+		t.Fatalf("pipeline render must dispatch the exact first Drafter: %+v", got)
+	}
+	for _, want := range []string{
+		"novel_context(chapter=5, profile=draft)",
+		"draft_chapter(chapter=5, mode=write)",
+		"written=true 后立即结束",
+		"禁止 read_chapter、check_consistency、edit_chapter、commit_chapter",
+		"禁止在本会话修补",
+		"精确草稿哈希",
+		"hard-fact/title/word 静态门",
+		"DeepSeek provider judge",
+	} {
+		if !strings.Contains(got.Task, want) {
+			t.Fatalf("pipeline render task lost boundary %q: %s", want, got.Task)
+		}
+	}
+	if strings.TrimSpace(got.Task) == "写第 5 章" || got.Agent == "draft_finalizer" {
+		t.Fatalf("pipeline render regressed to the open-ended ordinary route: %+v", got)
+	}
+
+	ordinary := Route(State{
+		Progress:            p,
+		LastCompleted:       4,
+		HasChapterReview:    true,
+		NextActionPlanReady: true,
+	})
+	if ordinary == nil || ordinary.Agent != "drafter" || ordinary.Task != "写第 5 章" {
+		t.Fatalf("ordinary non-pipeline interaction changed: %+v", ordinary)
+	}
+}
+
 func TestRoute_WorldSimulationPrecedesPOVPlanner(t *testing.T) {
 	p := writingProgress([]int{1}, domain.FlowWriting)
 	p.TotalChapters = 20
@@ -577,6 +633,34 @@ func TestRoute_ShortCompleteNeedsFinalGlobalReview(t *testing.T) {
 	}
 	if !contains(got.Task, "scope=global") {
 		t.Fatalf("expected global review task, got %q", got.Task)
+	}
+}
+
+func TestRoute_LayeredShortCompletePrioritizesGlobalReviewOverLegacyArcWork(t *testing.T) {
+	p := &domain.Progress{
+		Phase:             domain.PhaseWriting,
+		Flow:              domain.FlowWriting,
+		Layered:           true,
+		CompletedChapters: []int{1, 2},
+		TotalChapters:     2,
+	}
+	got := Route(State{
+		Progress:               p,
+		LastCompleted:          2,
+		HasChapterReview:       true,
+		BookCompleteByChapters: true,
+		NeedsFinalGlobalReview: true,
+		ArcBoundary: &storepkg.ArcBoundary{
+			Volume: 1, Arc: 1, IsArcEnd: true, IsVolumeEnd: true,
+		},
+	})
+	if got == nil || got.Agent != "editor" || got.Chapter != 2 || !contains(got.Task, "scope=global") {
+		t.Fatalf("layered short terminal must enter global review before arc summaries, got %+v", got)
+	}
+	for _, want := range []string{"2—3 个备选书名", "15—80 字", "无剧透简介", "5 个标签"} {
+		if !contains(got.Task, want) {
+			t.Fatalf("global review task missing publication requirement %q: %s", want, got.Task)
+		}
 	}
 }
 

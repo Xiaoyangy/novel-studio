@@ -160,6 +160,8 @@ func TestParseReviewIssuesSkipsNonActionablePraiseAndOptionalAdvice(t *testing.T
 3. protagonist_waver_missing 已有正文证据，无需补充修改。
 4. dialogue_conveyor_overuse 已被动作打断，不构成当前章问题。
 5. 某个判断可再强化，但已满足后果链，属可选优化。
+6. dialogue_info_dump（warning，不触发返工）：该认责对白属于必要的当面对质。
+7. 两处抽象表达略显说理，非严重问题，可不修改。
 
 ## 结论
 通过，不建议改写。`

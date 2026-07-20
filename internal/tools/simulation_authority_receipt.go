@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -23,10 +24,16 @@ type projectAllCharacterAuthorityOverlay struct {
 	CurrentGoal       string
 	CurrentAction     string
 	CurrentPressure   string
+	PriorWorldImpact  string
+	PriorCompletion   string
+	PriorDecision     string
 	Resources         []string
 	KnowledgeBoundary string
 	DecisionModel     string
 	ResourceBoundary  bool
+	TerminalGoal      bool
+	TerminalPressure  bool
+	TerminalAction    bool
 	Sources           []string
 }
 
@@ -198,6 +205,32 @@ func loadProjectAllCharacterContinuity(
 		return nil, "", "", err
 	}
 	priorDigest := simulationAuthorityRawDigest(priorRaw)
+	openingGoals := map[string]map[string]bool{}
+	openingPressures := map[string]map[string]bool{}
+	previousCompletion := map[string]string{}
+	for simulationChapter := 1; simulationChapter <= through; simulationChapter++ {
+		previous, loadErr := st.LoadChapterWorldSimulation(simulationChapter)
+		if loadErr != nil || previous == nil {
+			continue
+		}
+		for _, decision := range previous.CharacterDecisions {
+			name := strings.TrimSpace(decision.Character)
+			if name == "" || simulationAuthorityDecisionPlaceholder(decision.Decision) {
+				continue
+			}
+			if openingGoals[name] == nil {
+				openingGoals[name] = map[string]bool{}
+			}
+			if openingPressures[name] == nil {
+				openingPressures[name] = map[string]bool{}
+			}
+			openingGoals[name][strings.TrimSpace(decision.CurrentGoal)] = true
+			openingPressures[name][strings.TrimSpace(decision.Pressure)] = true
+			if simulationChapter == through {
+				previousCompletion[name] = strings.TrimSpace(decision.CompletionState)
+			}
+		}
+	}
 	for _, delta := range prior.CharacterDeltas {
 		name := strings.TrimSpace(delta.Character)
 		if name == "" {
@@ -207,6 +240,8 @@ func loadProjectAllCharacterContinuity(
 		overlay.CurrentLocation = nonSentinelAuthorityText(delta.Location)
 		overlay.CurrentStatus = nonSentinelAuthorityText(delta.Status)
 		overlay.CurrentAction = nonSentinelAuthorityText(delta.CurrentAction)
+		overlay.PriorWorldImpact = firstAuthorityText(delta.NextPotential, delta.WorldImpact)
+		overlay.PriorCompletion = previousCompletion[name]
 		overlay.KnowledgeBoundary = nonSentinelAuthorityText(delta.KnowledgeBoundary)
 		if overlay.CurrentLocation != "" || overlay.CurrentStatus != "" ||
 			overlay.CurrentAction != "" || overlay.KnowledgeBoundary != "" {
@@ -259,11 +294,31 @@ func loadProjectAllCharacterContinuity(
 		case "status", "state":
 			overlay.CurrentStatus = value
 		case "goal", "current_goal":
+			// Legacy project-all shadows wrote the chapter-opening goal back as
+			// if it were a terminal mutation. Ignore that exact snapshot. A
+			// genuinely distinct terminal goal remains valid for compatibility.
+			if openingGoals[name][value] {
+				continue
+			}
 			overlay.CurrentGoal = value
+			overlay.TerminalGoal = true
 		case "action", "current_action", "action_tendency":
 			overlay.CurrentAction = value
+			overlay.TerminalAction = true
+		case "decision":
+			// Project-all's sealed control plane persists a character's
+			// selected action as `decision`. Keep it separate until the
+			// completion state is known: only an action that was still started
+			// or in progress may survive an offscreen gap as current continuity.
+			overlay.PriorDecision = value
 		case "pressure":
+			if openingPressures[name][value] {
+				continue
+			}
 			overlay.CurrentPressure = value
+			overlay.TerminalPressure = true
+		case "completion_state":
+			overlay.PriorCompletion = value
 		case "knowledge", "knowledge_boundary":
 			overlay.KnowledgeBoundary = value
 		case "decision_frame":
@@ -299,11 +354,20 @@ func loadProjectAllCharacterContinuity(
 		case category == "character_state" && (field == "state" || field == "status"):
 			overlay.CurrentStatus = value
 		case category == "character_state" && (field == "goal" || field == "current_goal"):
+			if openingGoals[name][value] {
+				continue
+			}
 			overlay.CurrentGoal = value
+			overlay.TerminalGoal = true
 		case category == "character_state" && (field == "action" || field == "current_action"):
 			overlay.CurrentAction = value
+			overlay.TerminalAction = true
 		case category == "character_state" && field == "pressure":
+			if openingPressures[name][value] {
+				continue
+			}
 			overlay.CurrentPressure = value
+			overlay.TerminalPressure = true
 		case category == "knowledge" && (field == "knowledge" || field == "knowledge_boundary"):
 			overlay.KnowledgeBoundary = value
 		case category == "resource" && (field == "resource" || field == "resources"):
@@ -322,6 +386,43 @@ func loadProjectAllCharacterContinuity(
 		result[name] = overlay
 	}
 	for name, overlay := range result {
+		// CurrentGoal/Pressure are chapter-opening inputs, while StateAfter and
+		// ImmediateResult are terminal handoff data. Old project-all shadows
+		// persisted the former and therefore froze zero-init chapter-one text.
+		// Until the explicit terminal fields are present, derive a conservative
+		// next-chapter contract from the prior terminal state instead.
+		if !overlay.TerminalGoal {
+			overlay.CurrentGoal = projectAllDerivedContinuityGoal(
+				name,
+				overlay.PriorWorldImpact,
+				overlay.CurrentStatus,
+			)
+			overlay.Sources = append(overlay.Sources, "derived_terminal_handoff:current_goal")
+		}
+		if !overlay.TerminalPressure {
+			overlay.CurrentPressure = firstAuthorityText(
+				overlay.CurrentStatus,
+				overlay.PriorWorldImpact,
+			)
+			overlay.Sources = append(overlay.Sources, "derived_terminal_handoff:pressure")
+		}
+		if ongoing := projectAllOngoingDecisionHandoff(
+			overlay.PriorDecision,
+			overlay.PriorCompletion,
+		); !overlay.TerminalAction && strings.TrimSpace(overlay.CurrentAction) == "" && ongoing != "" {
+			overlay.CurrentAction = ongoing
+			overlay.Sources = append(
+				overlay.Sources,
+				"derived_terminal_handoff:ongoing_decision",
+			)
+		}
+		if !overlay.TerminalAction && slices.Contains(
+			[]string{"completed", "instant"},
+			strings.TrimSpace(overlay.PriorCompletion),
+		) {
+			overlay.CurrentAction = projectAllCompletedActionHandoff(name)
+			overlay.Sources = append(overlay.Sources, "derived_terminal_handoff:completed_action")
+		}
 		// An exact continuity snapshot also authorizes an explicit empty
 		// resource set. It never reintroduces zero-chapter pseudo-resources.
 		overlay.ResourceBoundary = true
@@ -330,6 +431,37 @@ func loadProjectAllCharacterContinuity(
 		result[name] = overlay
 	}
 	return result, priorDigest, stateDigest, nil
+}
+
+func projectAllDerivedContinuityGoal(name, priorImpact, priorStatus string) string {
+	name = strings.TrimSpace(name)
+	anchor := firstAuthorityText(priorImpact, priorStatus)
+	anchor = strings.TrimSpace(strings.TrimRight(anchor, "。；;"))
+	if anchor == "" {
+		return name + "要基于前章结果推进下一项可验证选择，并避免重复已经完成的动作。"
+	}
+	return fmt.Sprintf(
+		"%s要基于前章已形成的结果推进下一项可验证选择，并处理仍待推进的状态：%s。",
+		name,
+		firstRunes(anchor, 120),
+	)
+}
+
+func projectAllCompletedActionHandoff(name string) string {
+	return strings.TrimSpace(name) + "保持前章已形成的状态，不重复已经完成的动作"
+}
+
+func projectAllOngoingDecisionHandoff(decision, completion string) string {
+	decision = strings.TrimSpace(decision)
+	if decision == "" {
+		return ""
+	}
+	switch strings.TrimSpace(completion) {
+	case "started", "in_progress":
+		return decision
+	default:
+		return ""
+	}
 }
 
 func completeProjectAllCharacterContinuity(overlay projectAllCharacterAuthorityOverlay) bool {
@@ -553,6 +685,16 @@ func prepareSimulationAuthorityBinding(
 	}
 	if simulation.AuthorityReceipt != nil &&
 		!sameSimulationAuthorityBinding(simulation.AuthorityReceipt, binding) {
+		// A staged shell can contain server-authored hold-baseline sentinels but
+		// no model-authored causal work. Rebind that disposable shell to current
+		// continuity instead of trapping every retry behind a stale empty
+		// receipt. Any real decision, POV projection, rewrite coverage or signed
+		// receipt remains immutable and fail-closed below.
+		if simulation.AuthorityReceipt.ReceiptDigest == "" &&
+			!chapterWorldSimulationHasCausalWork(*simulation) {
+			simulation.AuthorityReceipt = binding
+			return nil
+		}
 		if simulation.AuthorityReceipt.ReceiptDigest != "" ||
 			!sameSimulationAuthorityContinuityBinding(simulation.AuthorityReceipt, binding) {
 			return fmt.Errorf("project-all grounded authority inputs changed during staged simulation")
@@ -729,6 +871,12 @@ func validateStoredSimulationAuthorityReceipt(
 		return err
 	} else if lock != nil && lock.Mode == domain.PipelineExecutionProjectAll &&
 		lock.TargetChapter == simulation.Chapter {
+		if convergenceReplanExecutionLock(lock) {
+			if err := validateSealedConvergenceSimulationAuthorityOverlay(st, simulation); err != nil {
+				return fmt.Errorf("sealed convergence authority overlay invalid: %w", err)
+			}
+			return validateReceiptActorContracts(simulation)
+		}
 		authority := buildSimulationCharacterAuthority(st, simulation.Chapter)
 		current, buildErr := buildProjectAllAuthorityReceiptBinding(
 			st,
@@ -1009,6 +1157,408 @@ func validateProjectAllGroundedDecision(
 		return fmt.Errorf("%s", strings.Join(compactStrings(violations), "; "))
 	}
 	return nil
+}
+
+// materializeProjectAllGroundedLockedFields keeps model-authored causal work
+// while binding fields that are already immutable in the authority entry.
+// Requiring an agent to copy long goal, pressure, resource, knowledge and
+// outline-action text byte-for-byte creates retry loops without adding any
+// story judgment. The server binds those immutable inputs to exact authority
+// text and mechanically shortens only over-budget projected prose. Semantic
+// novelty, causal grounding and location guards remain fail-closed. The chosen
+// decision is also inserted verbatim into available_options while preserving
+// the model-authored alternatives.
+func materializeProjectAllGroundedLockedFields(
+	st *store.Store,
+	chapter int,
+	decisions []domain.CharacterWorldDecision,
+) []domain.CharacterWorldDecision {
+	if st == nil || chapter <= 0 || len(decisions) == 0 {
+		return decisions
+	}
+	authority := buildSimulationCharacterAuthority(st, chapter)
+	byName := make(map[string]simulationCharacterAuthority, len(authority))
+	for _, entry := range authority {
+		if entry.AuthorityMode == "project_all_grounded" {
+			byName[strings.TrimSpace(entry.Character)] = entry
+		}
+	}
+	for i := range decisions {
+		entry, ok := byName[strings.TrimSpace(decisions[i].Character)]
+		if !ok {
+			continue
+		}
+		originalDecision := strings.TrimSpace(decisions[i].Decision)
+		if !projectAllGroundedActionAuthorized(
+			st,
+			chapter,
+			entry,
+			decisions[i].Decision,
+		) {
+			if action := deterministicProjectAllGroundedAction(
+				st,
+				chapter,
+				entry,
+				decisions[i].Decision,
+			); action != "" {
+				decisions[i].Decision = action
+			}
+		}
+		if !projectAllGroundedActionAuthorized(
+			st,
+			chapter,
+			entry,
+			decisions[i].Action,
+		) {
+			if action := deterministicProjectAllGroundedAction(
+				st,
+				chapter,
+				entry,
+				decisions[i].Action,
+			); action != "" {
+				decisions[i].Action = action
+			}
+		}
+		decisionText := strings.TrimSpace(decisions[i].Decision)
+		options := make([]string, 0, len(decisions[i].AvailableOptions)+1)
+		for _, option := range decisions[i].AvailableOptions {
+			option = strings.TrimSpace(option)
+			if option == originalDecision && originalDecision != decisionText {
+				option = decisionText
+			}
+			options = append(options, option)
+		}
+		options = compactStrings(options)
+		if decisionText != "" &&
+			!simulationAuthorityDecisionPlaceholder(decisionText) &&
+			!containsExactString(options, decisionText) {
+			options = append([]string{decisionText}, options...)
+		}
+		decisions[i].AvailableOptions = options
+		decisions[i].CurrentGoal = strings.TrimSpace(entry.CurrentGoal)
+		decisions[i].Resources = append([]string(nil), entry.Resources...)
+		decisions[i].KnowledgeBoundary = mergedAuthorityKnowledgeBoundary(
+			strings.TrimSpace(entry.KnowledgeBoundary),
+			entry.RequiredKnowledgeBoundary,
+		)
+		switch entry.CurrentPressurePolicy {
+		case "exact_continuity":
+			decisions[i].Pressure = strings.TrimSpace(entry.CurrentPressure)
+		case "outline_authorized_concise":
+			if !projectAllGroundedPressureAuthorized(
+				st,
+				chapter,
+				entry.CurrentPressure,
+				decisions[i].Pressure,
+			) {
+				if pressure := deterministicProjectAllGroundedPressure(st, chapter, entry); pressure != "" {
+					decisions[i].Pressure = pressure
+				}
+			}
+		}
+		if !projectAllGroundedLocationAuthorized(st, chapter, entry, decisions[i].Location) &&
+			projectAllGroundedLocationAuthorized(st, chapter, entry, entry.CurrentLocation) {
+			decisions[i].Location = strings.TrimSpace(entry.CurrentLocation)
+		}
+		if !projectAllGroundedLocationAuthorized(st, chapter, entry, decisions[i].Location) {
+			if location := deterministicProjectAllGroundedLocation(
+				st,
+				chapter,
+				entry,
+				decisions[i].Location,
+			); location != "" {
+				decisions[i].Location = location
+			}
+		}
+		for optionIndex := range decisions[i].AvailableOptions {
+			if decisions[i].AvailableOptions[optionIndex] == decisions[i].Decision {
+				continue
+			}
+			decisions[i].AvailableOptions[optionIndex] = trimProjectAllGroundedProjectedOutput(
+				st,
+				chapter,
+				entry,
+				decisions[i],
+				decisions[i].AvailableOptions[optionIndex],
+			)
+		}
+		decisions[i].AvailableOptions = compactStrings(decisions[i].AvailableOptions)
+		decisions[i].DecisionReason = trimProjectAllGroundedProjectedOutput(
+			st,
+			chapter,
+			entry,
+			decisions[i],
+			decisions[i].DecisionReason,
+		)
+		decisions[i].ImmediateResult = trimProjectAllGroundedProjectedOutput(
+			st,
+			chapter,
+			entry,
+			decisions[i],
+			decisions[i].ImmediateResult,
+		)
+		decisions[i].StateAfter = trimProjectAllGroundedProjectedOutput(
+			st,
+			chapter,
+			entry,
+			decisions[i],
+			decisions[i].StateAfter,
+		)
+		for effectIndex := range decisions[i].ButterflyEffects {
+			effect := &decisions[i].ButterflyEffects[effectIndex]
+			effect.Effect = trimProjectAllGroundedProjectedOutput(
+				st,
+				chapter,
+				entry,
+				decisions[i],
+				effect.Effect,
+			)
+			effect.ProtagonistImpact = trimProjectAllGroundedProjectedOutput(
+				st,
+				chapter,
+				entry,
+				decisions[i],
+				effect.ProtagonistImpact,
+			)
+			filtered := make([]string, 0, len(effect.Targets))
+			for _, target := range effect.Targets {
+				if projectAllGroundedOutputTargetAuthorized(
+					st,
+					chapter,
+					entry,
+					decisions[i],
+					target,
+				) {
+					filtered = append(filtered, target)
+				}
+			}
+			effect.Targets = filtered
+		}
+	}
+	return decisions
+}
+
+type projectAllGroundedActionCandidate struct {
+	text        string
+	fromOutline bool
+}
+
+func deterministicProjectAllGroundedAction(
+	st *store.Store,
+	chapter int,
+	entry simulationCharacterAuthority,
+	proposed string,
+) string {
+	if st == nil {
+		return ""
+	}
+	var candidates []projectAllGroundedActionCandidate
+	add := func(value string, fromOutline bool) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			candidates = append(candidates, projectAllGroundedActionCandidate{
+				text:        value,
+				fromOutline: fromOutline,
+			})
+		}
+		for _, clause := range splitProjectAllGroundedActionClauses(value) {
+			candidates = append(candidates, projectAllGroundedActionCandidate{
+				text:        clause,
+				fromOutline: fromOutline,
+			})
+		}
+	}
+	add(entry.CurrentAction, false)
+	if outline, err := st.Outline.GetChapterOutline(chapter); err == nil && outline != nil {
+		add(outline.CoreEvent, true)
+		add(outline.Hook, true)
+		for _, scene := range outline.Scenes {
+			add(scene, true)
+		}
+	}
+
+	proposed = strings.TrimSpace(proposed)
+	character := strings.TrimSpace(entry.Character)
+	bestIndex := -1
+	bestScore := -1
+	bestMentionsCharacter := false
+	seen := map[string]bool{}
+	for i, candidate := range candidates {
+		text := strings.TrimSpace(candidate.text)
+		if seen[text] || len([]rune(text)) < 4 ||
+			text == strings.TrimSpace(entry.CurrentGoal) ||
+			!projectAllGroundedActionAuthorized(st, chapter, entry, text) {
+			continue
+		}
+		seen[text] = true
+		score := projectAllGroundedActionOverlapScore(proposed, text)
+		mentionsCharacter := character != "" && strings.Contains(text, character)
+		if mentionsCharacter {
+			score += 80
+		}
+		if candidate.fromOutline {
+			score += 20
+		}
+		if bestIndex < 0 || score > bestScore ||
+			(score == bestScore && candidate.fromOutline && !candidates[bestIndex].fromOutline) ||
+			(score == bestScore && candidate.fromOutline == candidates[bestIndex].fromOutline &&
+				mentionsCharacter && !bestMentionsCharacter) ||
+			(score == bestScore && candidate.fromOutline == candidates[bestIndex].fromOutline &&
+				mentionsCharacter == bestMentionsCharacter &&
+				len([]rune(text)) < len([]rune(candidates[bestIndex].text))) {
+			bestIndex = i
+			bestScore = score
+			bestMentionsCharacter = mentionsCharacter
+		}
+	}
+	if bestIndex < 0 {
+		return ""
+	}
+	return strings.TrimSpace(candidates[bestIndex].text)
+}
+
+func splitProjectAllGroundedActionClauses(text string) []string {
+	return compactStrings(strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case '。', '！', '？', '；', ';', '\n', '，', ',', '：', ':':
+			return true
+		default:
+			return false
+		}
+	}))
+}
+
+func projectAllGroundedActionOverlapScore(proposed, candidate string) int {
+	proposed = strings.TrimSpace(proposed)
+	candidate = strings.TrimSpace(candidate)
+	if proposed == "" || candidate == "" {
+		return 0
+	}
+	score := 0
+	if strings.Contains(proposed, candidate) {
+		score += 2000
+	}
+	if strings.Contains(candidate, proposed) {
+		score += 1500
+	}
+	seen := map[string]bool{}
+	runes := []rune(candidate)
+	for i := 0; i+1 < len(runes); i++ {
+		gram := string(runes[i : i+2])
+		if !seen[gram] && strings.Contains(proposed, gram) {
+			seen[gram] = true
+			score += 10
+		}
+	}
+	return score
+}
+
+func trimProjectAllGroundedProjectedOutput(
+	st *store.Store,
+	chapter int,
+	entry simulationCharacterAuthority,
+	decision domain.CharacterWorldDecision,
+	text string,
+) string {
+	const (
+		validationLimit = 240
+		trimLimit       = 220
+	)
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) <= validationLimit {
+		return text
+	}
+	// Never let mechanical clipping hide an unsupported late suffix. Only text
+	// that is already semantically grounded against the authority corpus may be
+	// shortened to satisfy the transport budget; otherwise the original value
+	// reaches the fail-closed validator unchanged.
+	corpus := projectAllGroundedOutputAuthorityCorpus(
+		st,
+		chapter,
+		entry,
+		decision,
+	)
+	if !projectAllGroundedOutputHasCausalAnchor(corpus, text) ||
+		projectAllGroundedUnauthorizedNovelty(corpus, text) != "" {
+		return text
+	}
+	end := trimLimit
+	for i := trimLimit - 1; i >= trimLimit/2; i-- {
+		switch runes[i] {
+		case '。', '！', '？', '；', ';', '，', ',':
+			end = i + 1
+			i = -1
+		}
+	}
+	return strings.TrimSpace(string(runes[:end]))
+}
+
+func deterministicProjectAllGroundedPressure(
+	st *store.Store,
+	chapter int,
+	entry simulationCharacterAuthority,
+) string {
+	var candidates []string
+	candidates = append(candidates, strings.TrimSpace(entry.CurrentPressure))
+	candidates = append(candidates, splitSimulationClauses(entry.CurrentPressure)...)
+	if st != nil {
+		if outline, err := st.Outline.GetChapterOutline(chapter); err == nil && outline != nil {
+			for _, value := range append(
+				[]string{outline.CoreEvent, outline.Hook},
+				outline.Scenes...,
+			) {
+				candidates = append(candidates, strings.TrimSpace(value))
+				candidates = append(candidates, splitSimulationClauses(value)...)
+			}
+		}
+	}
+	for _, candidate := range compactStrings(candidates) {
+		if projectAllGroundedPressureAuthorized(
+			st,
+			chapter,
+			entry.CurrentPressure,
+			candidate,
+		) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func deterministicProjectAllGroundedLocation(
+	st *store.Store,
+	chapter int,
+	entry simulationCharacterAuthority,
+	proposed string,
+) string {
+	if st == nil {
+		return ""
+	}
+	proposed = strings.TrimSpace(proposed)
+	world, err := st.World.LoadBookWorld()
+	if err != nil || world == nil {
+		return ""
+	}
+	var candidates []string
+	for _, place := range world.Places {
+		candidates = append(candidates, strings.TrimSpace(place.Name))
+	}
+	for _, faction := range world.Factions {
+		candidates = append(candidates, strings.TrimSpace(faction.Name))
+		candidates = append(candidates, faction.Aliases...)
+	}
+	candidates = compactStrings(candidates)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return len([]rune(candidates[i])) > len([]rune(candidates[j]))
+	})
+	for _, candidate := range candidates {
+		if proposed != "" && strings.Contains(proposed, candidate) &&
+			projectAllGroundedLocationAuthorized(st, chapter, entry, candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 var (
@@ -1423,6 +1973,14 @@ func projectAllGroundedLocationAuthorized(
 	if world, err := st.World.LoadBookWorld(); err == nil && world != nil {
 		for _, place := range world.Places {
 			for _, value := range []string{place.Name, place.Description} {
+				if strings.TrimSpace(value) != "" {
+					authorityText.WriteString("\n")
+					authorityText.WriteString(value)
+				}
+			}
+		}
+		for _, faction := range world.Factions {
+			for _, value := range append([]string{faction.Name}, faction.Aliases...) {
 				if strings.TrimSpace(value) != "" {
 					authorityText.WriteString("\n")
 					authorityText.WriteString(value)

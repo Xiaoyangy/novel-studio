@@ -1618,6 +1618,7 @@ func TestProjectAllRevealBudgetItemMechanicallyEnforceable(t *testing.T) {
 	}{
 		{name: "explicit fact", value: "不解释系统资金的真实来源", want: true},
 		{name: "every clause explicit", value: "不揭示后台老板身份；不提前给出名单来源", want: true},
+		{name: "do not display protected artifact", value: "不展示服务端原始片段的受限内容", want: true},
 		{name: "empty probe", value: "不解释", want: false},
 		{name: "short probe", value: "不解释它", want: false},
 		{name: "mixed positive clause", value: "不揭示后台老板身份；只写主角反应", want: false},

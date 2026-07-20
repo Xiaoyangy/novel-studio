@@ -89,6 +89,14 @@ func TestDrafterPromptKeepsExactRenderOnlySubmissionContracts(t *testing.T) {
 		"显式整章重渲染、AIGC 整章换稿",
 		"不得读取旧 draft/final",
 		"先删掉或合并整轮功能问答",
+		"无论 `anti_ai_render_contract` 字段是否存在",
+		"旧 sealed render packet 的兼容合同",
+		"不等待检测、审稿或失败返工后再补",
+		"让刺激先改变主视角人物的注意、判断或误判",
+		"物件、屏幕和消息只在改变判断、选择、关系或安全后果时回应",
+		"可能是非空章级 `anti_ai_execution_plan` 的定性投影，也可能是与上述要求同义的通用基线",
+		"以更具体的章级规则优先细化上述基线",
+		"不得假定上游曾提供完整专项计划",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("drafter prompt missing exact render-only contract %q", want)
@@ -99,6 +107,7 @@ func TestDrafterPromptKeepsExactRenderOnlySubmissionContracts(t *testing.T) {
 		"首次绑定也不例外",
 		"返工读取本章旧终稿",
 		"先 `read_chapter(source=\"final\")` 读原文",
+		"上游完整 `anti_ai_execution_plan` 已净化投影",
 	} {
 		if strings.Contains(prompt, stale) {
 			t.Fatalf("drafter prompt retained contradictory rule %q", stale)

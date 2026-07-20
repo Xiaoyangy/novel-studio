@@ -257,13 +257,19 @@ func TestSaveReviewShortGlobalAcceptCompletesAndWritesManuscript(t *testing.T) {
 	if err := s.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
 		t.Fatalf("SetPlanningTier: %v", err)
 	}
+	if err := s.Progress.SetLayered(true); err != nil {
+		t.Fatalf("SetLayered: %v", err)
+	}
 	if err := s.Outline.SaveOutline([]domain.OutlineEntry{
 		{Chapter: 1, Title: "开端"},
 		{Chapter: 2, Title: "收束"},
 	}); err != nil {
 		t.Fatalf("SaveOutline: %v", err)
 	}
-	for ch, body := range map[int]string{1: "第一章正文。", 2: "第二章正文，完成收束。"} {
+	for ch, body := range map[int]string{
+		1: "第1章 开端\n\n第一章正文。",
+		2: "## 第二章 收束\n\n第二章正文，完成收束。",
+	} {
 		if err := s.Drafts.SaveFinalChapter(ch, body); err != nil {
 			t.Fatalf("SaveFinalChapter(%d): %v", ch, err)
 		}
@@ -285,6 +291,13 @@ func TestSaveReviewShortGlobalAcceptCompletesAndWritesManuscript(t *testing.T) {
 		"contract_notes":  "全书闭合。",
 		"verdict":         "accept",
 		"summary":         "短篇全文终审通过。",
+		"publication": map[string]any{
+			"primary_title":      "短篇测试",
+			"alternate_titles":   []string{"午夜证词", "最后一份回执"},
+			"hook_lead":          "她在午夜收到一份不该存在的证词，只剩一晚判断真假。",
+			"spoiler_free_blurb": "两位旧友被一份来源不明的证词重新拉到一起。她们必须在天亮前核对线索，也要重新决定是否相信彼此。",
+			"tags":               []string{"双女主", "现实悬疑", "限时追查", "旧友重逢", "短篇"},
+		},
 	})
 	raw, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -311,6 +324,200 @@ func TestSaveReviewShortGlobalAcceptCompletesAndWritesManuscript(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("merged manuscript missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Count(text, "第1章 开端") != 0 || strings.Count(text, "第二章 收束") != 0 {
+		t.Fatalf("source chapter headings survived canonical merge and duplicated titles:\n%s", text)
+	}
+}
+
+func TestSaveReviewTerminalGlobalWarningOnlyAcceptsWithoutSealedRewriteQueue(t *testing.T) {
+	s := terminalGlobalReviewFixture(t)
+	dimensions := acceptDimensions()
+	for _, dimension := range dimensions {
+		if dimension["dimension"] == "aesthetic" {
+			dimension["score"] = 74
+			dimension["comment"] = "个别句子仍可压缩，但不改变事实、连续性或阅读理解。"
+		}
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter":         2,
+		"scope":           "global",
+		"dimensions":      dimensions,
+		"issues":          []map[string]any{{"type": "aesthetic", "severity": "warning", "description": "一处句式可更利落", "evidence": "末段有一句重复解释", "suggestion": "发布后续版本可择机压缩"}},
+		"contract_status": "met",
+		// The Editor contract correctly returns accept for warning-only work;
+		// the generic scorecard used to turn the 74 into polish afterwards.
+		"verdict":     "accept",
+		"summary":     "全文事实与人物弧闭合，仅有非阻断表达建议。",
+		"publication": terminalGlobalReviewPublication(),
+	})
+	raw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("warning-only terminal review: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["final_verdict"] != "accept" || out["terminal_advisory_accepted"] != true {
+		t.Fatalf("terminal advisory was not normalized to accept: %+v", out)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil || progress == nil || progress.Phase != domain.PhaseComplete ||
+		len(progress.PendingRewrites) != 0 || progress.Flow != domain.FlowWriting {
+		t.Fatalf("warning-only terminal review created sealed rewrite work: progress=%+v err=%v", progress, err)
+	}
+	review, err := s.World.LoadLastReview(2)
+	if err != nil || review == nil || review.Verdict != "accept" || len(review.AffectedChapters) != 0 ||
+		review.Dimension("aesthetic") == nil || review.Dimension("aesthetic").Verdict != "warning" {
+		t.Fatalf("terminal review lost advisory audit evidence: review=%+v err=%v", review, err)
+	}
+}
+
+func TestSaveReviewTerminalGlobalUnsupportedRewriteWithAdvisoryEvidenceAccepts(t *testing.T) {
+	s := terminalGlobalReviewFixture(t)
+	dimensions := acceptDimensions()
+	for _, dimension := range dimensions {
+		if dimension["dimension"] == "hook" {
+			dimension["score"] = 72
+			dimension["comment"] = "终章余韵还可更锋利，但当前结局与承诺已闭合。"
+		}
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter":         2,
+		"scope":           "global",
+		"dimensions":      dimensions,
+		"issues":          []map[string]any{{"type": "hook", "severity": "warning", "description": "余韵可更锋利", "evidence": "末句已收束，只是冲击力一般", "suggestion": "作为后续发布建议保留"}},
+		"contract_status": "met",
+		// The verdict conflicts with every structured field.  Terminal control
+		// follows the deterministic evidence rather than manufacturing prose work.
+		"verdict":           "rewrite",
+		"summary":           "结构化证据仅为非阻断建议。",
+		"affected_chapters": []int{2},
+		"publication":       terminalGlobalReviewPublication(),
+	})
+	raw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unsupported rewrite terminal review: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["final_verdict"] != "accept" || out["terminal_advisory_accepted"] != true {
+		t.Fatalf("unsupported rewrite survived advisory evidence: %+v", out)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil || progress == nil || progress.Phase != domain.PhaseComplete || len(progress.PendingRewrites) != 0 {
+		t.Fatalf("unsupported rewrite created terminal work: progress=%+v err=%v", progress, err)
+	}
+}
+
+func TestSaveReviewTerminalGlobalContinuityFailureRemainsHardReject(t *testing.T) {
+	s := terminalGlobalReviewFixture(t)
+	dimensions := acceptDimensions()
+	for _, dimension := range dimensions {
+		if dimension["dimension"] == "continuity" {
+			dimension["score"] = 48
+			dimension["comment"] = "第一章确认的知情边界在第二章被越过。"
+		}
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter":           2,
+		"scope":             "global",
+		"dimensions":        dimensions,
+		"issues":            []map[string]any{{"type": "continuity", "severity": "critical", "description": "角色提前知道未公开事实", "evidence": "第一章明确未告知，第二章开场直接据此行动", "suggestion": "重建信息传递因果"}},
+		"contract_status":   "met",
+		"verdict":           "polish",
+		"summary":           "存在跨章知识边界硬伤。",
+		"affected_chapters": []int{2},
+	})
+	raw, err := NewSaveReviewTool(s).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("hard terminal review: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["final_verdict"] != "rewrite" || out["terminal_advisory_accepted"] == true {
+		t.Fatalf("continuity reject was silently downgraded: %+v", out)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil || progress == nil || progress.Phase == domain.PhaseComplete ||
+		progress.Flow != domain.FlowRewriting || fmt.Sprint(progress.PendingRewrites) != "[2]" {
+		t.Fatalf("hard reject did not remain durable: progress=%+v err=%v", progress, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir(), "正文.md")); !os.IsNotExist(err) {
+		t.Fatalf("hard reject manufactured a merged manuscript: %v", err)
+	}
+}
+
+func TestSaveReviewTerminalGlobalWarningOnlyMissingPublicationLeavesNoHalfState(t *testing.T) {
+	s := terminalGlobalReviewFixture(t)
+	dimensions := acceptDimensions()
+	for _, dimension := range dimensions {
+		if dimension["dimension"] == "aesthetic" {
+			dimension["score"] = 75
+		}
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": 2, "scope": "global", "dimensions": dimensions,
+		"issues": []map[string]any{}, "contract_status": "met",
+		"verdict": "accept", "summary": "仅有发布建议。",
+	})
+	if _, err := NewSaveReviewTool(s).Execute(context.Background(), args); err == nil ||
+		!strings.Contains(err.Error(), "publication package") {
+		t.Fatalf("missing publication should request a retry before persistence: %v", err)
+	}
+	progress, err := s.Progress.Load()
+	if err != nil || progress == nil || len(progress.PendingRewrites) != 0 || progress.Phase == domain.PhaseComplete {
+		t.Fatalf("failed advisory retry left progress half-mutated: progress=%+v err=%v", progress, err)
+	}
+	if review, err := s.World.LoadLastReview(2); err != nil || review != nil {
+		t.Fatalf("failed advisory retry persisted a global review: review=%+v err=%v", review, err)
+	}
+}
+
+func terminalGlobalReviewFixture(t *testing.T) *store.Store {
+	t.Helper()
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("终审恢复测试", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetLayered(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "开端"}, {Chapter: 2, Title: "收束"}}); err != nil {
+		t.Fatal(err)
+	}
+	for chapter, body := range map[int]string{1: "第一章正文。", 2: "第二章正文。"} {
+		if err := s.Drafts.SaveFinalChapter(chapter, body); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Progress.MarkChapterComplete(chapter, len([]rune(body)), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.World.SaveReview(domain.ReviewEntry{Chapter: chapter, Scope: "chapter", Verdict: "accept"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
+
+func terminalGlobalReviewPublication() map[string]any {
+	return map[string]any{
+		"primary_title":      "终审恢复测试",
+		"alternate_titles":   []string{"午夜证词", "最后一份回执"},
+		"hook_lead":          "她在午夜收到一份不该存在的证词，只剩一晚判断真假。",
+		"spoiler_free_blurb": "两位旧友被一份来源不明的证词重新拉到一起。她们必须在天亮前核对线索，也要重新决定是否相信彼此。",
+		"tags":               []string{"双女主", "现实悬疑", "限时追查", "旧友重逢", "短篇"},
 	}
 }
 

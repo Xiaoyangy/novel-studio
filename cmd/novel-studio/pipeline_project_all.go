@@ -242,7 +242,12 @@ func pipelineProjectAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		if err := savePipelineProjectAllPlanningContext(shadow, planningContext); err != nil {
 			return fmt.Errorf("project-all 第 %d 章发布 authoritative projected context: %w", chapter, err)
 		}
-		outline, err := applyPipelineProjectAllObligationsToOutline(shadow, *registry, chapter)
+		outline, err := applyPipelineProjectAllObligationsToOutline(
+			shadow,
+			*registry,
+			planningContext.PredecessorContract,
+			chapter,
+		)
 		if err != nil || outline == nil {
 			return fmt.Errorf("project-all 第 %d 章缺少物化后的稳定章位/跨章义务: %w", chapter, err)
 		}

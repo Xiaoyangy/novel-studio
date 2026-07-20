@@ -10,6 +10,26 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
 
+func TestArchitectChapterRangeFromPremiseIgnoresBeatRanges(t *testing.T) {
+	tests := []struct {
+		premise string
+		min     int
+		max     int
+		ok      bool
+	}{
+		{premise: "正文严格控制在三万字，建议十二章；第 4—5 章前兑现七份外卖", min: 12, max: 12, ok: true},
+		{premise: "第4-5章前完成定位，共12章", min: 12, max: 12, ok: true},
+		{premise: "约60-75章", min: 60, max: 75, ok: true},
+		{premise: "第4-5章前完成定位", ok: false},
+	}
+	for _, tt := range tests {
+		min, max, ok := architectChapterRangeFromPremise(tt.premise)
+		if min != tt.min || max != tt.max || ok != tt.ok {
+			t.Fatalf("architectChapterRangeFromPremise(%q) = %d,%d,%v; want %d,%d,%v", tt.premise, min, max, ok, tt.min, tt.max, tt.ok)
+		}
+	}
+}
+
 func TestArchitectFactionClockIssuesRequireClocks(t *testing.T) {
 	world := &domain.BookWorld{Factions: []domain.WorldFaction{
 		{ID: "team", Name: "无钟势力", Goal: "推进目标"},

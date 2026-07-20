@@ -75,6 +75,124 @@ func TestReadChapterWithholdsOldFinalDuringRewriteReplanning(t *testing.T) {
 	}
 }
 
+func TestReadChapterAcceptedFinalBypassesLegacyDraftQuotaInspection(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "# 第1章 已验收终稿\n\n报警记录和连续录屏分别封存，正文保持不变。"
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "冻结计划"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	// Historical C2-style journals used edit (not draft) as the first body
+	// checkpoint after plan, so the local-soft quota has no eligible seed.
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "edit", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := draftLocalSoftEditQuotaIdentity(st, 1); err == nil {
+		t.Fatal("fixture must reproduce the missing formal-review/initial-draft seed")
+	}
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveReview(domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: reviewreport.BodySHA256(body),
+		Verdict: "accept", ContractStatus: "met",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{
+		TotalChapters: 1, CurrentChapter: 2, CompletedChapters: []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewReadChapterTool(st)
+	for _, args := range []string{
+		`{"chapter":1,"source":"final"}`,
+		`{"from":1,"to":1,"source":"final","max_runes":40000}`,
+	} {
+		raw, err := tool.Execute(context.Background(), json.RawMessage(args))
+		if err != nil {
+			t.Fatalf("accepted final read failed for %s: %v", args, err)
+		}
+		if !strings.Contains(string(raw), "报警记录和连续录屏") || strings.Contains(string(raw), "withheld") {
+			t.Fatalf("accepted exact-body final was not returned for %s: %s", args, raw)
+		}
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress.InProgressChapter = 1
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	if stable, err := tool.acceptedFinalSurfaceStable(1); err != nil || stable {
+		t.Fatalf("in-progress chapter entered accepted-final fast path: stable=%v err=%v", stable, err)
+	}
+	progress.InProgressChapter = 0
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Signals.SavePendingCommit(domain.PendingCommit{Chapter: 1, Stage: domain.CommitStageStarted}); err != nil {
+		t.Fatal(err)
+	}
+	if stable, err := tool.acceptedFinalSurfaceStable(1); err != nil || stable {
+		t.Fatalf("pending commit entered accepted-final fast path: stable=%v err=%v", stable, err)
+	}
+}
+
+func TestReadChapterAcceptedFinalDoesNotBypassNewExplicitRerender(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	body := "# 第1章 已验收但被重新抽查\n\n当前终稿。"
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveReview(domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: reviewreport.BodySHA256(body),
+		Verdict: "accept", ContractStatus: "met",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{TotalChapters: 1, CurrentChapter: 2, CompletedChapters: []int{1}}); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(st.Dir(), "drafts", "01.rerender_request.json")
+	if err := os.WriteFile(requestPath, []byte(`{"chapter":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "rerender-request", "drafts/01.rerender_request.json"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := NewReadChapterTool(st).Execute(context.Background(), json.RawMessage(`{"chapter":1,"source":"final"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["withheld"] != true || got["trigger"] != "explicit_full_rerender" {
+		t.Fatalf("accepted final bypassed a newer explicit rerender: %s", raw)
+	}
+}
+
 func TestReadChapterWithholdsSupersededSurfaceDuringRenderOnlyFreshDraft(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,30 @@ import (
 const draftExternalEvaluatorRegistered = "registered_external_detector"
 
 const draftRerenderAuthorizationSource = "render_only_authorization"
+
+const draftLocalSoftEditConsumedStep = "draft-local-soft-edit-consumed"
+
+const draftLocalSoftEditTokenVersion = 1
+
+// draftLocalSoftEditToken is the durable half of the one-shot local repair
+// capability.  The checkpoint proves consumption order; this artifact binds
+// that checkpoint to the exact bytes which were present before edit_chapter
+// attempted its atomic replacement.  Keeping the pre-edit hash out of the
+// quota identity is intentional: the quota remains spent after a failed write
+// and therefore cannot be minted again for the same plan/render seed.
+type draftLocalSoftEditToken struct {
+	Version           int    `json:"version"`
+	Chapter           int    `json:"chapter"`
+	QuotaDigest       string `json:"quota_digest"`
+	SeedCheckpointSeq int64  `json:"seed_checkpoint_seq"`
+	PreEditBodySHA256 string `json:"pre_edit_body_sha256"`
+}
+
+type draftLocalSoftEditConsumption struct {
+	Token      *draftLocalSoftEditToken
+	Checkpoint *domain.Checkpoint
+	Legacy     bool
+}
 
 type DraftExternalRetestPolicy string
 
@@ -86,13 +111,28 @@ type DraftExternalGateInspection struct {
 	RegisteredArtifactExists bool
 	RequiresRegisteredRetest bool
 	RegisteredRetestDeferred bool
-	// LocalSoftEditPending means the exact current hash has already passed the
-	// independent DeepSeek judge, but the effective local gate still has a
-	// non-whole-text failure. Keep Status=rejudge_pending so commit remains
-	// fail-closed; edit_chapter may consume exactly one local repair before the
-	// changed hash returns to the independent judge. Named-platform retests stay
-	// deferred until both earlier stages pass.
+	// LocalSoftEditPending is retained for a non-probability, non-whole-text
+	// deterministic failure.  A fresh managed draft may consume its single edit
+	// before the provider call so only the final edited hash is judged; older
+	// flows may still discover the same state after an exact-hash DeepSeek pass.
+	// A pure local probability disagreement never enters this edit loop.
+	// Named-platform retests stay deferred until every real blocker passes.
 	LocalSoftEditPending bool
+	// LocalSoftEditBeforeJudge distinguishes the latency-saving pre-judge route
+	// from recovery of an older provider-passing hash.  Both routes permit the
+	// same single edit and require DeepSeek on the resulting exact hash.
+	LocalSoftEditBeforeJudge bool
+	// LocalSoftEditConsumed records that the current exact body is already the
+	// result of a bounded edit and has subsequently passed DeepSeek. A remaining
+	// non-whole local proxy is diagnostic at that point; it may not open an
+	// unbounded edit/rejudge loop.
+	LocalSoftEditConsumed bool
+	// LocalSoftEditFailedClosed means the plan/seed quota was consumed but there
+	// is no later exact-body edit checkpoint proving that different bytes landed.
+	// This is the expected crash/save-failure state: it may never mint a second
+	// edit or waive the original deterministic blocker. A new plan epoch is
+	// required before prose mutation can resume.
+	LocalSoftEditFailedClosed bool
 	// CurrentHashNamedRetestsPassed is retained for the explicit opt-in hard
 	// external-detector policy. Human-operated sampling never sets it and never
 	// freezes or blocks an otherwise approved replacement hash.
@@ -107,8 +147,12 @@ type draftExternalJudgeStatus struct {
 	AIProbabilityPercent int      `json:"ai_probability_percent"`
 	PassExclusivePercent int      `json:"pass_exclusive_percent"`
 	Summary              string   `json:"summary,omitempty"`
+	Reasons              []string `json:"reasons,omitempty"`
 	Evidence             []string `json:"evidence,omitempty"`
 	RevisionPlan         []string `json:"revision_plan,omitempty"`
+	DialogueFixPlan      []string `json:"dialogue_fix_plan,omitempty"`
+	AuthorVoicePlan      []string `json:"author_voice_plan,omitempty"`
+	RAGRules             []string `json:"rag_rules,omitempty"`
 }
 
 func draftExternalRerenderRequirementPath(projectDir string, chapter int) string {
@@ -237,7 +281,26 @@ func loadDraftExternalJudgeStatus(projectDir string, chapter int) (*draftExterna
 // exact body can never treat a missing or stale DeepSeek artifact as
 // NotRequired.
 func pipelineManagedCurrentDraftNeedsDeepSeekJudge(st *store.Store, chapter int, bodySHA256 string) (bool, error) {
-	if !pipelineWritingManaged(st) || st == nil || chapter <= 0 || strings.TrimSpace(bodySHA256) == "" {
+	tracked, err := pipelineManagedCurrentDraftTracked(st, chapter, bodySHA256)
+	if err != nil || !tracked {
+		return false, err
+	}
+	status, err := loadDraftExternalJudgeStatus(st.Dir(), chapter)
+	if err != nil {
+		return false, err
+	}
+	if status == nil || strings.TrimSpace(status.BodySHA256) != strings.TrimSpace(bodySHA256) {
+		return true, nil
+	}
+	// The persisted threshold is historical/diagnostic metadata. Pipeline
+	// approval is a fixed protocol boundary and must never be relaxed by a
+	// legacy artifact that recorded (for example) 10%.
+	return !status.AdviceComplete || status.Blocking ||
+		float64(status.AIProbabilityPercent) >= aigc.PassExclusivePercent, nil
+}
+
+func pipelineManagedCurrentDraftTracked(st *store.Store, chapter int, bodySHA256 string) (bool, error) {
+	if st == nil || !pipelineWritingManaged(st) || chapter <= 0 || strings.TrimSpace(bodySHA256) == "" {
 		return false, nil
 	}
 	scope := domain.ChapterScope(chapter)
@@ -259,18 +322,7 @@ func pipelineManagedCurrentDraftNeedsDeepSeekJudge(st *store.Store, chapter int,
 	if bodyCheckpoint.Digest != wantDigest {
 		return false, fmt.Errorf("managed current draft checkpoint digest=%s, want %s", bodyCheckpoint.Digest, wantDigest)
 	}
-	status, err := loadDraftExternalJudgeStatus(st.Dir(), chapter)
-	if err != nil {
-		return false, err
-	}
-	if status == nil || strings.TrimSpace(status.BodySHA256) != strings.TrimSpace(bodySHA256) {
-		return true, nil
-	}
-	// The persisted threshold is historical/diagnostic metadata. Pipeline
-	// approval is a fixed protocol boundary and must never be relaxed by a
-	// legacy artifact that recorded (for example) 10%.
-	return !status.AdviceComplete || status.Blocking ||
-		float64(status.AIProbabilityPercent) >= aigc.PassExclusivePercent, nil
+	return true, nil
 }
 
 // InspectDraftExternalGate treats a blocking judgment as a single-use
@@ -382,6 +434,10 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 	}
 	requiresRegisteredRetest := RequiresRegisteredExternalRetest(requirement)
 	registeredSamplingTrigger := isRegisteredExternalSamplingTrigger(requirement)
+	status, err := loadDraftExternalJudgeStatus(projectDir, chapter)
+	if err != nil {
+		return inspection, err
+	}
 	if requirement != nil {
 		inspection.EvaluatedBodySHA256 = strings.TrimSpace(requirement.EvaluatedBodySHA256)
 		if !requirement.AdviceComplete || len(requirement.RevisionPlan) == 0 {
@@ -398,7 +454,25 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		registeredMarkerCleared := (requirement.Source == "registered_external_detection" || requirement.Evaluator == draftExternalEvaluatorRegistered) &&
 			registeredExternalMarkerClearedInRows(requirement, inspection.CurrentBodySHA256, registeredRows)
 		if inspection.CurrentBodySHA256 != "" && inspection.CurrentBodySHA256 == inspection.EvaluatedBodySHA256 {
-			if !registeredMarkerCleared {
+			localProxyProviderRouted := false
+			if requirement.Source == "local_mechanical_gate" && !requiresRegisteredRetest {
+				content, loadErr := st.Drafts.LoadDraft(chapter)
+				if loadErr != nil {
+					return inspection, loadErr
+				}
+				report, gate := inspectDraftAIGCGate(st, chapter, content)
+				// Upgrade recovery for markers written by builds which merged a
+				// calibratable whole-text probability proxy with statistical prose
+				// warnings. Missing/stale/incomplete provider state must fall through
+				// to RejudgePending; an exact pass resolves only the probability
+				// component and leaves the warnings for LocalSoftEditPending.
+				if routed, pendingErr := draftAIGCLocalMarkerProviderRouted(st, chapter, content, report, gate); pendingErr != nil {
+					return inspection, pendingErr
+				} else {
+					localProxyProviderRouted = routed
+				}
+			}
+			if !registeredMarkerCleared && !localProxyProviderRouted {
 				inspection.Status = DraftExternalGateRerenderAuthorized
 				inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 				return inspection, nil
@@ -426,14 +500,44 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		}
 	}
 
-	// Stage 2: the independent current-hash DeepSeek judgment always precedes a
-	// named-platform retest. A stale or missing artifact keeps every registered
+	// Stage 2: resolve deterministic local-soft text defects before paying for a
+	// provider call, but only once and only when they are not whole-text/segment
+	// failures.  This changes no approval authority: the edited exact hash still
+	// requires DeepSeek below.  Probability-only local disagreement skips this
+	// path because draftAIGCExternalCurrentBodyBlockers excludes aigc_ratio.
+	managedCurrent, managedErr := pipelineManagedCurrentDraftTracked(st, chapter, inspection.CurrentBodySHA256)
+	if managedErr != nil {
+		return inspection, managedErr
+	}
+	exactJudgeExists := status != nil && inspection.CurrentBodySHA256 != "" &&
+		inspection.CurrentBodySHA256 == strings.TrimSpace(status.BodySHA256)
+	if !exactJudgeExists && draftCurrentHashNeedsLocalGateRouting(requirement, managedCurrent) {
+		content, loadErr := st.Drafts.LoadDraft(chapter)
+		if loadErr != nil {
+			return inspection, loadErr
+		}
+		report, gate := inspectDraftAIGCGate(st, chapter, content)
+		localStructural, localSoft := draftExternalLocalGateDisposition(content, report, gate)
+		if requiresRegisteredRetest && draftAIGCHasWholeTextStructuralBlock(content, report, draftAIGCRawLocalGateResult(report, gate)) {
+			localStructural, localSoft = true, false
+		}
+		if draftPreJudgeLocalSoftEditEligible(st, chapter, content, report, localStructural, localSoft) {
+			if status != nil {
+				inspection.ArtifactExists = true
+				inspection.EvaluatedBodySHA256 = strings.TrimSpace(status.BodySHA256)
+			}
+			inspection.Status = DraftExternalGateRejudgePending
+			inspection.LocalSoftEditPending = true
+			inspection.LocalSoftEditBeforeJudge = true
+			inspection.RegisteredRetestDeferred = requiresRegisteredRetest
+			return inspection, nil
+		}
+	}
+
+	// The independent current-hash DeepSeek judgment always precedes any named
+	// platform retest. A stale or missing artifact keeps every registered
 	// identity deferred; it must never make the pipeline ask a human-operated
 	// detector to score bytes that DeepSeek may immediately reject.
-	status, err := loadDraftExternalJudgeStatus(projectDir, chapter)
-	if err != nil {
-		return inspection, err
-	}
 	if status == nil {
 		managedPending, pendingErr := pipelineManagedCurrentDraftNeedsDeepSeekJudge(st, chapter, inspection.CurrentBodySHA256)
 		if pendingErr != nil {
@@ -482,7 +586,7 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		inspection.Status = DraftExternalGateRejudgePending
 		return inspection, nil
 	}
-	if requirement != nil {
+	if draftCurrentHashNeedsLocalGateRouting(requirement, managedCurrent) {
 		// DeepSeek passed the exact current hash. Re-run the effective local gate
 		// with that corroboration before approval. Structural failures still
 		// consume the bounded full-render budget; a remaining soft failure permits
@@ -495,18 +599,47 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 		report, gate := inspectDraftAIGCGate(st, chapter, content)
 		localStructural, localSoft := draftExternalLocalGateDisposition(content, report, gate)
 		if localStructural {
-			if localRequirement, blocked := currentDraftLocalStructuralRerenderRequirement(st, chapter, requirement); blocked {
-				inspection.Requirement = localRequirement
-				inspection.EvaluatedBodySHA256 = inspection.CurrentBodySHA256
-				inspection.Status = DraftExternalGateRerenderAuthorized
+			// A prior blocking marker already grants a one-shot replacement and can
+			// be upgraded immediately. For a first managed draft, check_consistency
+			// persists the exact-body local marker; inspection alone remains
+			// read-mostly and must not turn a provider pass into a new write grant.
+			if requirement != nil {
+				if localRequirement, blocked := currentDraftLocalStructuralRerenderRequirement(st, chapter, requirement); blocked {
+					inspection.Requirement = localRequirement
+					inspection.EvaluatedBodySHA256 = inspection.CurrentBodySHA256
+					inspection.Status = DraftExternalGateRerenderAuthorized
+					inspection.RegisteredRetestDeferred = requiresRegisteredRetest
+					return inspection, nil
+				}
+			}
+		}
+		if localSoft {
+			if draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, chapter, content, report, gate) {
+				inspection.LocalSoftEditConsumed = true
+			} else {
+				consumed, consumedErr := draftLocalSoftEditQuotaConsumed(st, chapter)
+				if consumedErr != nil {
+					return inspection, consumedErr
+				}
+				if consumed {
+					// The token is written before prose mutation. If no later exact
+					// edit checkpoint binds different bytes, the write crashed or
+					// failed. Keep both edit and commit closed; only a new plan/seed
+					// may create another bounded repair capability.
+					inspection.Status = DraftExternalGateAdviceIncomplete
+					inspection.LocalSoftEditConsumed = true
+					inspection.LocalSoftEditFailedClosed = true
+					inspection.RegisteredRetestDeferred = requiresRegisteredRetest
+					return inspection, nil
+				}
+				inspection.Status = DraftExternalGateRejudgePending
+				inspection.LocalSoftEditPending = true
 				inspection.RegisteredRetestDeferred = requiresRegisteredRetest
 				return inspection, nil
 			}
 		}
-		if localSoft {
-			inspection.Status = DraftExternalGateRejudgePending
-			inspection.LocalSoftEditPending = true
-			inspection.RegisteredRetestDeferred = requiresRegisteredRetest
+		if requirement == nil {
+			inspection.Status = DraftExternalGateApproved
 			return inspection, nil
 		}
 
@@ -552,13 +685,326 @@ func InspectDraftExternalGateWithStore(st *store.Store, chapter int) (DraftExter
 	return inspection, nil
 }
 
+func draftCurrentHashNeedsLocalGateRouting(requirement *DraftExternalRerenderRequirement, managedCurrent bool) bool {
+	return requirement != nil || managedCurrent
+}
+
+func draftAIGCLocalMarkerProviderRouted(
+	st *store.Store,
+	chapter int,
+	content string,
+	report aigc.Report,
+	gate draftAIGCGateResult,
+) (bool, error) {
+	if draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		return true, nil
+	}
+	return draftAIGCManagedProviderPendingWholeText(st, chapter, content, report, gate)
+}
+
 func draftExternalLocalGateDisposition(content string, report aigc.Report, gate draftAIGCGateResult) (structural, soft bool) {
 	rawGate := draftAIGCRawLocalGateResult(report, gate)
 	if rawGate.Passed {
 		return false, false
 	}
+	if draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		// The exact-body provider resolved the stochastic probability proxy.
+		// Concrete statistical/mechanical warnings keep one bounded local-soft
+		// repair; they can no longer be recombined with the resolved probability
+		// signal into a whole-draft rerender authorization.
+		return false, len(draftAIGCExternalCurrentBodyBlockers(content)) > 0
+	}
 	structural = draftAIGCHasWholeTextStructuralBlock(content, report, rawGate)
+	if structural {
+		return true, false
+	}
 	return structural, rawGate.Enforced && !structural
+}
+
+func draftExternalJudgeStrictlyPassesBody(status *draftExternalJudgeStatus, bodySHA256 string) bool {
+	return status != nil && status.AdviceComplete && !status.Blocking &&
+		float64(status.AIProbabilityPercent) < aigc.PassExclusivePercent &&
+		strings.TrimSpace(status.BodySHA256) == strings.TrimSpace(bodySHA256)
+}
+
+// draftPreJudgeLocalSoftEditEligible is deliberately narrower than the
+// post-judge soft path. Before an independent probability exists, we may edit
+// only concrete deterministic text violations; a high local probability proxy,
+// whole-text/segment risk, or content-integrity floor must go straight to
+// DeepSeek. The one-edit quota is owned by the causal plan plus its formal
+// review/initial-render seed, not by the current body hash. A later whole render
+// under the same seed therefore cannot reopen the edit loop.
+func draftPreJudgeLocalSoftEditEligible(
+	st *store.Store,
+	chapter int,
+	content string,
+	report aigc.Report,
+	localStructural bool,
+	localSoft bool,
+) bool {
+	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" || localStructural ||
+		report.ContentIntegrityFloor > 0 || !localSoft ||
+		len(draftAIGCExternalCurrentBodyBlockers(content)) == 0 {
+		return false
+	}
+	consumed, err := draftLocalSoftEditQuotaConsumed(st, chapter)
+	return err == nil && !consumed
+}
+
+// draftLocalSoftEditQuotaIdentity binds the bounded local repair to the current
+// formal plan and the event that seeded this render cycle. A blocking formal
+// review is the seed when one exists after the plan; otherwise the first draft
+// after the plan is the initial-render seed. Subsequent draft hashes do not
+// change this identity. Including sequence numbers preserves legitimate A-B-A
+// epochs even when artifact bytes repeat.
+func draftLocalSoftEditQuotaIdentity(st *store.Store, chapter int) (digest string, seedSeq int64, err error) {
+	plan, err := CurrentChapterPlanCheckpoint(st, chapter)
+	if err != nil {
+		return "", 0, err
+	}
+	scope := domain.ChapterScope(chapter)
+	body, err := CurrentChapterBodyCheckpoint(st, chapter)
+	if err != nil {
+		return "", 0, err
+	}
+	// A formal review starts a new render/edit quota only after prose actually
+	// succeeds it. A review written for the current exact body is an outcome of
+	// the existing cycle; using it as the seed would re-key an already-consumed
+	// token after commit and falsely mint another local-soft edit. Select the
+	// newest review strictly between the plan and current body checkpoints.
+	var seed *domain.Checkpoint
+	for _, checkpoint := range st.Checkpoints.All() {
+		if !checkpoint.Scope.Matches(scope) || checkpoint.Step != "review" ||
+			checkpoint.Seq <= plan.Seq || checkpoint.Seq >= body.Seq {
+			continue
+		}
+		if seed == nil || checkpoint.Seq > seed.Seq {
+			copy := checkpoint
+			seed = &copy
+		}
+	}
+	if seed == nil {
+		for _, checkpoint := range st.Checkpoints.All() {
+			if checkpoint.Seq <= plan.Seq || checkpoint.Seq > body.Seq ||
+				!checkpoint.Scope.Matches(scope) || checkpoint.Step != "draft" {
+				continue
+			}
+			copy := checkpoint
+			seed = &copy
+			break
+		}
+	}
+	if seed == nil || seed.Seq <= plan.Seq || strings.TrimSpace(seed.Digest) == "" {
+		return "", 0, fmt.Errorf("第 %d 章当前 plan 后缺少 formal review 或 initial draft seed: %w", chapter, errs.ErrToolPrecondition)
+	}
+	digest, err = draftLocalSoftEditQuotaDigest(chapter, plan, seed)
+	if err != nil {
+		return "", 0, err
+	}
+	return digest, seed.Seq, nil
+}
+
+func draftLocalSoftEditQuotaDigest(
+	chapter int,
+	plan *domain.Checkpoint,
+	seed *domain.Checkpoint,
+) (string, error) {
+	if chapter <= 0 || plan == nil || seed == nil || plan.Seq <= 0 ||
+		seed.Seq <= plan.Seq || strings.TrimSpace(plan.Digest) == "" ||
+		strings.TrimSpace(seed.Step) == "" || strings.TrimSpace(seed.Digest) == "" {
+		return "", fmt.Errorf("local-soft edit quota identity is incomplete: %w", errs.ErrToolPrecondition)
+	}
+	payload := fmt.Sprintf(
+		"draft-local-soft-edit/v1\nchapter=%d\nplan_seq=%d\nplan_digest=%s\nseed_step=%s\nseed_seq=%d\nseed_digest=%s\n",
+		chapter, plan.Seq, strings.TrimSpace(plan.Digest), seed.Step, seed.Seq, strings.TrimSpace(seed.Digest),
+	)
+	sum := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func draftLocalSoftEditTokenArtifact(chapter int, quotaDigest string) string {
+	key := strings.TrimPrefix(strings.TrimSpace(quotaDigest), "sha256:")
+	return filepath.ToSlash(filepath.Join(
+		"meta", "runtime", "draft_local_soft_edit",
+		fmt.Sprintf("ch%03d", chapter), key+".json",
+	))
+}
+
+func loadDraftLocalSoftEditConsumption(
+	st *store.Store,
+	chapter int,
+	quotaDigest string,
+) (*draftLocalSoftEditConsumption, error) {
+	if st == nil || chapter <= 0 || strings.TrimSpace(quotaDigest) == "" {
+		return nil, nil
+	}
+	scope := domain.ChapterScope(chapter)
+	expectedArtifact := draftLocalSoftEditTokenArtifact(chapter, quotaDigest)
+	for _, checkpoint := range st.Checkpoints.All() {
+		if !checkpoint.Scope.Matches(scope) || checkpoint.Step != draftLocalSoftEditConsumedStep {
+			continue
+		}
+		// Builds predating the token artifact stored the quota identity directly
+		// as checkpoint digest. It remains consumed, but without pre-edit identity
+		// it can never be used as acceptance evidence.
+		if checkpoint.Digest == quotaDigest &&
+			!strings.HasPrefix(filepath.ToSlash(checkpoint.Artifact), "meta/runtime/draft_local_soft_edit/") {
+			copy := checkpoint
+			return &draftLocalSoftEditConsumption{Checkpoint: &copy, Legacy: true}, nil
+		}
+		if filepath.ToSlash(strings.TrimSpace(checkpoint.Artifact)) != expectedArtifact {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(checkpoint.Artifact)))
+		if err != nil {
+			return nil, fmt.Errorf("read local-soft edit token %s: %w", checkpoint.Artifact, err)
+		}
+		if checkpoint.Digest != "sha256:"+reviewreport.BodySHA256(string(raw)) {
+			return nil, fmt.Errorf("local-soft edit token checkpoint digest mismatch")
+		}
+		var token draftLocalSoftEditToken
+		if err := json.Unmarshal(raw, &token); err != nil {
+			return nil, fmt.Errorf("parse local-soft edit token %s: %w", checkpoint.Artifact, err)
+		}
+		if token.QuotaDigest != quotaDigest {
+			continue
+		}
+		if token.Version != draftLocalSoftEditTokenVersion || token.Chapter != chapter ||
+			token.SeedCheckpointSeq <= 0 || !validExternalBodySHA256(token.PreEditBodySHA256) {
+			return nil, fmt.Errorf("invalid local-soft edit token for chapter %d", chapter)
+		}
+		copy := checkpoint
+		return &draftLocalSoftEditConsumption{Token: &token, Checkpoint: &copy}, nil
+	}
+	return nil, nil
+}
+
+// draftLocalSoftEditQuotaConsumed checks the explicit persistent token first.
+// For projects created before the token existed, any edit checkpoint after the
+// same seed is treated conservatively as already consumed. That migration path
+// prevents a process upgrade from granting an extra edit to an in-flight cycle.
+func draftLocalSoftEditQuotaConsumed(st *store.Store, chapter int) (bool, error) {
+	digest, seedSeq, err := draftLocalSoftEditQuotaIdentity(st, chapter)
+	if err != nil {
+		return false, err
+	}
+	consumption, err := loadDraftLocalSoftEditConsumption(st, chapter, digest)
+	if err != nil {
+		return false, err
+	}
+	if consumption != nil {
+		return true, nil
+	}
+	scope := domain.ChapterScope(chapter)
+	for _, checkpoint := range st.Checkpoints.All() {
+		if !checkpoint.Scope.Matches(scope) {
+			continue
+		}
+		if checkpoint.Seq > seedSeq && checkpoint.Step == "edit" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// consumeDraftLocalSoftEditQuota persists the at-most-once capability before
+// prose bytes are mutated. If the later file write fails, the quota remains
+// consumed (fail closed) instead of risking a second edit after restart.
+func consumeDraftLocalSoftEditQuota(st *store.Store, chapter int) error {
+	digest, seedSeq, err := draftLocalSoftEditQuotaIdentity(st, chapter)
+	if err != nil {
+		return err
+	}
+	consumed, err := draftLocalSoftEditQuotaConsumed(st, chapter)
+	if err != nil {
+		return err
+	}
+	if consumed {
+		return fmt.Errorf("第 %d 章当前 plan/render seed 的唯一本地软修配额已消费: %w", chapter, errs.ErrToolPrecondition)
+	}
+	content, err := st.Drafts.LoadDraft(chapter)
+	if err != nil {
+		return fmt.Errorf("load pre-edit body for local-soft token: %w", err)
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("local-soft token requires a non-empty pre-edit body: %w", errs.ErrToolPrecondition)
+	}
+	preEditSHA := reviewreport.BodySHA256(content)
+	bodyCheckpoint, err := CurrentChapterBodyCheckpoint(st, chapter)
+	if err != nil {
+		return fmt.Errorf("bind local-soft token to current body checkpoint: %w", err)
+	}
+	if bodyCheckpoint.Digest != "sha256:"+preEditSHA {
+		return fmt.Errorf("local-soft token pre-edit body/checkpoint mismatch: %w", errs.ErrToolPrecondition)
+	}
+	token := draftLocalSoftEditToken{
+		Version:           draftLocalSoftEditTokenVersion,
+		Chapter:           chapter,
+		QuotaDigest:       digest,
+		SeedCheckpointSeq: seedSeq,
+		PreEditBodySHA256: preEditSHA,
+	}
+	raw, err := json.MarshalIndent(token, "", "  ")
+	if err != nil {
+		return err
+	}
+	artifact := draftLocalSoftEditTokenArtifact(chapter, digest)
+	if err := writeAtomicDraftIntent(filepath.Join(st.Dir(), filepath.FromSlash(artifact)), raw); err != nil {
+		return fmt.Errorf("persist local-soft edit token: %w", err)
+	}
+	_, err = st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(chapter),
+		draftLocalSoftEditConsumedStep,
+		artifact,
+	)
+	return err
+}
+
+// draftAIGCLocalSoftSatisfiedAfterBoundedEdit closes the local soft loop only
+// after all three facts are durable: the current body checkpoint is an edit,
+// the independent DeepSeek artifact binds these exact bytes and strictly
+// passes, and the local failure is non-whole-text. Whole-text/segment failures
+// remain structural and can never be waived by this bounded-edit rule.
+func draftAIGCLocalSoftSatisfiedAfterBoundedEdit(
+	st *store.Store,
+	chapter int,
+	content string,
+	report aigc.Report,
+	gate draftAIGCGateResult,
+) bool {
+	if st == nil || chapter <= 0 || strings.TrimSpace(content) == "" {
+		return false
+	}
+	structural, soft := draftExternalLocalGateDisposition(content, report, gate)
+	if structural || !soft {
+		return false
+	}
+	quotaDigest, _, err := draftLocalSoftEditQuotaIdentity(st, chapter)
+	if err != nil {
+		return false
+	}
+	consumption, err := loadDraftLocalSoftEditConsumption(st, chapter, quotaDigest)
+	if err != nil || consumption == nil || consumption.Legacy || consumption.Token == nil ||
+		consumption.Checkpoint == nil {
+		return false
+	}
+	bodyCheckpoint, err := CurrentChapterBodyCheckpoint(st, chapter)
+	if err != nil || bodyCheckpoint.Step != "edit" ||
+		bodyCheckpoint.Seq <= consumption.Checkpoint.Seq {
+		return false
+	}
+	currentSHA := reviewreport.BodySHA256(content)
+	if bodyCheckpoint.Digest != "sha256:"+currentSHA ||
+		currentSHA == consumption.Token.PreEditBodySHA256 {
+		return false
+	}
+	status, err := loadDraftExternalJudgeStatus(st.Dir(), chapter)
+	if err != nil || status == nil || !status.AdviceComplete || status.Blocking ||
+		float64(status.AIProbabilityPercent) >= aigc.PassExclusivePercent ||
+		strings.TrimSpace(status.BodySHA256) != currentSHA {
+		return false
+	}
+	return true
 }
 
 func normalizeDraftExternalRetestPolicy(requirement *DraftExternalRerenderRequirement) error {
@@ -976,6 +1422,9 @@ func RequireDraftExternalApprovalWithStore(st *store.Store, chapter int) error {
 	case DraftExternalGateRerenderAuthorized:
 		return fmt.Errorf("第 %d 章当前草稿仍是外判阻断版本，必须先按完整修改建议整章重渲染: %w", chapter, errs.ErrToolPrecondition)
 	case DraftExternalGateAdviceIncomplete:
+		if inspection.LocalSoftEditFailedClosed {
+			return fmt.Errorf("第 %d 章当前 plan/render seed 的本地软修 token 已消费，但没有更晚、不同哈希的 exact-body edit checkpoint；疑似编辑写入失败或中断，禁止再次编辑或提交，必须先建立新 plan epoch: %w", chapter, errs.ErrToolPrecondition)
+		}
 		return fmt.Errorf("第 %d 章外判没有返回完整修改建议，禁止重渲染和提交，必须先重新外判: %w", chapter, errs.ErrToolPrecondition)
 	default:
 		if inspection.LocalSoftEditPending {

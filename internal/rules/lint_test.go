@@ -875,6 +875,31 @@ func TestLint_DialogueConveyorOveruse(t *testing.T) {
 	}
 }
 
+func TestLint_DomainLogisticsAloneDoesNotMakeDialogueConveyor(t *testing.T) {
+	text := `“订单先留在原位。”
+
+“我去核对交付记录，你看公共位置。”
+
+门外的车灯扫过桌角，林澈把声音调低了一格。
+
+“这条记录比骑手的交付时间早。”
+
+“位置没变，订单备注却被改过。”
+
+“先别下结论，原始记录还差一段。”
+
+走廊里有人拉动卷闸门，金属声把后半句盖住了。
+
+“交付照片里只能看到公共架子。”
+
+“那就把位置和时间分开核对。”
+
+“好，订单记录由我保留。”`
+	if v := findRule(Lint(text), "dialogue_conveyor_overuse"); v != nil {
+		t.Fatalf("domain logistics vocabulary alone became conveyor evidence: %+v", v)
+	}
+}
+
 func TestLint_DialogueMicroPeriodChain(t *testing.T) {
 	bad := `沈知遥说：“断电。先把线断了。”
 
@@ -958,6 +983,56 @@ func TestLint_POVInteriorityThin(t *testing.T) {
 	bad := strings.Repeat("摊位前的灯亮着，付款记录、订单、票据和材料都摆在桌上。通道里有人走，众人继续核对交付。", 50) + dialogue
 	if v := findRule(Lint(bad), "pov_interiority_thin"); v == nil {
 		t.Fatalf("expected pov_interiority_thin, got %+v", Lint(bad))
+	}
+}
+
+func TestLint_POVInteriorityThinHonorsAtLeastTwoContract(t *testing.T) {
+	dialogue := `“付款记上。”林澈说。
+
+“票据收好。”沈知遥回答。
+
+“材料到了。”老丁说。
+
+“通道留出来。”摊主提醒。
+
+“订单再核对。”林澈说。
+
+“收款没有错。”沈知遥回答。
+
+“安装接着做。”老丁说。
+
+“试用位置别变。”摊主提醒。
+
+`
+	base := strings.Repeat("摊位前的灯亮着，付款记录、订单、票据和材料都摆在桌上。通道里有人走，众人继续核对交付。", 50) + dialogue
+	one := base + "\n她想先压住报出结论的冲动。"
+	if v := findRule(Lint(one), "pov_interiority_thin"); v == nil {
+		t.Fatal("one interiority-changing beat unexpectedly satisfied the two-beat contract")
+	}
+	two := one + "\n\n她犹豫了一下，门外的回声因此改掉她的下一步。"
+	if got := countMarkerParagraphHits(narrativeParagraphs(two), narrativeInteriorityMarkers); got != 2 {
+		t.Fatalf("fixture interiority count=%d, want exactly 2", got)
+	}
+	if v := findRule(Lint(two), "pov_interiority_thin"); v != nil {
+		t.Fatalf("two interiority-changing beats still triggered a two-beat minimum: %+v", v)
+	}
+}
+
+func TestInteriorityMarkersCountDistinctParagraphBeats(t *testing.T) {
+	c6 := `程野盯住她那一眼，才发现自己刚才已经准备下车。
+
+她看着那个时间，第一反应竟是还有三十六分钟。
+
+她强迫自己再看一遍三份记录。
+
+程野下意识把直播声音调大了一格。`
+	if got := countMarkerParagraphHits(narrativeParagraphs(c6), narrativeInteriorityMarkers); got != 4 {
+		t.Fatalf("C6 subjective paragraph beats=%d, want 4", got)
+	}
+
+	repeated := `她第一反应是下车，第一反应仍是下车，于是反复念着第一反应。`
+	if got := countMarkerParagraphHits(narrativeParagraphs(repeated), narrativeInteriorityMarkers); got != 1 {
+		t.Fatalf("repeated marker in one paragraph counted %d beats, want 1", got)
 	}
 }
 

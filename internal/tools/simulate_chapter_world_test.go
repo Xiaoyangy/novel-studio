@@ -128,6 +128,180 @@ func TestSimulateChapterWorldRequiresEveryCharacterAndButterflyEffect(t *testing
 	}
 }
 
+func TestSimulationRejectsRepeatingPreviousCompletedProtagonistDecision(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	previousDecision := simulatedDecision("林澈", "停进安全区后立即报警", true)
+	previousDecision.CompletionState = "completed"
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Version:            1,
+		Chapter:            1,
+		SimulationID:       "previous",
+		TimeWindow:         "第一章",
+		CharacterDecisions: []domain.CharacterWorldDecision{previousDecision},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "林澈",
+			ChosenDecision:    previousDecision.Decision,
+			ObservableEffects: []string{"报警时间线已固定"},
+			HiddenPressures:   []string{"地点仍未知"},
+			AvailableOptions:  []string{previousDecision.Decision, "等待核验"},
+			DecisionReason:    "异常已足够报警",
+			PlanConstraints:   []string{"不得自行追踪"},
+			CausalChain:       []string{"识别异常", "报警"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	currentDecision := simulatedDecision("林澈", previousDecision.Decision, true)
+	projection := domain.ProtagonistDecisionProjection{
+		Protagonist:       "林澈",
+		ChosenDecision:    previousDecision.Decision,
+		ObservableEffects: []string{"平台准备核验"},
+		HiddenPressures:   []string{"观看端有延迟"},
+		AvailableOptions:  []string{previousDecision.Decision, "留在安全区等待当下核验"},
+		DecisionReason:    "继续走报警协作",
+		PlanConstraints:   []string{"不得精确校秒"},
+		CausalChain:       []string{"既成报警", "平台核验"},
+	}
+	if err := validateIncomingSimulationSemanticInvariants(st, 2, []domain.CharacterWorldDecision{currentDecision}, projection, nil); err == nil ||
+		!strings.Contains(err.Error(), "repeats chapter 1 completed action") {
+		t.Fatalf("repeated completed choice must be rejected, got %v", err)
+	}
+
+	currentDecision.Decision = "留在安全区等待当下核验"
+	currentDecision.Action = "留在安全区等待当下核验"
+	projection.ChosenDecision = currentDecision.Decision
+	projection.AvailableOptions = []string{currentDecision.Decision, "暂不投放核验"}
+	if err := validateIncomingSimulationSemanticInvariants(st, 2, []domain.CharacterWorldDecision{currentDecision}, projection, nil); err != nil {
+		t.Fatalf("a current consequence-consuming choice should pass: %v", err)
+	}
+}
+
+func TestSimulationRejectsRepeatingPreviousCompletedNonProtagonistAction(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	protagonist := simulatedDecision("林澈", "提交既有核验结果", true)
+	protagonist.CompletionState = "started"
+	supporting := simulatedDecision("沈知遥", "移开醋碟并敲击碗沿", true)
+	supporting.Action = "移开醋碟并敲击碗沿"
+	supporting.CompletionState = "completed"
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Version:            1,
+		Chapter:            1,
+		SimulationID:       "previous-supporting",
+		TimeWindow:         "第一章",
+		CharacterDecisions: []domain.CharacterWorldDecision{protagonist, supporting},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "林澈",
+			ChosenDecision:    protagonist.Decision,
+			ObservableEffects: []string{"核验结果已提交"},
+			HiddenPressures:   []string{"地点仍未知"},
+			AvailableOptions:  []string{protagonist.Decision, "等待反馈"},
+			DecisionReason:    "先固定可复核结果",
+			PlanConstraints:   []string{"不得重复求救动作"},
+			CausalChain:       []string{"核验", "提交"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	currentProtagonist := simulatedDecision("林澈", "根据反馈缩小候选范围", true)
+	currentSupporting := simulatedDecision("沈知遥", supporting.Decision, true)
+	currentSupporting.Action = supporting.Action
+	projection := domain.ProtagonistDecisionProjection{
+		Protagonist:       "林澈",
+		ChosenDecision:    currentProtagonist.Decision,
+		ObservableEffects: []string{"候选范围开始收缩"},
+		HiddenPressures:   []string{"控制仍在继续"},
+		AvailableOptions:  []string{currentProtagonist.Decision, "保持原范围"},
+		DecisionReason:    "新反馈支持下一步缩圈",
+		PlanConstraints:   []string{"不得重演上一章动作"},
+		CausalChain:       []string{"反馈", "缩圈"},
+	}
+	err := validateIncomingSimulationSemanticInvariants(
+		st,
+		2,
+		[]domain.CharacterWorldDecision{currentProtagonist, currentSupporting},
+		projection,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "character 沈知遥 repeats chapter 1 completed decision/action") {
+		t.Fatalf("repeated completed supporting action must be rejected, got %v", err)
+	}
+
+	currentSupporting.Decision = "保持前章已形成的受控状态"
+	currentSupporting.Action = "保持前章已形成的受控状态"
+	if err := validateIncomingSimulationSemanticInvariants(
+		st,
+		2,
+		[]domain.CharacterWorldDecision{currentProtagonist, currentSupporting},
+		projection,
+		nil,
+	); err != nil {
+		t.Fatalf("a consequence-consuming supporting action should pass: %v", err)
+	}
+}
+
+func TestSimulationRejectsStaleChapterCoreEventGoalTemplate(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	decision := simulatedDecision("林澈", "推进第三章核验", true)
+	decision.CurrentGoal = "林澈要以主角的立场，在第一章核心事件里做出可验证选择。"
+	if err := validateIncomingSimulationSemanticInvariants(
+		st,
+		3,
+		[]domain.CharacterWorldDecision{decision},
+		domain.ProtagonistDecisionProjection{},
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "current_goal still targets chapter 1 core event") {
+		t.Fatalf("stale zero-init goal must be rejected, got %v", err)
+	}
+	// This rule was introduced after some content-addressed project-all bundles
+	// had already been sealed. Keep it on ingress so new projections cannot
+	// persist the template, but do not retroactively make an immutable stored
+	// simulation unreadable: its exact render packet remains the sealed prose
+	// authority and the historical bundle cannot be rewritten in place.
+	historical := domain.ChapterWorldSimulation{
+		Version:            1,
+		Chapter:            3,
+		CharacterDecisions: []domain.CharacterWorldDecision{decision},
+	}
+	if gaps := chapterWorldSimulationGaps(st, historical); slices.ContainsFunc(gaps, func(gap string) bool {
+		return strings.Contains(gap, "current_goal still targets chapter 1 core event")
+	}) {
+		t.Fatalf("stored simulation was retroactively rejected by a new ingress-only rule: %v", gaps)
+	}
+
+	decision.CurrentGoal = "林澈要在第三章核心事件里推进当前核验。"
+	if gaps := staleChapterCoreEventGoalGaps(3, []domain.CharacterWorldDecision{decision}); len(gaps) != 0 {
+		t.Fatalf("current chapter goal should pass: %v", gaps)
+	}
+	decision.CurrentGoal = "林澈要利用第一章报警证据推进当前核验。"
+	if gaps := staleChapterCoreEventGoalGaps(3, []domain.CharacterWorldDecision{decision}); len(gaps) != 0 {
+		t.Fatalf("general prior-evidence reference should pass: %v", gaps)
+	}
+}
+
+func TestChapterWorldSimulationHasCausalWorkIgnoresAuthorityShell(t *testing.T) {
+	shell := domain.ChapterWorldSimulation{
+		Chapter: 4,
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			holdBaselineDecisionForTest("许牧", 4),
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "林澈",
+		},
+	}
+	if chapterWorldSimulationHasCausalWork(shell) {
+		t.Fatal("server-authored hold-baseline shell was treated as authored causal work")
+	}
+	shell.CharacterDecisions = append(shell.CharacterDecisions, domain.CharacterWorldDecision{
+		Character: "林澈",
+		Decision:  "核验本章现场证据",
+	})
+	if !chapterWorldSimulationHasCausalWork(shell) {
+		t.Fatal("a real character decision was not treated as causal work")
+	}
+}
+
 func TestSimulateChapterWorldRejectsIncompleteProjectionAtomically(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
 	existing := domain.ChapterWorldSimulation{

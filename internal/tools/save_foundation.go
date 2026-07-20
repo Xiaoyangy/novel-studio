@@ -59,7 +59,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
 		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance），顶层可带 protagonist_position（主角在矛盾网中的位置）与 vision_pillars / world_pillars（视觉核心与世界运作核心分层）。",
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance）。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / revise_arc / outline-all append_volume / volume_codex 时必传）")),
@@ -106,7 +106,7 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	result := map[string]any{"saved": true, "type": a.Type, "scale": a.Scale}
 
 	// 写作阶段禁止全量覆盖大纲，只允许增量操作（expand_arc / append_volume）
-	if (a.Type == "outline" || a.Type == "layered_outline") && t.isWriting() {
+	if (a.Type == "outline" || a.Type == "layered_outline") && t.isWriting() && !t.chapterZeroOutlineReplacementAuthorized() {
 		return nil, fmt.Errorf(
 			"写作阶段禁止使用 %s 全量覆盖大纲。请使用 expand_arc 展开骨架弧，或 append_volume 追加新卷: %w", a.Type, errs.ErrToolPrecondition)
 	}
@@ -854,6 +854,38 @@ func normalizeFoundationContent(raw json.RawMessage) (string, error) {
 func (t *SaveFoundationTool) isWriting() bool {
 	p, _ := t.store.Progress.Load()
 	return p != nil && p.Phase == domain.PhaseWriting
+}
+
+func (t *SaveFoundationTool) chapterZeroOutlineReplacementAuthorized() bool {
+	p, err := t.store.Progress.Load()
+	if err != nil || p == nil || p.LatestCompleted() != 0 || p.TotalWordCount != 0 || strings.TrimSpace(p.GenerationID) == "" {
+		return false
+	}
+	markerRaw, err := os.ReadFile(filepath.Join(t.store.Dir(), "meta", "all_chapter_rebase.json"))
+	if err != nil {
+		return false
+	}
+	var marker struct {
+		NewGenerationID string `json:"new_generation_id"`
+	}
+	if json.Unmarshal(markerRaw, &marker) != nil || strings.TrimSpace(marker.NewGenerationID) != strings.TrimSpace(p.GenerationID) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(t.store.Dir(), "meta", "first_chapter_generation_readiness.json")); err == nil || !os.IsNotExist(err) {
+		return false
+	}
+	for _, rel := range []string{"chapters", "drafts"} {
+		entries, err := os.ReadDir(filepath.Join(t.store.Dir(), rel))
+		if err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // worldCodexDraftRel 初建期的增量草稿缓冲。LLM 稳定输出不了一次成型的完整

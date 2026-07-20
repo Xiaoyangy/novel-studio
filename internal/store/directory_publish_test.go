@@ -21,6 +21,31 @@ type directoryPublishFixture struct {
 	request       PublishDirectoryRequest
 }
 
+func TestDirectoryContentRootExcludesOnlyReservedAtomicTemps(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "stable.json"), []byte("stable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, err := DirectoryContentRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"usage.json.tmp-2326855527", ".planning-12345.tmp", ".receipt.json.tmp-987"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("transient\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := DirectoryContentRoot(root); err != nil || got != want {
+		t.Fatalf("reserved atomic temps changed directory root: got=%s want=%s err=%v", got, want, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "durable.tmp-not-a-number"), []byte("durable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DirectoryContentRoot(root); err != nil || got == want {
+		t.Fatalf("non-reserved durable file was excluded: got=%s want_old=%s err=%v", got, want, err)
+	}
+}
+
 func TestDirectoryPublishRecoversEveryJournaledPhaseAndFinalizes(t *testing.T) {
 	for _, stage := range []string{
 		"intent_written",

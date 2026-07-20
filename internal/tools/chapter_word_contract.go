@@ -52,6 +52,36 @@ func requireChapterWordContract(st *store.Store, chapter int, content string) er
 		return fmt.Errorf("第 %d 章终稿格式门禁未通过: %w", chapter, err)
 	}
 	result := inspectChapterWordContract(st, content)
+	bounds, err := InspectSealedShortChapterWordBounds(st, chapter)
+	if err != nil {
+		return err
+	}
+	if bounds.Active {
+		if result.Actual >= bounds.Min && result.Actual <= bounds.Max {
+			return nil
+		}
+		action := "调整正文长度"
+		if result.Actual > bounds.Max {
+			action = fmt.Sprintf("至少压缩 %d 字", result.Actual-bounds.Max)
+		} else {
+			action = fmt.Sprintf("至少补足 %d 字", bounds.Min-result.Actual)
+		}
+		return fmt.Errorf(
+			"第 %d 章 sealed 短篇累计字数门禁未通过：实际 %d 字，动态要求 %d-%d 字（此前 %d 章已验收累计 %d 字，全书合同 %d-%d 字，单章绝对范围 %d-%d）；需%s。草稿已保留，正文/canon/cursor 均未提交；请局部调整后重新 check_consistency: %w",
+			chapter,
+			result.Actual,
+			bounds.Min,
+			bounds.Max,
+			bounds.PriorAcceptedChapters,
+			bounds.PriorAcceptedRunes,
+			bounds.BookMin,
+			bounds.BookMax,
+			bounds.ChapterMin,
+			bounds.ChapterMax,
+			action,
+			errs.ErrToolPrecondition,
+		)
+	}
 	if !result.Configured || result.Passed {
 		return nil
 	}

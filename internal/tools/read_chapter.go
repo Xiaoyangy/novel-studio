@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore/schema"
 )
@@ -96,7 +99,7 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 	if a.From > 0 && a.To > 0 {
 		if a.Source == "" || a.Source == "final" || a.Source == "draft" {
 			for chapter := a.From; chapter <= a.To; chapter++ {
-				withholding, err := t.renderOnlySurfaceWithholding(chapter)
+				withholding, err := t.renderOnlySurfaceWithholding(chapter, a.Source)
 				if err != nil {
 					return nil, fmt.Errorf("inspect chapter %d render-only read guard: %w", chapter, err)
 				}
@@ -140,7 +143,7 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		a.Chapter = resolved
 	}
 	if a.Source == "" || a.Source == "final" || a.Source == "draft" {
-		withholding, err := t.renderOnlySurfaceWithholding(a.Chapter)
+		withholding, err := t.renderOnlySurfaceWithholding(a.Chapter, a.Source)
 		if err != nil {
 			return nil, fmt.Errorf("inspect chapter %d render-only read guard: %w", a.Chapter, err)
 		}
@@ -295,7 +298,21 @@ func normalizedChapterSurfaceSource(source string) string {
 // an interrupted but complete replacement draft can recover its checkpoint;
 // after recovery the explicit request is consumed and draft_finalizer may read
 // the current candidate normally.
-func (t *ReadChapterTool) renderOnlySurfaceWithholding(chapter int) (*chapterSurfaceWithholding, error) {
+func (t *ReadChapterTool) renderOnlySurfaceWithholding(chapter int, source string) (*chapterSurfaceWithholding, error) {
+	// A completed, exact-body accepted final is immutable canon, not a candidate
+	// surface. Global review must be able to read it even when legacy draft-gate
+	// bookkeeping (for example a local-soft quota seed) is incomplete. Keep this
+	// shortcut final-only and fail closed on every live rewrite signal; draft
+	// reads and any pending/registered rerender still use the full inspector.
+	if normalizedChapterSurfaceSource(source) == "final" {
+		stable, err := t.acceptedFinalSurfaceStable(chapter)
+		if err != nil {
+			return nil, err
+		}
+		if stable {
+			return nil, nil
+		}
+	}
 	inspection, err := InspectDraftExternalGateWithStore(t.store, chapter)
 	if err != nil {
 		return nil, err
@@ -325,6 +342,76 @@ func (t *ReadChapterTool) renderOnlySurfaceWithholding(chapter int) (*chapterSur
 		}, nil
 	}
 	return nil, nil
+}
+
+func (t *ReadChapterTool) acceptedFinalSurfaceStable(chapter int) (bool, error) {
+	if t == nil || t.store == nil || chapter <= 0 {
+		return false, nil
+	}
+	body, err := t.store.Drafts.LoadChapterText(chapter)
+	if err != nil || strings.TrimSpace(body) == "" {
+		return false, err
+	}
+	bodyHash := reviewreport.BodySHA256(body)
+	review, err := t.store.World.LoadReview(chapter)
+	if err != nil {
+		return false, err
+	}
+	if review == nil || strings.TrimSpace(review.Scope) != "chapter" ||
+		strings.TrimSpace(review.BodySHA256) != bodyHash ||
+		strings.TrimSpace(review.Verdict) != "accept" ||
+		strings.TrimSpace(review.ContractStatus) != "met" || len(review.ContractMisses) > 0 {
+		return false, nil
+	}
+	progress, err := t.store.Progress.Load()
+	if err != nil {
+		return false, err
+	}
+	if progress == nil || !chapterNumberPresent(progress.CompletedChapters, chapter) ||
+		chapterNumberPresent(progress.PendingRewrites, chapter) || progress.InProgressChapter == chapter {
+		return false, nil
+	}
+	pendingCommit, err := t.store.Signals.LoadPendingCommit()
+	if err != nil {
+		return false, err
+	}
+	if pendingCommit != nil && pendingCommit.Chapter == chapter {
+		return false, nil
+	}
+	if ExplicitRerenderRequestActive(t.store, chapter) || ReviewRequiresFreshDraft(t.store, chapter) {
+		return false, nil
+	}
+	if _, statErr := os.Stat(draftWriteIntentPath(t.store.Dir(), chapter)); statErr == nil {
+		return false, nil
+	} else if !os.IsNotExist(statErr) {
+		return false, statErr
+	}
+	requirement, err := loadDraftExternalRerenderRequirement(t.store.Dir(), chapter)
+	if err != nil {
+		return false, err
+	}
+	if requirement != nil {
+		return false, nil
+	}
+	rows, err := latestRegisteredExternalDetectionsForDraftGate(t.store.Dir(), chapter, bodyHash, nil)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.NormalizedScorePercent >= aigc.PassExclusivePercent {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func chapterNumberPresent(chapters []int, chapter int) bool {
+	for _, candidate := range chapters {
+		if candidate == chapter {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *ReadChapterTool) rewritePlanningBlocksFinalRead(chapter int) bool {

@@ -23,6 +23,23 @@ type currentChapterRenderPlanGuard struct {
 }
 
 func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChapterRenderPlanGuard, error) {
+	return validateCurrentChapterRenderPlanWithCapability(st, chapter, false)
+}
+
+// validateCurrentChapterRenderPlanForExternalJudge permits one additional
+// plan-reuse state: an exact checkpoint-bound replacement of a formally
+// expression-only rejected body may run deterministic static checks before its
+// current hash has a DeepSeek result. It is intentionally private to the
+// read-only judge preflight and cannot authorize draft/edit/commit writes.
+func validateCurrentChapterRenderPlanForExternalJudge(st *store.Store, chapter int) (currentChapterRenderPlanGuard, error) {
+	return validateCurrentChapterRenderPlanWithCapability(st, chapter, true)
+}
+
+func validateCurrentChapterRenderPlanWithCapability(
+	st *store.Store,
+	chapter int,
+	allowPendingExpressionJudge bool,
+) (currentChapterRenderPlanGuard, error) {
 	guard := currentChapterRenderPlanGuard{}
 	if st == nil || chapter <= 0 {
 		return guard, fmt.Errorf("invalid chapter %d: %w", chapter, errs.ErrToolArgs)
@@ -32,7 +49,6 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 		return guard, fmt.Errorf("load progress for chapter plan gate: %w: %w", errs.ErrStoreRead, err)
 	}
 	guard.IsRewrite = progress != nil && slices.Contains(progress.PendingRewrites, chapter)
-	guard.RenderOnly = guard.IsRewrite && RenderOnlyRerenderReady(st, chapter)
 	if partial, err := st.Drafts.LoadChapterPlanPartial(chapter); err != nil {
 		return guard, fmt.Errorf("load staged chapter plan: %w: %w", errs.ErrStoreRead, err)
 	} else if partial != nil {
@@ -63,6 +79,18 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 		}
 		return guard, nil
 	}
+	expressionOnlyReviewPhase := expressionOnlyReviewReuseNone
+	if guard.IsRewrite {
+		expressionOnlyReviewPhase = expressionOnlyReviewPlanReusePhase(st, chapter, *plan)
+	}
+	pendingExpressionJudgeReuse := allowPendingExpressionJudge &&
+		expressionOnlyReviewPhase == expressionOnlyReviewReuseNone &&
+		expressionOnlyReviewPendingJudgePlanReuse(st, chapter, *plan)
+	expressionOnlyReviewReuse := expressionOnlyReviewPhase != expressionOnlyReviewReuseNone || pendingExpressionJudgeReuse
+	guard.RenderOnly = guard.IsRewrite &&
+		(expressionOnlyReviewPhase == expressionOnlyReviewReuseSeed ||
+			expressionOnlyReviewPhase == expressionOnlyReviewReuseRejectedReplacement ||
+			RenderOnlyRerenderReady(st, chapter))
 	latestPlanCheckpoint := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "plan")
 	if requirePlan || latestPlanCheckpoint != nil {
 		if _, err := CurrentChapterPlanCausalCheckpoint(st, chapter); err != nil {
@@ -73,14 +101,26 @@ func validateCurrentChapterRenderPlan(st *store.Store, chapter int) (currentChap
 	if err := validateRAGFactPlanForChapterRender(st, chapter, *plan); err != nil {
 		return guard, fmt.Errorf("第 %d 章正文写入前普通事实 RAG receipt 复验失败：%w", chapter, err)
 	}
-	if guard.RenderOnly {
+	if expressionOnlyReviewReuse {
+		// The formal review was created after this simulation/plan packet was
+		// sealed and rejects only expression. Its exact-body review and mechanical
+		// gate are the render contract, so mutable rewrite-source/craft receipts
+		// must not force a causal replan. Keep deterministic plan invariants here
+		// as an independent write-side backstop.
+		if err := ValidateChapterQuantityResultContract(st, *plan); err != nil {
+			return guard, fmt.Errorf("第 %d 章表达层重渲染的数量结果合同已漂移: %w", chapter, err)
+		}
+		if !ChapterAttractionPlanReadyForProject(st, *plan) {
+			return guard, fmt.Errorf("第 %d 章表达层重渲染的 attraction contract 已漂移: %w", chapter, errs.ErrToolPrecondition)
+		}
+	} else if guard.RenderOnly {
 		if err := ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
 			return guard, fmt.Errorf("第 %d 章显式 render-only 复用门禁失败: %w", chapter, err)
 		}
 	} else if err := validateChapterPrewriteSimulation(st, *plan, guard.IsRewrite); err != nil {
 		return guard, err
 	}
-	if guard.IsRewrite {
+	if guard.IsRewrite && !expressionOnlyReviewReuse {
 		if err := validateRewriteCraftConsumption(st, *plan); err != nil {
 			return guard, fmt.Errorf("第 %d 章正文写入前 craft receipt 复验失败：%w", chapter, err)
 		}

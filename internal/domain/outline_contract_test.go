@@ -46,6 +46,22 @@ func TestResolveBookScaleTargetUsesFrozenMidpointAndWordBudget(t *testing.T) {
 	}
 }
 
+func TestResolveBookScaleTargetParsesChineseWanOnBothRangeBounds(t *testing.T) {
+	for _, scale := range []string{
+		"1-1卷，12-12章；正文2.8万—3万字",
+		"1-1卷，12-12章；正文2.8—3万字",
+	} {
+		target, err := ResolveBookScaleTarget(scale, 1, 12)
+		if err != nil {
+			t.Fatalf("ResolveBookScaleTarget(%q): %v", scale, err)
+		}
+		if target.MinWords != 28000 || target.MaxWords != 30000 ||
+			target.TargetWords != 29000 || target.TargetWordsPerChapter != 2417 {
+			t.Fatalf("ResolveBookScaleTarget(%q) = %+v", scale, target)
+		}
+	}
+}
+
 func TestOutlineChapterContractRejectsThinAndJSONShell(t *testing.T) {
 	volumes := []VolumeOutline{{Index: 1, Title: "\u5377", Theme: "\u4e3b\u9898", Arcs: []ArcOutline{{
 		Index: 1, Title: "\u5f27", Goal: "\u76ee\u6807", Chapters: []OutlineEntry{

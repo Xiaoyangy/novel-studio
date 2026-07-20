@@ -810,6 +810,29 @@ func RunProjectedChapterPlanning(
 		return nil, planErr
 	}
 	if plan == nil {
+		bookBudget := ""
+		if receipt, receiptErr := st.LoadOutlineAllExecutionReceipt(); receiptErr == nil && receipt != nil && receipt.TargetWords > 0 {
+			bookBudget = fmt.Sprintf(
+				"全书正文目标总量%d字、共%d章，平均约%d字；本章容量应围绕全书剩余预算分配，不要连续顶到单章上限，最终工具会校验累计可行性。",
+				receipt.TargetWords,
+				receipt.TargetChapters,
+				receipt.TargetWordsPerChapter,
+			)
+		}
+		planningContextArgs, err := json.Marshal(map[string]any{
+			"chapter": chapter,
+			"profile": "planning",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("project-all planner context args chapter %d: %w", chapter, err)
+		}
+		planningContextRaw, err := contextTool.Execute(ctx, planningContextArgs)
+		if err != nil {
+			return nil, fmt.Errorf("project-all planner host context chapter %d: %w", chapter, err)
+		}
+		if len(planningContextRaw) == 0 {
+			return nil, fmt.Errorf("project-all planner host context chapter %d is empty", chapter)
+		}
 		planner := agentcore.NewAgent(
 			agentcore.WithModel(model),
 			agentcore.WithSystemPrompt(bundle.Prompts.Planner+projectAllPlannerBoundary),
@@ -828,7 +851,9 @@ func RunProjectedChapterPlanning(
 		thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))
 		planner.SetThinkingLevel(thinking)
 		if err := planner.Prompt(ctx, fmt.Sprintf(
-			"Project-Arc 已完成 V%dA%d《%s》中第 %d 章的全角色世界推演。本弧范围第%d-%d章，整体目标：%s。只规划第 %d 章：先调用 novel_context(chapter=%d, profile=planning)，必须消费当前 content-addressed craft receipt；有 hits 的每个 need 都要按 receipt pack 精确转化进 external_reference_plan，fact receipt 有 hits 时同理；no_material 只绑定来源，禁止伪造材料。然后用 plan_structure + plan_details 分批生成并 finalize 完整 POV plan。若 project_all_state 有 predecessor_contract，arc_transition_contract 的 incoming id/text 必须逐字复制，consumed_by_cause 必须逐字等于本章一个 causal_beats[].cause；弧首章 incoming 留空。每章都必须另写弧内唯一的 outgoing consequence id/text，禁止用 goal/hook 冒充。render_capacity 必须给出3-6个有主动阻力、转折、退出后果和具体行动证据的场景单元，总量自然支撑 user_rules.chapter_words，不得靠手续、复述或总结注水。不得读取或生成正文，不得转去其他章节。跨弧 payoff/reveal/reward 必须保留为 carried-forward，不能挤到本弧末章提前兑现；只有第%d章才是全书末章。",
+			"Host 已代你完成本章唯一一次 novel_context(chapter=%d, profile=planning) 调用并签发当前访问收据；不要再次调用 novel_context，也不要解释或结束，直接消费下列权威 JSON 并调用 plan_structure，然后用 plan_details 分批 finalize：\n<host_prefetched_novel_context>\n%s\n</host_prefetched_novel_context>\n\nProject-Arc 已完成 V%dA%d《%s》中第 %d 章的全角色世界推演。本弧范围第%d-%d章，整体目标：%s。只规划第 %d 章：必须消费当前 content-addressed craft receipt；有 hits 的每个 need 都要按 receipt pack 精确转化进 external_reference_plan，fact receipt 有 hits 时同理；no_material 只绑定来源，禁止伪造材料。用 plan_structure + plan_details 分批生成并 finalize 完整 POV plan。若 project_all_state 有 predecessor_contract，arc_transition_contract 的 incoming id/text 必须逐字复制，consumed_by_cause 必须逐字等于本章一个 causal_beats[].cause；弧首章 incoming 留空。每章都必须另写弧内唯一的 outgoing consequence id/text，禁止用 goal/hook 冒充。render_capacity 必须给出3-6个有主动阻力、转折、退出后果和具体行动证据的场景单元，总量自然支撑 user_rules.chapter_words，不得靠手续、复述或总结注水。%s不得读取或生成正文，不得转去其他章节。跨弧 payoff/reveal/reward 必须保留为 carried-forward，不能挤到本弧末章提前兑现；只有第%d章才是全书末章。",
+			chapter,
+			string(planningContextRaw),
 			arcBoundary.Volume,
 			arcBoundary.Arc,
 			arcBoundary.Title,
@@ -837,7 +862,7 @@ func RunProjectedChapterPlanning(
 			arcBoundary.LastChapter,
 			arcBoundary.Goal,
 			chapter,
-			chapter,
+			bookBudget,
 			arcBoundary.BookLastChapter,
 		)); err != nil {
 			return nil, fmt.Errorf("project-all POV plan chapter %d: %w", chapter, err)
@@ -861,7 +886,20 @@ func RunProjectedChapterPlanning(
 		)
 	}
 	if err := tools.ValidateProjectAllCraftPlanCurrent(st, *plan, craftReceipt); err != nil {
-		return nil, fmt.Errorf("project-all chapter %d craft consumption: %w", chapter, err)
+		repaired, repairErr := tools.RepairProjectAllCraftPlanCurrent(st, plan, craftReceipt)
+		if repairErr != nil {
+			return nil, fmt.Errorf("project-all chapter %d craft consumption repair: %w", chapter, repairErr)
+		}
+		if !repaired {
+			return nil, fmt.Errorf("project-all chapter %d craft consumption: %w", chapter, err)
+		}
+		plan, planCP, repairErr = loadCurrentProjectedPlan(st, chapter)
+		if repairErr != nil {
+			return nil, repairErr
+		}
+		if plan == nil || planCP == nil {
+			return nil, fmt.Errorf("project-all chapter %d repaired plan did not produce a current checkpoint", chapter)
+		}
 	}
 	if !exactProjectAllSourceToken(simulation.Sources, contextToken) {
 		return nil, fmt.Errorf(
@@ -993,6 +1031,14 @@ func loadCurrentProjectedSimulation(
 		return nil, nil, err
 	}
 	if cp == nil {
+		return nil, nil, nil
+	}
+	// A checkpoint proves exact bytes, not that a stricter semantic invariant
+	// still accepts those bytes. Reopen an unpublished projected chapter when
+	// its finalized simulation now has gaps; simulate_chapter_world will retain
+	// valid prior-chapter state and replace only this chapter's invalid epoch.
+	_, ready, _ := tools.ChapterWorldSimulationStatus(st, chapter)
+	if !ready {
 		return nil, nil, nil
 	}
 	simulation, err := st.LoadChapterWorldSimulation(chapter)

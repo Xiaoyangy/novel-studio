@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,167 @@ func TestPipelineStaleCausalCandidateSkipsJudgeAndDispatchesWorldResimulation(t 
 	if next == nil || next.Agent != "world_simulator" || next.Chapter != 1 ||
 		!strings.Contains(next.Task, "simulate_chapter_world") {
 		t.Fatalf("stale candidate did not dispatch fresh world simulation: state=%+v next=%+v", state, next)
+	}
+}
+
+func TestRenderOnlyCandidateJudgesRetainedExactDraftBeforeNextHostTurn(t *testing.T) {
+	st := newPipelineCausalPreflightFixture(t)
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		t.Fatalf("load candidate progress: progress=%+v err=%v", progress, err)
+	}
+	before, err := st.Drafts.LoadDraft(1)
+	if err != nil || strings.TrimSpace(before) == "" {
+		t.Fatalf("fixture has no retained exact-body draft: err=%v body=%q", err, before)
+	}
+	beforeCheckpoint, err := tools.CurrentChapterBodyCheckpoint(st, 1)
+	if err != nil {
+		t.Fatalf("fixture draft is not checkpoint-bound: %v", err)
+	}
+	resumable, reason, err := pipelineRenderOnlyCandidateResumeStatus(st, 1)
+	if err != nil || !resumable || strings.TrimSpace(reason) == "" {
+		t.Fatalf("managed render candidate was not resumable: resumable=%v reason=%q err=%v", resumable, reason, err)
+	}
+
+	judgeCalls := 0
+	var judgeArgs []string
+	var judgeDir string
+	judged, err := pipelineJudgePendingRenderOnlyDraftHashWithJudge(
+		cliOptions{},
+		st.Dir(),
+		progress,
+		func(opts cliOptions, args []string) error {
+			judgeCalls++
+			judgeDir = opts.Dir
+			judgeArgs = append([]string(nil), args...)
+			return os.ErrDeadlineExceeded
+		},
+	)
+	if !judged || err == nil || judgeCalls != 1 {
+		t.Fatalf("retained candidate did not reach its exact-body judge: judged=%v calls=%d err=%v", judged, judgeCalls, err)
+	}
+	if judgeDir != st.Dir() || !slices.Contains(judgeArgs, "--no-sediment") ||
+		!slices.Contains(judgeArgs, "--primary-only") ||
+		!slices.Contains(judgeArgs, "--chapter") || !slices.Contains(judgeArgs, "1") ||
+		!strings.Contains(strings.Join(judgeArgs, " "), "--budget 3m0s") {
+		t.Fatalf("candidate judge lost exact output/chapter isolation: dir=%q args=%v", judgeDir, judgeArgs)
+	}
+	after, err := st.Drafts.LoadDraft(1)
+	if err != nil || after != before {
+		t.Fatalf("judge boundary regenerated or discarded the candidate draft: err=%v before=%q after=%q", err, before, after)
+	}
+	afterCheckpoint, err := tools.CurrentChapterBodyCheckpoint(st, 1)
+	if err != nil || afterCheckpoint.Seq != beforeCheckpoint.Seq || afterCheckpoint.Digest != beforeCheckpoint.Digest {
+		t.Fatalf("judge boundary changed the exact-body epoch: before=%+v after=%+v err=%v", beforeCheckpoint, afterCheckpoint, err)
+	}
+}
+
+func TestPipelineCausalPreflightKeepsPlanPreservingFormalReviewSeed(t *testing.T) {
+	st := newPipelineCausalPreflightFixture(t)
+	sim, err := st.LoadChapterWorldSimulation(1)
+	if err != nil || sim == nil {
+		t.Fatalf("load simulation: sim=%+v err=%v", sim, err)
+	}
+	// Match the sealed first-render case: the approved simulation predates any
+	// rewrite_source.  The formal review arrived only after commit.
+	sim.RewriteSource = nil
+	sim.RewriteFactCoverage = nil
+	if err := st.SaveChapterWorldSimulation(*sim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := st.Drafts.LoadChapterPlan(1)
+	if err != nil || plan == nil {
+		t.Fatalf("load plan: plan=%+v err=%v", plan, err)
+	}
+	plan.Goal = "保留同一因果计划，只处理正式评审指出的表达问题"
+	if err := st.Drafts.SaveChapterPlan(*plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	finalBody, err := st.Drafts.LoadChapterText(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveDraft(1, finalBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+	); err != nil {
+		t.Fatal(err)
+	}
+	bodySHA := reviewreport.BodySHA256(finalBody)
+	review := domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: bodySHA, Verdict: "rewrite", ContractStatus: "met",
+		Summary: "删掉清单感并补主角判断。",
+		Issues:  []domain.ConsistencyIssue{{Type: "aesthetic", Severity: "warning", Description: "catalog stuffing"}},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Verdict: "pass"},
+			{Dimension: "character", Verdict: "pass"},
+			{Dimension: "pacing", Verdict: "pass"},
+			{Dimension: "continuity", Verdict: "pass"},
+			{Dimension: "foreshadow", Verdict: "pass"},
+			{Dimension: "hook", Verdict: "pass"},
+		},
+	}
+	if err := st.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	gateRaw, err := json.Marshal(reviewreport.MechanicalGatePayload{
+		Chapter: 1, BodySHA256: bodySHA,
+		RuleViolations: []rules.Violation{{Rule: "pov_interiority_thin", Severity: rules.SeverityWarning}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(st.Dir(), "reviews", "01_ai_gate.json"), string(gateRaw))
+	if err := tools.ValidateReusableCausalPlanForRerender(st, 1); err == nil ||
+		!strings.Contains(err.Error(), "world simulation 缺少当前 rewrite source") {
+		t.Fatalf("fixture did not reproduce mutable rewrite-source mismatch: %v", err)
+	}
+
+	preflight, err := pipelinePreflightManagedDraftCausal(st, 1, true)
+	if err != nil || preflight.Invalidated {
+		t.Fatalf("plan-preserving exact formal review seed was quarantined: %+v err=%v", preflight, err)
+	}
+	if _, err := tools.CurrentChapterPlanCausalCheckpoint(st, 1); err != nil {
+		t.Fatalf("preflight lost exact sealed plan: %v", err)
+	}
+	if _, err := tools.CurrentChapterBodyCheckpoint(st, 1); err != nil {
+		t.Fatalf("preflight lost exact rejected body checkpoint: %v", err)
+	}
+	judgeCalls := 0
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		t.Fatalf("load semantic seed progress: %+v err=%v", progress, err)
+	}
+	judged, err := pipelineJudgePendingDraftHashWithJudge(
+		cliOptions{}, st.Dir(), progress,
+		func(cliOptions, []string) error { judgeCalls++; return nil },
+	)
+	if err != nil || judged || judgeCalls != 0 {
+		t.Fatalf("fresh formal review seed reached static/provider rejudge instead of Host rerender: judged=%v calls=%d err=%v", judged, judgeCalls, err)
+	}
+	if got, err := st.Drafts.LoadDraft(1); err != nil || got != finalBody {
+		t.Fatalf("fresh formal review seed was removed before Host rerender: body=%q err=%v", got, err)
+	}
+
+	review.Dimensions[1].Verdict = "warning"
+	if err := st.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	preflight, err = pipelinePreflightManagedDraftCausal(st, 1, true)
+	if err != nil || !preflight.Invalidated {
+		t.Fatalf("character-failing review bypassed causal quarantine: %+v err=%v", preflight, err)
 	}
 }
 

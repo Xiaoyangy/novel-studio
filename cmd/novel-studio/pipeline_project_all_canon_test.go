@@ -87,6 +87,47 @@ func TestProjectAllPromoteRerunRecoversAfterStartChapter(t *testing.T) {
 	}
 }
 
+func TestPipelinePromoteIsActiveReceiptRecovery(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor *domain.RealizationCursorV2
+		want   bool
+	}{
+		{
+			name: "exact active next chapter receipt",
+			cursor: &domain.RealizationCursorV2{
+				NextPromoteChapter:           2,
+				ActivePromotedChapter:        2,
+				ActivePromotionReceiptDigest: "sha256:active",
+			},
+			want: true,
+		},
+		{
+			name: "different active chapter",
+			cursor: &domain.RealizationCursorV2{
+				NextPromoteChapter:           2,
+				ActivePromotedChapter:        3,
+				ActivePromotionReceiptDigest: "sha256:active",
+			},
+		},
+		{
+			name: "missing active receipt",
+			cursor: &domain.RealizationCursorV2{
+				NextPromoteChapter:    2,
+				ActivePromotedChapter: 2,
+			},
+		},
+		{name: "nil cursor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pipelinePromoteIsActiveReceiptRecovery(tt.cursor); got != tt.want {
+				t.Fatalf("pipelinePromoteIsActiveReceiptRecovery()=%v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProjectAllPromoteQuarantinesLegacyDraftSurfaces(t *testing.T) {
 	opts, st, _ := projectAllCmdTestInstallThreeChapterCLIProjection(t)
 	for rel, body := range map[string]string{

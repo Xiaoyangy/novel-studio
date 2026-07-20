@@ -100,6 +100,10 @@ func buildPipelineProjectedChapterBundle(
 	if err != nil {
 		return domain.ProjectedChapterBundle{}, registry, err
 	}
+	registry.RegistryRoot, err = domain.ComputeObligationRegistryV2Root(registry)
+	if err != nil {
+		return domain.ProjectedChapterBundle{}, registry, fmt.Errorf("project-all sign next obligation registry: %w", err)
+	}
 	delta := pipelineProjectAllDelta(chapter, simulation, plan, consumed, carried, created)
 	if err := validatePipelineProjectAllRevealBudget(plan); err != nil {
 		return domain.ProjectedChapterBundle{}, registry, err

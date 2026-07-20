@@ -64,13 +64,18 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 			}
 		}
 		n := consecutive.Add(1)
+		lastResponse := strings.TrimSpace(info.Message.TextContent())
+		if runes := []rune(lastResponse); len(runes) > 600 {
+			lastResponse = string(runes[:600]) + "…"
+		}
 		if n > subagentMaxConsecutiveBlocks {
 			slog.Error("subagent stop_guard 连续阻拦超限，升级为终止",
 				"module", "host.reminder", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
 			return agentcore.StopDecision{Allow: false, Escalate: true}
 		}
 		slog.Warn("subagent stop_guard 拦截 end_turn",
-			"module", "host.reminder", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
+			"module", "host.reminder", "agent", agentName, "turn", info.TurnIndex, "consecutive", n,
+			"last_response", lastResponse)
 		return agentcore.StopDecision{Allow: false, InjectMessage: blockMsg}
 	}
 }
@@ -113,6 +118,14 @@ func latestCheckpointSeq(st *store.Store) int64 {
 // is deliberately insufficient: the writer still has to consume that one-shot
 // authorization and emit a different draft before control returns to Host.
 func draftPauseBoundaryReached(st *store.Store, structuralBaseline int64) bool {
+	// A verified frozen-render lease makes a new whole-body draft checkpoint the
+	// mandatory Host boundary. Both Drafter and Coordinator must yield here even
+	// when the local static inspection exposes a pre-judge soft edit: the outer
+	// pipeline owns exact-hash/static/provider ordering and may decide the next
+	// bounded turn only after inspecting these bytes.
+	if pipelineRenderDraftCheckpointReached(st, structuralBaseline) {
+		return true
+	}
 	if awaitingDraftExternalRejudge(st) {
 		return true
 	}
@@ -122,6 +135,18 @@ func draftPauseBoundaryReached(st *store.Store, structuralBaseline int64) bool {
 	}
 	cp := st.Checkpoints.LatestByStep(domain.ChapterScope(chapter), "draft-structural-block")
 	return cp != nil && cp.Seq > structuralBaseline && tools.CurrentDraftHasLocalStructuralBlock(st, chapter)
+}
+
+func pipelineRenderDraftCheckpointReached(st *store.Store, baseline int64) bool {
+	if st == nil {
+		return false
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil || lock == nil || lock.Mode != domain.PipelineExecutionRender || lock.TargetChapter <= 0 {
+		return false
+	}
+	cp := st.Checkpoints.LatestByStep(domain.ChapterScope(lock.TargetChapter), "draft")
+	return cp != nil && cp.Seq > baseline
 }
 
 func activeDraftChapter(st *store.Store) int {
@@ -163,7 +188,7 @@ func currentDraftLocalSoftEditPending(st *store.Store) bool {
 func NewPlannerStopGuard(st *store.Store) agentcore.StopGuard {
 	return newCheckpointDeltaGuard(st, "planner",
 		[]string{"plan"},
-		"你必须调用 plan_chapter（或两阶段 plan_structure + plan_details finalize=true）把本章计划落盘后才能结束。只输出计划文字等于没落盘。",
+		"禁止解释或结束。Project-Arc task 已附 host_prefetched_novel_context 并已签发访问收据；立即调用 plan_structure 保存本章骨架，再调用 plan_details 分批补齐并 finalize=true。只输出计划文字等于没落盘。",
 	)
 }
 
@@ -182,7 +207,7 @@ func NewWorldSimulatorStopGuard(st *store.Store) agentcore.StopGuard {
 func NewArchitectStopGuard(st *store.Store) agentcore.StopGuard {
 	return newCheckpointDeltaGuard(st, "architect",
 		[]string{
-			"premise", "outline", "layered_outline", "characters", "world_rules", "book_world",
+			"premise", "outline", "layered_outline", "characters", "world_rules", "book_world", "world_codex",
 			"expand_arc", "append_volume", "update_compass", "complete_book",
 			// 开局/弧末 world_tick 也是 architect 的合法收尾产物：被派去只跑 save_world_tick
 			// （第 1 章前的离屏世界推演、或弧末推进）时，落盘 world_tick 即算完成，否则

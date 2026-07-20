@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -149,7 +151,11 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		if err != nil {
 			return nil, fmt.Errorf("render 加载冻结正文上下文失败: %w", err)
 		}
-		return raw, nil
+		raw, err = t.attachSealedShortRenderWordBudget(raw, lock.TargetChapter)
+		if err != nil {
+			return nil, fmt.Errorf("render 注入 sealed 短篇动态字数合同失败: %w", err)
+		}
+		return t.attachSealedRerenderFeedback(raw, lock.TargetChapter, lock.PlanDigest)
 	}
 
 	requestedChapter := a.Chapter
@@ -265,6 +271,94 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	return t.finalizeContextWithAccessReceipt(result, a.Chapter, a.Profile)
 }
 
+// attachSealedRerenderFeedback is the sole post-freeze prose overlay.  It is
+// enabled when the current formal review rejects the exact committed body that
+// is still the current draft, or when a later exact replacement hash has itself
+// received a complete blocking DeepSeek judgment. This keeps the immutable POV
+// plan authoritative while allowing the next one-shot render to see the newest
+// bounded feedback without exposing either rejected prose body.
+func (t *ContextTool) attachSealedRerenderFeedback(
+	raw json.RawMessage,
+	chapter int,
+	planDigest string,
+) (json.RawMessage, error) {
+	if t == nil || t.store == nil {
+		return raw, nil
+	}
+	freshFormalSeed := ReviewRequiresFreshDraft(t.store, chapter)
+	externalRejectedReplacement := false
+	if formalPlan, loadErr := t.store.Drafts.LoadChapterPlan(chapter); loadErr == nil && formalPlan != nil {
+		externalRejectedReplacement = expressionOnlyReviewPlanReusePhase(t.store, chapter, *formalPlan) ==
+			expressionOnlyReviewReuseRejectedReplacement
+	}
+	if !freshFormalSeed && !externalRejectedReplacement {
+		return raw, nil
+	}
+	progress, err := t.store.Progress.Load()
+	if err != nil || progress == nil || !slices.Contains(progress.PendingRewrites, chapter) {
+		return raw, err
+	}
+	plan, err := CurrentChapterPlanCheckpoint(t.store, chapter)
+	if err != nil || plan == nil || plan.Digest != strings.TrimSpace(planDigest) {
+		return nil, fmt.Errorf("sealed rerender feedback plan binding mismatch: plan=%v err=%v", plan, err)
+	}
+	review, err := t.store.World.LoadReview(chapter)
+	if err != nil {
+		return nil, fmt.Errorf("sealed rerender feedback load exact review: %w", err)
+	}
+	if review == nil {
+		return nil, fmt.Errorf("sealed rerender feedback exact review is missing")
+	}
+	briefPath := filepath.Join(t.store.Dir(), "reviews", fmt.Sprintf("%02d_rewrite_brief.md", chapter))
+	brief, err := os.ReadFile(briefPath)
+	if err != nil {
+		return nil, fmt.Errorf("sealed rerender feedback missing exact rewrite brief: %w", err)
+	}
+	if strings.TrimSpace(string(brief)) == "" || !strings.Contains(string(brief), review.BodySHA256) {
+		return nil, fmt.Errorf("sealed rerender feedback rewrite brief is not bound to body %s", review.BodySHA256)
+	}
+	feedback := map[string]any{
+		"chapter":                     chapter,
+		"plan_digest":                 plan.Digest,
+		"body_sha256":                 review.BodySHA256,
+		"formal_rejected_body_sha256": review.BodySHA256,
+		"verdict":                     review.Verdict,
+		"summary":                     review.Summary,
+		"issues":                      compactDraftReviewIssues(review.Issues, 4),
+		"rewrite_brief":               string(brief),
+		"policy":                      "只修复 exact-body 正式拒稿与最新 exact-body DeepSeek 阻断列出的具体问题；复用冻结 world simulation、POV plan、事实结果与知识边界，不得重规划、照抄示例修法或复用任一旧稿表面。",
+	}
+	if diagnostics := actionableRewriteDimensionDiagnostics(review, review.Verdict); len(diagnostics) > 0 {
+		// This structured copy makes recovery of an already-written rewrite brief
+		// safe: old briefs may only say “详见第8维”, but the exact structured
+		// review still carries the rule-by-rule comment. It is an expression-only
+		// overlay and does not mutate or supersede the frozen plan.
+		feedback["blocking_dimension_feedback"] = diagnostics
+	}
+	if gate, gateErr := t.loadMechanicalGateBriefForBody(chapter, review.BodySHA256); gateErr == nil && gate != nil {
+		feedback["mechanical_gate"] = gate
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("decode frozen context for semantic rerender overlay: %w", err)
+	}
+	if externalRejectedReplacement {
+		externalFeedback, externalErr := loadDraftExternalJudgeContextWithStore(t.store, chapter)
+		if externalErr != nil {
+			return nil, fmt.Errorf("sealed rerender feedback load exact external review: %w", externalErr)
+		}
+		if externalFeedback == nil || externalFeedback["evaluated_body_sha256"] == "" {
+			return nil, fmt.Errorf("sealed rerender feedback exact external review is missing")
+		}
+		feedback["external_rejected_body_sha256"] = externalFeedback["evaluated_body_sha256"]
+		feedback["external_ai_review"] = externalFeedback
+		payload["draft_external_ai_review"] = externalFeedback
+		payload["draft_external_ai_review_policy"] = "这是最新 exact-body 拒稿的净化诊断；只吸收具体证据与修改计划，不得读取、拼贴或换皮复现被拒正文。"
+	}
+	payload["sealed_rerender_feedback"] = feedback
+	return json.Marshal(payload)
+}
+
 func contextBudget(chapter int, profile string) int {
 	if chapter <= 0 {
 		return 60 * 1024
@@ -291,8 +385,21 @@ func contextHardBudget(chapter int, profile string) int {
 	return contextBudget(chapter, profile)
 }
 
-func allowRewritePlanningCriticalOverflow(result map[string]any, chapter int, profile string) bool {
-	return chapter > 0 && profile == "planning" && hasContextKey(result, "rewrite_source")
+func planningCriticalOverflowMode(result map[string]any, chapter int, profile string) (string, string, bool) {
+	if chapter <= 0 || profile != "planning" {
+		return "", "", false
+	}
+	if _, sealed := result["sealed_convergence_replan_context"]; sealed {
+		return "sealed_convergence_critical_overflow",
+			"已删除未来大纲、全量 projected 历史、角色 authority 包和失败正文表面；仅当前章 outline、精确 protagonist projection、immutable state contract binding、open obligations、receipts、user rules 与净化 diagnostics 可使用 planning 硬上限。",
+			true
+	}
+	if hasContextKey(result, "rewrite_source") {
+		return "rewrite_critical_overflow",
+			"已按首选预算删除镜像、宽快照与低优先级资料；仅受保护的返工正文、brief 和当前任务使用硬上限。",
+			true
+	}
+	return "", "", false
 }
 
 func finalizeContextResult(result map[string]any, chapter int, profile string) (json.RawMessage, error) {
@@ -310,21 +417,22 @@ func finalizeContextResult(result map[string]any, chapter int, profile string) (
 	if !trimByBudget(result, preferredBudget, chapter) {
 		data, _ := json.Marshal(result)
 		hardBudget := preferredBudget
-		if allowRewritePlanningCriticalOverflow(result, chapter, profile) {
+		overflowMode, overflowPolicy, allowOverflow := planningCriticalOverflowMode(result, chapter, profile)
+		if allowOverflow {
 			hardBudget = contextHardBudget(chapter, profile)
 		}
 		if hardBudget <= preferredBudget || len(data) > hardBudget {
 			return nil, fmt.Errorf("novel_context profile=%q 的关键上下文无法安全收敛：preferred=%d hard=%d actual=%d critical=%s；请压缩上游 plan，不会静默删除当前任务: %w", profile, preferredBudget, hardBudget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
 		}
 		result["_context_budget"] = map[string]any{
-			"mode":             "rewrite_critical_overflow",
+			"mode":             overflowMode,
 			"preferred_bytes":  preferredBudget,
 			"hard_limit_bytes": hardBudget,
-			"policy":           "已按首选预算删除镜像、宽快照与低优先级资料；仅受保护的返工正文、brief 和当前任务使用硬上限。",
+			"policy":           overflowPolicy,
 		}
 		if !trimByBudget(result, hardBudget, chapter) {
 			data, _ = json.Marshal(result)
-			return nil, fmt.Errorf("novel_context profile=%q 的返工关键上下文超过硬上限：preferred=%d hard=%d actual=%d critical=%s: %w", profile, preferredBudget, hardBudget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
+			return nil, fmt.Errorf("novel_context profile=%q 的关键上下文超过硬上限：mode=%s preferred=%d hard=%d actual=%d critical=%s: %w", profile, overflowMode, preferredBudget, hardBudget, len(data), largestContextKeySizes(result, 8), errs.ErrToolPrecondition)
 		}
 		finalBudget = hardBudget
 	}
@@ -721,16 +829,34 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 			}
 		}
 	}
+	factReceiptContext, factReceiptErr := currentRAGFactReceiptContext(t.store, chapter)
+	if factReceiptErr != nil {
+		return nil, true, fmt.Errorf("staged plan repair current RAG fact receipt: %w", factReceiptErr)
+	}
+	if factReceiptContext != nil {
+		pack, _ := result["reference_pack"].(map[string]any)
+		if pack == nil {
+			pack = map[string]any{}
+		}
+		pack["rag_fact_receipt"] = factReceiptContext
+		result["reference_pack"] = pack
+	}
 	if cards, decodeErr := decodeLiteraryRenderingCards(t.refs.LiteraryRenderingCards); decodeErr != nil {
 		warnings, _ := result["_warnings"].([]string)
 		result["_warnings"] = append(warnings, fmt.Sprintf("literary_rendering_cards 读取失败: %v", decodeErr))
 	} else if cards != nil {
-		result["reference_pack"] = map[string]any{"literary_rendering_cards": cards}
+		pack, _ := result["reference_pack"].(map[string]any)
+		if pack == nil {
+			pack = map[string]any{}
+		}
+		pack["literary_rendering_cards"] = cards
+		result["reference_pack"] = pack
 	}
 	if simulationStage != nil {
 		result["chapter_world_simulation"] = simulationStage
 	}
 	if rewrite {
+		workingBodySHA := currentChapterContextBodySHA(t.store, chapter)
 		brief := map[string]any{}
 		if progress, loadErr := t.store.Progress.Load(); loadErr == nil && progress != nil && strings.TrimSpace(progress.RewriteReason) != "" {
 			brief["reason"] = progress.RewriteReason
@@ -740,10 +866,10 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 			brief["issues"] = review.Issues
 			brief["contract_misses"] = review.ContractMisses
 		}
-		if gate, gateErr := t.loadMechanicalGateBrief(chapter); gateErr == nil && gate != nil {
+		if gate, gateErr := t.loadMechanicalGateBriefForBody(chapter, workingBodySHA); gateErr == nil && gate != nil {
 			brief["mechanical_gate"] = gate
 		}
-		if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
+		if analysis, aiErr := t.loadAIVoiceRedFlagsForBody(chapter, workingBodySHA); aiErr == nil && analysis != nil {
 			if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
 				brief["ai_voice_redflags"] = actionable
 			}

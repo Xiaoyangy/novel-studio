@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -203,7 +204,10 @@ func TestDraftProfileBuildsSelectiveRenderPacket(t *testing.T) {
 			t.Fatalf("draft render packet leaked %q: %s", forbidden, serialized)
 		}
 	}
-	if len(raw) > 7000 {
+	// The prospective anti-AI contract is now part of the render input rather
+	// than a post-draft review-only artifact. Keep a tight cap, but reserve the
+	// small explicit allowance needed for those qualitative first-draft rules.
+	if len(raw) > 7300 {
 		t.Fatalf("prose-facing packet regrew into a planning dossier: %d bytes", len(raw))
 	}
 	if len(packet.CandidateBeats) != 3 || packet.CandidateBeats[0].Event != "饭桌压力" {
@@ -409,7 +413,7 @@ func TestDraftProfileHidesRewriteBodyButKeepsImmutableSourceContract(t *testing.
 	}
 }
 
-func TestDraftRenderPacketKeepsEventTimingWithoutAntiAIRecipe(t *testing.T) {
+func TestDraftRenderPacketProjectsProseSafeAntiAIContract(t *testing.T) {
 	objectTiming := "系统绑定只回应一次；旧债操作后必须留出可感知等待，再给拒绝；首次结算只能由主角在巡查结束后主动查看。"
 	rhythmTiming := "饭桌长问短答，风险发现处收短，电话等待各自成段。"
 	dialogueFunction := "饭桌对白承担权力博弈，不能让人物轮流说明规则。"
@@ -427,6 +431,15 @@ func TestDraftRenderPacketKeepsEventTimingWithoutAntiAIRecipe(t *testing.T) {
 	}}
 
 	packet := newDraftRenderPacket(plan)
+	contract := packet.AntiAIRenderContract
+	if contract == nil ||
+		!slices.Contains(contract.RiskSignals, "物件回应等距") ||
+		!slices.Contains(contract.RiskSignals, "对白传送带") ||
+		!slices.Contains(contract.CounterMoves, "三次反馈由人物行动和场景切换错开") ||
+		contract.SentenceRhythmPolicy != rhythmTiming ||
+		!slices.Contains(contract.ReviewChecks, "旧债前是否真的留下等待空白？") {
+		t.Fatalf("chapter-specific anti-AI contract did not reach prose packet: %#v", contract)
+	}
 	got := packet.EventTimingSafeguards
 	if got == nil ||
 		!strings.Contains(got.ObjectResponseBudget, "系统绑定只回应一次") ||
@@ -445,14 +458,65 @@ func TestDraftRenderPacketKeepsEventTimingWithoutAntiAIRecipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"anti_ai_execution_plan", "risk_signals", "counter_moves", "sentence_rhythm_policy", "review_checks", rhythmTiming} {
+	for _, forbidden := range []string{"anti_ai_execution_plan", "每3句", "CV", "0.62"} {
 		if strings.Contains(string(raw), forbidden) {
-			t.Fatalf("planning/review recipe %q leaked into prose packet: %s", forbidden, raw)
+			t.Fatalf("detector/fixed-cadence recipe %q leaked into prose packet: %s", forbidden, raw)
 		}
 	}
 }
 
-func TestDraftRenderPacketHidesQualitativeAndMetricAntiAIRecipesButKeepsStoryTiming(t *testing.T) {
+func TestDraftRenderPacketProvidesC6ToC12ProseSafeAntiAIBaselineWhenPlanIsEmpty(t *testing.T) {
+	for chapter := 6; chapter <= 12; chapter++ {
+		t.Run(fmt.Sprintf("chapter_%02d", chapter), func(t *testing.T) {
+			packet := newDraftRenderPacket(domain.ChapterPlan{Chapter: chapter})
+			contract := packet.AntiAIRenderContract
+			if contract == nil ||
+				len(contract.RiskSignals) == 0 ||
+				len(contract.CounterMoves) == 0 ||
+				strings.TrimSpace(contract.SentenceRhythmPolicy) == "" ||
+				strings.TrimSpace(contract.ObjectResponseBudget) == "" ||
+				strings.TrimSpace(contract.DialogueFunctionPlan) == "" ||
+				len(contract.ReviewChecks) == 0 {
+				t.Fatalf("C%d empty formal anti-AI plan did not receive the first-draft baseline: %#v", chapter, contract)
+			}
+			raw, err := json.Marshal(contract)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"首稿前执行",
+				"防台账",
+				"对白传送带",
+				"刺激先改判断",
+				"硬事实并场",
+				"配角对白必须以主动误解、反驳或拒绝改变局面",
+				"POV 内省落在判断摇摆、欲望冲突或可感代价",
+				"不撒通用身体反应",
+				"连续“没有 X，只 Y”式戏剧否定",
+				"多源证据只保留 3—5 个功能锚点",
+				"其余概括并场",
+				"不按来源逐项堆成清单",
+				"删掉不承载选择、阻力或后果的弱过渡",
+				"真正命中的动作直接承接后果",
+				"句段随观察、犹疑、冲突和余波换挡",
+				"物件或界面只在改变判断、关系或安全后果时回应",
+			} {
+				if !strings.Contains(string(raw), want) {
+					t.Fatalf("C%d default first-draft anti-AI rule %q is missing: %s", chapter, want, raw)
+				}
+			}
+			for _, forbidden := range []string{
+				"CV", "TTR", "0.62", "0.72", "12%", "检测概率", "检测阈值", "低于4%", "每3句", "每五句",
+			} {
+				if strings.Contains(string(raw), forbidden) {
+					t.Fatalf("C%d detector/fixed-cadence recipe %q leaked into default contract: %s", chapter, forbidden, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestDraftRenderPacketKeepsQualitativeAntiAIRulesAndHidesMetricRecipes(t *testing.T) {
 	objectTiming := "旧债拒付后系统静默；人物完成选择后才允许一次结算回应。"
 	dialogueFunction := "饭桌对白承担权力博弈，不能让人物轮流说明规则。"
 	plan := domain.ChapterPlan{CausalSimulation: domain.ChapterCausalSimulation{
@@ -471,7 +535,7 @@ func TestDraftRenderPacketHidesQualitativeAndMetricAntiAIRecipesButKeepsStoryTim
 			ObjectResponseBudget: objectTiming,
 			DialogueFunctionPlan: dialogueFunction,
 			ReviewChecks: []string{
-				"全文检测概率是否低于4%",
+				"全文检测概率是否低于12%阈值",
 				"风险发现是否真正改变了人物选择？",
 				"父亲护场是否留下后续关系余波？",
 				"第四条检查不应进入精简包",
@@ -480,14 +544,35 @@ func TestDraftRenderPacketHidesQualitativeAndMetricAntiAIRecipesButKeepsStoryTim
 	}}
 
 	packet := newDraftRenderPacket(plan)
+	contract := packet.AntiAIRenderContract
+	if contract == nil {
+		t.Fatal("prose-safe anti-AI render contract is missing")
+	}
+	contractJSON, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"对白传送带压掉了人物迟疑",
+		"让主角先误判，再由眼前安全后果迫使他改口",
+		"让父亲的护场改变主角随后保密的选择",
+		"饭桌保留长问短答",
+		"风险发现处自然收短",
+		"风险发现是否真正改变了人物选择",
+		"父亲护场是否留下后续关系余波",
+	} {
+		if !strings.Contains(string(contractJSON), want) {
+			t.Fatalf("prose-safe anti-AI rule %q was dropped: %s", want, contractJSON)
+		}
+	}
 	got := packet.EventTimingSafeguards
 	raw, err := json.Marshal(packet)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, forbidden := range []string{
-		"CV", "TTR", "0.62", "0.72", "4%", "每三句", "每五句", "检测概率",
-		"饭桌保留长问短答", "让主角先误判", "risk_signals", "counter_moves",
+		"CV", "TTR", "0.62", "0.72", "12%", "阈值", "每三句", "每五句", "检测概率",
+		"anti_ai_execution_plan",
 	} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("anti-AI recipe %q leaked into prose-facing packet: %s", forbidden, raw)
@@ -1254,10 +1339,37 @@ func TestNonDraftProfileKeepsPlanningContext(t *testing.T) {
 func TestPlanningProfileUsesProjectionWithoutFullCharacterDecisions(t *testing.T) {
 	result := map[string]any{
 		"outline": []string{"full outline"},
+		"next_chapter_outline": domain.OutlineEntry{
+			Chapter: 3, Title: "下一章", CoreEvent: "保留核心", Hook: "保留钩子", Scenes: []string{"保留完整下一章"},
+			ContractRefs: []domain.StoryContractRef{{ID: "root-mirror-receipt", PlannedResolution: "删除结构收据"}},
+		},
+		"future_outline_window": []domain.OutlineEntry{
+			{Chapter: 2, Title: "当前重复", Scenes: []string{"删除"}},
+			{Chapter: 3, Title: "下一章重复", Scenes: []string{"删除"}},
+			{Chapter: 4, Title: "远期章", CoreEvent: "只保留核心", Scenes: []string{"删除详细场景"}},
+		},
 		"working_memory": map[string]any{
-			"current_chapter_outline": "keep",
+			"current_chapter_outline": domain.OutlineEntry{Chapter: 2, Title: "当前章"},
+			"next_chapter_outline": domain.OutlineEntry{
+				Chapter: 3, Title: "下一章", CoreEvent: "保留核心", Hook: "保留钩子", Scenes: []string{"保留完整下一章"},
+				ContractRefs: []domain.StoryContractRef{{ID: "working-receipt", PlannedResolution: "删除结构收据"}},
+			},
+			"future_outline_window": []domain.OutlineEntry{
+				{Chapter: 2, Title: "当前重复", Scenes: []string{"删除"}},
+				{Chapter: 3, Title: "下一章重复", Scenes: []string{"删除"}},
+				{Chapter: 4, Title: "远期章", CoreEvent: "只保留核心", Scenes: []string{"删除详细场景"}},
+			},
+			"horizon_events":          []string{"已由正式 simulation 消费"},
+			"horizon_events_usage":    "删除重复说明",
 			"progression_snapshot":    "drop",
 			"character_stage_records": "keep",
+		},
+		"project_all_state": domain.ProjectedPlanningContextV2{
+			Version:         domain.ProjectedPlanningContextV2Version,
+			CumulativeState: []domain.ProjectedPlanningStateFactV2{{Subject: "重复状态"}},
+			RecentTransitions: []domain.ProjectedPlanningTransitionV2{
+				{Chapter: 1}, {Chapter: 2}, {Chapter: 3},
+			},
 		},
 		"chapter_world_simulation": map[string]any{
 			"status":                 "ready",
@@ -1284,6 +1396,239 @@ func TestPlanningProfileUsesProjectionWithoutFullCharacterDecisions(t *testing.T
 	if _, exists := working["character_stage_records"]; exists {
 		t.Fatal("planning profile should trust the finalized protagonist projection instead of repeating all character stages")
 	}
+	if _, exists := working["horizon_events"]; exists {
+		t.Fatal("ready planning profile replayed horizon events already consumed by simulation")
+	}
+	future, ok := working["future_outline_window"].([]domain.OutlineEntry)
+	if !ok || len(future) != 1 || future[0].Chapter != 4 || len(future[0].Scenes) != 0 {
+		t.Fatalf("planning future outline was not de-duplicated to lean horizon: %#v", working["future_outline_window"])
+	}
+	if next := working["next_chapter_outline"].(domain.OutlineEntry); len(next.Scenes) != 1 ||
+		next.CoreEvent != "保留核心" || next.Hook != "保留钩子" || len(next.ContractRefs) != 0 {
+		t.Fatalf("planning profile damaged the adjacent narrative boundary or retained receipts: %#v", next)
+	}
+	rootNext := result["next_chapter_outline"].(domain.OutlineEntry)
+	if len(rootNext.Scenes) != 1 || rootNext.CoreEvent != "保留核心" || rootNext.Hook != "保留钩子" || len(rootNext.ContractRefs) != 0 {
+		t.Fatalf("planning root next-outline mirror was not compacted consistently: %#v", rootNext)
+	}
+	rootFuture, ok := result["future_outline_window"].([]domain.OutlineEntry)
+	if !ok || !reflect.DeepEqual(rootFuture, future) {
+		t.Fatalf("planning root future-outline mirror diverged from working memory: root=%#v working=%#v", rootFuture, future)
+	}
+	projected := result["project_all_state"].(map[string]any)
+	if _, exists := projected["cumulative_state"]; exists {
+		t.Fatalf("project-all state retained cumulative state after simulation consumption: %+v", projected)
+	}
+	recent := projected["recent_transitions"].([]any)
+	if len(recent) != 2 || recent[0].(map[string]any)["chapter"] != 2 {
+		t.Fatalf("project-all state did not retain the last two transition receipts: %+v", projected)
+	}
+	for _, raw := range recent {
+		if _, leaked := raw.(map[string]any)["delta"]; leaked {
+			t.Fatalf("ready planning replayed a full historical transition delta: %+v", raw)
+		}
+	}
+}
+
+func TestCompactReadyPlanningProjectAllStateKeepsLastTwoReceiptOnlyTransitions(t *testing.T) {
+	largeDeltaValue := strings.Repeat("historical-projected-delta-anchor|", 220)
+	transitions := make([]domain.ProjectedPlanningTransitionV2, 0, 4)
+	for i, digest := range []string{"bundle-1", "bundle-2", "bundle-3", "bundle-4"} {
+		transitions = append(transitions, domain.ProjectedPlanningTransitionV2{
+			Chapter:                i + 1,
+			BundleDigest:           digest,
+			ProjectedPostStateRoot: "root-" + digest,
+			Delta: domain.ProjectedDelta{
+				Version: domain.ProjectedDeltaV2Version,
+				CharacterState: []domain.StateMutationV2{{
+					StableID: "state", Subject: "角色", Field: "current_action", Operation: "set",
+					After: largeDeltaValue, Cause: "历史章节已消费", Evidence: largeDeltaValue,
+				}},
+			},
+		})
+	}
+	predecessor := &domain.ProjectedPlanningPredecessorContractV2{
+		Chapter: 4, OutgoingConsequenceID: "out-4", OutgoingConsequenceText: "保留相邻章后果",
+		BundleDigest: "bundle-4", ProjectedPostStateRoot: "root-bundle-4",
+	}
+	state := domain.ProjectedPlanningContextV2{
+		Version:             domain.ProjectedPlanningContextV2Version,
+		GenerationID:        "generation-1",
+		NextChapter:         5,
+		ThroughChapter:      4,
+		StateRoot:           "state-root-4",
+		ContextDigest:       "context-digest-4",
+		PredecessorContract: predecessor,
+		CumulativeState: []domain.ProjectedPlanningStateFactV2{{
+			Category: "character", StableID: "state", Subject: "角色", Field: "current_action",
+			Value: "当前动作", ThroughChapter: 4,
+		}},
+		RecentTransitions: transitions,
+		OpenObligations: []domain.ProjectedPlanningObligationV2{{
+			ID: "open-1", Kind: domain.ObligationRevealV2, Contract: "保留开放义务",
+			Hardness: domain.ObligationHardV2, ConsumerChapters: []int{5}, DueNow: true,
+		}},
+	}
+
+	encodedState, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mappedState map[string]any
+	if err := json.Unmarshal(encodedState, &mappedState); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{name: "typed", value: state},
+		{name: "map", value: mappedState},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := map[string]any{"project_all_state": tc.value}
+			compactReadyPlanningProjectAllState(result)
+			after, err := json.Marshal(result["project_all_state"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var compact map[string]any
+			if err := json.Unmarshal(after, &compact); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := compact["cumulative_state"]; exists {
+				t.Fatalf("ready-planning transport retained cumulative state: %s", after)
+			}
+			for key, want := range map[string]any{
+				"version":         domain.ProjectedPlanningContextV2Version,
+				"generation_id":   "generation-1",
+				"next_chapter":    float64(5),
+				"through_chapter": float64(4),
+				"state_root":      "state-root-4",
+				"context_digest":  "context-digest-4",
+			} {
+				if got := compact[key]; !reflect.DeepEqual(got, want) {
+					t.Fatalf("ready-planning transport changed %s: got=%#v want=%#v", key, got, want)
+				}
+			}
+			if predecessor := compact["predecessor_contract"].(map[string]any); predecessor["outgoing_consequence_id"] != "out-4" || predecessor["outgoing_consequence_text"] != "保留相邻章后果" {
+				t.Fatalf("predecessor contract changed: %#v", predecessor)
+			}
+			if obligations := compact["open_obligations"].([]any); len(obligations) != 1 || obligations[0].(map[string]any)["id"] != "open-1" {
+				t.Fatalf("open obligations changed: %#v", obligations)
+			}
+			recent := compact["recent_transitions"].([]any)
+			if len(recent) != 2 {
+				t.Fatalf("recent transition receipt window = %d, want 2", len(recent))
+			}
+			for i, raw := range recent {
+				receipt := raw.(map[string]any)
+				wantChapter := float64(i + 3)
+				wantDigest := []string{"bundle-3", "bundle-4"}[i]
+				if len(receipt) != 3 || receipt["chapter"] != wantChapter || receipt["bundle_digest"] != wantDigest || receipt["projected_post_state_root"] != "root-"+wantDigest {
+					t.Fatalf("transition was not reduced to its exact receipt: %#v", receipt)
+				}
+				if _, leaked := receipt["delta"]; leaked {
+					t.Fatalf("historical delta leaked into ready planning: %#v", receipt)
+				}
+			}
+			saved := len(before) - len(after)
+			t.Logf("%s ready-planning project_all_state saves %d transport bytes", tc.name, saved)
+			if saved <= 2_480 {
+				t.Fatalf("ready-planning compaction saves %d bytes, must exceed the 2,480-byte C12 overflow", saved)
+			}
+		})
+	}
+}
+
+func TestReadyPlanningProfileCompactsTerminalOutlineMirrorsBeforeBudget(t *testing.T) {
+	const currentBoundary = "00:35—00:37内侧开门；00:37—00:38唯一外侧纠正；00:38—00:40警方控制；程野留在外围；00:40后只转入医疗。"
+	refs := make([]domain.StoryContractRef, 0, 22)
+	for i := 0; i < 22; i++ {
+		refs = append(refs, domain.StoryContractRef{
+			ID:                   "terminal-receipt",
+			Kind:                 "non_negotiable",
+			SourceDigest:         "sha256:terminal",
+			PlannedPayoffChapter: 12,
+			PlannedResolution:    strings.Repeat("完整收据持久保存在outline.json，当前只传叙事边界。", 12),
+		})
+	}
+	next := domain.OutlineEntry{
+		Chapter:      12,
+		Title:        "三个月后，镜头没有开",
+		CoreEvent:    "00:40后先就医、作证与证据交接；三个月后才回答关系。",
+		Hook:         "不追加现场行动。",
+		Scenes:       []string{"00:40后只进行医疗接手。", "随后处理证据，三个月后再处理关系。"},
+		ContractRefs: refs,
+	}
+	future := []domain.OutlineEntry{{Chapter: 11, CoreEvent: currentBoundary}, next}
+	result := map[string]any{
+		"current_chapter_outline": domain.OutlineEntry{Chapter: 11, CoreEvent: currentBoundary},
+		"next_chapter_outline":    next,
+		"future_outline_window":   future,
+		"working_memory": map[string]any{
+			"current_chapter_outline": domain.OutlineEntry{Chapter: 11, CoreEvent: currentBoundary},
+			"next_chapter_outline":    next,
+			"future_outline_window":   future,
+			"critical_continuity":     strings.Repeat("w", 20_000),
+		},
+		"project_all_state": map[string]any{
+			"open_obligations": strings.Repeat("o", 13_000),
+			"cumulative_state": strings.Repeat("duplicate", 1_000),
+		},
+		"reference_pack": map[string]any{
+			"literary_rendering_cards": strings.Repeat("r", 8_200),
+		},
+		"chapter_world_simulation": map[string]any{
+			"status":                 "ready",
+			"simulation_id":          "sim-11",
+			"protagonist_projection": domain.ProtagonistDecisionProjection{Protagonist: "程野", ChosenDecision: "留在外围完成唯一纠正"},
+		},
+	}
+	before, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) <= contextBudget(11, "planning") {
+		t.Fatalf("fixture must reproduce the ready-planning overflow: %d", len(before))
+	}
+
+	raw, err := finalizeContextResult(result, 11, "planning")
+	if err != nil {
+		t.Fatalf("ready planning context should converge after mirror compaction: %v", err)
+	}
+	if len(raw) > contextBudget(11, "planning") {
+		t.Fatalf("ready planning result exceeded 64 KiB: %d", len(raw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["future_outline_window"]; exists {
+		t.Fatal("terminal future-outline root mirror survived planning compaction")
+	}
+	working := payload["working_memory"].(map[string]any)
+	if _, exists := working["future_outline_window"]; exists {
+		t.Fatal("terminal future-outline working copy survived planning compaction")
+	}
+	current := working["current_chapter_outline"].(map[string]any)
+	if current["core_event"] != currentBoundary {
+		t.Fatalf("current climax boundary was damaged: %#v", current)
+	}
+	adjacent := working["next_chapter_outline"].(map[string]any)
+	if _, exists := adjacent["contract_refs"]; exists {
+		t.Fatalf("adjacent receipts survived ready planning transport: %#v", adjacent)
+	}
+	for _, want := range []string{"00:40后先就医", "00:40后只进行医疗接手", "三个月后"} {
+		encoded, _ := json.Marshal(adjacent)
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("adjacent narrative boundary lost %q: %s", want, encoded)
+		}
+	}
 }
 
 func TestWorldSimulationProfileKeepsCharacterStateAndDropsWritingMaterial(t *testing.T) {
@@ -1297,11 +1642,33 @@ func TestWorldSimulationProfileKeepsCharacterStateAndDropsWritingMaterial(t *tes
 		},
 		"working_memory": map[string]any{
 			"current_chapter_outline": "keep",
+			"next_chapter_outline": domain.OutlineEntry{
+				Chapter:   12,
+				Title:     "终章",
+				CoreEvent: "00:40后只转入医疗与证据交接。",
+				Hook:      "三个月后再回答关系。",
+				Scenes:    []string{"医疗接手", "证据交接"},
+				ContractRefs: []domain.StoryContractRef{{
+					ID:                   "ending-receipt",
+					Kind:                 "ending",
+					SourceDigest:         "sha256:ending",
+					PlannedPayoffChapter: 12,
+					PlannedResolution:    strings.Repeat("结构收据不属于当前世界事实。", 200),
+				}},
+			},
 			"character_stage_records": "keep",
 			"chapter_world_deltas":    "drop",
 			"side_character_journeys": "drop",
 		},
 		"episodic_memory": map[string]any{"characters": "keep"},
+		"project_all_state": domain.ProjectedPlanningContextV2{
+			Version:         domain.ProjectedPlanningContextV2Version,
+			ContextDigest:   "keep-digest",
+			CumulativeState: []domain.ProjectedPlanningStateFactV2{{Subject: "角色当前状态的重复累计快照"}},
+			RecentTransitions: []domain.ProjectedPlanningTransitionV2{
+				{Chapter: 1}, {Chapter: 2}, {Chapter: 3},
+			},
+		},
 	}
 	applyChapterContextProfile(result, "world_simulation")
 	for _, key := range []string{"outline", "references", "literary_rendering_cards"} {
@@ -1320,7 +1687,97 @@ func TestWorldSimulationProfileKeepsCharacterStateAndDropsWritingMaterial(t *tes
 	if working["current_chapter_outline"] != "keep" || working["character_stage_records"] != "keep" {
 		t.Fatal("world simulation profile lost current chapter or character state")
 	}
+	next := working["next_chapter_outline"].(domain.OutlineEntry)
+	if len(next.ContractRefs) != 0 {
+		t.Fatalf("world simulation profile replayed adjacent structural receipts: %#v", next.ContractRefs)
+	}
+	if next.Title != "终章" || next.CoreEvent != "00:40后只转入医疗与证据交接。" ||
+		next.Hook != "三个月后再回答关系。" || !reflect.DeepEqual(next.Scenes, []string{"医疗接手", "证据交接"}) {
+		t.Fatalf("world simulation profile damaged adjacent narrative boundary: %#v", next)
+	}
 	if _, exists := working["chapter_world_deltas"]; exists {
 		t.Fatal("world simulation profile kept duplicate chapter deltas")
+	}
+	projected := result["project_all_state"].(map[string]any)
+	if cumulative := projected["cumulative_state"].([]domain.ProjectedPlanningStateFactV2); len(cumulative) != 1 {
+		t.Fatalf("world simulation lost the folded direct pre-state: %+v", projected)
+	}
+	recent := projected["recent_transitions"].([]any)
+	if len(recent) != 3 || recent[2].(map[string]any)["chapter"] != 3 || projected["context_digest"] != "keep-digest" {
+		t.Fatalf("world simulation project-all transition receipts are incomplete: %+v", projected)
+	}
+	for _, raw := range recent {
+		if _, leaked := raw.(map[string]any)["delta"]; leaked {
+			t.Fatalf("historical project-all delta survived receipt compaction: %+v", raw)
+		}
+	}
+}
+
+func TestWorldSimulationProfileDropsAdjacentReceiptsBeforeHardBudget(t *testing.T) {
+	const currentBoundary = "00:35—00:37内侧开门；00:37—00:38唯一外侧纠正；00:38—00:40警方控制；程野留在外围；00:40后只转入医疗。"
+	refs := make([]domain.StoryContractRef, 0, 22)
+	for i := 0; i < 22; i++ {
+		refs = append(refs, domain.StoryContractRef{
+			ID:                   "terminal-receipt",
+			Kind:                 "non_negotiable",
+			SourceDigest:         "sha256:terminal",
+			PlannedPayoffChapter: 12,
+			PlannedResolution:    strings.Repeat("完整收据持久保存在outline.json，当前只传叙事边界。", 12),
+		})
+	}
+	next := &domain.OutlineEntry{
+		Chapter:      12,
+		Title:        "三个月后，镜头没有开",
+		CoreEvent:    "00:40后先就医、作证与证据交接；三个月后才回答关系。",
+		Hook:         "不追加现场行动。",
+		Scenes:       []string{"00:40后只进行医疗接手。", "随后处理证据，三个月后再处理关系。"},
+		ContractRefs: refs,
+	}
+	result := map[string]any{
+		"working_memory": map[string]any{
+			"current_chapter_outline": domain.OutlineEntry{Chapter: 11, CoreEvent: currentBoundary},
+			"next_chapter_outline":    next,
+			"horizon_events":          strings.Repeat("h", 15_500),
+			"critical_continuity":     strings.Repeat("w", 42_000),
+		},
+		"simulation_character_authority": map[string]any{
+			"format":  "layered_v1",
+			"entries": []any{map[string]any{"exact_current_authority": strings.Repeat("a", 30_000)}},
+		},
+		"chapter_world_simulation": map[string]any{"status": "missing"},
+	}
+	before, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) <= contextBudget(11, "world_simulation") {
+		t.Fatalf("fixture must reproduce the pre-compaction hard overflow: %d", len(before))
+	}
+
+	raw, err := finalizeContextResult(result, 11, "world_simulation")
+	if err != nil {
+		t.Fatalf("adjacent structural receipts should compact before the hard ceiling: %v", err)
+	}
+	if len(raw) > contextBudget(11, "world_simulation") {
+		t.Fatalf("world simulation result exceeded 96 KiB: %d", len(raw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	working := payload["working_memory"].(map[string]any)
+	current := working["current_chapter_outline"].(map[string]any)
+	if current["core_event"] != currentBoundary {
+		t.Fatalf("current climax boundary was damaged: %#v", current)
+	}
+	adjacent := working["next_chapter_outline"].(map[string]any)
+	if _, exists := adjacent["contract_refs"]; exists {
+		t.Fatalf("adjacent structural receipts survived focused simulation transport: %#v", adjacent)
+	}
+	for _, want := range []string{"00:40后先就医", "00:40后只进行医疗接手", "三个月后"} {
+		encoded, _ := json.Marshal(adjacent)
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("adjacent narrative boundary lost %q: %s", want, encoded)
+		}
 	}
 }

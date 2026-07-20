@@ -144,6 +144,46 @@ func TestSealedCommitMechanicallyRestoresHiddenCharacterLedger(t *testing.T) {
 	}
 }
 
+func TestSealedCommitSchemaOmitsBundleControlledModelPayload(t *testing.T) {
+	st, _, hiddenName, _ := sealedCommitControlTestFixture(t)
+	tool := NewCommitChapterTool(st)
+	props, ok := tool.Schema()["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("sealed commit schema properties missing")
+	}
+	for _, field := range []string{
+		"characters", "key_events", "timeline_events", "foreshadow_updates",
+		"relationship_changes", "state_changes", "character_stage_records",
+		"resource_updates", "resource_proposals",
+	} {
+		if _, exists := props[field]; exists {
+			t.Fatalf("sealed commit schema still asks model for server-controlled %s", field)
+		}
+	}
+	for _, field := range []string{"chapter", "summary", "hook_type", "pov"} {
+		if _, exists := props[field]; !exists {
+			t.Fatalf("sealed commit schema lost body-derived field %s", field)
+		}
+	}
+	if description := tool.Description(); !strings.Contains(description, "服务端精确填充") ||
+		!strings.Contains(description, "完整提交路径复验") {
+		t.Fatalf("sealed commit description does not explain server control plane: %q", description)
+	}
+	if _, err := tool.Execute(
+		context.Background(),
+		json.RawMessage(`{"chapter":1,"summary":"主角确认欠费单后接过钥匙。"}`),
+	); err != nil {
+		t.Fatalf("minimal sealed schema payload did not pass the full commit path: %v", err)
+	}
+	stages, err := st.LoadCharacterStageRecords(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sealedCommitControlTestStage(stages, hiddenName); !ok {
+		t.Fatalf("minimal sealed payload was not hydrated from projected bundle: %+v", stages)
+	}
+}
+
 func TestNonSealedCommitUsesModelLedgerArguments(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

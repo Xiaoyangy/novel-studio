@@ -67,6 +67,96 @@ func TestSimulationCharacterAuthorityCoversRequiredRosterWithoutCap(t *testing.T
 	}
 }
 
+func TestSimulationCharacterAuthorityWorldRuleBlocksDeceasedActorWithoutMarkingResponsibleActorDead(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "唐梨", Role: "旧案关联人及原始影像保全者", Tier: "important"},
+		{Name: "贺铎", Role: "旧案责任人", Tier: "important"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter:   1,
+		Title:     "旧门位草图",
+		CoreEvent: "程野叠合唐梨留下的旧门位草图，并继续核验贺铎的当前行动。",
+		Hook:      "旧记录指向下一处公共交付点。",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"唐梨", "贺铎"} {
+		if err := st.SaveCharacterDossier(domain.CharacterDossier{
+			Version: 1, Character: name, Role: "重要角色", Tier: "important",
+			Profile: domain.CharacterDossierProfile{
+				Description: name + "的角色档案",
+				Desires:     []string{"守住自己掌握的事实与边界"},
+			},
+			CurrentAtStoryStart: domain.CharacterStartState{
+				Location:            "南栈影创园公共区域",
+				Status:              "仍在按自身目标行动",
+				CurrentAction:       "核验眼前记录",
+				Pressure:            "旧案记录正在接受复核",
+				NextIndependentMove: "根据现场记录选择下一步",
+			},
+			Resources: []domain.CharacterResource{{
+				ID: "record", Name: "可复核记录", Kind: "evidence", Status: "available",
+			}},
+			KnowledgeBoundary: "只知道自己亲见和合法取得的信息",
+			DecisionModel:     "先核验记录，再决定是否行动",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.World.SaveWorldRules([]domain.WorldRule{{
+		Category: "旧案责任",
+		Rule:     "唐梨不是服务现案的被动死者，她留下的排班异议、门位记录与原始材料体现其主动抵抗。贺铎对三年前死亡负有直接现实责任。",
+		Boundary: "不得把旧案洗成纯意外。",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	authority := buildSimulationCharacterAuthority(st, 1)
+	byName := make(map[string]simulationCharacterAuthority, len(authority))
+	for _, entry := range authority {
+		byName[entry.Character] = entry
+	}
+	deceased := byName["唐梨"]
+	if !deceased.canonicallyDeceased || deceased.CurrentStatus != "deceased" ||
+		deceased.AuthorityMode != "hold_baseline" || !deceased.Blocking || deceased.projectAllGrounded ||
+		!slices.Contains(deceased.MissingAuthority, "current_actor_not_applicable_deceased") {
+		t.Fatalf("world-rule deceased actor must be held without a current action: %+v", deceased)
+	}
+	if !slices.Contains(deceased.AuthoritySources, "world_rules.json:旧案责任:rule:deceased") {
+		t.Fatalf("deceased authority lacks structured world-rule source: %+v", deceased.AuthoritySources)
+	}
+	responsible := byName["贺铎"]
+	if responsible.canonicallyDeceased || responsible.CurrentStatus == "deceased" ||
+		responsible.AuthorityMode != "authoritative" || responsible.Blocking {
+		t.Fatalf("responsibility for a death must not mark the responsible actor dead: %+v", responsible)
+	}
+	if worldRuleDeclaresCharacterDeceased("贺铎", "贺铎对三年前死亡负有直接现实责任") {
+		t.Fatal("bare responsibility clause was misread as the subject's death")
+	}
+
+	materialized, err := materializeSimulationAuthorityContracts(st, 1, []string{"唐梨"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(materialized) != 1 {
+		t.Fatalf("expected one server-side hold decision, got %+v", materialized)
+	}
+	if err := validateHoldBaselineDecision(1, materialized[0]); err != nil {
+		t.Fatalf("deceased actor was not materialized as exact hold-baseline: %v", err)
+	}
+	active := simulatedDecision("唐梨", "把旧门位草图发给程野", false)
+	if err := validateIncomingSimulationCharacterAuthority(st, 1, []domain.CharacterWorldDecision{active}); err == nil ||
+		!strings.Contains(err.Error(), "hold_baseline") {
+		t.Fatalf("post-death active decision must be rejected by authority guard, got %v", err)
+	}
+}
+
 func TestEffectiveProtagonistDecisionHidesAuthoritySentinel(t *testing.T) {
 	projection := domain.ProtagonistDecisionProjection{
 		ChosenDecision: simulationAuthorityPreserve,
@@ -309,9 +399,13 @@ func TestNormalizeGroundedProtagonistProjectionBindsOnlyChosenDecision(t *testin
 	if projection.ChosenDecision != decision.Decision {
 		t.Fatalf("grounded chosen decision was not server-bound: %+v", projection)
 	}
-	if !slices.Equal(projection.AvailableOptions, []string{"继续观察现场证据", "模型改写后的另一组选项"}) ||
+	if !slices.Equal(projection.AvailableOptions, []string{
+		"先做一笔可核验的小额县内试验",
+		"继续观察现场证据",
+		"模型改写后的另一组选项",
+	}) ||
 		projection.DecisionReason != "模型改写后的理由" {
-		t.Fatalf("server binding overwrote time-correct POV options/reason: %+v", projection)
+		t.Fatalf("server binding did not preserve alternatives while inserting the exact choice: %+v", projection)
 	}
 	if !slices.Equal(projection.ObservableEffects, []string{"额度与货物都能现场核验"}) ||
 		!slices.Equal(projection.CausalChain, []string{"额度出现", "小额试验", "现场核验"}) {
@@ -506,6 +600,80 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 			}
 		})
 	}
+	t.Run("materializer binds paraphrased actions and safely clips grounded output", func(t *testing.T) {
+		candidate := grounded
+		candidate.Decision = "核验专项额度后，再谨慎完成一笔能够撤回的县内小额试验"
+		candidate.Action = "先确认专项额度可靠，再做一笔能撤回的县内小额试验"
+		candidate.AvailableOptions = []string{"暂缓夜市试验", candidate.Decision}
+		candidate.ButterflyEffects = append(
+			[]domain.DecisionButterflyEffect(nil),
+			grounded.ButterflyEffects...,
+		)
+		candidate.ImmediateResult = strings.Repeat(
+			grounded.ImmediateResult+"。",
+			24,
+		)
+		candidate.ButterflyEffects[0].Effect = strings.Repeat(
+			grounded.ButterflyEffects[0].Effect+"。",
+			24,
+		)
+		originalDecision := candidate.Decision
+		materialized := materializeProjectAllGroundedLockedFields(
+			st,
+			1,
+			[]domain.CharacterWorldDecision{candidate},
+		)[0]
+		if materialized.Decision == originalDecision ||
+			!projectAllGroundedActionAuthorized(st, 1, groundedEntry, materialized.Decision) ||
+			!projectAllGroundedActionAuthorized(st, 1, groundedEntry, materialized.Action) {
+			t.Fatalf("paraphrased decision/action were not rebound to grounded outline text: %+v", materialized)
+		}
+		if containsExactString(materialized.AvailableOptions, originalDecision) ||
+			!containsExactString(materialized.AvailableOptions, materialized.Decision) {
+			t.Fatalf("materialized options retained the paraphrase or omitted the bound choice: %+v", materialized.AvailableOptions)
+		}
+		if len([]rune(materialized.ImmediateResult)) > 240 ||
+			len([]rune(materialized.ButterflyEffects[0].Effect)) > 240 {
+			t.Fatalf("grounded projected output was not clipped to budget: result=%d effect=%d",
+				len([]rune(materialized.ImmediateResult)),
+				len([]rune(materialized.ButterflyEffects[0].Effect)),
+			)
+		}
+		if err := validateProjectAllGroundedDecision(
+			st,
+			1,
+			groundedEntry,
+			materialized,
+		); err != nil {
+			t.Fatalf("materialized grounded decision did not validate: %v", err)
+		}
+
+		unsafe := grounded
+		unsafe.ButterflyEffects = append(
+			[]domain.DecisionButterflyEffect(nil),
+			grounded.ButterflyEffects...,
+		)
+		unsafe.ImmediateResult = strings.Repeat(
+			grounded.ImmediateResult+"。",
+			24,
+		) + "地下实验室密码"
+		unsafeMaterialized := materializeProjectAllGroundedLockedFields(
+			st,
+			1,
+			[]domain.CharacterWorldDecision{unsafe},
+		)[0]
+		if unsafeMaterialized.ImmediateResult != unsafe.ImmediateResult {
+			t.Fatalf("clipping hid an unauthorized suffix: %q", unsafeMaterialized.ImmediateResult)
+		}
+		if err := validateProjectAllGroundedDecision(
+			st,
+			1,
+			groundedEntry,
+			unsafeMaterialized,
+		); err == nil {
+			t.Fatal("unauthorized over-budget suffix passed after materialization")
+		}
+	})
 	projection := domain.ProtagonistDecisionProjection{
 		Protagonist:       "林澈",
 		ObservableEffects: []string{"专项额度已在本人界面出现"},
@@ -516,10 +684,24 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		PlanConstraints:   []string{"只能写本人可见的额度与交易结果"},
 		CausalChain:       []string{"专项额度出现", "先核验专项额度", "完成小额县内试验"},
 	}
+	submittedGrounded := grounded
+	submittedGrounded.CurrentGoal = "模型对目标的非精确概括"
+	submittedGrounded.Pressure = "模型对压力的非精确概括"
+	submittedGrounded.Resources = []string{"模型擅自改写的资源"}
+	submittedGrounded.KnowledgeBoundary = "模型擅自扩写的知识边界"
+	submittedGrounded.AvailableOptions = []string{"暂缓夜市试验"}
+	submittedGrounded.ButterflyEffects = append(
+		[]domain.DecisionButterflyEffect(nil),
+		submittedGrounded.ButterflyEffects...,
+	)
+	submittedGrounded.ButterflyEffects[0].Targets = append(
+		submittedGrounded.ButterflyEffects[0].Targets,
+		"交易台账",
+	)
 	args, err := json.Marshal(map[string]any{
 		"chapter":                       1,
 		"time_window":                   "返乡当日晚饭至夜市收摊前",
-		"character_decisions":           []domain.CharacterWorldDecision{grounded},
+		"character_decisions":           []domain.CharacterWorldDecision{submittedGrounded},
 		"authority_contract_characters": []string{"沈知遥"},
 		"protagonist_projection":        projection,
 		"sources":                       []string{contextToken, accessToken, "current_chapter_outline"},
@@ -547,6 +729,35 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 		"先暂缓交易，继续核验专项额度",
 	) {
 		t.Fatalf("server overwrote a grounded, time-correct POV alternative: %+v", simulation.ProtagonistProjection)
+	}
+	var savedGrounded domain.CharacterWorldDecision
+	for _, decision := range simulation.CharacterDecisions {
+		if decision.Character == "林澈" {
+			savedGrounded = decision
+			break
+		}
+	}
+	if savedGrounded.CurrentGoal != groundedEntry.CurrentGoal ||
+		!sameAuthorityStringSet(savedGrounded.Resources, groundedEntry.Resources) ||
+		rewriteFactIdentity(savedGrounded.KnowledgeBoundary) != rewriteFactIdentity(
+			mergedAuthorityKnowledgeBoundary(
+				groundedEntry.KnowledgeBoundary,
+				groundedEntry.RequiredKnowledgeBoundary,
+			),
+		) ||
+		!projectAllGroundedPressureAuthorized(
+			st,
+			1,
+			groundedEntry.CurrentPressure,
+			savedGrounded.Pressure,
+		) {
+		t.Fatalf("server did not bind grounded locked fields: entry=%+v decision=%+v", groundedEntry, savedGrounded)
+	}
+	if !slices.Equal(savedGrounded.AvailableOptions, []string{decisionText, "暂缓夜市试验"}) {
+		t.Fatalf("server did not insert the exact choice while preserving authored alternatives: %+v", savedGrounded.AvailableOptions)
+	}
+	if containsExactString(savedGrounded.ButterflyEffects[0].Targets, "交易台账") {
+		t.Fatalf("server retained an unauthorized bookkeeping target: %+v", savedGrounded.ButterflyEffects)
 	}
 	tamperedProjection := *simulation
 	tamperedProjection.ProtagonistProjection = simulation.ProtagonistProjection
@@ -590,15 +801,22 @@ func TestProjectAllGroundedAuthorityReceiptBindsHumanDecisionAndResume(t *testin
 
 func TestProjectAllGroundingUsesPriorContinuityAndLateEntrySeed(t *testing.T) {
 	st := newChapterSimulationTestStore(t)
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林澈", Role: "主角", Tier: "core"},
+		{Name: "沈知遥", Role: "女主", Tier: "core"},
+		{Name: "邵维", Role: "现场同伙", Tier: "secondary"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
 		Chapter:   2,
 		Title:     "次日复核",
-		CoreEvent: "林澈与沈知遥在次日河畔夜市复核第一笔交易和走线安全。",
+		CoreEvent: "林澈与沈知遥在次日河畔夜市复核第一笔交易和走线安全；邵维因自保拖延封门。",
 		Hook:      "沈知遥留下下一次现场核验要求。",
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"林澈", "沈知遥"} {
+	for _, name := range []string{"林澈", "沈知遥", "邵维"} {
 		if err := st.SaveCharacterDossier(domain.CharacterDossier{
 			Version: 1, Character: name, Role: "核心角色", Tier: "core",
 			Profile:           domain.CharacterDossierProfile{Description: name + "的角色卡"},
@@ -628,6 +846,16 @@ func TestProjectAllGroundingUsesPriorContinuityAndLateEntrySeed(t *testing.T) {
 				DecisionFrame:  domain.CharacterDecisionFrame{DecisionRule: "沈知遥稳定决策规则"},
 				KnowledgeLedger: domain.CharacterKnowledgeLedger{
 					KnownFacts: []string{"沈知遥知道自己的监管职责"}, ForbiddenKnowledge: []string{"林澈未披露的秘密"},
+				},
+			},
+			{
+				Character:      "邵维",
+				CurrentGoal:    "降低自己留在现场的责任风险",
+				Pressure:       "现场记录正在持续固定执行人",
+				ActionTendency: "先执行既有安排，同时保留自保退路",
+				DecisionFrame:  domain.CharacterDecisionFrame{DecisionRule: "先降低自身风险，再决定是否继续服从"},
+				KnowledgeLedger: domain.CharacterKnowledgeLedger{
+					KnownFacts: []string{"邵维知道自己经手的现场安排"}, ForbiddenKnowledge: []string{"外部尚未传回的部署"},
 				},
 			},
 		},
@@ -662,6 +890,11 @@ func TestProjectAllGroundingUsesPriorContinuityAndLateEntrySeed(t *testing.T) {
 		{Chapter: 1, Entity: "林澈", Field: "goal", NewValue: "复核第一笔交易并确认安全边界", FactKey: "林澈:goal"},
 		{Chapter: 1, Entity: "林澈", Field: "pressure", NewValue: "次日复核必须面对票据与走线问题", FactKey: "林澈:pressure"},
 		{Chapter: 1, Entity: "林澈", Field: "decision_frame", NewValue: "先复核票据和现场，再决定是否扩大", FactKey: "林澈:decision_frame"},
+		{Chapter: 1, Entity: "邵维", Field: "location", NewValue: "旧棚内部通路", FactKey: "邵维:location"},
+		{Chapter: 1, Entity: "邵维", Field: "status", NewValue: "仍在执行现场转移，但已开始计算个人责任风险", FactKey: "邵维:status"},
+		{Chapter: 1, Entity: "邵维", Field: "knowledge", NewValue: "只知道本人经手的现场安排与合法通信", FactKey: "邵维:knowledge"},
+		{Chapter: 1, Entity: "邵维", Field: "decision", NewValue: "封住原服务廊并继续转移", FactKey: "邵维:decision"},
+		{Chapter: 1, Entity: "邵维", Field: "completion_state", NewValue: "started", FactKey: "邵维:completion_state"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -673,8 +906,11 @@ func TestProjectAllGroundingUsesPriorContinuityAndLateEntrySeed(t *testing.T) {
 		StateRoot:      sealedRAGGuardDigest(t, "continuity-state-root"),
 		CumulativeState: []domain.ProjectedPlanningStateFactV2{
 			{Category: "character_state", StableID: "lin-state", Subject: "林澈", Field: "state", Value: "等待次日现场复核", ThroughChapter: 1},
+			{Category: "character_state", StableID: "shao-state", Subject: "邵维", Field: "state", Value: "仍在执行现场转移，但已开始计算个人责任风险", ThroughChapter: 1},
 			{Category: "knowledge", StableID: "lin-knowledge", Subject: "林澈", Field: "knowledge_boundary", Value: "只知道本人经历和合法通信获得的信息", ThroughChapter: 1},
+			{Category: "knowledge", StableID: "shao-knowledge", Subject: "邵维", Field: "knowledge_boundary", Value: "只知道本人经手的现场安排与合法通信", ThroughChapter: 1},
 			{Category: "location", StableID: "lin-location", Subject: "林澈", Field: "location", Value: "次日河畔夜市", ThroughChapter: 1},
+			{Category: "location", StableID: "shao-location", Subject: "邵维", Field: "location", Value: "旧棚内部通路", ThroughChapter: 1},
 		},
 	}
 	context.ContextDigest, err = domain.ComputeProjectedPlanningContextV2Digest(context)
@@ -742,6 +978,67 @@ func TestProjectAllGroundingUsesPriorContinuityAndLateEntrySeed(t *testing.T) {
 		lateEntry.CurrentAction != "沈知遥先看现场证据再给出合规边界" ||
 		lateEntry.DecisionModel != "沈知遥稳定决策规则" {
 		t.Fatalf("first late entry could not use its untouched actor seed: %+v", lateEntry)
+	}
+	reentered := byName["邵维"]
+	if reentered.AuthorityMode != "project_all_grounded" || reentered.Blocking ||
+		reentered.CurrentAction != "封住原服务廊并继续转移" ||
+		reentered.CurrentStatus != "仍在执行现场转移，但已开始计算个人责任风险" ||
+		reentered.DecisionModel != "先降低自身风险，再决定是否继续服从" ||
+		!slices.Contains(reentered.AuthoritySources, "derived_terminal_handoff:ongoing_decision") {
+		t.Fatalf("ongoing actor could not re-enter after an offscreen gap: %+v", reentered)
+	}
+	if action := deterministicProjectAllGroundedAction(
+		st,
+		2,
+		reentered,
+		"邵维拖延重新封闭消防门",
+	); action != "邵维因自保拖延封门" {
+		t.Fatalf("re-entered actor could not select the current outline action: %q", action)
+	}
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Version: 1,
+		Chapter: 1,
+		CharacterDecisions: []domain.CharacterWorldDecision{{
+			Character:       "林澈",
+			CurrentGoal:     "复核第一笔交易并确认安全边界",
+			Pressure:        "次日复核必须面对票据与走线问题",
+			Decision:        "完成小额试验后暂不扩大",
+			CompletionState: "completed",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := map[string]simulationCharacterAuthority{}
+	for _, entry := range buildSimulationCharacterAuthority(st, 2) {
+		refreshed[entry.Character] = entry
+	}
+	if got := refreshed["林澈"]; got.CurrentGoal == "复核第一笔交易并确认安全边界" ||
+		!strings.Contains(got.CurrentGoal, "等待次日现场复核") ||
+		got.CurrentPressure != "等待次日现场复核" {
+		t.Fatalf("chapter-opening goal/pressure snapshot leaked into terminal continuity: %+v", got)
+	}
+}
+
+func TestProjectAllOngoingDecisionHandoffRequiresActiveCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		completion string
+		want       string
+	}{
+		{completion: "started", want: "拖延封门"},
+		{completion: "in_progress", want: "拖延封门"},
+		{completion: "completed"},
+		{completion: "instant"},
+		{completion: "blocked"},
+		{completion: ""},
+	} {
+		t.Run(tc.completion, func(t *testing.T) {
+			if got := projectAllOngoingDecisionHandoff(" 拖延封门 ", tc.completion); got != tc.want {
+				t.Fatalf("completion=%q restored decision=%q, want %q", tc.completion, got, tc.want)
+			}
+		})
+	}
+	if got := projectAllOngoingDecisionHandoff("", "started"); got != "" {
+		t.Fatalf("empty decision was restored as %q", got)
 	}
 }
 

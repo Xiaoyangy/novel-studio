@@ -21,6 +21,186 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
+func TestPipelineProjectAllWorldMutationVisibilityDoesNotLeakHiddenState(t *testing.T) {
+	simulation := &domain.ChapterWorldSimulation{
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist: "程野",
+			ObservableEffects: []string{
+				"画外声音提前说出南栈订单，但真实藏匿地仍未确认",
+				"姜岚启动平台保全",
+			},
+		},
+	}
+	tests := []struct {
+		name     string
+		kind     string
+		mutation domain.StateMutationV2
+		want     bool
+	}{
+		{
+			name:     "protagonist owns her state",
+			kind:     "state",
+			mutation: domain.StateMutationV2{Subject: "程野", After: "留在安全停车位"},
+			want:     true,
+		},
+		{
+			name:     "hidden antagonist state",
+			kind:     "state",
+			mutation: domain.StateMutationV2{Subject: "贺铎", After: "准备在00:40转移许知遥"},
+			want:     false,
+		},
+		{
+			name:     "hidden victim location",
+			kind:     "location",
+			mutation: domain.StateMutationV2{Subject: "许知遥", After: "南栈影创园"},
+			want:     false,
+		},
+		{
+			name:     "explicitly observable external effect",
+			kind:     "state",
+			mutation: domain.StateMutationV2{Subject: "姜岚", After: "姜岚启动平台保全"},
+			want:     true,
+		},
+		{
+			name:     "obligation is never protagonist knowledge",
+			kind:     "obligation",
+			mutation: domain.StateMutationV2{Subject: "obl-1", After: "planned"},
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pipelineProjectAllWorldMutationVisibleToProtagonist(
+				tt.kind,
+				tt.mutation,
+				simulation,
+			)
+			if got != tt.want {
+				t.Fatalf("visibility = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepairPipelineProjectAllWorldDeltaVisibilityOnResume(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("visibility-repair", 1); err != nil {
+		t.Fatal(err)
+	}
+	const generationID = "pg2_visibility_repair"
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1,
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "程野",
+			ObservableEffects: []string{"姜岚启动平台保全"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChapterWorldDelta(domain.ChapterWorldDelta{
+		Version:      1,
+		Chapter:      1,
+		GenerationID: generationID,
+		WorldDeltas: []domain.WorldChapterDelta{
+			{Kind: "state", Entity: "程野", Change: "留在安全停车位", VisibleToProtagonist: true},
+			{Kind: "state", Entity: "贺铎", Change: "准备在00:40转移许知遥", VisibleToProtagonist: true},
+			{Kind: "location", Entity: "许知遥", Change: "南栈影创园", VisibleToProtagonist: true},
+			{Kind: "state", Entity: "姜岚", Change: "姜岚启动平台保全", VisibleToProtagonist: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 0, "", "projected_non_canon"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repairPipelineProjectAllWorldDeltaVisibility(st, generationID, 0); err != nil {
+		t.Fatal(err)
+	}
+	delta, err := st.LoadChapterWorldDelta(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta == nil || len(delta.WorldDeltas) != 4 {
+		t.Fatalf("repaired delta missing: %#v", delta)
+	}
+	want := []bool{true, false, false, true}
+	for i, item := range delta.WorldDeltas {
+		if item.VisibleToProtagonist != want[i] {
+			t.Fatalf("world delta %d visibility = %t, want %t: %#v", i, item.VisibleToProtagonist, want[i], item)
+		}
+	}
+}
+
+func TestApplyPipelineProjectAllPredecessorStateToShadowOutlineIsIdempotent(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Title: "第一卷",
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Title: "营救弧",
+			Chapters: []domain.OutlineEntry{
+				{Chapter: 1, Title: "开门", Scenes: []string{"完成救援"}},
+				{Chapter: 2, Title: "后果", Scenes: []string{"进入医疗与取证"}},
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := &domain.ProjectedPlanningPredecessorContractV2{
+		Chapter:                 1,
+		OutgoingConsequenceID:   "out-ch001-rescue-complete",
+		OutgoingConsequenceText: "警方已经救出许知遥并控制两名嫌疑人",
+	}
+	for i := 0; i < 2; i++ {
+		entry, err := applyPipelineProjectAllObligationsToOutline(
+			st,
+			domain.ObligationRegistryV2{},
+			predecessor,
+			2,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil || entry.Chapter != 2 {
+			t.Fatalf("materialized chapter = %#v", entry)
+		}
+	}
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(volumes) != 1 || len(volumes[0].Arcs) != 1 ||
+		len(volumes[0].Arcs[0].Chapters) != 2 {
+		t.Fatalf("layered outline shape changed: %#v", volumes)
+	}
+	entry := &volumes[0].Arcs[0].Chapters[1]
+	count := 0
+	for _, scene := range entry.Scenes {
+		if strings.HasPrefix(scene, "[project-all predecessor-state:out-ch001-rescue-complete]") {
+			count++
+			if !strings.Contains(scene, "不得把同一状态转移重新安排为当前章现场") {
+				t.Fatalf("predecessor guard lost no-restaging rule: %q", scene)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("predecessor guard count = %d, want 1; scenes=%#v", count, entry.Scenes)
+	}
+	first := &volumes[0].Arcs[0].Chapters[0]
+	for _, scene := range first.Scenes {
+		if strings.Contains(scene, "project-all predecessor-state") {
+			t.Fatalf("predecessor guard leaked into predecessor chapter: %#v", first.Scenes)
+		}
+	}
+}
+
 func TestPlanningDependenciesBindProjectAllFoundationCorpus(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -1025,6 +1205,44 @@ func TestPipelineProjectAllRejectsFutureObligationBeyondTerminalChapter(t *testi
 	}
 }
 
+func TestBuildPipelineProjectedChapterBundleSignsNextObligationRegistry(t *testing.T) {
+	generation, registry := projectAllCmdTestGenerationAndRegistry(t, 2)
+	genesis, err := domain.DeriveProjectedChainGenesisV2(generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, outline := projectAllCmdTestArtifacts(t, generation.GenerationID, 1)
+	artifacts.WorldSimulation.CharacterDecisions[0].ButterflyEffects = []domain.DecisionButterflyEffect{{
+		Effect:            "第二章必须回收的可见后果",
+		Targets:           []string{"主角"},
+		TransmissionPath:  "下一次当面核验",
+		ArrivalChapter:    2,
+		Visibility:        "visible",
+		ProtagonistImpact: "主角必须作出新的选择",
+	}}
+	projectAllCmdTestBindPlanningContext(t, artifacts, generation, nil, registry, 1)
+	_, nextRegistry, err := buildPipelineProjectedChapterBundle(
+		generation,
+		outline,
+		genesis,
+		generation.BaseStateRoot,
+		artifacts,
+		registry,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nextRegistry.Obligations) != 1 {
+		t.Fatalf("next registry obligations=%d, want 1", len(nextRegistry.Obligations))
+	}
+	if nextRegistry.RegistryRoot == registry.RegistryRoot {
+		t.Fatal("next registry retained the predecessor root after adding an obligation")
+	}
+	if err := domain.ValidateObligationRegistryV2(nextRegistry); err != nil {
+		t.Fatalf("builder returned unsigned next registry: %v", err)
+	}
+}
+
 func TestProjectAllSealPromoteOutcomeRecoveryAndCycleReset(t *testing.T) {
 	opts, st, identity := projectAllCmdTestInstallThreeChapterCLIProjection(t)
 
@@ -1208,6 +1426,17 @@ func TestProjectAllSealPromoteOutcomeRecoveryAndCycleReset(t *testing.T) {
 	}
 	if _, err := st.ArcCycle().SaveChapterAcceptanceReceipt(acceptances[0]); err != nil {
 		t.Fatalf("restore exact-body acceptance fixture: %v", err)
+	}
+	renderOnlyState := &domain.PipelineState{Stages: []string{"render"}}
+	renderOnlyState.MarkDone("render", domain.PipelineStageEvidence{Stage: "render", Status: "complete"})
+	if reset, err := resetCompletedSealedPipelineCycle(st.Dir(), renderOnlyState); err != nil || reset {
+		t.Fatalf("non-terminal render-only invocation advanced sealed cycle: reset=%v err=%v", reset, err)
+	}
+	if !renderOnlyState.Done("render") {
+		t.Fatal("non-terminal render-only invocation cleared its completed render stage")
+	}
+	if completions, err := st.ArcCycle().ListArcCompletionReceipts(identity.Generation.GenerationID); err != nil || len(completions) != 0 {
+		t.Fatalf("non-terminal render-only invocation published arc completion: receipts=%+v err=%v", completions, err)
 	}
 	reset, err := resetCompletedSplitPipelineCycle(st.Dir(), crashState)
 	if err != nil || !reset {

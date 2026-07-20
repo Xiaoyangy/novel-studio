@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"sort"
 	"strings"
@@ -148,6 +149,9 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 	if craftReceipt != nil {
 		response["rewrite_craft_pack"] = craftReceiptContext(craftReceipt)
 	}
+	if err := attachCurrentRAGFactReceiptContext(t.store, chapter, response); err != nil {
+		return nil, fmt.Errorf("plan_structure expose current RAG fact receipt: %w", err)
+	}
 	return json.Marshal(response)
 }
 
@@ -218,9 +222,15 @@ func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[s
 		return
 	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
-		// 大纲核心事件决定本章“要完成什么”。允许 Planner 自由设计冲突、场景和
-		// 因果，但不再复制进 required_beats 形成两份同义硬清单。
+		// 大纲核心事件决定本章“要完成什么”。The formal contract is what
+		// Drafter, Editor, projected state advancement and sealed actual-match
+		// consume, so a model-authored beat list may not become a second story
+		// authority. Pin one result-level beat to the stable outline and let the
+		// causal plan freely design scenes, choices and evidence beneath it.
 		structure["goal"] = "完整兑现本章大纲核心事件：" + event
+		structure["required_beats"] = []string{
+			"完整兑现本章大纲核心事件（允许压缩、并场和换序，但终态不可改变）：" + event,
+		}
 	}
 	if hook := strings.TrimSpace(entry.Hook); hook != "" {
 		// 章末钩子是章节边界。过去仅追加 required beat，会出现标题仍是本章、
@@ -336,6 +346,7 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if merged == nil {
 		merged = map[string]any{}
 	}
+	stagedExternalReferences, _ := merged["external_reference_plan"].([]any)
 	if len(a.CausalSimulation) == 0 && !a.Finalize {
 		return nil, fmt.Errorf("plan_details 空提交无效：必须提交非空 causal_simulation 补丁，不能只查看进度。当前缺口：%s。下一步只补最靠前的缺口分组: %w",
 			strings.Join(planDetailsGapSummary(t.store, a.Chapter, partial, merged), "；"),
@@ -347,17 +358,16 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	if err != nil {
 		return nil, err
 	}
-	if projectAllContextToken != "" &&
-		!projectAllStateSourcesContain(
-			stringSliceFromAny(merged["context_sources"]),
-			projectAllContextToken,
-		) {
-		return nil, fmt.Errorf(
-			"project-all planner must call novel_context and submit its exact authoritative context binding before finalize: %w",
-			errs.ErrToolPrecondition,
-		)
+	if err := ensurePlanDetailsProjectAllStateSource(
+		t.store,
+		a.Chapter,
+		merged,
+		worldSimulation,
+		projectAllContextToken,
+	); err != nil {
+		return nil, err
 	}
-	if err := applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt); err != nil {
+	if err := applyPlanDetailsSourceAnchors(t.store, a.Chapter, merged, worldSimulation, craftReceipt, stagedExternalReferences); err != nil {
 		return nil, err
 	}
 	normalizations := normalizePartialVisibleCharacterScope(t.store, a.Chapter, merged)
@@ -393,6 +403,9 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		}
 		if craftReceipt != nil {
 			response["rewrite_craft_pack"] = craftReceiptContext(craftReceipt)
+		}
+		if err := attachCurrentRAGFactReceiptContext(t.store, a.Chapter, response); err != nil {
+			return nil, fmt.Errorf("plan_details expose current RAG fact receipt: %w", err)
 		}
 		return json.Marshal(response)
 	}
@@ -511,7 +524,14 @@ func mergeUniqueStringArrays(existing, incoming any) ([]any, bool) {
 	return out, true
 }
 
-func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[string]any, simulation *domain.ChapterWorldSimulation, craftReceipt *domain.CraftRecallReceipt) error {
+func applyPlanDetailsSourceAnchors(
+	st *store.Store,
+	chapter int,
+	merged map[string]any,
+	simulation *domain.ChapterWorldSimulation,
+	craftReceipt *domain.CraftRecallReceipt,
+	stagedExternalReferences ...[]any,
+) error {
 	if st == nil || chapter <= 0 || merged == nil {
 		return nil
 	}
@@ -532,6 +552,17 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 		withoutStaleFactReceipt = append(withoutStaleFactReceipt, source)
 	}
 	contextSources = withoutStaleFactReceipt
+	// A successful novel_context(planning) receipt proves that the server
+	// actually served the canonical planning packet. Keep the model-authored
+	// opaque receipt, but deterministically restore the stable source labels
+	// from that packet as well. Otherwise a staged repair can replace
+	// context_sources with only receipts and then loop forever: finalize quite
+	// correctly requires the restart boundary, foundation, dossiers, outline,
+	// and chapter contract, while the model can no longer reconstruct their
+	// exact canonical labels from the compact gap response.
+	if planningContextAccessSourcesPresent(contextSources) {
+		contextSources = appendServedPlanningContextAnchors(st, chapter, contextSources)
+	}
 	if simulation != nil {
 		merged["world_simulation_id"] = simulation.SimulationID
 		// The world store may retain an authority sentinel when a rewrite must
@@ -571,6 +602,10 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 			return err
 		}
 		contextSources = appendUniqueString(contextSources, factReceipt.SourceToken())
+		normalizePartialRAGFactReferenceAliases(merged, factReceipt)
+		if len(stagedExternalReferences) > 0 {
+			preserveStagedCurrentRAGFactExternalRows(merged, stagedExternalReferences[0], factReceipt)
+		}
 	}
 	normalizePartialCraftReferenceAliases(merged, craftReceipt)
 	removeStalePartialCraftReferences(merged, craftReceipt)
@@ -578,6 +613,524 @@ func applyPlanDetailsSourceAnchors(st *store.Store, chapter int, merged map[stri
 		merged["context_sources"] = contextSources
 	}
 	return nil
+}
+
+func appendServedPlanningContextAnchors(
+	st *store.Store,
+	chapter int,
+	contextSources []string,
+) []string {
+	if st == nil || chapter <= 0 {
+		return contextSources
+	}
+	if policy, err := st.LoadSimulationRestartPolicy(); err == nil && policy != nil && policy.Active {
+		token := "meta/simulation_restart_policy.md"
+		if generationID := strings.TrimSpace(policy.GenerationID); generationID != "" {
+			token += "#generation_id=" + generationID
+		}
+		contextSources = appendUniqueString(contextSources, token)
+	}
+	if foundation, err := st.LoadWorldFoundation(); err == nil && foundation != nil {
+		contextSources = appendUniqueString(contextSources, "meta/world_foundation.md")
+	}
+	if characters, err := st.Characters.Load(); err == nil && len(characters) > 0 {
+		contextSources = appendUniqueString(contextSources, "character_dossiers")
+	}
+	if entries, err := st.Outline.LoadOutline(); err == nil {
+		for _, entry := range entries {
+			if entry.Chapter != chapter {
+				continue
+			}
+			contextSources = appendUniqueString(contextSources, fmt.Sprintf("outline.json#chapter=%d", chapter))
+			contextSources = appendUniqueString(contextSources, fmt.Sprintf("working_memory.current_chapter_outline#chapter=%d", chapter))
+			contextSources = appendUniqueString(contextSources, fmt.Sprintf("progression/chapter_contract#chapter=%d", chapter))
+			break
+		}
+	}
+	if projected, _, err := loadProjectAllStateForExecution(st, chapter); err == nil && projected != nil {
+		contextSources = appendUniqueString(
+			contextSources,
+			"project_all_state#generation_id="+strings.TrimSpace(projected.GenerationID),
+		)
+	}
+	return contextSources
+}
+
+// normalizePartialRAGFactReferenceAliases repairs only aliases that can be
+// proven from the current, already-validated chapter receipt. The alias map is
+// constructed from the receipt's ordered hits instead of parsing an arbitrary
+// receipt ID or index supplied by the model, so stale IDs, out-of-range
+// indexes, non-canonical decimals and extra suffixes remain untouched and fail
+// closed in the ordinary RAG fact validator.
+//
+// A weak planner can also put an ExternalReferencePlan-shaped object under
+// grounding_details. GroundingDetailPlan has one source_ref, so merely
+// rewriting its plural source_refs would still drop every reference during
+// JSON decoding. Rehome that row only when its complete shape is unambiguous
+// and every supplied ref belongs to this exact receipt; plural facts then stay
+// plural instead of inventing a positional fact-to-hit relationship.
+func normalizePartialRAGFactReferenceAliases(merged map[string]any, receipt *domain.RAGFactReceipt) {
+	if merged == nil || receipt == nil || receipt.NoMaterial || len(receipt.Hits) == 0 {
+		return
+	}
+	aliasToExact := make(map[string]string, len(receipt.Hits))
+	exactRefs := make(map[string]struct{}, len(receipt.Hits))
+	for index, hit := range receipt.Hits {
+		alias := fmt.Sprintf("%s%s#hit=%d", domain.RAGFactReceiptTokenPrefix, receipt.ID, index)
+		aliasToExact[alias] = hit.Ref
+		exactRefs[hit.Ref] = struct{}{}
+	}
+	resolveRef := partialRAGFactRefResolver(receipt, aliasToExact)
+	normalizeScalar := func(entry map[string]any, field string) {
+		value, ok := entry[field].(string)
+		if !ok {
+			return
+		}
+		if exact := resolveRef(value); exact != "" {
+			entry[field] = exact
+		}
+	}
+	normalizeArray := func(entry map[string]any, field string) {
+		refs, ok := strictPartialStringRefs(entry[field])
+		if !ok {
+			return
+		}
+		// In an ExternalReferencePlan row the current receipt source token is a
+		// safe shorthand for "this transformation consumes the selected hit
+		// set". Expand it deterministically to the exact ordered hit refs so the
+		// provenance validator and the staged normalizer share one vocabulary.
+		// GroundingDetail aliases remain fail-closed because their scalar fact
+		// claim cannot safely be mapped to several chunks.
+		entry[field] = normalizedPartialRAGFactRefSet(refs, receipt, resolveRef)
+	}
+
+	if items, ok := merged["external_reference_plan"].([]any); ok {
+		for _, item := range items {
+			if entry, ok := item.(map[string]any); ok {
+				normalizeArray(entry, "source_refs")
+				normalizeCurrentRAGFactExternalMetadata(entry, receipt, exactRefs)
+			}
+		}
+	}
+	if items, ok := merged["reality_support_plan"].([]any); ok {
+		for _, item := range items {
+			if entry, ok := item.(map[string]any); ok {
+				normalizeScalar(entry, "source_ref")
+			}
+		}
+	}
+
+	grounding, ok := merged["grounding_details"].([]any)
+	if !ok {
+		return
+	}
+	kept := make([]any, 0, len(grounding))
+	var rehomed []any
+	for _, item := range grounding {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		normalizeScalar(entry, "source_ref")
+		refs, refsOK := strictPartialStringRefs(entry["source_refs"])
+		if !refsOK {
+			kept = append(kept, entry)
+			continue
+		}
+		normalizedRefs := normalizedPartialRAGFactRefSet(refs, receipt, resolveRef)
+		if !allPartialRAGFactRefsCurrent(normalizedRefs, exactRefs) {
+			kept = append(kept, entry)
+			continue
+		}
+		if !externalShapedGroundingRAGFact(entry) {
+			kept = append(kept, entry)
+			continue
+		}
+		queryOrNeed := strings.TrimSpace(stringFromAny(entry["scene_anchor"]))
+		if queryOrNeed == "" {
+			// query_or_need is required metadata on ExternalReferencePlan, but a
+			// weak planner may omit it while still supplying a complete authored
+			// transformation. Bind the row to the exact validated receipt rather
+			// than asking the model to paraphrase the same facts yet again.
+			queryOrNeed = strings.TrimSpace(receipt.Query)
+			if queryOrNeed == "" {
+				queryOrNeed = "current-rag-fact-receipt:" + receipt.ID
+			}
+		}
+		rehomed = append(rehomed, map[string]any{
+			"query_or_need":         queryOrNeed,
+			"source_type":           "RAG",
+			"source_refs":           normalizedRefs,
+			"retrieved_at":          receipt.CreatedAt,
+			"freshness_requirement": "当前项目事实 receipt；selected hits 与当前 RAG index 已由服务端校验",
+			"usable_details":        entry["usable_details"],
+			"transformation_rule":   strings.TrimSpace(entry["transformation_rule"].(string)),
+			"do_not_use":            entry["do_not_use"],
+		})
+	}
+	if len(kept) == 0 {
+		delete(merged, "grounding_details")
+	} else {
+		merged["grounding_details"] = kept
+	}
+	if len(rehomed) == 0 {
+		return
+	}
+	external, _ := merged["external_reference_plan"].([]any)
+	merged["external_reference_plan"] = append(external, rehomed...)
+}
+
+// normalizeCurrentRAGFactExternalMetadata fills only server-owned provenance
+// metadata after a Planner has already authored a complete fact
+// transformation and every supplied source ref has been proven to belong to
+// the exact, live-validated receipt. This avoids another model turn whose only
+// purpose is to copy schema boilerplate. It does not invent fact use: missing,
+// stale, mixed, explicitly non-RAG or semantically incomplete rows remain
+// untouched and fail through the ordinary formal-plan guard.
+func normalizeCurrentRAGFactExternalMetadata(
+	entry map[string]any,
+	receipt *domain.RAGFactReceipt,
+	exactRefs map[string]struct{},
+) {
+	if entry == nil || receipt == nil || receipt.NoMaterial || len(exactRefs) == 0 {
+		return
+	}
+	refs, ok := strictPartialStringRefs(entry["source_refs"])
+	if !ok {
+		return
+	}
+	for _, ref := range refs {
+		if _, current := exactRefs[strings.TrimSpace(ref)]; !current {
+			return
+		}
+	}
+	sourceType := strings.TrimSpace(stringFromAny(entry["source_type"]))
+	if sourceType != "" && !isRAGFactSourceType(sourceType) {
+		return
+	}
+	if len(compactStrings(stringSliceFromAny(entry["usable_details"]))) == 0 ||
+		strings.TrimSpace(stringFromAny(entry["transformation_rule"])) == "" ||
+		len(compactStrings(stringSliceFromAny(entry["do_not_use"]))) == 0 {
+		return
+	}
+	query := strings.TrimSpace(receipt.Query)
+	if query == "" {
+		query = "current-rag-fact-receipt:" + strings.TrimSpace(receipt.ID)
+	}
+	// These four fields describe server-owned receipt provenance, not authored
+	// story semantics. Overwrite even non-empty planner values so a fact row
+	// cannot retain craft receipt timestamps/policies from a copied schema.
+	entry["query_or_need"] = query
+	entry["source_type"] = "RAG"
+	entry["retrieved_at"] = strings.TrimSpace(receipt.CreatedAt)
+	entry["freshness_requirement"] = "当前项目事实 receipt；selected hits 与当前 RAG index 已由服务端校验"
+}
+
+func partialRAGFactRefResolver(
+	receipt *domain.RAGFactReceipt,
+	aliasToExact map[string]string,
+) func(string) string {
+	chunkToExact := make(map[string]string, len(receipt.Hits))
+	localDocumentToExact := make(map[string]string, len(receipt.Hits))
+	for _, hit := range receipt.Hits {
+		chunkID := strings.TrimSpace(hit.ChunkID)
+		exact := strings.TrimSpace(hit.Ref)
+		if chunkID == "" || exact == "" {
+			continue
+		}
+		chunkToExact[chunkID] = exact
+		if documentID, ok := localRAGChunkDocumentID(chunkID); ok {
+			if prior, exists := localDocumentToExact[documentID]; !exists {
+				localDocumentToExact[documentID] = exact
+			} else if prior != exact {
+				// A document can contribute multiple chunks. A document-only alias
+				// is then ambiguous and must remain invalid rather than guessing a
+				// positional fact-to-hit relationship.
+				localDocumentToExact[documentID] = ""
+			}
+		}
+	}
+	currentReceiptChunkPrefix := domain.RAGFactReceiptTokenPrefix + receipt.ID + "#chunk="
+	return func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		if exact := aliasToExact[value]; exact != "" {
+			return exact
+		}
+		candidate := value
+		if strings.HasPrefix(value, currentReceiptChunkPrefix) {
+			candidate = strings.TrimPrefix(value, currentReceiptChunkPrefix)
+			if index := strings.Index(candidate, "#"); index >= 0 {
+				candidate = candidate[:index]
+			}
+		}
+		if exact := chunkToExact[candidate]; exact != "" {
+			return exact
+		}
+		for documentID, exact := range localDocumentToExact {
+			if exact == "" || !strings.HasPrefix(candidate, documentID) {
+				continue
+			}
+			remainder := strings.TrimPrefix(candidate, documentID)
+			if remainder != "" && isLowerHexString(remainder) {
+				return exact
+			}
+		}
+		return ""
+	}
+}
+
+func localRAGChunkDocumentID(chunkID string) (string, bool) {
+	chunkID = strings.TrimSpace(chunkID)
+	if !strings.HasPrefix(chunkID, "local:") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(chunkID, "local:")
+	index := strings.Index(rest, ":")
+	if index <= 0 {
+		return "", false
+	}
+	documentHash := rest[:index]
+	if len(documentHash) != 16 || !isLowerHexString(documentHash) {
+		return "", false
+	}
+	return "local:" + documentHash, true
+}
+
+func isLowerHexString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func externalShapedGroundingRAGFact(entry map[string]any) bool {
+	if strings.TrimSpace(stringFromAny(entry["source_ref"])) != "" ||
+		strings.TrimSpace(stringFromAny(entry["detail"])) != "" ||
+		strings.TrimSpace(stringFromAny(entry["transformed_as"])) != "" {
+		return false
+	}
+	sourceType := strings.ToLower(strings.TrimSpace(stringFromAny(entry["source_type"])))
+	// Some planner batches omit source_type and scene_anchor even though the
+	// plural receipt refs plus the three transformation fields make this
+	// unmistakably an ExternalReferencePlan row. Missing metadata is safe to
+	// materialize only after every ref has been proven to belong to the current
+	// validated receipt; an explicit non-RAG source type still fails closed.
+	return (sourceType == "" || isRAGFactSourceType(sourceType)) &&
+		len(compactStrings(stringSliceFromAny(entry["usable_details"]))) > 0 &&
+		strings.TrimSpace(stringFromAny(entry["transformation_rule"])) != "" &&
+		len(compactStrings(stringSliceFromAny(entry["do_not_use"]))) > 0
+}
+
+func strictPartialStringRefs(value any) ([]string, bool) {
+	var values []string
+	switch refs := value.(type) {
+	case []any:
+		values = make([]string, 0, len(refs))
+		for _, raw := range refs {
+			ref, ok := raw.(string)
+			if !ok || strings.TrimSpace(ref) == "" {
+				return nil, false
+			}
+			values = append(values, strings.TrimSpace(ref))
+		}
+	case []string:
+		values = make([]string, 0, len(refs))
+		for _, ref := range refs {
+			if strings.TrimSpace(ref) == "" {
+				return nil, false
+			}
+			values = append(values, strings.TrimSpace(ref))
+		}
+	default:
+		return nil, false
+	}
+	return values, len(values) > 0
+}
+
+func normalizedPartialRAGFactRefs(refs []string, resolveRef func(string) string) []any {
+	values := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if exact := resolveRef(ref); exact != "" {
+			ref = exact
+		}
+		values = appendUniqueString(values, ref)
+	}
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+// normalizedPartialRAGFactRefSet additionally accepts the two set-level
+// aliases that can identify only this already-validated receipt: its canonical
+// SourceToken and its exact bare ID. Both mean "all selected hits" in a plural
+// source_refs field. Stale receipt IDs and every malformed suffix remain
+// untouched so ordinary validation rejects them.
+func normalizedPartialRAGFactRefSet(
+	refs []string,
+	receipt *domain.RAGFactReceipt,
+	resolveRef func(string) string,
+) []any {
+	values := make([]string, 0, len(refs))
+	bareCurrentReceipt := ""
+	canonicalCurrentReceipt := ""
+	if receipt != nil {
+		if id := strings.TrimSpace(receipt.ID); id != "" {
+			bareCurrentReceipt = domain.RAGFactReceiptTokenPrefix + id
+		}
+		canonicalCurrentReceipt = strings.TrimSpace(receipt.SourceToken())
+	}
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if receipt != nil && ((bareCurrentReceipt != "" && ref == bareCurrentReceipt) ||
+			(canonicalCurrentReceipt != "" && ref == canonicalCurrentReceipt)) {
+			for _, hit := range receipt.Hits {
+				values = appendUniqueString(values, hit.Ref)
+			}
+			continue
+		}
+		if exact := resolveRef(ref); exact != "" {
+			ref = exact
+		}
+		values = appendUniqueString(values, ref)
+	}
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+func allPartialRAGFactRefsCurrent(refs []any, exactRefs map[string]struct{}) bool {
+	if len(refs) == 0 {
+		return false
+	}
+	for _, raw := range refs {
+		ref, ok := raw.(string)
+		if !ok {
+			return false
+		}
+		if _, ok := exactRefs[strings.TrimSpace(ref)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+// preserveStagedCurrentRAGFactExternalRows keeps a previously transformed fact
+// row when a later plan_details batch replaces external_reference_plan with a
+// fresh craft-only array. Craft rows deliberately retain replacement semantics:
+// only complete fact rows bound by exact refs to the current validated receipt
+// are eligible. Aliases, receipt source tokens, stale/mixed refs and incomplete
+// transformations are not carried forward.
+func preserveStagedCurrentRAGFactExternalRows(
+	merged map[string]any,
+	staged []any,
+	receipt *domain.RAGFactReceipt,
+) {
+	if merged == nil || receipt == nil || receipt.NoMaterial || len(staged) == 0 {
+		return
+	}
+	exactOrder := make([]string, 0, len(receipt.Hits))
+	exactRefs := make(map[string]struct{}, len(receipt.Hits))
+	for _, hit := range receipt.Hits {
+		exactOrder = append(exactOrder, hit.Ref)
+		exactRefs[hit.Ref] = struct{}{}
+	}
+	current, _ := merged["external_reference_plan"].([]any)
+	seen := make(map[string]struct{}, len(current)+len(staged))
+	for _, item := range current {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if key, ok := currentRAGFactExternalRowKey(entry, exactRefs, exactOrder); ok {
+			seen[key] = struct{}{}
+		}
+	}
+	for _, item := range staged {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		key, ok := currentRAGFactExternalRowKey(entry, exactRefs, exactOrder)
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		current = append(current, entry)
+	}
+	if len(current) > 0 {
+		merged["external_reference_plan"] = current
+	}
+}
+
+func currentRAGFactExternalRowKey(
+	entry map[string]any,
+	exactRefs map[string]struct{},
+	exactOrder []string,
+) (string, bool) {
+	if entry == nil || !isRAGFactSourceType(stringFromAny(entry["source_type"])) {
+		return "", false
+	}
+	refs, ok := strictPartialStringRefs(entry["source_refs"])
+	if !ok {
+		return "", false
+	}
+	refSet := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if _, current := exactRefs[ref]; !current {
+			return "", false
+		}
+		refSet[ref] = struct{}{}
+	}
+	query := strings.TrimSpace(stringFromAny(entry["query_or_need"]))
+	retrievedAt := strings.TrimSpace(stringFromAny(entry["retrieved_at"]))
+	freshness := strings.TrimSpace(stringFromAny(entry["freshness_requirement"]))
+	transformation := strings.TrimSpace(stringFromAny(entry["transformation_rule"]))
+	usable := compactStrings(stringSliceFromAny(entry["usable_details"]))
+	doNotUse := compactStrings(stringSliceFromAny(entry["do_not_use"]))
+	if query == "" || retrievedAt == "" || freshness == "" || transformation == "" ||
+		len(usable) == 0 || len(doNotUse) == 0 {
+		return "", false
+	}
+	orderedRefs := make([]string, 0, len(refSet))
+	for _, ref := range exactOrder {
+		if _, exists := refSet[ref]; exists {
+			orderedRefs = append(orderedRefs, ref)
+		}
+	}
+	key, err := json.Marshal(struct {
+		Query          string   `json:"query"`
+		Refs           []string `json:"refs"`
+		Usable         []string `json:"usable"`
+		Transformation string   `json:"transformation"`
+		DoNotUse       []string `json:"do_not_use"`
+	}{query, orderedRefs, usable, transformation, doNotUse})
+	if err != nil {
+		return "", false
+	}
+	return string(key), true
 }
 
 // plan_details partial writes are intentionally patch-friendly, so a model can
@@ -925,6 +1478,12 @@ func (t *PlanDetailsTool) finalizePartial(chapter int, partial, merged map[strin
 }
 
 func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause error) error {
+	slog.Warn("plan_details finalize rejected",
+		"module", "tools.plan_details",
+		"chapter", chapter,
+		"saved_fields", strings.Join(sortedKeys(merged), ", "),
+		"cause", cause,
+	)
 	return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%v。已保存字段：%s。修复协议：不要一次性重发所有字段，也不要立刻 finalize=true；下一轮只补 recommended_batches 中最靠前且未完成的一组，保留已保存字段，最后一组补完后再传 finalize=true。recommended_batches=%s: %w",
 		chapter,
 		cause,

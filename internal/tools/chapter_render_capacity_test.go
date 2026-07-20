@@ -139,6 +139,32 @@ func TestProjectAllRenderCapacityHardGateUsesUserRules(t *testing.T) {
 	}
 }
 
+func TestProjectAllCurrentChapterCapacityBoundsKeepShortBookNearMidpoint(t *testing.T) {
+	target := domain.BookScaleTarget{
+		TargetChapters:        12,
+		MinWords:              28000,
+		MaxWords:              30000,
+		TargetWords:           29000,
+		TargetWordsPerChapter: 2417,
+	}
+	minWords, maxWords := projectAllCurrentChapterCapacityBounds(2200, 2600, target, 2, 2600)
+	if minWords != 2200 || maxWords != 2474 {
+		t.Fatalf("chapter 2 bounds = %d-%d, want 2200-2474", minWords, maxWords)
+	}
+	minWords, maxWords = projectAllCurrentChapterCapacityBounds(2200, 2600, target, 5, 9398)
+	if minWords != 2444 || maxWords != 2600 {
+		t.Fatalf("chapter 5 bounds = %d-%d, want 2444-2600", minWords, maxWords)
+	}
+	minWords, maxWords = projectAllCurrentChapterCapacityBounds(2200, 2600, target, 6, 11898)
+	if minWords != 2361 || maxWords != 2600 {
+		t.Fatalf("chapter 6 relaxed bounds = %d-%d, want 2361-2600", minWords, maxWords)
+	}
+	minWords, maxWords = projectAllCurrentChapterCapacityBounds(2200, 2600, target, 12, 26800)
+	if minWords != 2200 || maxWords != 2441 {
+		t.Fatalf("final chapter bounds = %d-%d, want 2200-2441", minWords, maxWords)
+	}
+}
+
 func TestDraftRenderPacketCarriesOnlyLeanRenderCapacitySpine(t *testing.T) {
 	packet := newDraftRenderPacket(domain.ChapterPlan{
 		Chapter: 1,

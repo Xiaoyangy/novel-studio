@@ -473,6 +473,404 @@ func TestDraftExternalLocalGateDispositionKeepsSoftFailureEditableAfterDeepSeek(
 	}
 }
 
+func TestDraftExternalLocalGateDispositionClearsExactBodyProbabilityOnlyDisagreement(t *testing.T) {
+	external := 2.0
+	content := "第一章\n\n林砚把登记册推回窗口，先让值班员核对监控时间。"
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		Enforced: true, RawLocalGatePercent: 20.99, EffectiveGatePercent: 20.99,
+		PassExclusivePercent: 4, ExternalAIProbabilityPercent: &external,
+	}
+	structural, soft := draftExternalLocalGateDisposition(content, report, gate)
+	if structural || soft {
+		t.Fatalf("exact-body DeepSeek pass should clear a probability-only local disagreement: structural=%v soft=%v", structural, soft)
+	}
+
+	// Whole-text/segment is another probability proxy for an exact-body provider
+	// pass; the raw score remains available as diagnostic evidence.
+	report.WholeTextSegmentGate = 18
+	structural, soft = draftExternalLocalGateDisposition(content, report, gate)
+	if structural || soft {
+		t.Fatalf("exact-body provider pass did not resolve whole-text probability proxy: structural=%v soft=%v", structural, soft)
+	}
+}
+
+func TestDraftExternalProbabilityPassCannotClearMechanicalStructuralWarning(t *testing.T) {
+	external := 2.0
+	content := `“先把桌子挪开。”林澈说。
+
+“价牌放左边。”沈知遥接话。
+
+“车只能跑一趟。”贺骁补充。
+
+“那就先装三家。”老丁回答。
+
+“剩下两家怎么办？”摊主追问。
+
+“下午再送。”林澈解释。
+
+“票据别忘了。”沈知遥提醒。
+
+“我现在就开。”老丁点头。`
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		Enforced: true, RawLocalGatePercent: 20.99, EffectiveGatePercent: 20.99,
+		PassExclusivePercent: 4, ExternalAIProbabilityPercent: &external,
+	}
+	if draftAIGCExternalProbabilityOnlySatisfied(content, report, gate) {
+		t.Fatal("exact-body external probability pass cleared dialogue_conveyor_overuse")
+	}
+	blockers := draftAIGCExternalCurrentBodyBlockers(content)
+	if len(blockers) == 0 || blockers[0].Rule != "dialogue_conveyor_overuse" {
+		t.Fatalf("current-body structural blocker was not made explicit: %+v", blockers)
+	}
+	structural, soft := draftExternalLocalGateDisposition(content, report, gate)
+	if structural || !soft {
+		t.Fatalf("mechanical structural warning must remain on the repair path: structural=%v soft=%v", structural, soft)
+	}
+}
+
+func TestDraftLocalSoftGateClosesAfterOneEditedHashPassesDeepSeek(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "一次软修"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章\n\n林砚把登记册推回窗口，要求值班员先核对监控时间。"
+	if err := st.Drafts.SaveDraft(1, content); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		Enforced: true, Passed: true, ExternalCorroborated: true,
+		RawLocalGatePercent: 10.3, EffectiveGatePercent: 2, PassExclusivePercent: 4,
+	}
+	if draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, 1, content, report, gate) {
+		t.Fatal("an unedited draft incorrectly consumed the bounded local soft edit")
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	edited := content + "她没有收回手，只把监控编号念给对方听。"
+	if err := st.Drafts.SaveDraft(1, edited); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "edit", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeDraftExternalJudgeStatus(t, st.Dir(), 1, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(edited), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	if !draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, 1, edited, report, gate) {
+		t.Fatal("one edited exact hash with a DeepSeek pass did not close the local soft loop")
+	}
+	report.WholeTextSegmentGate = 18
+	if draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, 1, edited, report, gate) {
+		t.Fatal("whole-text structural failure was waived by the bounded local soft rule")
+	}
+}
+
+func TestDraftLocalSoftQuotaIgnoresFormalReviewWrittenAfterCurrentEditedBody(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "事后复审不重键"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	initial := "第一章\n\n林砚把登记册推回窗口，要求值班员先核对监控时间。"
+	if err := st.Drafts.SaveDraft(1, initial); err != nil {
+		t.Fatal(err)
+	}
+	initialCheckpoint, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantQuota, wantSeed, err := draftLocalSoftEditQuotaIdentity(st, 1)
+	if err != nil || wantSeed != initialCheckpoint.Seq {
+		t.Fatalf("initial quota=%s seed=%d checkpoint=%+v err=%v", wantQuota, wantSeed, initialCheckpoint, err)
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	edited := initial + "她没有收回手，只把监控编号念给对方听。"
+	if err := st.Drafts.SaveDraft(1, edited); err != nil {
+		t.Fatal(err)
+	}
+	editCheckpoint, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "edit", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDraftExternalJudgeStatus(t, st.Dir(), 1, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(edited), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	review := domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: reviewreport.BodySHA256(edited),
+		Verdict: "rewrite", Summary: "复审发生在当前 edit 之后。",
+	}
+	if err := st.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	reviewCheckpoint, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "review", "reviews/01.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewCheckpoint.Seq <= editCheckpoint.Seq {
+		t.Fatalf("fixture review did not follow edit: edit=%+v review=%+v", editCheckpoint, reviewCheckpoint)
+	}
+
+	gotQuota, gotSeed, err := draftLocalSoftEditQuotaIdentity(st, 1)
+	if err != nil || gotQuota != wantQuota || gotSeed != wantSeed {
+		t.Fatalf("post-body review re-keyed consumed quota: got=%s#%d want=%s#%d err=%v", gotQuota, gotSeed, wantQuota, wantSeed, err)
+	}
+	consumed, err := draftLocalSoftEditQuotaConsumed(st, 1)
+	if err != nil || !consumed {
+		t.Fatalf("post-body review lost consumed token: consumed=%v err=%v", consumed, err)
+	}
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		Enforced: true, Passed: true, ExternalCorroborated: true,
+		RawLocalGatePercent: 10.3, EffectiveGatePercent: 2, PassExclusivePercent: 4,
+	}
+	if !draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, 1, edited, report, gate) {
+		t.Fatal("post-body formal review reopened a locally repaired exact-body gate")
+	}
+}
+
+func TestDraftLocalSoftQuotaUsesLatestReviewBeforeSuccessorBodyAsNewSeed(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "复审后新渲染"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	initial := "第一章\n\n林砚先把旧登记册留在窗口外。"
+	if err := st.Drafts.SaveDraft(1, initial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	oldQuota, _, err := draftLocalSoftEditQuotaIdentity(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	review := domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: reviewreport.BodySHA256(initial),
+		Verdict: "rewrite", Summary: "该复审要求产生 successor body。",
+	}
+	if err := st.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	reviewCheckpoint, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "review", "reviews/01.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := "第一章\n\n门外脚步停下后，林砚才把新的监控编号写进登记册。"
+	if err := st.Drafts.SaveDraft(1, successor); err != nil {
+		t.Fatal(err)
+	}
+	successorCheckpoint, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successorCheckpoint.Seq <= reviewCheckpoint.Seq {
+		t.Fatalf("fixture successor did not follow review: review=%+v successor=%+v", reviewCheckpoint, successorCheckpoint)
+	}
+
+	newQuota, newSeed, err := draftLocalSoftEditQuotaIdentity(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newSeed != reviewCheckpoint.Seq || newQuota == oldQuota {
+		t.Fatalf("successor body did not open review-seeded quota: old=%s new=%s#%d review=%d", oldQuota, newQuota, newSeed, reviewCheckpoint.Seq)
+	}
+	consumed, err := draftLocalSoftEditQuotaConsumed(st, 1)
+	if err != nil || consumed {
+		t.Fatalf("old-cycle token consumed the review-seeded successor quota: consumed=%v err=%v", consumed, err)
+	}
+}
+
+func TestDraftLocalSoftTokenNeverWaivesOriginalHashAfterEditWriteFailure(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "写入失败闭锁"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	original := "第一章\n\n这不是提醒，而是命令。值班员把登记册推了回来。"
+	if err := st.Drafts.SaveDraft(1, original); err != nil {
+		t.Fatal(err)
+	}
+	draftCheckpoint, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Model a crash/save failure after token consumption but before the atomic
+	// draft replacement. The original bytes and their draft checkpoint remain.
+	writeDraftExternalJudgeStatus(t, st.Dir(), 1, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(original), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	gate := draftAIGCGateResult{
+		Enforced: true, Passed: true, ExternalCorroborated: true,
+		RawLocalGatePercent: 10.3, EffectiveGatePercent: 2, PassExclusivePercent: 4,
+	}
+	if draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, 1, original, report, gate) {
+		t.Fatal("consumed token waived the unchanged pre-edit body after write failure")
+	}
+	current, err := CurrentChapterBodyCheckpoint(st, 1)
+	if err != nil || current.Seq != draftCheckpoint.Seq || current.Step != "draft" {
+		t.Fatalf("write-failure fixture unexpectedly acquired an edit checkpoint: current=%+v err=%v", current, err)
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err == nil {
+		t.Fatal("write failure minted a second local-soft edit quota")
+	}
+	quotaDigest, _, err := draftLocalSoftEditQuotaIdentity(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumption, err := loadDraftLocalSoftEditConsumption(st, 1, quotaDigest)
+	if err != nil || consumption == nil || consumption.Token == nil ||
+		consumption.Token.PreEditBodySHA256 != reviewreport.BodySHA256(original) ||
+		consumption.Checkpoint == nil || consumption.Checkpoint.Seq <= draftCheckpoint.Seq {
+		t.Fatalf("token did not preserve pre-edit identity/order: consumption=%+v err=%v", consumption, err)
+	}
+}
+
+func TestDraftLocalSoftEditQuotaPersistsAcrossNewDraftHashAndProcess(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "同一渲染种子"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	initial := "第一章\n\n这不是提醒，而是命令。\n这不是商量，而是最后期限。\n这不是偶然，而是有人提前安排。"
+	if err := st.Drafts.SaveDraft(1, initial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	report := aigc.Report{Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi}}
+	if !draftPreJudgeLocalSoftEditEligible(st, 1, initial, report, false, true) {
+		t.Fatal("fresh plan/initial-render seed did not receive its one local-soft edit")
+	}
+	if err := consumeDraftLocalSoftEditQuota(st, 1); err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(initial, "这不是提醒，而是命令。", "门外脚步一停，林砚把命令压低了半句。", 1)
+	if err := st.Drafts.SaveDraft(1, edited); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "edit", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later whole render changes the body hash and changes the latest body
+	// checkpoint back to draft, but it must not mint another quota. Reloading the
+	// Store proves the token is journal-backed rather than process-local.
+	newDraft := initial + "\n她把回执折好，等对方先移开视线。"
+	if err := st.Drafts.SaveDraft(1, newDraft); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := store.NewStore(dir)
+	if draftPreJudgeLocalSoftEditEligible(reloaded, 1, newDraft, report, false, true) {
+		t.Fatal("draft -> edit -> new draft reopened the plan/seed local-soft quota")
+	}
+	consumed, err := draftLocalSoftEditQuotaConsumed(reloaded, 1)
+	if err != nil || !consumed {
+		t.Fatalf("persistent local-soft token was lost after reload: consumed=%v err=%v", consumed, err)
+	}
+
+	// Content-integrity evidence is never eligible for the latency shortcut,
+	// even before the one-shot token is consumed.
+	contentRisk := report
+	contentRisk.ContentIntegrityFloor = 25
+	if draftPreJudgeLocalSoftEditEligible(reloaded, 1, newDraft, contentRisk, false, true) {
+		t.Fatal("content-integrity risk entered the pre-judge local edit path")
+	}
+}
+
 func TestRegisteredExternalHighUpgradesExistingIndependentMarker(t *testing.T) {
 	dir := t.TempDir()
 	body := "第一章\n\n已有 DeepSeek 阻断的正文。"

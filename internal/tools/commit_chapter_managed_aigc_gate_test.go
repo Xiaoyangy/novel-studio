@@ -77,7 +77,7 @@ func TestManagedCommitRejectsFailedHardConsistencyReceipt(t *testing.T) {
 		"character_stage_records": testCharacterStageRecords("主角", "配角"),
 	})
 	if _, err := NewCommitChapterTool(st).Execute(context.Background(), args); err == nil ||
-		!strings.Contains(err.Error(), "passed=true") {
+		(!strings.Contains(err.Error(), "passed=true") && !strings.Contains(err.Error(), "外判阻断版本")) {
 		t.Fatalf("managed commit did not reject the still-failing exact body: %v", err)
 	}
 	if final, _ := st.Drafts.LoadChapterText(1); final != "" {

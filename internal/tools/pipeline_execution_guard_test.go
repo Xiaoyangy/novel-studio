@@ -398,6 +398,29 @@ func TestPipelineExecutionNoLockPreservesDefaultBehavior(t *testing.T) {
 	}
 }
 
+func TestPipelineExecutionPromoteLockRejectsPlanningProseAndGlobalMutation(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionPromote,
+		TargetChapter: 1,
+		Owner:         "promote-guard-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardPipelinePlanningExecution(st, 1, "plan_chapter"); err == nil || !strings.Contains(err.Error(), "promote execution lock") {
+		t.Fatalf("promote lock must reject planning: %v", err)
+	}
+	if err := guardPipelineProseExecution(st, 1, "draft_chapter"); err == nil || !strings.Contains(err.Error(), "promote execution lock") {
+		t.Fatalf("promote lock must reject prose: %v", err)
+	}
+	if err := guardPipelineGlobalPlanningExecution(st, "save_world_tick"); err == nil || !strings.Contains(err.Error(), "promote execution lock") {
+		t.Fatalf("promote lock must reject global mutation: %v", err)
+	}
+}
+
 func TestPipelineExecutionGuardsRejectAnotherProcessCapability(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

@@ -194,6 +194,60 @@ func TestDialogueMicroPeriodChainSignalsNarrativeDynamics(t *testing.T) {
 	}
 }
 
+func TestNarrativeDynamicsDoesNotTreatDomainLogisticsAsStandaloneConveyorEvidence(t *testing.T) {
+	longTurn := strings.Repeat("位置和交付记录分开核对，", 12) + "最后只保留原始订单。"
+	body := strings.Join([]string{
+		"“订单。”",
+		"“核对记录。”",
+		"门外的车灯扫过窗台。",
+		"“交付时间比备注早。”",
+		"“公共位置还在原处，订单却被人改过。”",
+		"“" + longTurn + "”",
+		"走廊的卷闸门响了一声。",
+		"“票据不是交付凭证。”",
+		"“把位置、记录和订单拆开看。”",
+		"“原始交付记录由我保留。”",
+	}, "\n\n")
+	dimension := scoreNarrativeDynamics(body, Stats{Hanzi: len(hanzi(body))})
+	if got := floatFromAny(dimension.Stats["logistics_density_per_k"]); got < 5 {
+		t.Fatalf("fixture did not isolate high domain-logistics density: %.3f", got)
+	}
+	if got := floatFromAny(dimension.Stats["action_dialogue_lead_ratio"]); got >= 0.35 {
+		t.Fatalf("fixture unexpectedly acquired action-lead evidence: %.3f", got)
+	}
+	if got := floatFromAny(dimension.Stats["dialogue_turn_length_cv"]); got < 0.72 {
+		t.Fatalf("fixture unexpectedly acquired uniform-quote evidence: %.3f", got)
+	}
+	if boolFromAny(dimension.Stats["conveyor_compound_evidence"]) {
+		t.Fatalf("logistics density alone became compound conveyor evidence: %+v", dimension)
+	}
+	for _, signal := range dimension.Signals {
+		if strings.HasPrefix(signal.Name, "dialogue_conveyor_") {
+			t.Fatalf("domain logistics alone emitted %s: %+v", signal.Name, dimension)
+		}
+	}
+}
+
+func TestNarrativeDynamicsCountsInteriorityByDistinctParagraph(t *testing.T) {
+	c6 := `程野盯住她那一眼，才发现自己刚才已经准备下车。
+
+她看着那个时间，第一反应竟是还有三十六分钟。
+
+她强迫自己再看一遍三份记录。
+
+程野下意识把直播声音调大了一格。`
+	dimension := scoreNarrativeDynamics(c6, Stats{Hanzi: len(hanzi(c6))})
+	if got := intFromAny(dimension.Stats["interiority_paragraph_count"]); got != 4 {
+		t.Fatalf("C6 subjective paragraph beats=%d, want 4: %+v", got, dimension)
+	}
+
+	repeated := `她第一反应是下车，第一反应仍是下车，于是反复念着第一反应。`
+	dimension = scoreNarrativeDynamics(repeated, Stats{Hanzi: len(hanzi(repeated))})
+	if got := intFromAny(dimension.Stats["interiority_paragraph_count"]); got != 1 {
+		t.Fatalf("repeated marker in one paragraph counted %d beats, want 1", got)
+	}
+}
+
 func TestStraightChineseDialogueMatchesTypographicQuoteMetrics(t *testing.T) {
 	typographic := `林澈抬头说：“先关灯。别让孩子踩到线。”
 

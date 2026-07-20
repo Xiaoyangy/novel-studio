@@ -59,6 +59,9 @@ func (t *ContextTool) finalizeContextWithAccessReceipt(
 	chapter int,
 	profile string,
 ) (json.RawMessage, error) {
+	if err := t.attachSealedConvergencePlanningContext(result, chapter, profile); err != nil {
+		return nil, err
+	}
 	receipt, sourceToken, err := t.preparePlanningContextAccessReceipt(chapter, profile)
 	if err != nil {
 		return nil, err

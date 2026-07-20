@@ -81,6 +81,69 @@ func TestStopGuardsAllowPauseForDraftExternalRejudge(t *testing.T) {
 	}
 }
 
+func TestStopGuardsPauseOnNewDraftOnlyUnderExactRenderLock(t *testing.T) {
+	t.Run("new frozen-render draft stops Drafter and Coordinator", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("render-pause", 3); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionRender, TargetChapter: 1,
+			PlanDigest: "sha256:frozen", Owner: "render-pause-test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		writerGuard := NewWriterStopGuard(s)
+		coordinatorGuard := NewStopGuard(s, nil)
+		if _, err := s.Checkpoints.Append(domain.ChapterScope(1), "draft", "drafts/01.draft.md", "sha256:new-draft"); err != nil {
+			t.Fatal(err)
+		}
+		if decision := writerGuard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("frozen Drafter did not pause at its new draft checkpoint: %+v", decision)
+		}
+		if decision := coordinatorGuard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); !decision.Allow {
+			t.Fatalf("Coordinator did not return new frozen draft to outer pipeline: %+v", decision)
+		}
+	})
+
+	t.Run("preexisting draft does not let finalizer skip work", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("render-finalizer", 3); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionRender, TargetChapter: 1,
+			PlanDigest: "sha256:frozen", Owner: "render-finalizer-test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Checkpoints.Append(domain.ChapterScope(1), "draft", "drafts/01.draft.md", "sha256:old-draft"); err != nil {
+			t.Fatal(err)
+		}
+		guard := NewWriterStopGuard(s)
+		if decision := guard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); decision.Allow {
+			t.Fatalf("preexisting draft incorrectly satisfied a later finalizer guard: %+v", decision)
+		}
+	})
+
+	t.Run("ordinary interaction still requires commit", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Progress.Init("ordinary", 3); err != nil {
+			t.Fatal(err)
+		}
+		guard := NewWriterStopGuard(s)
+		if _, err := s.Checkpoints.Append(domain.ChapterScope(1), "draft", "drafts/01.draft.md", "sha256:ordinary-draft"); err != nil {
+			t.Fatal(err)
+		}
+		if decision := guard(context.Background(), agentcore.StopInfo{TurnIndex: 1}); decision.Allow {
+			t.Fatalf("ordinary non-pipeline writer stopped before commit: %+v", decision)
+		}
+	})
+}
+
 func TestWriterStopGuardRequiresNewLocalStructuralBoundary(t *testing.T) {
 	newStructuralBody := func(destination string) string {
 		return "第一章 县城试点\n\n" + strings.Repeat("林澈把价牌放好，然后核对票据，然后走到"+destination+"。", 100)
@@ -353,4 +416,16 @@ func TestEditorStopGuard_TaskAware(t *testing.T) {
 			t.Fatal("review task must be satisfied by a review checkpoint")
 		}
 	})
+}
+
+func TestArchitectStopGuardAcceptsWorldCodexCheckpoint(t *testing.T) {
+	s := newTestStore(t)
+	guard := NewArchitectStopGuard(s)
+	if _, err := s.Checkpoints.Append(domain.GlobalScope(), "world_codex", "world_codex.json", "sha256:new-codex"); err != nil {
+		t.Fatalf("append world_codex: %v", err)
+	}
+	stop := agentcore.StopInfo{TurnIndex: 1, Message: agentcore.Message{StopReason: agentcore.StopReasonStop}}
+	if decision := guard(context.Background(), stop); !decision.Allow {
+		t.Fatal("world_codex save must satisfy the architect persistence guard")
+	}
 }

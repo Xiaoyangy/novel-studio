@@ -102,6 +102,36 @@ func TestNormalize_NilModelDegrades(t *testing.T) {
 	}
 }
 
+func TestNormalizeExplicitChapterRangeOverridesModelUncertainty(t *testing.T) {
+	model := &scriptedModel{replies: []string{`{
+  "structured": {},
+  "preferences": "短篇节奏",
+  "uncertain": ["chapter_words 未明确，不提升"]
+}`}}
+	cand := NewNormalizer(model).Normalize(
+		t.Context(),
+		"startup_prompt",
+		"正文严格控制在2.8万—3万字，单章约 2200—2600 字。",
+	)
+	if cand.Structured.ChapterWords == nil ||
+		cand.Structured.ChapterWords.Min != 2200 ||
+		cand.Structured.ChapterWords.Max != 2600 {
+		t.Fatalf("explicit range was lost: %+v", cand.Structured.ChapterWords)
+	}
+	if len(cand.Uncertain) != 0 {
+		t.Fatalf("contradictory uncertainty survived explicit extraction: %v", cand.Uncertain)
+	}
+}
+
+func TestExplicitChapterWordsDoesNotTreatBookTotalAsChapterRange(t *testing.T) {
+	if got := ExplicitChapterWords("正文严格控制在2.8万—3万字，共12章"); got != nil {
+		t.Fatalf("book total was misclassified as chapter range: %+v", got)
+	}
+	if got := ExplicitChapterWords("单章约2200—2600字"); got == nil || got.Min != 2200 || got.Max != 2600 {
+		t.Fatalf("explicit chapter range not extracted: %+v", got)
+	}
+}
+
 // scriptedModel 是最小 fake ChatModel：按调用次序吐预设回复，并记录最后一轮收到的
 // messages，供断言反馈式重试是否把纠正提示并入了下一轮对话。回复用尽后重复最后一条。
 type scriptedModel struct {

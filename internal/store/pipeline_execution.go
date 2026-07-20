@@ -43,7 +43,7 @@ func (s *RuntimeStore) AcquirePipelineExecution(lock domain.PipelineExecutionLoc
 		return fmt.Errorf("pipeline execution owner must not be empty")
 	}
 	switch lock.Mode {
-	case domain.PipelineExecutionFoundation, domain.PipelineExecutionOutlineAll, domain.PipelineExecutionPreplan, domain.PipelineExecutionProjectAll:
+	case domain.PipelineExecutionFoundation, domain.PipelineExecutionOutlineAll, domain.PipelineExecutionPreplan, domain.PipelineExecutionProjectAll, domain.PipelineExecutionPromote:
 	case domain.PipelineExecutionRender:
 		if lock.PlanDigest == "" {
 			return fmt.Errorf("pipeline render execution requires plan_digest")
@@ -207,7 +207,7 @@ func validateStoredPipelineExecution(lock domain.PipelineExecutionLock) error {
 		return fmt.Errorf("invalid pipeline execution lock metadata")
 	}
 	switch lock.Mode {
-	case domain.PipelineExecutionFoundation, domain.PipelineExecutionOutlineAll, domain.PipelineExecutionPreplan, domain.PipelineExecutionProjectAll:
+	case domain.PipelineExecutionFoundation, domain.PipelineExecutionOutlineAll, domain.PipelineExecutionPreplan, domain.PipelineExecutionProjectAll, domain.PipelineExecutionPromote:
 		return nil
 	case domain.PipelineExecutionRender:
 		if strings.TrimSpace(lock.PlanDigest) == "" {

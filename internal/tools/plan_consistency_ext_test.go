@@ -72,6 +72,86 @@ func TestCheckChapterPlanConsistencyRejectsHiddenCharacterInRequiredBeat(t *test
 	}
 }
 
+func TestCheckChapterPlanConsistencyAllowsVisibleActorToPreserveHiddenDeadCharactersMaterials(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 12,
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("姜岚", "按来源封存证据", true),
+			simulatedDecision("唐梨", "已经死亡，仅遗留生前材料", false),
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 12, Contract: domain.ChapterContract{
+		RequiredBeats: []string{"姜岚按来源分别封存报警、录屏、平台记录、订单与公共交付记录、门禁现场物证及唐梨材料的授权保全链，使旧案与现案依法推进。"},
+	}}
+
+	hard, _ := checkChapterPlanConsistency(st, plan)
+	if len(hard) != 0 {
+		t.Fatalf("a visible actor preserving a dead character's materials is an evidence-object reference, not POV action: %v", hard)
+	}
+}
+
+func TestCheckChapterPlanConsistencyEvidenceReferenceDoesNotMaskHiddenActionOrDialogue(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 12,
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			simulatedDecision("姜岚", "按来源封存证据", true),
+			simulatedDecision("唐梨", "已经死亡，仅遗留生前材料", false),
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, beat := range []string{
+		"唐梨提交材料，由姜岚封存。",
+		"姜岚封存唐梨材料后，唐梨开口说明来源。",
+		"姜岚封存唐梨材料后，唐梨在现场回答询问。",
+	} {
+		plan := domain.ChapterPlan{Chapter: 12, Contract: domain.ChapterContract{RequiredBeats: []string{beat}}}
+		hard, _ := checkChapterPlanConsistency(st, plan)
+		if len(hard) == 0 || !strings.Contains(strings.Join(hard, "\n"), "唐梨") {
+			t.Fatalf("hidden direct action/dialogue must remain rejected for %q: %v", beat, hard)
+		}
+	}
+}
+
+func TestCheckChapterPlanConsistencyAllowsProjectionObservableActorsWithMissingVisibilityBool(t *testing.T) {
+	st := newChapterSimulationTestStore(t)
+	sim := domain.ChapterWorldSimulation{
+		Chapter: 5,
+		CharacterDecisions: []domain.CharacterWorldDecision{
+			{Character: "程野"},
+			{Character: "贺铎"},
+			{Character: "邵维"},
+		},
+		ProtagonistProjection: domain.ProtagonistDecisionProjection{
+			Protagonist:       "程野",
+			ObservableEffects: []string{"贺铎从直播画外清楚叫出程野姓名。"},
+		},
+	}
+	if err := st.SaveChapterWorldSimulation(sim); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 5, Contract: domain.ChapterContract{
+		RequiredBeats: []string{"贺铎从直播画外清楚叫出程野姓名。"},
+	}}
+	hard, _ := checkChapterPlanConsistency(st, plan)
+	if len(hard) != 0 {
+		t.Fatalf("projection-observable focalizer/speaker were treated as hidden: %v", hard)
+	}
+
+	plan.Contract.RequiredBeats = append(plan.Contract.RequiredBeats, "邵维走进镜头发言。")
+	hard, _ = checkChapterPlanConsistency(st, plan)
+	if len(hard) == 0 || !strings.Contains(strings.Join(hard, "\n"), "邵维") {
+		t.Fatalf("actor absent from every observable projection channel must remain hidden: %v", hard)
+	}
+}
+
 func TestChapterPlanScopeCheckFlagsForbiddenHit(t *testing.T) {
 	plan := domain.ChapterPlan{
 		Chapter:  1,

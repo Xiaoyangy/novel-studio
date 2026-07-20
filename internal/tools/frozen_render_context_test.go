@@ -9,8 +9,90 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestSealedRenderContextAddsOnlyExactRejectedBodyFeedback(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "冻结上下文"}); err != nil {
+		t.Fatal(err)
+	}
+	cp, err := st.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = "第一章 冻结上下文\n\n七个地点被逐项列成清单。"
+	if err := st.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md", "plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("semantic overlay", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.StartChapter(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, len([]rune(body)), "mystery", "quest"); err != nil {
+		t.Fatal(err)
+	}
+	bodySHA := reviewreport.BodySHA256(body)
+	review := domain.ReviewEntry{
+		Chapter: 1, Scope: "chapter", BodySHA256: bodySHA, Verdict: "rewrite", ContractStatus: "met",
+		Summary: "删掉清单感，补一处主角真实误判。",
+		Issues:  []domain.ConsistencyIssue{{Type: "aesthetic", Severity: "warning", Description: "catalog stuffing"}},
+	}
+	if err := st.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.SetPendingRewritesAndFlow([]int{1}, review.Summary, domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	brief := "# rewrite brief\n\n- 待返工正文 SHA-256：`" + bodySHA + "`。\n- 删掉清单感。\n"
+	if err := st.Drafts.SaveRewriteBrief(1, brief); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewContextTool(st, References{}, "default")
+	raw, err := tool.attachSealedRerenderFeedback(json.RawMessage(`{"render_packet":{"chapter":1}}`), 1, cp.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	feedback, ok := payload["sealed_rerender_feedback"].(map[string]any)
+	if !ok || feedback["body_sha256"] != bodySHA || feedback["summary"] != review.Summary ||
+		!strings.Contains(feedback["rewrite_brief"].(string), "删掉清单感") {
+		t.Fatalf("exact semantic feedback missing: %#v", payload["sealed_rerender_feedback"])
+	}
+
+	if err := st.Drafts.SaveDraft(1, body+"\n新哈希"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md", "plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = tool.attachSealedRerenderFeedback(json.RawMessage(`{"render_packet":{"chapter":1}}`), 1, cp.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sealed_rerender_feedback") {
+		t.Fatalf("old review leaked onto replacement hash: %s", raw)
+	}
+}
 
 func TestRenderContextReturnsExactPlanFrozenPayloadAndRejectsLiveProfiles(t *testing.T) {
 	st := store.NewStore(t.TempDir())

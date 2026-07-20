@@ -35,6 +35,7 @@ const (
 )
 
 var directoryPublishTransactionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var directoryAtomicTempNamePattern = regexp.MustCompile(`^(?:\.?[^/]+\.tmp-[0-9]+|\.[^/]+-[0-9]+\.tmp)$`)
 
 var ErrDirectoryPublishAborted = errors.New("directory publish transaction was aborted")
 
@@ -1453,6 +1454,25 @@ func DirectoryContentRoot(root string) (string, error) {
 }
 
 func directoryContentRoot(root string) (string, error) {
+	const transientRetryLimit = 8
+	for attempt := 0; ; attempt++ {
+		contentRoot, err := directoryContentRootOnce(root)
+		if err == nil {
+			return contentRoot, nil
+		}
+		// Atomic JSON writers create a sibling temp file and rename it into
+		// place. WalkDir may observe the directory entry just before that rename
+		// and then receive ENOENT from Info/ReadFile. The directory itself is not
+		// corrupt; restart the complete snapshot so CAS still binds one coherent
+		// tree. Every other error remains fail-closed.
+		if !errors.Is(err, fs.ErrNotExist) || attempt+1 >= transientRetryLimit {
+			return "", err
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+	}
+}
+
+func directoryContentRootOnce(root string) (string, error) {
 	if err := requireRegularDirectory(root, "directory"); err != nil {
 		return "", err
 	}
@@ -1471,6 +1491,9 @@ func directoryContentRoot(root string) (string, error) {
 		}
 		if item.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("directory content root rejects symlink %s", path)
+		}
+		if !item.IsDir() && directoryAtomicTempNamePattern.MatchString(item.Name()) {
+			return nil
 		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {

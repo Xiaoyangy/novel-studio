@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +20,36 @@ import (
 )
 
 const (
-	deepseekAIJudgeReasoningEffort       = agentcore.ThinkingMax
-	deepseekAIJudgeReviewProtocolVersion = "review-existing/deepseek-ai-judge/v12"
+	deepseekAIJudgeReasoningEffort       = agentcore.ThinkingLow
+	deepseekAIJudgeReviewProtocolVersion = "review-existing/deepseek-ai-judge/v14"
+	deepseekAIJudgeMaxOutputTokens       = 4096
 	deepseekAIJudgePassExclusive         = 4
 	deepseekAIJudgeMaxAttempts           = 2
+	// Existing production evidence shows a healthy full-chapter v4-pro judge can
+	// run close to two minutes. Never split the managed three-minute operation
+	// into two 90s calls: the primary call receives the whole wall-clock window,
+	// and only a malformed response that returns early may use the remainder for
+	// one same-body format repair. Longer explicitly configured operations may
+	// reserve retries, but every reserved attempt must receive at least 120s.
+	deepseekAIJudgeMinAttemptBudget = 120 * time.Second
 )
+
+// A malformed-but-fast response should not consume the caller's entire judge
+// operation. The first request still receives the full production window; when
+// it returns before that window with an invalid structure, the judge may spend
+// the remaining wall-clock budget on one format repair. This small floor only
+// prevents launching a provider call after the global deadline is effectively
+// exhausted.
+func deepseekAIJudgeParseRetryFloor(minAttemptBudget time.Duration) time.Duration {
+	floor := minAttemptBudget / 10
+	if floor > 5*time.Second {
+		floor = 5 * time.Second
+	}
+	if floor < 10*time.Millisecond {
+		floor = 10 * time.Millisecond
+	}
+	return floor
+}
 
 const deepseekAIJudgeSystemPrompt = `你是中文小说 AI 写作痕迹审核员。你会收到一整章小说正文；用户消息只包含正文，不包含说明、标题解释、检测要求或元数据。请把它当作约 3000 字整段检测场景，判断是否像 AI 写作，并给出可执行修改方案。
 
@@ -156,6 +183,11 @@ func loadOrGenerateDeepSeekAIJudge(
 	chapterBody string,
 	budget time.Duration,
 ) deepseekAIJudgeBranchResult {
+	started := time.Now()
+	finish := func(result deepseekAIJudgeBranchResult) deepseekAIJudgeBranchResult {
+		result.Elapsed = time.Since(started)
+		return result
+	}
 	policy := newDeepSeekAIJudgeCachePolicy(selection, chapter, chapterBody)
 	cached, loadErr := loadDeepSeekAIJudgeCache(projectDir, policy)
 	if loadErr == nil && cached != nil {
@@ -163,14 +195,19 @@ func loadOrGenerateDeepSeekAIJudge(
 		// model response identity. Keep final artifact metadata current on a hit.
 		cached.ReviewerExplicit = selection.Explicit
 		cached.ModelSelection = selection
-		return deepseekAIJudgeBranchResult{Artifact: cached, CacheHit: true}
+		return finish(deepseekAIJudgeBranchResult{Artifact: cached, CacheHit: true})
 	}
 	artifact, err := runDeepSeekAIJudge(model, selection, chapter, chapterBody, budget)
-	return deepseekAIJudgeBranchResult{
+	modelCalls := 1
+	if artifact != nil && artifact.AttemptCount > 0 {
+		modelCalls = artifact.AttemptCount
+	}
+	return finish(deepseekAIJudgeBranchResult{
 		Artifact:     artifact,
 		CacheLoadErr: loadErr,
 		Err:          err,
-	}
+		ModelCalls:   modelCalls,
+	})
 }
 
 func loadDeepSeekAIJudgeCache(projectDir string, expected reviewExistingCachePolicy) (*deepseekAIJudgeArtifact, error) {
@@ -268,6 +305,52 @@ func runDeepSeekAIJudge(
 	chapterBody string,
 	budget time.Duration,
 ) (*deepseekAIJudgeArtifact, error) {
+	return runDeepSeekAIJudgeWithMinAttemptBudget(
+		model,
+		selection,
+		chapter,
+		chapterBody,
+		budget,
+		deepseekAIJudgeMinAttemptBudget,
+	)
+}
+
+// deepseekAIJudgeAttemptBudgets returns the fixed per-attempt windows for one
+// judge run. A total budget that cannot fund every attempt for at least
+// minAttemptBudget stays a single attempt and receives the whole budget.
+func deepseekAIJudgeAttemptBudgets(totalBudget, minAttemptBudget time.Duration, maxAttempts int) []time.Duration {
+	if totalBudget <= 0 || maxAttempts <= 0 {
+		return nil
+	}
+	attempts := 1
+	if minAttemptBudget <= 0 {
+		attempts = maxAttempts
+	} else if feasible := int(totalBudget / minAttemptBudget); feasible > 1 {
+		attempts = feasible
+	}
+	if attempts > maxAttempts {
+		attempts = maxAttempts
+	}
+
+	perAttempt := totalBudget / time.Duration(attempts)
+	budgets := make([]time.Duration, attempts)
+	for i := range budgets {
+		budgets[i] = perAttempt
+	}
+	// Preserve the caller's exact total when integer duration division leaves a
+	// remainder. The final attempt is never made smaller than the earlier ones.
+	budgets[len(budgets)-1] += totalBudget - perAttempt*time.Duration(attempts)
+	return budgets
+}
+
+func runDeepSeekAIJudgeWithMinAttemptBudget(
+	model agentcore.ChatModel,
+	selection deepseekAIJudgeModelSelection,
+	chapter int,
+	chapterBody string,
+	budget time.Duration,
+	minAttemptBudget time.Duration,
+) (*deepseekAIJudgeArtifact, error) {
 	if strings.TrimSpace(chapterBody) == "" {
 		return nil, fmt.Errorf("第 %d 章正文为空，无法做 DeepSeek 裸正文 AI 判定", chapter)
 	}
@@ -275,6 +358,7 @@ func runDeepSeekAIJudge(
 	if budget <= 0 {
 		budget = 180 * time.Second
 	}
+	attemptBudgets := deepseekAIJudgeAttemptBudgets(budget, minAttemptBudget, deepseekAIJudgeMaxAttempts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -298,28 +382,100 @@ func runDeepSeekAIJudge(
 		artifact.ParseWarning = "reviewer role is not configured to a DeepSeek model"
 	}
 
+	parseRetryRequested := false
 	for attempt := 1; attempt <= deepseekAIJudgeMaxAttempts; attempt++ {
+		attemptStarted := time.Now()
+		remaining := time.Duration(0)
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining = time.Until(deadline)
+			if remaining < 0 {
+				remaining = 0
+			}
+		}
+		plannedAttemptBudget := time.Duration(0)
+		if attempt <= len(attemptBudgets) {
+			plannedAttemptBudget = attemptBudgets[attempt-1]
+		} else {
+			// A managed operation intentionally starts as one full-window attempt.
+			// If it returns malformed JSON early, use only the actual remaining
+			// time for one structural retry; never extend the caller's wall-clock
+			// deadline.
+			if !parseRetryRequested || remaining < deepseekAIJudgeParseRetryFloor(minAttemptBudget) {
+				break
+			}
+			plannedAttemptBudget = remaining
+		}
+		attemptBudget := plannedAttemptBudget
+		if remaining < attemptBudget {
+			attemptBudget = remaining
+		}
+		slog.Info("DeepSeek judge attempt started",
+			"module", "review",
+			"chapter", chapter,
+			"body_sha", shortReviewCacheKey(artifact.BodySHA256),
+			"attempt", attempt,
+			"max_attempts", deepseekAIJudgeMaxAttempts,
+			"remaining_budget_ms", remaining.Milliseconds(),
+			"attempt_budget_ms", attemptBudget.Milliseconds(),
+		)
 		systemPrompt := deepseekAIJudgeSystemPrompt
 		if attempt > 1 {
 			systemPrompt += deepseekAIJudgeRetrySuffix
 		}
-		resp, err := model.Generate(ctx,
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, attemptBudget)
+		resp, err := model.Generate(attemptCtx,
 			[]agentcore.Message{
 				{Role: "system", Content: []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: systemPrompt}}},
 				{Role: "user", Content: []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: chapterBody}}},
 			},
 			nil,
 			agentcore.WithThinking(deepseekAIJudgeReasoningEffort),
+			agentcore.WithMaxTokens(deepseekAIJudgeMaxOutputTokens),
 		)
+		attemptCancel()
 		if err != nil {
+			slog.Warn("DeepSeek judge attempt finished",
+				"module", "review",
+				"chapter", chapter,
+				"body_sha", shortReviewCacheKey(artifact.BodySHA256),
+				"attempt", attempt,
+				"status", "error",
+				"elapsed_ms", time.Since(attemptStarted).Milliseconds(),
+				"err", err,
+			)
+			if attempt < len(attemptBudgets) && ctx.Err() == nil &&
+				errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
 			return nil, err
 		}
 		if resp == nil || strings.TrimSpace(resp.Message.TextContent()) == "" {
+			slog.Warn("DeepSeek judge attempt finished",
+				"module", "review",
+				"chapter", chapter,
+				"body_sha", shortReviewCacheKey(artifact.BodySHA256),
+				"attempt", attempt,
+				"status", "empty",
+				"elapsed_ms", time.Since(attemptStarted).Milliseconds(),
+			)
 			return nil, fmt.Errorf("DeepSeek AI 判定返回空响应")
 		}
 		artifact.AttemptCount = attempt
 		artifact.RawResponse = strings.TrimSpace(resp.Message.TextContent())
 		parseDeepSeekAIJudgeResponse(artifact)
+		parseRetryRequested = !artifact.AdviceComplete || artifact.Verdict == "parse_failed"
+		status := "parse_retry"
+		if artifact.AdviceComplete && artifact.Verdict != "parse_failed" {
+			status = "complete"
+		}
+		slog.Info("DeepSeek judge attempt finished",
+			"module", "review",
+			"chapter", chapter,
+			"body_sha", shortReviewCacheKey(artifact.BodySHA256),
+			"attempt", attempt,
+			"status", status,
+			"elapsed_ms", time.Since(attemptStarted).Milliseconds(),
+		)
 		if artifact.AdviceComplete && artifact.Verdict != "parse_failed" {
 			break
 		}
@@ -347,21 +503,21 @@ func parseDeepSeekAIJudgeResponse(artifact *deepseekAIJudgeArtifact) {
 
 	jsonText := extractJSONObject(artifact.RawResponse)
 	if jsonText == "" {
-		artifact.ParseWarning = appendDeepSeekWarning(artifact.ParseWarning, "no JSON object found in model response")
+		markDeepSeekAIJudgeParseFailure(artifact, "no JSON object found in model response")
 		return
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(jsonText), &fields); err != nil {
-		artifact.ParseWarning = appendDeepSeekWarning(artifact.ParseWarning, err.Error())
+		markDeepSeekAIJudgeParseFailure(artifact, err.Error())
 		return
 	}
 	if _, ok := fields["ai_probability_percent"]; !ok {
-		artifact.ParseWarning = appendDeepSeekWarning(artifact.ParseWarning, "missing ai_probability_percent")
+		markDeepSeekAIJudgeParseFailure(artifact, "missing ai_probability_percent")
 		return
 	}
 	var parsed deepseekAIJudgeModelOutput
 	if err := json.Unmarshal([]byte(jsonText), &parsed); err != nil {
-		artifact.ParseWarning = appendDeepSeekWarning(artifact.ParseWarning, err.Error())
+		markDeepSeekAIJudgeParseFailure(artifact, err.Error())
 		return
 	}
 
@@ -376,9 +532,99 @@ func parseDeepSeekAIJudgeResponse(artifact *deepseekAIJudgeArtifact) {
 	artifact.DialogueFixPlan = cleanStringList(parsed.DialogueFixPlan, 10)
 	artifact.AuthorVoicePlan = cleanStringList(parsed.AuthorVoicePlan, 8)
 	artifact.RAGRules = cleanStringList(parsed.RAGRules, 12)
+	normalizeDeepSeekExplicitCleanPassAdvice(artifact)
 	artifact.AdviceWarning = deepseekJudgeAdviceWarning(*artifact)
 	artifact.AdviceComplete = artifact.AdviceWarning == ""
 	artifact.Blocking = deepseekJudgeBlocking(*artifact)
+}
+
+func markDeepSeekAIJudgeParseFailure(artifact *deepseekAIJudgeArtifact, warning string) {
+	if artifact == nil {
+		return
+	}
+	warning = strings.TrimSpace(warning)
+	artifact.ParseWarning = appendDeepSeekWarning(artifact.ParseWarning, warning)
+	artifact.AdviceWarning = "外审响应无法解析"
+	if warning != "" {
+		artifact.AdviceWarning += ": " + warning
+	}
+}
+
+// A clean pass has no defect to rewrite. Some reviewers correctly return two
+// human-writing evidence points but leave the modification arrays empty rather
+// than inventing damage. Normalize only that explicit, independently
+// non-blocking result to deterministic "no change" advice. Missing evidence,
+// an unknown parse disposition, a blocking score, or any substantive partial
+// edit plan remains incomplete and therefore fail-closed.
+func normalizeDeepSeekExplicitCleanPassAdvice(artifact *deepseekAIJudgeArtifact) {
+	if artifact == nil || !deepseekJudgeIsExplicitCleanPass(*artifact) {
+		return
+	}
+	if !deepseekJudgeListsContainOnlyNoChangeAdvice(
+		artifact.RevisionPlan,
+		artifact.DialogueFixPlan,
+		artifact.AuthorVoicePlan,
+	) {
+		return
+	}
+	artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
+		"无需修改：保留当前正文的事件顺序、人物选择与场景后果。",
+	)
+	artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
+		"无需修改：保留当前叙述节奏与信息释放方式。",
+	)
+	artifact.DialogueFixPlan = appendUnique(artifact.DialogueFixPlan,
+		"无需修改：保留当前对白的目标、声口与话轮。",
+	)
+	artifact.AuthorVoicePlan = appendUnique(artifact.AuthorVoicePlan,
+		"无需修改：保留当前章节已有的限知声口与叙述质地。",
+	)
+	artifact.RAGRules = appendUnique(artifact.RAGRules,
+		"明确通过且未发现问题时，不为制造所谓毛边改写正文。",
+	)
+	artifact.RAGRules = appendUnique(artifact.RAGRules,
+		"后续章节延续当前人物声口、因果密度与信息释放方式。",
+	)
+}
+
+func deepseekJudgeIsExplicitCleanPass(artifact deepseekAIJudgeArtifact) bool {
+	if artifact.Verdict != "human_like" || artifact.RiskLevel != "low" ||
+		artifact.AIProbabilityPercent >= deepseekAIJudgePassExclusive ||
+		len(artifact.Evidence) < 2 {
+		return false
+	}
+	summary := strings.ReplaceAll(strings.TrimSpace(artifact.Summary), " ", "")
+	if !containsAnyDeepSeekPhrase(summary, []string{
+		"无需修改", "无须修改", "不需要修改", "未发现需要修改",
+		"未发现明显AI", "无明显AI", "没有明显AI", "不存在明显AI",
+		"未发现AI写作痕迹", "无AI写作痕迹",
+	}) {
+		return false
+	}
+	for _, reason := range artifact.Reasons {
+		reason = strings.ReplaceAll(strings.TrimSpace(reason), " ", "")
+		if !containsAnyDeepSeekPhrase(reason, []string{
+			"未发现", "无明显", "没有明显", "不存在", "无需修改", "无须修改",
+			"人工反证", "人类写作", "真人写作", "真人质感", "整体自然",
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+func deepseekJudgeListsContainOnlyNoChangeAdvice(lists ...[]string) bool {
+	for _, values := range lists {
+		for _, value := range values {
+			value = strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+			if !containsAnyDeepSeekPhrase(value, []string{
+				"无需修改", "无须修改", "不需要修改", "无需专项修改", "保持原文", "保留当前",
+			}) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func deepseekJudgeAdviceWarning(artifact deepseekAIJudgeArtifact) string {

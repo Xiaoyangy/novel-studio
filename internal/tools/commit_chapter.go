@@ -92,6 +92,11 @@ type commitOutput struct {
 
 func (t *CommitChapterTool) Name() string { return "commit_chapter" }
 func (t *CommitChapterTool) Description() string {
+	if sealedCommitSchemaUsesServerControlPlane(t.store) {
+		return "提交 sealed render 章节终稿。只需概括当前正文并报告叙事表现字段；" +
+			"characters、key_events 与角色/时间线/伏笔/关系/状态/资源控制平面由已批准 projected bundle 在服务端精确填充，禁止重复生成。" +
+			"正文、DeepSeek、hard consistency 与机械门禁仍按完整提交路径复验。"
+	}
 	return "提交章节终稿。加载草稿正文保存为终稿，更新时间线、伏笔、关系、角色状态和进度。" +
 		"提交时必须沉淀全角色 character_stage_records；系统会同步保存 side_character_journeys 和 chapter_world_deltas。rewrite 阶段若正文改变角色/世界事实，也必须同步提交新版角色台账。" +
 		"返回结构化事实：next_chapter / review_required / arc_end / volume_end / needs_expansion / book_complete / flow 等"
@@ -164,6 +169,41 @@ func (t *CommitChapterTool) Schema() map[string]any {
 		schema.Property("suggestion", schema.String("对后续大纲的调整建议")).Required(),
 	)
 	feedbackSchema["description"] = "对后续大纲的建议对象；必须直接传 JSON object，不要传字符串化 JSON"
+	if sealedCommitSchemaUsesServerControlPlane(t.store) {
+		// In sealed_v2, applySealedCommitControlPlane overwrites every omitted
+		// control-plane field from the exact promoted bundle before validation.
+		// Do not ask the model to spend thousands of output tokens reproducing
+		// data that cannot affect the commit. Keep only body-derived presentation
+		// metadata (plus cast introductions, which are not bundle-controlled).
+		return schema.Object(
+			schema.Property("chapter", schema.Int("章节号；必须等于当前 sealed render 目标章")).Required(),
+			schema.Property("summary", schema.String("本章正文摘要（200字以内）")).Required(),
+			schema.Property("cast_intros", schema.Array("本章正文首次引入且后续可能再出现的次要角色简介（没有则省略）", schema.Object(
+				schema.Property("name", schema.String("角色名")).Required(),
+				schema.Property("brief_role", schema.String("一句话定位")).Required(),
+			))),
+			schema.Property("hook_type", schema.Enum("章末钩子类型", "crisis", "mystery", "desire", "emotion", "choice")),
+			schema.Property("dominant_strand", schema.Enum("本章主导叙事线", "quest", "fire", "constellation")),
+			schema.Property("opening_device", schema.String("本章开头装置类型")),
+			schema.Property("ending_device", schema.String("本章结尾装置类型")),
+			schema.Property("scene_dynamics", schema.Object(
+				schema.Property("conflict_engine", schema.Enum("本章主导冲突引擎", "value", "interest", "emotion", "survival")).Required(),
+				schema.Property("pressure_index", schema.Int("本章紧张度 1-10")).Required(),
+				schema.Property("info_release_ratio", schema.Number("新信息占比 0-1")).Required(),
+				schema.Property("entropy_delta", schema.Number("本章混乱度增减 -1 到 1")).Required(),
+			)),
+			schema.Property("pov", schema.String("本章 POV 角色名")),
+			schema.Property("confidence", schema.Object(
+				schema.Property("overall", schema.Number("对本章质量的自报置信度 0-1；仅观测不阻塞")).Required(),
+				schema.Property("doubts", schema.Array("具体疑点", schema.String(""))),
+			)),
+			schema.Property("character_expression_check", schema.Array("本章主要角色情绪表现强度自评", schema.Object(
+				schema.Property("name", schema.String("角色名")).Required(),
+				schema.Property("emotion_intensity", schema.Number("情绪表现强度 0-1")).Required(),
+			))),
+			schema.Property("feedback", feedbackSchema),
+		)
+	}
 	return schema.Object(
 		schema.Property("chapter", schema.Int("章节号")).Required(),
 		schema.Property("summary", schema.String("本章内容摘要（200字以内）")).Required(),
@@ -1768,7 +1808,11 @@ func (t *CommitChapterTool) saveAIGCReviewFiles(chapter int, body string, report
 }
 
 func (t *CommitChapterTool) clearStaleFinalGlobalReview(progress *domain.Progress) {
-	if progress == nil || progress.Layered || progress.TotalChapters <= 0 {
+	if progress == nil || progress.TotalChapters <= 0 {
+		return
+	}
+	meta, _ := t.store.RunMeta.Load()
+	if !domain.RequiresFinalGlobalReview(progress, meta) {
 		return
 	}
 	_ = t.store.World.ClearGlobalReview(progress.TotalChapters)

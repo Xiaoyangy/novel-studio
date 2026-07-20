@@ -16,14 +16,17 @@ const (
 )
 
 type sealedV2FrozenPlanMarker struct {
-	Version                string `json:"version"`
-	Chapter                int    `json:"chapter"`
-	PlanDigest             string `json:"plan_digest"`
-	PlanningGenerationID   string `json:"planning_generation_id"`
-	ProjectionBinding      string `json:"projection_binding"`
-	ProjectedPlanSHA256    string `json:"projected_plan_sha256"`
-	ProjectedBundleDigest  string `json:"projected_bundle_digest"`
-	PromotionReceiptDigest string `json:"promotion_receipt_digest"`
+	Version                        string `json:"version"`
+	Chapter                        int    `json:"chapter"`
+	PlanDigest                     string `json:"plan_digest"`
+	PlanCheckpointSeq              int64  `json:"plan_checkpoint_seq"`
+	RenderContextSHA256            string `json:"render_context_sha256"`
+	PlanningGenerationID           string `json:"planning_generation_id"`
+	ProjectionBinding              string `json:"projection_binding"`
+	ProjectedPlanSHA256            string `json:"projected_plan_sha256"`
+	ProjectedBundleDigest          string `json:"projected_bundle_digest"`
+	PromotionReceiptDigest         string `json:"promotion_receipt_digest"`
+	ConvergenceReplanReceiptDigest string `json:"convergence_replan_receipt_digest,omitempty"`
 }
 
 // validateRAGFactPlanForChapterRender selects the sealed verifier only after
@@ -62,6 +65,48 @@ func exactSealedV2RAGReceiptForRender(
 	}
 	checkpoint, err := CurrentChapterPlanCheckpoint(st, chapter)
 	if err != nil || checkpoint == nil || checkpoint.Digest != lock.PlanDigest {
+		return nil, false
+	}
+	bundle, sealed := exactSealedV2FrozenBundleForPlan(st, chapter, plan)
+	if !sealed {
+		return nil, false
+	}
+
+	receiptID, factsSHA, count, err := ragFactReceiptIdentityFromSources(plan.CausalSimulation.ContextSources)
+	if err != nil {
+		return nil, false
+	}
+	if count == 0 {
+		if bundle.RAGFactReceipt != nil {
+			return nil, false
+		}
+		return nil, true
+	}
+	if bundle.RAGFactReceipt == nil ||
+		bundle.RAGFactReceipt.ID != receiptID ||
+		bundle.RAGFactReceipt.Chapter != chapter ||
+		bundle.RAGFactReceipt.SelectedFactsSHA256 != factsSHA {
+		return nil, false
+	}
+	exact := *bundle.RAGFactReceipt
+	return &exact, true
+}
+
+// exactSealedV2FrozenBundleForPlan proves the immutable planning identity
+// without depending on a currently-held render lease. Pipeline stage
+// verification runs immediately before that lease is acquired, while prose
+// tools separately enforce the same-process render lock through
+// guardPipelineProseExecution.
+func exactSealedV2FrozenBundleForPlan(
+	st *store.Store,
+	chapter int,
+	plan domain.ChapterPlan,
+) (*domain.ProjectedChapterBundle, bool) {
+	if st == nil || chapter <= 0 || plan.Chapter != chapter {
+		return nil, false
+	}
+	checkpoint, err := CurrentChapterPlanCheckpoint(st, chapter)
+	if err != nil || checkpoint == nil {
 		return nil, false
 	}
 	raw, err := os.ReadFile(filepath.Join(st.Dir(), filepath.FromSlash(currentFrozenPlanMarkerPath)))
@@ -121,7 +166,20 @@ func exactSealedV2RAGReceiptForRender(
 		return nil, false
 	}
 	currentPlanDigest, err := domain.ComputeChapterPlanV2Digest(plan)
-	if err != nil || currentPlanDigest != bundlePlanDigest {
+	if err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(marker.ConvergenceReplanReceiptDigest) == "" {
+		if currentPlanDigest != bundlePlanDigest {
+			return nil, false
+		}
+	} else if !sealedConvergenceReplanMarkerCurrent(
+		st,
+		marker,
+		checkpoint,
+		bundlePlanDigest,
+		currentPlanDigest,
+	) {
 		return nil, false
 	}
 	promotion, err := projected.LoadPromotionReceipt(
@@ -135,23 +193,5 @@ func exactSealedV2RAGReceiptForRender(
 		promotion.FrozenPlanDigest != bundlePlanDigest {
 		return nil, false
 	}
-
-	receiptID, factsSHA, count, err := ragFactReceiptIdentityFromSources(plan.CausalSimulation.ContextSources)
-	if err != nil {
-		return nil, false
-	}
-	if count == 0 {
-		if bundle.RAGFactReceipt != nil {
-			return nil, false
-		}
-		return nil, true
-	}
-	if bundle.RAGFactReceipt == nil ||
-		bundle.RAGFactReceipt.ID != receiptID ||
-		bundle.RAGFactReceipt.Chapter != chapter ||
-		bundle.RAGFactReceipt.SelectedFactsSHA256 != factsSHA {
-		return nil, false
-	}
-	exact := *bundle.RAGFactReceipt
-	return &exact, true
+	return bundle, true
 }

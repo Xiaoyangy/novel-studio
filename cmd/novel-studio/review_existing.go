@@ -47,7 +47,8 @@ type reviewFlags struct {
 const (
 	editorReviewCacheBranch          = "editor"
 	deepseekAIJudgeCacheBranch       = "deepseek"
-	editorReviewProtocolVersion      = "review-existing/editor/v4"
+	editorReviewProtocolVersion      = "review-existing/editor/v5"
+	editorReviewUserPayloadKind      = "chapter_context_with_canonical_heading/v2"
 	reviewExistingCacheDirectoryName = "cache"
 )
 
@@ -83,6 +84,8 @@ type editorReviewBranchResult struct {
 	CacheHit      bool
 	CacheLoadErr  error
 	Err           error
+	Elapsed       time.Duration
+	ModelCalls    int
 }
 
 type deepseekAIJudgeBranchResult struct {
@@ -90,6 +93,8 @@ type deepseekAIJudgeBranchResult struct {
 	CacheHit     bool
 	CacheLoadErr error
 	Err          error
+	Elapsed      time.Duration
+	ModelCalls   int
 }
 
 func parseReviewFlags(argv []string) (reviewFlags, []string, error) {
@@ -136,6 +141,24 @@ func reviewExistingPipelineAtOutput(
 	args []string,
 	exactOutputDir string,
 	disableLiveRAG bool,
+) error {
+	return reviewExistingPipelineAtOutputWithPolicy(opts, args, exactOutputDir, disableLiveRAG, reviewExistingRunPolicy{})
+}
+
+type reviewExistingRunPolicy struct {
+	// RequireCurrentDeepSeekCache is used by sealed post-commit recovery.  That
+	// path already has an approved exact-body provider gate, so formal
+	// revalidation may refresh Editor but must never pay for (or silently accept)
+	// a second DeepSeek decision.
+	RequireCurrentDeepSeekCache bool
+}
+
+func reviewExistingPipelineAtOutputWithPolicy(
+	opts cliOptions,
+	args []string,
+	exactOutputDir string,
+	disableLiveRAG bool,
+	policy reviewExistingRunPolicy,
 ) error {
 	// --review-existing --help：路由 token 已在 main 里剥离（避免 Go flag 包
 	// 把它注册为 StringVar 后把 --help 当成它的值），此时再 hasHelpToken 打印 usage。
@@ -282,6 +305,7 @@ func reviewExistingPipelineAtOutput(
 		chapterReviewContext := buildEditorChapterReviewContext(st, chNum)
 		fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor(%s/%s) + DeepSeek(%s/%s) 并行评审中（预算 %s）...\n",
 			chNum, editorProvider, editorName, reviewerProvider, reviewerName, flags.Budget)
+		reviewBranchesStarted := time.Now()
 		editorBranch, deepseekBranch := runReviewExistingBranchesConcurrently(
 			func() editorReviewBranchResult {
 				return loadOrGenerateEditorReview(
@@ -291,11 +315,33 @@ func reviewExistingPipelineAtOutput(
 				)
 			},
 			func() deepseekAIJudgeBranchResult {
+				if policy.RequireCurrentDeepSeekCache {
+					started := time.Now()
+					expected := newDeepSeekAIJudgeCachePolicy(reviewerSelection, chNum, frozenBody)
+					cached, cacheErr := loadDeepSeekAIJudgeCache(eng.Dir(), expected)
+					if cacheErr != nil {
+						return deepseekAIJudgeBranchResult{Err: cacheErr, CacheLoadErr: cacheErr, Elapsed: time.Since(started)}
+					}
+					if cached == nil {
+						cacheErr = fmt.Errorf("sealed formal revalidation requires current exact-body DeepSeek cache")
+						return deepseekAIJudgeBranchResult{Err: cacheErr, Elapsed: time.Since(started)}
+					}
+					cached.ReviewerExplicit = reviewerSelection.Explicit
+					cached.ModelSelection = reviewerSelection
+					return deepseekAIJudgeBranchResult{Artifact: cached, CacheHit: true, Elapsed: time.Since(started)}
+				}
 				return loadOrGenerateDeepSeekAIJudge(
 					eng.Dir(), reviewerModel, reviewerSelection,
 					chNum, frozenBody, flags.Budget,
 				)
 			},
+		)
+		fmt.Fprintf(os.Stderr,
+			"[review-existing:timing] ch%02d parallel_total=%s editor=%s(cache=%t calls=%d) deepseek=%s(cache=%t calls=%d)\n",
+			chNum,
+			time.Since(reviewBranchesStarted).Round(time.Millisecond),
+			editorBranch.Elapsed.Round(time.Millisecond), editorBranch.CacheHit, editorBranch.ModelCalls,
+			deepseekBranch.Elapsed.Round(time.Millisecond), deepseekBranch.CacheHit, deepseekBranch.ModelCalls,
 		)
 
 		if editorBranch.CacheLoadErr != nil {
@@ -348,25 +394,20 @@ func reviewExistingPipelineAtOutput(
 		deepseekJudge := deepseekBranch.Artifact
 		sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
 		if !deepseekJudge.AdviceComplete {
-			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 建议经项目门禁净化后不完整，已回源重新估分\n", chNum)
-			fresh, freshErr := runDeepSeekAIJudge(reviewerModel, reviewerSelection, chNum, frozenBody, flags.Budget)
-			if freshErr != nil || fresh == nil {
-				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 净化后回源失败：%v\n", chNum, freshErr)
-				failureCount++
-				continue
+			// The model-facing request identity is unchanged. Calling the provider
+			// again for the same body/cache key is both redundant and unbounded: the
+			// same project sanitizer can reject the second response for the same
+			// reason. Persist the exact result for audit and fail closed; a protocol
+			// or prompt revision will naturally produce a new cache identity.
+			if saveErr := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 净化后失败闭锁结果写入失败：%v\n", chNum, saveErr)
 			}
-			if saveErr := saveDeepSeekAIJudgeCache(eng.Dir(), fresh); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 刷新缓存写入失败：%v\n", chNum, saveErr)
-				failureCount++
-				continue
-			}
-			deepseekJudge = fresh
-			sanitizeDeepSeekAIJudgeForProject(st, deepseekJudge)
-			if !deepseekJudge.AdviceComplete {
-				fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek 二次建议仍不完整：%s\n", chNum, deepseekJudge.AdviceWarning)
-				failureCount++
-				continue
-			}
+			fmt.Fprintf(os.Stderr,
+				"[review-existing] ch%02d DeepSeek 建议经项目门禁净化后不完整；同一 body/cache key 禁止重复回源，已保留精确结果并失败闭锁：%s\n",
+				chNum, deepseekJudge.AdviceWarning,
+			)
+			failureCount++
+			continue
 		}
 		if err := saveDeepSeekAIJudge(eng.Dir(), deepseekJudge); err != nil {
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d DeepSeek AI 判定写入失败：%v\n", chNum, err)
@@ -398,7 +439,7 @@ func reviewExistingPipelineAtOutput(
 		} else if deepseekJudge.Blocking {
 			entry.Verdict = "rewrite"
 			entry.AffectedChapters = []int{chNum}
-		} else if reconcileWarningOnlyEditorReview(&entry, bodyHash, mechanical, analysis, deepseekJudge) {
+		} else if reconcileWarningOnlyEditorReview(&entry, review, bodyHash, mechanical, analysis, deepseekJudge) {
 			reconciledWarnings = true
 			fmt.Fprintf(os.Stderr, "[review-existing] ch%02d Editor 警告已由同哈希机械门禁、AI voice 与裸文 Reviewer 三方校准为非阻断建议\n", chNum)
 		}
@@ -538,6 +579,7 @@ func newEditorReviewCachePolicy(
 		UserRulesSHA256:            reviewExistingSHA256(userRules),
 		ChapterReviewContextSHA256: reviewExistingSHA256(chapterReviewContext),
 		AIVoiceContextSHA256:       reviewExistingSHA256(aiVoiceContext),
+		UserPayloadKind:            editorReviewUserPayloadKind,
 	}
 }
 
@@ -550,6 +592,11 @@ func loadOrGenerateEditorReview(
 	analysis domain.AIVoiceAnalysis,
 	budget time.Duration,
 ) editorReviewBranchResult {
+	started := time.Now()
+	finish := func(result editorReviewBranchResult) editorReviewBranchResult {
+		result.Elapsed = time.Since(started)
+		return result
+	}
 	aiVoiceContext := editorAIVoiceReviewPayload(analysis, chapterBody)
 	policy := newEditorReviewCachePolicy(
 		provider, modelName, premise, userRules, chapterReviewContext,
@@ -557,11 +604,11 @@ func loadOrGenerateEditorReview(
 	)
 	cached, loadErr := loadEditorReviewCache(projectDir, policy)
 	if loadErr == nil && cached != nil {
-		return editorReviewBranchResult{
+		return finish(editorReviewBranchResult{
 			Review:        cached.Markdown,
 			CacheArtifact: cached,
 			CacheHit:      true,
-		}
+		})
 	}
 
 	review, err := callEditorOnChapter(
@@ -569,7 +616,7 @@ func loadOrGenerateEditorReview(
 		chapter, chapterBody, analysis, budget,
 	)
 	if err != nil {
-		return editorReviewBranchResult{CacheLoadErr: loadErr, Err: err}
+		return finish(editorReviewBranchResult{CacheLoadErr: loadErr, Err: err, ModelCalls: 1})
 	}
 	artifact := &editorReviewCacheArtifact{
 		Chapter:     chapter,
@@ -578,11 +625,12 @@ func loadOrGenerateEditorReview(
 		CachePolicy: policy,
 		Markdown:    review,
 	}
-	return editorReviewBranchResult{
+	return finish(editorReviewBranchResult{
 		Review:        review,
 		CacheArtifact: artifact,
 		CacheLoadErr:  loadErr,
-	}
+		ModelCalls:    1,
+	})
 }
 
 func editorAIVoiceReviewPayload(analysis domain.AIVoiceAnalysis, chapterBody string) string {
@@ -1397,6 +1445,7 @@ func editorAIVoicePayloadPassed(chapter int, body string, analysis domain.AIVoic
 
 func reconcileWarningOnlyEditorReview(
 	entry *domain.ReviewEntry,
+	editorMarkdown string,
 	bodyHash string,
 	mechanical *reviewreport.MechanicalGatePayload,
 	analysis domain.AIVoiceAnalysis,
@@ -1405,14 +1454,33 @@ func reconcileWarningOnlyEditorReview(
 	if entry == nil || mechanical == nil || judge == nil || strings.TrimSpace(bodyHash) == "" {
 		return false
 	}
-	if entry.ContractStatus != "met" || len(entry.ContractMisses) > 0 || judge.Blocking || deepseekJudgeBlocking(*judge) ||
-		mechanical.BodySHA256 != bodyHash || analysis.BodySHA256 != bodyHash || judge.BodySHA256 != bodyHash {
+	if strings.TrimSpace(extractLine(editorMarkdown, "## 是否需要改写")) != "否" ||
+		entry.ContractStatus != "met" || len(entry.ContractMisses) > 0 || !reviewDimensionsStrictlyPass(entry.Dimensions) ||
+		judge.Blocking || deepseekJudgeBlocking(*judge) ||
+		entry.Chapter <= 0 || entry.Chapter != mechanical.Chapter || entry.Chapter != analysis.Chapter || entry.Chapter != judge.Chapter ||
+		strings.TrimSpace(entry.BodySHA256) != bodyHash || strings.TrimSpace(mechanical.BodySHA256) != bodyHash ||
+		strings.TrimSpace(analysis.BodySHA256) != bodyHash || strings.TrimSpace(judge.BodySHA256) != bodyHash {
 		return false
 	}
 	reviewreport.ApplyExternalCorroborationWithEditor(mechanical, deepSeekExternalAIJudge(judge), entry)
 	if !strings.Contains(strings.ToLower(judge.Verdict), "human") ||
-		reviewreport.HasBlockingAIVoice(&analysis) || reviewExistingAIGCGatePercent(mechanical.AIGCReport) >= deepseekAIJudgePassExclusive {
+		reviewExistingAIGCGatePercent(mechanical.AIGCReport) >= deepseekAIJudgePassExclusive {
 		return false
+	}
+	for _, flag := range analysis.RedFlags {
+		switch strings.TrimSpace(flag.Severity) {
+		case "critical":
+			return false
+		case "error":
+			if !reviewreport.EditorExplicitlySupportsContextualDialogueRatioErrorClearance(entry, mechanical, &analysis, flag) {
+				return false
+			}
+			continue
+		}
+		if reviewreport.IsBlockingAIVoiceFlagInAnalysis(flag, analysis) &&
+			!reviewreport.EditorExplicitlySupportsAIVoiceWarningClearance(entry, mechanical, &analysis, flag) {
+			return false
+		}
 	}
 	for _, violation := range mechanical.RuleViolations {
 		if reviewreport.IsDeterministicMechanicalViolation(violation) {
@@ -1431,17 +1499,32 @@ func reconcileWarningOnlyEditorReview(
 			return false
 		}
 	}
-	for i := range entry.Dimensions {
-		if entry.Dimensions[i].Score < 80 {
-			entry.Dimensions[i].Score = 80
-			entry.Dimensions[i].Verdict = "pass"
-			entry.Dimensions[i].Comment += " | 同哈希机械门禁、AI voice 与裸文 Reviewer 均通过；本项保留为非阻断建议。"
-		}
-	}
 	entry.Issues = nil
 	entry.Verdict = "accept"
 	entry.AffectedChapters = nil
 	entry.Summary = fmt.Sprintf("第 %d 章结果级合同、机械门禁、AI voice 与独立裸文 Reviewer 均通过；Editor 的 warning 级意见保留在原始报告中，不触发返工。", entry.Chapter)
+	return true
+}
+
+func reviewDimensionsStrictlyPass(dimensions []domain.DimensionScore) bool {
+	if len(dimensions) != len(reviewDimensionNames) {
+		return false
+	}
+	seen := make(map[string]bool, len(reviewDimensionNames))
+	for _, dimension := range dimensions {
+		name := strings.TrimSpace(dimension.Dimension)
+		known := false
+		for _, want := range reviewDimensionNames {
+			if name == want {
+				known = true
+				break
+			}
+		}
+		if !known || seen[name] || dimension.Score < 80 || strings.TrimSpace(dimension.Verdict) != "pass" {
+			return false
+		}
+		seen[name] = true
+	}
 	return true
 }
 
@@ -1886,12 +1969,16 @@ func isNonActionableReviewIssue(desc string) bool {
 		return true
 	}
 	normalized := strings.Join(strings.Fields(desc), "")
-	nonAction := strings.HasPrefix(normalized, "无严重问题") ||
-		strings.HasPrefix(normalized, "没有严重问题")
+	bare := strings.Trim(normalized, "（）()[]【】")
+	nonAction := strings.HasPrefix(bare, "无严重问题") ||
+		strings.HasPrefix(bare, "没有严重问题") ||
+		strings.HasPrefix(bare, "无其他问题") ||
+		strings.HasPrefix(bare, "没有其他问题")
 	for _, marker := range []string{
 		"无需整章返工", "无需返工", "不需要返工", "不需返工", "无需改写",
-		"不建议改写", "无需修改", "无需补充修改", "不需要修改", "不构成问题", "不构成当前章问题", "不构成强制改写",
-		"属可选优化", "可选优化", "实为优秀写作", "非必要",
+		"不触发返工", "不建议改写", "无需修改", "无需补充修改", "不需要修改", "可不修改",
+		"不构成问题", "不构成当前章问题", "不构成强制改写", "不构成阻断", "非阻断",
+		"不阻断本章通过", "不阻断当前章通过", "属可选优化", "可选优化", "实为优秀写作", "非必要",
 	} {
 		if strings.Contains(normalized, marker) {
 			nonAction = true
@@ -1946,6 +2033,8 @@ const editorSystemPrompt = `你是一位资深中文网文编辑，负责男频�
 7. **审美品质**：描写质感、对话区分度、用词质量、情感打动力。
 8. **AI 腔检测**：必须读取用户消息里的 red flag JSON，检查比喻密度、对话占比、格言命中、主角动摇、章节功能和章末钩子均匀度。问题必须具体到段号/句号/风险来源。
 
+章节文件首个非空行若符合“第N章 标题”（阿拉伯数字或中文数字均可），它是必须保留的规范章标题元数据，不是叙事段落，不属于第三人称限知 POV，也不计入开篇格言、段首句式、比喻密度或其他 AI 腔正文规则。正文第 1 段从标题后的首个非空段开始。你可以核对标题是否与已批准 plan 一致、评价标题吸引力，但不得把标题文字当作 opening_single_sentence_aphorism 等正文红旗，不得要求删除标题或把标题改成动作句。若 red flag JSON 的 evidence 恰好等于规范章标题，必须明确判为检测范围错位并清除该项，再从下一段审核正文。
+
 若用户消息中的机械门禁列出 structural warning，而你根据当前正文判断它不阻断本章，必须在第 8 维证据的同一句中原样写出 rule ID、warning、正文里的有效打断或场景合理性证据，并明确写“无需改写”或“不触发返工”。只写中文别名、只说问题不大或只建议后续关注，不足以清除同哈希 warning；未逐条明确清除的 structural warning 继续阻断。
 
 ## 输出格式（严格遵循 markdown 结构）
@@ -1992,7 +2081,7 @@ func callEditorOnChapter(model agentcore.ChatModel, premise, userRules, chapterR
 	defer cancel()
 
 	redFlagJSON := editorAIVoiceReviewPayload(analysis, chapterBody)
-	userMsg := fmt.Sprintf("## 项目用户规则（最高优先级）\n```json\n%s\n```\n\n## 本章已批准写前 plan（合同事实，不得反向建议）\n```json\n%s\n```\n\n## 故事前提（供参考）\n%s\n\n## AI 腔 red flag JSON（必须读取）\n```json\n%s\n```\n\n## 本章正文（ch%02d）\n%s",
+	userMsg := fmt.Sprintf("## 项目用户规则（最高优先级）\n```json\n%s\n```\n\n## 本章已批准写前 plan（合同事实，不得反向建议）\n```json\n%s\n```\n\n## 故事前提（供参考）\n%s\n\n## AI 腔 red flag JSON（必须读取）\n```json\n%s\n```\n\n## 章节文件边界（硬约束）\n本章正文首个非空行是规范章标题元数据，必须保留；它不是叙事段落、不是 POV 句子，也不参与 opening_single_sentence_aphorism 等正文 AI 腔判断。正文段落编号从标题后的首个非空段开始；若 red flag evidence 等于标题，按检测范围错位清除，不得要求删改标题。\n\n## 本章正文（ch%02d）\n%s",
 		truncateForContext(userRules, 6000), truncateForContext(chapterReviewContext, 8000), truncateForContext(premise, 2000), redFlagJSON, chNum, chapterBody)
 
 	resp, err := model.Generate(ctx,

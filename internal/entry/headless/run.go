@@ -21,20 +21,34 @@ import (
 )
 
 type Options struct {
-	Prompt                    string
-	StopAfterChapter          int
-	StopAfterPlanChapter      int
-	StopAfterRewriteCommit    int
-	StopOnRenderReplanChapter int
-	StopAfterFoundation       bool
-	StopAfterFoundationChange bool
-	StopAfterInitialWorldTick bool
-	PreserveUserRules         bool
-	SkipQueueReplay           bool
-	DisableLiveRAG            bool
-	Stdin                     io.Reader
-	Stdout                    io.Writer
-	Stderr                    io.Writer
+	Prompt                 string
+	StopAfterChapter       int
+	StopAfterPlanChapter   int
+	StopAfterRewriteCommit int
+	// StopAfterGlobalReviewChapter returns control to the pipeline as soon as
+	// save_review has durably recorded a new scope=global review at this chapter.
+	// It is intentionally separate from StopAfterChapter: a rejected whole-book
+	// review may enqueue rewrites, but the sealed finalization stage must stop and
+	// report those affected chapters instead of silently starting a legacy rewrite.
+	StopAfterGlobalReviewChapter int
+	StopOnRenderReplanChapter    int
+	// StopOnSealedConvergencePreconditionChapter is used only by the narrow
+	// sealed convergence Planner. Deterministic context/authority failures are
+	// not model-repairable; abort on the first observed failure instead of
+	// paying for the same tool call three times.
+	StopOnSealedConvergencePreconditionChapter int
+	StopAfterFoundation                        bool
+	StopAfterFoundationChange                  bool
+	StopAfterInitialWorldTick                  bool
+	PreserveUserRules                          bool
+	SkipQueueReplay                            bool
+	DisableLiveRAG                             bool
+	// WriterSessionIdentity is an internal pipeline-only audit identity for a
+	// fresh Planner run. Empty preserves the normal writer-chNN routing.
+	WriterSessionIdentity string
+	Stdin                 io.Reader
+	Stdout                io.Writer
+	Stderr                io.Writer
 }
 
 // Run 以无界面模式运行会话内核，直接消费 Engine 事件与流式输出。
@@ -57,7 +71,9 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	if opts.DisableLiveRAG {
 		cfg.DisableLiveRAG = true
 	}
-	eng, err := host.New(cfg, bundle)
+	eng, err := host.NewWithOptions(cfg, bundle, host.NewOptions{
+		WriterSessionIdentity: opts.WriterSessionIdentity,
+	})
 	if err != nil {
 		return err
 	}
@@ -74,6 +90,8 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	}
 	rewriteCommitSeq := latestChapterCommitSeq(eng.Dir(), opts.StopAfterRewriteCommit)
 	planSeq := latestChapterPlanSeq(eng.Dir(), opts.StopAfterPlanChapter)
+	globalReviewSeq := latestGlobalReviewSeq(eng.Dir(), opts.StopAfterGlobalReviewChapter)
+	renderDraftSeq := latestChapterDraftSeq(eng.Dir(), opts.StopOnRenderReplanChapter)
 	cleanup := logger.SetupFile(eng.Dir(), "headless.log", false)
 	defer cleanup()
 	defer eng.Close()
@@ -123,13 +141,13 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return fmt.Errorf("headless 模式需要 --prompt，或输出目录 %q 下已有可恢复会话", eng.Dir())
 		}
 		fmt.Fprintf(stderr, "headless 恢复: %s (%s)\n", eng.Dir(), label)
-		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopOnRenderReplanChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
+		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopOnRenderReplanChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick)
+	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
 }
 
-func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopOnRenderReplanChapter int, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool) error {
+func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterGlobalReviewChapter int, initialGlobalReviewSeq int64, stopOnRenderReplanChapter, stopOnSealedConvergencePreconditionChapter int, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool, initialRenderDraftSeq int64) error {
 	stopRequested := false
 	for {
 		select {
@@ -138,6 +156,13 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 				return nil
 			}
 			writeEvent(stderr, ev)
+			if deterministicErr := sealedConvergenceDeterministicPreconditionError(
+				ev,
+				stopOnSealedConvergencePreconditionChapter,
+			); deterministicErr != nil {
+				eng.Abort()
+				return deterministicErr
+			}
 			if !stopRequested && shouldStopAfterChapter(eng.Dir(), stopAfterChapter) {
 				stopRequested = true
 				fmt.Fprintf(stderr, "[headless] 已完成到第 %d 章，按 --write-to 暂停写作\n", stopAfterChapter)
@@ -153,11 +178,21 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 				fmt.Fprintf(stderr, "[headless] 第 %d 章返工正文已 commit，交还 pipeline 复审\n", stopAfterRewriteCommit)
 				eng.Abort()
 			}
+			if !stopRequested && shouldStopAfterGlobalReview(eng.Dir(), stopAfterGlobalReviewChapter, initialGlobalReviewSeq) {
+				stopRequested = true
+				fmt.Fprintf(stderr, "[headless] 第 %d 章锚定的全文终审已落盘，交还 pipeline 做 sealed 完结验收\n", stopAfterGlobalReviewChapter)
+				eng.Abort()
+			}
 			if !stopRequested && stopOnRenderReplanChapter > 0 {
 				if stopErr := inspectRenderOnlyReplanStop(eng.Dir(), stopOnRenderReplanChapter); stopErr != nil {
 					eng.Abort()
 					return stopErr
 				}
+			}
+			if !stopRequested && shouldStopAfterChapterDraft(eng.Dir(), stopOnRenderReplanChapter, initialRenderDraftSeq) {
+				stopRequested = true
+				fmt.Fprintf(stderr, "[headless] 第 %d 章新整章草稿已落盘，立即交还 pipeline 做 exact-hash/static/provider 门禁\n", stopOnRenderReplanChapter)
+				eng.Abort()
 			}
 			if !stopRequested && stopAfterFoundation && shouldStopAfterFoundationReady(eng.Dir()) {
 				stopRequested = true
@@ -203,8 +238,45 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 	}
 }
 
+func sealedConvergenceDeterministicPreconditionError(ev host.Event, chapter int) error {
+	if chapter <= 0 || ev.Category != "ERROR" {
+		return nil
+	}
+	text := strings.TrimSpace(ev.Detail)
+	if text == "" {
+		text = strings.TrimSpace(ev.Summary)
+	}
+	lower := strings.ToLower(text)
+	contextBudget := strings.Contains(lower, "novel_context") &&
+		(strings.Contains(text, "关键上下文无法安全收敛") ||
+			strings.Contains(text, "返工关键上下文超过硬上限") ||
+			strings.Contains(text, "关键上下文超过硬上限") ||
+			strings.Contains(text, "最终序列化结果超过预算"))
+	authorityBinding := strings.Contains(lower, "stored project-all authority receipt invalid") &&
+		strings.Contains(lower, "active project-all authority binding no longer matches receipt")
+	overlayBinding := strings.Contains(lower, "sealed convergence authority overlay")
+	projectedStateBinding := strings.Contains(lower, "plan_details") &&
+		strings.Contains(lower, "project-all-state") &&
+		strings.Contains(lower, "source token")
+	if !contextBudget && !authorityBinding && !overlayBinding && !projectedStateBinding {
+		return nil
+	}
+	return fmt.Errorf(
+		"第 %d 章 sealed convergence replan deterministic planning precondition；已在首次失败后终止 Host，禁止模型重复同一调用: %s",
+		chapter,
+		text,
+	)
+}
+
 func inspectRenderOnlyReplanStop(dir string, chapter int) error {
-	escalation := tools.InspectRenderOnlyReplanEscalation(store.NewStore(dir), chapter)
+	st := store.NewStore(dir)
+	// This check runs after every Host event, including the tool result that
+	// durably records a structural rejection. It must observe the combined
+	// plan-owned ledger before the router can request another prose projection.
+	if err := tools.RequireRenderConvergenceAttemptAvailable(st, chapter); err != nil {
+		return err
+	}
+	escalation := tools.InspectRenderOnlyReplanEscalation(st, chapter)
 	if !escalation.Required {
 		return nil
 	}
@@ -236,8 +308,43 @@ func latestChapterCommitSeq(dir string, chapter int) int64 {
 	return cp.Seq
 }
 
+func latestChapterDraftSeq(dir string, chapter int) int64 {
+	if chapter <= 0 {
+		return 0
+	}
+	cp := store.NewStore(dir).Checkpoints.LatestByStep(domain.ChapterScope(chapter), "draft")
+	if cp == nil {
+		return 0
+	}
+	return cp.Seq
+}
+
+func shouldStopAfterChapterDraft(dir string, chapter int, initialSeq int64) bool {
+	return chapter > 0 && latestChapterDraftSeq(dir, chapter) > initialSeq
+}
+
 func shouldStopAfterChapterCommit(dir string, chapter int, initialSeq int64) bool {
 	return chapter > 0 && latestChapterCommitSeq(dir, chapter) > initialSeq
+}
+
+func latestGlobalReviewSeq(dir string, chapter int) int64 {
+	if chapter <= 0 {
+		return 0
+	}
+	want := fmt.Sprintf("reviews/%02d-global.json", chapter)
+	checkpoints := store.NewStore(dir).Checkpoints.All()
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		checkpoint := checkpoints[i]
+		if checkpoint.Scope.Matches(domain.ChapterScope(chapter)) &&
+			checkpoint.Step == "review" && checkpoint.Artifact == want {
+			return checkpoint.Seq
+		}
+	}
+	return 0
+}
+
+func shouldStopAfterGlobalReview(dir string, chapter int, initialSeq int64) bool {
+	return chapter > 0 && latestGlobalReviewSeq(dir, chapter) > initialSeq
 }
 
 func latestChapterPlanSeq(dir string, chapter int) int64 {

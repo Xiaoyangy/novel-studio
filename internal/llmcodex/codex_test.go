@@ -13,6 +13,14 @@ import (
 	"github.com/voocel/agentcore"
 )
 
+func TestDetectCodexBinaryHonorsExplicitPipelineOverride(t *testing.T) {
+	const want = "/opt/novel-studio/codex-cli"
+	t.Setenv("NOVEL_STUDIO_CODEX_BINARY", "  "+want+"  ")
+	if got := detectCodexBinary(); got != want {
+		t.Fatalf("detectCodexBinary()=%q want explicit override %q", got, want)
+	}
+}
+
 func TestBuildResponseSchemaStrictCompliant(t *testing.T) {
 	schema := buildResponseSchema(nil)
 	// OpenAI 严格结构化输出：additionalProperties:false + 所有 property required。
@@ -219,6 +227,55 @@ func TestBuildProsePromptStructurallyPrunesNovelContext(t *testing.T) {
 	}
 	if got := len([]rune(prompt)); got > codexProsePromptRuneBudget+2000 {
 		t.Fatalf("pruned prose prompt too large: %d", got)
+	}
+}
+
+func TestBuildProsePromptRequiresSceneFirstCompleteChapter(t *testing.T) {
+	prompt := buildProsePrompt([]agentcore.Message{{
+		Role: agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(
+			`{"render_packet":{"version":11,"chapter":2,"title":"门外的两声轻响"}}`,
+		)},
+	}})
+	for _, want := range []string{
+		"不要以章纲、事实边界、时间窗、结论或自检摘要起笔",
+		"标题后必须直接进入带有人物动作或现场感知的具体场景",
+		"连续写成完整章节正文",
+		"只能确认什么、不能确认什么",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("scene-first prose guard missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProsePromptPassesAphoristicSummaryGateBeforeGeneration(t *testing.T) {
+	msgs := []agentcore.Message{{
+		Role: agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(
+			`{"render_packet":{"version":11,"chapter":4,"title":"三层时间"},"user_rules":{"structured":{"chapter_words":{"min":2200,"max":2600}}}}`,
+		)},
+	}}
+
+	for name, prompt := range map[string]string{
+		"initial": buildProsePrompt(msgs),
+		"repair":  buildProseRepairPrompt(msgs, "第四章 三层时间\n\n待修正文。", 2190, proseWordContract{Min: 2200, Max: 2600}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{
+				"写前硬门禁：aphoristic_narrative_summary",
+				"无对白的旁白段不得把人物当下判断提炼成对称判词",
+				"理由一条比一条……只有……",
+				"任何一段……只能……不能……",
+				"接单相近不等于……也不等于……",
+				"命中任一例型会整章拒绝",
+				"具体误判、动作、对话或后果",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("%s prose prompt missing pre-generation aphoristic gate %q:\n%s", name, want, prompt)
+				}
+			}
+		})
 	}
 }
 
@@ -509,6 +566,29 @@ func TestCompactProseMessageDropsLiveRewriteBrief(t *testing.T) {
 	}
 }
 
+func TestCompactProseMessageKeepsSealedRerenderFeedback(t *testing.T) {
+	payload := map[string]any{
+		"render_packet": map[string]any{"chapter": 3, "title": "七个地址都只试门口"},
+		"sealed_rerender_feedback": map[string]any{
+			"plan_digest": "sha256:frozen-plan",
+			"body_sha256": "2958deadbeef",
+			"summary":     "删掉七址清单感，补一处主角真实误判与代价。",
+			"issues":      []any{map[string]any{"type": "aesthetic", "problem": "catalog stuffing"}},
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := agentcore.Message{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(string(raw))}}
+	got := compactProseMessageText(msg, string(raw))
+	for _, want := range []string{"sealed_rerender_feedback", "sha256:frozen-plan", "删掉七址清单感"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sealed semantic feedback was dropped from prose context %q: %s", want, got)
+		}
+	}
+}
+
 func TestCompactProseMessageKeepsLiteraryBridgeFallback(t *testing.T) {
 	payload := map[string]any{
 		"render_packet": map[string]any{"chapter": 4, "title": "门后的雨"},
@@ -644,6 +724,19 @@ func TestBoundedCodexExecContextAddsHardDeadlineAndRespectsEarlierParent(t *test
 	}
 }
 
+func TestConfiguredCodexExecHardTimeoutSupportsBoundedOverride(t *testing.T) {
+	t.Setenv("NOVEL_STUDIO_CODEX_EXEC_HARD_TIMEOUT", "25m")
+	if got := configuredCodexExecHardTimeout(); got != 25*time.Minute {
+		t.Fatalf("override = %s, want 25m", got)
+	}
+	for _, invalid := range []string{"bad", "30s", "2h"} {
+		t.Setenv("NOVEL_STUDIO_CODEX_EXEC_HARD_TIMEOUT", invalid)
+		if got := configuredCodexExecHardTimeout(); got != defaultCodexExecHardTimeout {
+			t.Fatalf("invalid override %q = %s, want default %s", invalid, got, defaultCodexExecHardTimeout)
+		}
+	}
+}
+
 func TestBuildProsePromptPinsChapterWordContract(t *testing.T) {
 	msgs := []agentcore.Message{
 		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"user_rules":{"structured":{"chapter_words":{"min":2100,"max":3000}}}}`)}},
@@ -657,6 +750,208 @@ func TestBuildProsePromptPinsChapterWordContract(t *testing.T) {
 	contract := inferProseWordContract(msgs)
 	if contract.Min != 2100 || contract.Max != 3000 || !contract.accepts(2500) || contract.accepts(3900) {
 		t.Fatalf("unexpected inferred contract: %+v", contract)
+	}
+}
+
+func TestBuildProsePromptPrefersEffectiveRenderWordBudget(t *testing.T) {
+	msgs := []agentcore.Message{
+		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(`{
+			"render_packet":{"version":11,"chapter":5,"word_budget":{
+				"unit":"unicode_characters_including_title",
+				"hard_min":2444,"hard_max":2600,
+				"submission_target_min":2522,"submission_target_max":2561,
+				"exact_boundary":true
+			}},
+			"user_rules":{"structured":{"chapter_words":{"min":2200,"max":2600}}}
+		}`)}},
+	}
+
+	contract := inferProseWordContract(msgs)
+	if contract.Min != 2444 || contract.Max != 2600 ||
+		contract.TargetMin != 2522 || contract.TargetMax != 2561 {
+		t.Fatalf("effective render contract lost to project fallback: %+v", contract)
+	}
+	if contract.accepts(2351) || !contract.accepts(2444) || !contract.accepts(2600) {
+		t.Fatalf("effective render contract accepted an under-length C5 body: %+v", contract)
+	}
+	if min, max := contract.targetRange(); min != 2522 || max != 2561 {
+		t.Fatalf("effective submission target = %d-%d, want 2522-2561", min, max)
+	}
+	prompt := buildProsePrompt(msgs)
+	for _, want := range []string{
+		"硬边界仍是 2444-2600", "安全写作目标", "2522-2561", "达到 2522 字前不得提前收束",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("effective render prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProseRepairPromptCarriesRejectedBodyAndExactDelta(t *testing.T) {
+	msgs := []agentcore.Message{{
+		Role:    agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"render_packet":{"version":11,"chapter":5,"word_budget":{"hard_min":2444,"hard_max":2600,"submission_target_min":2522,"submission_target_max":2561}}}`)},
+	}}
+	previous := "第五章 两下，停一停，再两下\n\n这是一版需要定向补足的完整正文。"
+	prompt := buildProseRepairPrompt(msgs, previous, 2351, inferProseWordContract(msgs))
+	for _, want := range []string{previous, "净增约 190 字", "2444-2600", "2522-2561", "只输出修复后的完整正文"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProsePromptInjectsAntiAIRulesBeforeRenderingOldV11Packet(t *testing.T) {
+	messages := []agentcore.Message{{
+		Role: agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(`{
+			"render_packet":{
+				"version":11,
+				"chapter":9,
+				"title":"画面黑了，许知遥还在行动",
+				"mandatory_beats":["按冻结事实完成本章"]
+			}
+		}`)},
+	}}
+	prompt := buildProsePrompt(messages)
+	for _, want := range []string{
+		`"anti_ai_render_contract"`,
+		`"event_timing_safeguards"`,
+		"证据、规则或流程按计划顺序逐项播报成台账",
+		"刺激先改变POV的注意、判断或误判",
+		"句段随观察、犹疑、冲突、决断和余波自然换挡",
+		"首稿前执行；章级优先。",
+		"首次落笔前必须执行",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("old v11 prose prompt did not receive render-time anti-AI rule %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProsePromptPreservesChapterSpecificAntiAIRenderContract(t *testing.T) {
+	messages := []agentcore.Message{{
+		Role: agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(`{
+			"render_packet":{
+				"version":11,
+				"chapter":10,
+				"anti_ai_render_contract":{
+					"risk_signals":["本章专属：分钟窗被逐格复述"],
+					"counter_moves":["本章专属：让等待改变程野的判断"],
+					"sentence_rhythm_policy":"本章专属节奏",
+					"object_response_budget":"本章专属物件预算",
+					"dialogue_function_plan":"本章专属对白功能",
+					"review_checks":["本章专属复核"],
+					"usage_policy":"首稿前执行；章级优先。"
+				}
+			}
+		}`)},
+	}}
+	prompt := buildProsePrompt(messages)
+	for _, want := range []string{
+		"本章专属：分钟窗被逐格复述",
+		"本章专属：让等待改变程野的判断",
+		"本章专属节奏",
+		"本章专属物件预算",
+		"本章专属对白功能",
+		"本章专属复核",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("chapter-specific anti-AI contract was replaced or dropped: missing %q\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProsePromptDoesNotInventStorySpecificSurfaceProjection(t *testing.T) {
+	withContract := []agentcore.Message{{
+		Role: agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(`{
+			"render_packet":{
+				"version":11,
+				"chapter":4,
+				"title":"批量履约",
+				"heading":"第4章 批量履约",
+				"visible_characters":["甲","乙"],
+				"continuity_checks":[
+					"三项任务的精确状态必须保持",
+					"章末两项完成、一项仍在途"
+				],
+				"mandatory_beats":["甲决定启动三项任务"],
+				"render_capacity":{"scene_spine":[{"beats":["启动","误判","收束"]}]},
+				"literary_render_contract":{"focalizer":"甲","narrative_access":"limited","knowledge_boundary":"只写甲可见事实"}
+			},
+			"sealed_rerender_feedback":{"surface_allocation_contract":{
+				"scope":"expression_only",
+				"detailed_node_limit":3,
+				"policy":"页面只详写3处，其余台账离屏"
+			},"rewrite_brief":"压缩重复流程，但不得更改冻结事实。"}
+		}`)},
+	}}
+	prompt := buildProsePrompt(withContract)
+	for _, want := range []string{
+		"冻结事实的页面分配优先级",
+		"只覆盖正文的表面篇幅分配",
+		"不覆盖或改写 render_packet、frozen plan 的事实",
+		"批量事实仍由冻结 plan 锁定",
+		"不得为证明完整性把台账逐行逐值转写",
+		"凡正文显写的事实仍必须与冻结合同一致",
+		"三项任务的精确状态必须保持",
+		"章末两项完成、一项仍在途",
+		"甲决定启动三项任务",
+		"只写甲可见事实",
+		"页面只详写3处，其余台账离屏",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("surface-allocation prose priority missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, forbidden := range []string{
+		"程野", "许知遥", "姜岚", "南栈", "桥湾", "七单", "公共呼叫板",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("unrelated story-specific value was injected %q:\n%s", forbidden, prompt)
+		}
+	}
+
+	withoutContract := []agentcore.Message{{
+		Role:    agentcore.RoleTool,
+		Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"render_packet":{"version":11,"chapter":4},"sealed_rerender_feedback":{"summary":"普通表达返工"}}`)},
+	}}
+	plainPrompt := buildProsePrompt(withoutContract)
+	if strings.Contains(plainPrompt, "冻结事实的页面分配优先级") {
+		t.Fatalf("generic prose render unexpectedly inherited story-specific priority:\n%s", plainPrompt)
+	}
+}
+
+func TestBuildProsePromptUsesBufferedTargetForInitialAndWholeRerender(t *testing.T) {
+	initial := []agentcore.Message{
+		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"user_rules":{"structured":{"chapter_words":{"min":2200,"max":2600}}},"render_packet":{"chapter":3,"title":"门外来单"}}`)}},
+	}
+	rerender := []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("整章重渲染第 3 章，调用 draft_chapter(mode=write)")}},
+		{Role: agentcore.RoleTool, Content: []agentcore.ContentBlock{agentcore.TextBlock(`{"user_rules":{"structured":{"chapter_words":{"min":2200,"max":2600}}},"render_packet":{"chapter":3,"title":"门外来单"},"sealed_rerender_feedback":{"body_sha256":"sha256:rejected","summary":"保留冻结计划做整章表达返工"}}`)}},
+	}
+
+	for name, messages := range map[string][]agentcore.Message{"initial": initial, "whole-rerender": rerender} {
+		t.Run(name, func(t *testing.T) {
+			prompt := buildProsePrompt(messages)
+			for _, want := range []string{
+				"本章字数硬合同", "硬边界仍是 2200-2600", "安全写作目标", "2300-2450", "靶心约 2375", "达到 2300 字前不得提前收束",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("%s prose prompt missing %q:\n%s", name, want, prompt)
+				}
+			}
+		})
+	}
+
+	contract := proseWordContract{Min: 2200, Max: 2600}
+	if min, max := contract.targetRange(); min != 2300 || max != 2450 {
+		t.Fatalf("buffered target = %d-%d, want 2300-2450", min, max)
+	}
+	if !contract.accepts(2200) || !contract.accepts(2600) || contract.accepts(2199) || contract.accepts(2601) {
+		t.Fatalf("buffer changed the hard 2200-2600 contract")
 	}
 }
 
@@ -751,5 +1046,19 @@ func TestCapabilitiesAdvertiseUltra(t *testing.T) {
 	capabilities := New("", "gpt-5.6-sol", "").Capabilities()
 	if !capabilities.Thinking.SupportsEffort(agentcore.ThinkingLevel("ultra")) {
 		t.Fatal("gpt-5.6-sol should advertise ultra reasoning")
+	}
+}
+
+func TestCappedCodexReasoningDoesNotChangeRequestedIdentity(t *testing.T) {
+	t.Setenv(codexReasoningCapEnv, "high")
+	if got := cappedCodexReasoning("ultra"); got != "high" {
+		t.Fatalf("capped reasoning = %q, want high", got)
+	}
+	if got := cappedCodexReasoning("medium"); got != "medium" {
+		t.Fatalf("lower requested reasoning must remain unchanged, got %q", got)
+	}
+	t.Setenv(codexReasoningCapEnv, "invalid")
+	if got := cappedCodexReasoning("ultra"); got != "ultra" {
+		t.Fatalf("invalid cap must preserve requested reasoning, got %q", got)
 	}
 }

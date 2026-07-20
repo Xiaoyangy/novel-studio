@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,64 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestSaveFoundationAllowsRebasedChapterZeroOutlineReplacement(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	progress := &domain.Progress{
+		NovelName:         "测试",
+		Phase:             domain.PhaseWriting,
+		CurrentChapter:    1,
+		InProgressChapter: 1,
+		TotalChapters:     12,
+		GenerationID:      "generation-rebased",
+	}
+	if err := s.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta", "all_chapter_rebase.json"), []byte(`{"new_generation_id":"generation-rebased"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"type":  "layered_outline",
+		"scale": "short",
+		"content": []map[string]any{{
+			"index": 1, "title": "第一卷", "theme": "主题",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "第一弧", "goal": "目标",
+				"chapters": []map[string]any{{"chapter": 1, "title": "第一章", "core_event": "开局", "hook": "继续"}},
+			}},
+		}},
+	})
+	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err != nil {
+		t.Fatalf("rebased chapter-zero outline replacement rejected: %v", err)
+	}
+}
+
+func TestSaveFoundationStillBlocksWritingOutlineReplacementWithoutRebaseAuthority(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Save(&domain.Progress{Phase: domain.PhaseWriting, CurrentChapter: 1, GenerationID: "ordinary"}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"type":    "outline",
+		"scale":   "short",
+		"content": []map[string]any{{"chapter": 1, "title": "第一章", "core_event": "开局", "hook": "继续"}},
+	})
+	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "写作阶段禁止") {
+		t.Fatalf("ordinary writing outline replacement was not blocked: %v", err)
+	}
+}
 
 func TestSaveFoundationPersistsPlanningTier(t *testing.T) {
 	dir := t.TempDir()

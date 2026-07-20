@@ -76,23 +76,26 @@ type AIVoiceScorePoint struct {
 
 // ChapterAIVoiceMetrics 是章节级反 AI 腔指标。
 type ChapterAIVoiceMetrics struct {
-	Chapter             int                 `json:"chapter"`
-	FigurativeCount     int                 `json:"figurative_count"`
-	FigurativeDensity   float64             `json:"figurative_density"`
-	DialogueChars       int                 `json:"dialogue_chars"`
-	SupportingDialogue  int                 `json:"supporting_dialogue_chars"`
-	DialogueRatio       float64             `json:"dialogue_ratio"`
-	ParagraphCount      int                 `json:"paragraph_count"`
-	SentenceCount       int                 `json:"sentence_count"`
-	AIVoiceScore        float64             `json:"ai_voice_score"`
-	ChapterFunction     string              `json:"chapter_function"`
-	AphorismHits        []AphorismHit       `json:"aphorism_hits,omitempty"`
-	ProtagonistWaver    bool                `json:"protagonist_waver"`
-	EndingHookUsed      bool                `json:"ending_hook_used"`
-	RevisionRound       int                 `json:"revision_round"`
-	BeforeAfterDiff     string              `json:"before_after_diff,omitempty"`
-	AIVoiceScoreHistory []AIVoiceScorePoint `json:"ai_voice_score_history,omitempty"`
-	GeneratedAt         string              `json:"generated_at,omitempty"`
+	Chapter                          int                 `json:"chapter"`
+	FigurativeCount                  int                 `json:"figurative_count"`
+	FigurativeDensity                float64             `json:"figurative_density"`
+	DialogueChars                    int                 `json:"dialogue_chars"`
+	SupportingDialogue               int                 `json:"supporting_dialogue_chars"`
+	DialogueRatio                    float64             `json:"dialogue_ratio"`
+	SupportingDialogueTurns          int                 `json:"supporting_dialogue_turns,omitempty"`
+	SupportingDialogueParagraphs     int                 `json:"supporting_dialogue_paragraphs,omitempty"`
+	SupportingDialogueParagraphRatio float64             `json:"supporting_dialogue_paragraph_ratio,omitempty"`
+	ParagraphCount                   int                 `json:"paragraph_count"`
+	SentenceCount                    int                 `json:"sentence_count"`
+	AIVoiceScore                     float64             `json:"ai_voice_score"`
+	ChapterFunction                  string              `json:"chapter_function"`
+	AphorismHits                     []AphorismHit       `json:"aphorism_hits,omitempty"`
+	ProtagonistWaver                 bool                `json:"protagonist_waver"`
+	EndingHookUsed                   bool                `json:"ending_hook_used"`
+	RevisionRound                    int                 `json:"revision_round"`
+	BeforeAfterDiff                  string              `json:"before_after_diff,omitempty"`
+	AIVoiceScoreHistory              []AIVoiceScorePoint `json:"ai_voice_score_history,omitempty"`
+	GeneratedAt                      string              `json:"generated_at,omitempty"`
 }
 
 // AIVoiceAnalysis 是规则引擎输出给 Editor 的红旗 JSON。

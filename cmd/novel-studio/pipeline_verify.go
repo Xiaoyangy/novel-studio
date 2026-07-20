@@ -68,6 +68,8 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		return verifyPipelineReviewStage(outputDir, flags, evidence)
 	case "rewrite":
 		return verifyPipelineRewriteStage(outputDir, flags, evidence)
+	case "finalize":
+		return verifyPipelineFinalizeStage(outputDir, evidence)
 	case "deliver":
 		return verifyPipelineDeliverStage(outputDir, flags, evidence)
 	default:
@@ -425,6 +427,9 @@ func filterChaptersForPipelineRange(chapters []int, flags pipelineFlags) []int {
 }
 
 func verifyPipelineDeliverStage(outputDir string, flags pipelineFlags, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+	if err := requirePipelineFinalizedShortBook(outputDir); err != nil {
+		return evidence, err
+	}
 	chapters, err := chapterNumbersFromFiles(filepath.Join(outputDir, "chapters"))
 	if err != nil {
 		return evidence, err

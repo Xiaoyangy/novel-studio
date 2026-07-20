@@ -31,10 +31,11 @@ func StructurallyComplete(progress *Progress) bool {
 }
 
 // RequiresFinalGlobalReview 判断是否需要短篇全文终审。
-// 规则：分层长篇不走全文汇总审；显式 short 一定走；显式 mid/long 不走；
-// 老项目没有 planning_tier 时，用实际总字数 <= 30000 兜底。
+// 规则：显式 short 一定走，即使它用“一卷一弧”的 layered 结构承载；显式
+// mid/long 不走。只有没有 planning_tier 的旧项目才把 layered 当成长篇信号，
+// 并对非 layered 项目用实际总字数 <= 30000 兜底。
 func RequiresFinalGlobalReview(progress *Progress, meta *RunMeta) bool {
-	if progress == nil || progress.Layered {
+	if progress == nil {
 		return false
 	}
 	if meta != nil {
@@ -44,6 +45,9 @@ func RequiresFinalGlobalReview(progress *Progress, meta *RunMeta) bool {
 		case PlanningTierMid, PlanningTierLong:
 			return false
 		}
+	}
+	if progress.Layered {
+		return false
 	}
 	return progress.TotalWordCount > 0 && progress.TotalWordCount <= ShortFormWordLimit
 }

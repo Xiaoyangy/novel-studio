@@ -251,7 +251,7 @@ func pipelinePromote(opts cliOptions, flags pipelineFlags) (returnErr error) {
 
 	owner := pipelineExecutionOwner("promote", chapter)
 	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
-		Mode:          domain.PipelineExecutionProjectAll,
+		Mode:          domain.PipelineExecutionPromote,
 		TargetChapter: chapter,
 		Owner:         owner,
 		ExpiresAt:     time.Now().UTC().Add(pipelineExecutionLease),
@@ -621,7 +621,14 @@ func requirePreviousPipelineSealedRenderClosed(
 	if cursor.LastAcceptedChapter <= generation.BaseCanonChapter {
 		return nil
 	}
-	if cursor.ActivePromotedChapter != 0 ||
+	// Promote publishes the immutable receipt/cursor before installing the live
+	// plan.  A crash in that gap leaves the *next* chapter active while the
+	// previous accepted chapter is still the render receipt being verified.
+	// That exact state is an idempotent recovery, not an attempt to jump over an
+	// unclosed chapter.  The caller subsequently reloads the content-addressed
+	// active receipt and verifies it against the sealed bundle before install.
+	activeReceiptRecovery := pipelinePromoteIsActiveReceiptRecovery(cursor)
+	if (cursor.ActivePromotedChapter != 0 && !activeReceiptRecovery) ||
 		strings.TrimSpace(cursor.LastOutcomeReceiptDigest) == "" {
 		return fmt.Errorf("promote 上一章 actual outcome 尚未收口")
 	}
@@ -648,6 +655,13 @@ func requirePreviousPipelineSealedRenderClosed(
 		)
 	}
 	return nil
+}
+
+func pipelinePromoteIsActiveReceiptRecovery(cursor *domain.RealizationCursorV2) bool {
+	return cursor != nil &&
+		cursor.ActivePromotedChapter > 0 &&
+		cursor.ActivePromotedChapter == cursor.NextPromoteChapter &&
+		strings.TrimSpace(cursor.ActivePromotionReceiptDigest) != ""
 }
 
 func installPipelineProjectedChapter(
@@ -1011,12 +1025,13 @@ func verifyPipelinePromoteStage(
 }
 
 type pipelineSealedRenderBinding struct {
-	Active     domain.ActivePlanningGenerationV2
-	Cursor     domain.RealizationCursorV2
-	Generation domain.PlanningGenerationV2
-	Bundle     domain.ProjectedChapterBundle
-	Promotion  domain.PromotionReceiptV2
-	Outcome    *domain.ActualOutcomeReceiptV2
+	Active                   domain.ActivePlanningGenerationV2
+	Cursor                   domain.RealizationCursorV2
+	Generation               domain.PlanningGenerationV2
+	Bundle                   domain.ProjectedChapterBundle
+	Promotion                domain.PromotionReceiptV2
+	ConvergenceReplanReceipt *domain.SealedConvergenceReplanReceipt
+	Outcome                  *domain.ActualOutcomeReceiptV2
 }
 
 func validatePipelineSealedRenderBinding(
@@ -1051,8 +1066,7 @@ func validatePipelineSealedRenderBinding(
 	}
 	if frozen.ProjectedBundleDigest != bundle.BundleDigest ||
 		frozen.ProjectedPreStateRoot != bundle.ProjectedPreStateRoot ||
-		frozen.ProjectedPostStateRoot != bundle.ProjectedPostStateRoot ||
-		frozen.RenderContextSHA256 != bundle.RenderContextSHA256 {
+		frozen.ProjectedPostStateRoot != bundle.ProjectedPostStateRoot {
 		return nil, fmt.Errorf("render sealed_v2 frozen plan/context 未绑定 exact bundle")
 	}
 	planDigest, err := domain.ComputeChapterPlanV2Digest(bundle.ChapterPlan)
@@ -1061,6 +1075,27 @@ func validatePipelineSealedRenderBinding(
 	}
 	if frozen.ProjectedPlanSHA256 != planDigest {
 		return nil, fmt.Errorf("render sealed_v2 formal plan semantic digest 漂移")
+	}
+	livePlan, err := st.Drafts.LoadChapterPlan(frozen.Chapter)
+	if err != nil || livePlan == nil {
+		return nil, fmt.Errorf("render sealed_v2 live formal plan 不可读: %w", err)
+	}
+	livePlanDigest, err := domain.ComputeChapterPlanV2Digest(*livePlan)
+	if err != nil {
+		return nil, err
+	}
+	var convergenceReceipt *domain.SealedConvergenceReplanReceipt
+	if strings.TrimSpace(frozen.ConvergenceReplanReceiptDigest) == "" {
+		if frozen.RenderContextSHA256 != bundle.RenderContextSHA256 || livePlanDigest != planDigest {
+			return nil, fmt.Errorf("render sealed_v2 frozen plan/context 未绑定 exact bundle")
+		}
+	} else {
+		convergenceReceipt, err = loadAndVerifyPipelineSealedConvergenceReplanReceipt(
+			st.Dir(), frozen, bundle, livePlanDigest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("render sealed_v2 convergence successor binding 不可验证: %w", err)
+		}
 	}
 	promotion, err := projected.LoadPromotionReceipt(
 		active.GenerationID,
@@ -1074,18 +1109,21 @@ func validatePipelineSealedRenderBinding(
 		return nil, fmt.Errorf("render sealed_v2 promotion receipt 未绑定 frozen render dependencies")
 	}
 	binding := &pipelineSealedRenderBinding{
-		Active:     *active,
-		Cursor:     *cursor,
-		Generation: *generation,
-		Bundle:     *bundle,
-		Promotion:  *promotion,
+		Active:                   *active,
+		Cursor:                   *cursor,
+		Generation:               *generation,
+		Bundle:                   *bundle,
+		Promotion:                *promotion,
+		ConvergenceReplanReceipt: convergenceReceipt,
 	}
 	switch {
 	case cursor.ActivePromotedChapter == frozen.Chapter &&
 		cursor.ActivePromotionReceiptDigest == promotion.ReceiptDigest:
 		return binding, nil
 	case postCommitRecovery &&
-		cursor.ActivePromotedChapter == 0 &&
+		(cursor.ActivePromotedChapter == 0 ||
+			(pipelinePromoteIsActiveReceiptRecovery(cursor) &&
+				cursor.NextPromoteChapter == frozen.Chapter+1)) &&
 		cursor.LastAcceptedChapter == frozen.Chapter &&
 		strings.TrimSpace(cursor.LastOutcomeReceiptDigest) != "":
 		outcome, err := projected.LoadActualOutcomeReceipt(

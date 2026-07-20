@@ -59,10 +59,10 @@ func TestAIGCDetectorRewriteFocusUsesNarrativeSignals(t *testing.T) {
 	}
 	focus := strings.Join(aigcDetectorRewriteFocus(report), "\n")
 	for _, want := range []string{
-		"对白传送带", "动作报幕式对白", "主视角仍被经营流程或对白原话压住", "按焦点真实换段",
+		"对白传送带", "动作报幕式对白", "主视角仍被流程推进或对白原话压住", "按焦点真实换段",
 		"对白段占比 62.0%", "主观密度 1.10/千字", "流程密度 6.40/千字",
 		"至少重建两条分处不同场景", "刺激→主观体验或误判→人物如何调节、压住或转移→因此改变的选择→关系或现实余波",
-		"删掉等量安装、票据、付款等流程或非必要对白原话", "情绪名词", "微动作", "单独出现都不算主观链",
+		"删掉等量流程说明、证据罗列或非必要对白原话", "情绪名词", "微动作", "单独出现都不算主观链",
 	} {
 		if !strings.Contains(focus, want) {
 			t.Fatalf("focus missing %q:\n%s", want, focus)
@@ -119,6 +119,32 @@ func TestDraftAIGCGateUsesCurrentHashExternalCorroborationWithoutHidingRawScore(
 	}
 }
 
+func TestDraftAIGCProbabilityOnlyCalibrationRequiresExactExternalBody(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	content := "第四章\n\n林砚把登记册推回窗口，先让值班员核对监控时间。"
+	report := aigc.Report{
+		Engine: aigc.Engine, AIGCPercent: 20.99, LegacyHeuristicPercent: 12,
+		Stats: aigc.Stats{Hanzi: draftAIGCMinHanzi},
+	}
+	writeDraftExternalJudgeStatus(t, st.Dir(), 4, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(content), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+	gate := corroborateDraftAIGCGate(st, 4, content, report, draftAIGCGateResultFromReport(report))
+	if !draftAIGCExternalProbabilityOnlySatisfied(content, report, gate) {
+		t.Fatalf("exact-body external pass did not clear a probability-only disagreement: %+v", gate)
+	}
+
+	otherBody := content + "另一份正文。"
+	gate = corroborateDraftAIGCGate(st, 4, otherBody, report, draftAIGCGateResultFromReport(report))
+	if draftAIGCExternalProbabilityOnlySatisfied(otherBody, report, gate) || gate.ExternalAIProbabilityPercent != nil {
+		t.Fatalf("stale external body was accepted: %+v", gate)
+	}
+}
+
 func TestDraftAIGCLocalGateFailureMessageLeadsWithRawScoreAfterCorroboration(t *testing.T) {
 	gate := draftAIGCGateResult{
 		RawLocalGatePercent: 10.30, EffectiveGatePercent: 3, PassExclusivePercent: 4,
@@ -151,6 +177,33 @@ func TestDraftAIGCGateDoesNotCorroborateContentIntegrityRisk(t *testing.T) {
 	gate := corroborateDraftAIGCGate(st, 1, content, report, draftAIGCGateResultFromReport(report))
 	if gate.Passed || gate.ExternalCorroborated || !strings.Contains(strings.Join(gate.CorroborationBlockedBy, "\n"), "content_integrity_floor") {
 		t.Fatalf("external score must not override deterministic integrity risk: %+v", gate)
+	}
+}
+
+func TestDraftAIGCGateDoesNotCorroborateExtremeExactRepetition(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	content := "第一章 测试章\n\n" + strings.Repeat(
+		"首先，主角感到前所未有的恐惧，这意味着局势已经发生了变化。其次，他终于明白自己必须面对命运的安排。最后，所有人都意识到问题的严重性。\n",
+		70,
+	)
+	writeDraftExternalJudgeStatus(t, st.Dir(), 1, draftExternalJudgeStatus{
+		BodySHA256: reviewreport.BodySHA256(content), AdviceComplete: true,
+		AIProbabilityPercent: 2, PassExclusivePercent: 4,
+	})
+
+	report, gate := inspectDraftAIGCGate(st, 1, content)
+	if report.Stats.Repeated12Extra < 40 || report.Stats.Repeated12Extra*10 < report.Stats.Hanzi {
+		t.Fatalf("fixture must contain a deterministic large duplicate footprint: %+v", report.Stats)
+	}
+	if gate.Passed || gate.ExternalCorroborated ||
+		!strings.Contains(strings.Join(gate.CorroborationBlockedBy, "\n"), "deterministic_long_ngram_repeat") {
+		t.Fatalf("external percentage must not override exact large-scale repetition: %+v", gate)
+	}
+	if draftAIGCExternalProbabilityOnlySatisfied(content, report, gate) {
+		t.Fatal("large-scale exact repetition was misclassified as probability-only")
 	}
 }
 
@@ -255,17 +308,14 @@ func TestDraftAIGCBlockPersistsSingleUseWholeRerenderEvidence(t *testing.T) {
 	if err := st.Drafts.SaveDraft(1, content); err != nil {
 		t.Fatal(err)
 	}
-	external := 2.0
 	report := aigc.Analyze(content)
 	gate := draftAIGCGateResult{
-		RawLocalGatePercent:          79.33,
-		EffectiveGatePercent:         2,
-		PassExclusivePercent:         4,
-		Enforced:                     true,
-		Passed:                       true,
-		ExternalCorroborated:         true,
-		ExternalAIProbabilityPercent: &external,
-		CorroborationBlockedBy:       []string{"whole_text_or_segment_risk"},
+		RawLocalGatePercent:    79.33,
+		EffectiveGatePercent:   79.33,
+		PassExclusivePercent:   4,
+		Enforced:               true,
+		Passed:                 false,
+		CorroborationBlockedBy: []string{"whole_text_or_segment_risk"},
 		RewriteFocus: []string{
 			"拆开连续对白传送带，让主视角判断在现场留下余波。",
 			"减少物件对每个动作的即时确认。",

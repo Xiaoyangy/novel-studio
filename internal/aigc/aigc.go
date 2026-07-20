@@ -192,7 +192,7 @@ var (
 	sensoryMarkers         = []string{"冷", "热", "烫", "疼", "痒", "酸", "涩", "苦", "甜", "腥", "臭", "响", "哑", "湿", "黏", "硬", "软", "亮", "暗", "刺", "闷", "吵"}
 	emotionMarkers         = []string{"紧张", "愤怒", "悲伤", "难过", "委屈", "害怕", "恐惧", "震惊", "惊讶", "复杂", "痛苦", "绝望", "崩溃", "开心", "喜悦", "温柔", "释然", "怅然", "茫然"}
 	abstractMarkers        = []string{"意义", "命运", "人生", "灵魂", "内心", "情绪", "感觉", "关系", "成长", "救赎", "羁绊", "真相", "现实", "未来", "过去", "世界", "规则", "答案"}
-	interiorityMarkers     = []string{"心里", "心口", "胸口", "脑子里", "以为", "觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "第一反应", "第二反应", "拿不准", "不准备", "不打算", "打定主意", "宁愿", "巴不得", "恨不得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来"}
+	interiorityMarkers     = []string{"心里", "心口", "胸口", "脑子里", "以为", "觉得", "他想", "她想", "本想", "没想到", "想起", "想到", "记得", "才发现", "第一反应", "第二反应", "强迫自己", "下意识", "拿不准", "不准备", "不打算", "打定主意", "宁愿", "巴不得", "恨不得", "难堪", "委屈", "后悔", "犹豫", "不甘", "不愿", "不敢", "舍不得", "偏偏", "明明", "早知道", "差点", "松了口气", "说不上来"}
 	logisticsMarkers       = []string{"付款", "收款", "订单", "票据", "材料", "安装", "通道", "位置", "摊位", "试用", "额度", "规则", "核对", "记录", "交付", "扩摊", "运力"}
 	emotionCategoryMarkers = map[string][]string{
 		"joy":       {"开心", "高兴", "痛快", "兴奋", "期待", "乐了", "笑开", "松了口气"},
@@ -1367,12 +1367,16 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 				dialogueCount++
 			}
 		}
-		if dialogueCount >= 6 && countAll(strings.Join(window, "\n"), interiorityMarkers) <= 1 {
+		if dialogueCount >= 6 && countMarkerParagraphHits(window, interiorityMarkers) <= 1 {
 			denseDialogueWindows++
 		}
 	}
 
-	interiorityDensity := density(countAll(body, interiorityMarkers), stats.Hanzi)
+	// Subjectivity is a sequence of beats, not a keyword-frequency contest.
+	// Count at most one hit per paragraph so repeating a marker cannot clear the
+	// thin-POV gate without a second independent change in attention or choice.
+	interiorityParagraphCount := countMarkerParagraphHits(paras, interiorityMarkers)
+	interiorityDensity := density(interiorityParagraphCount, stats.Hanzi)
 	logisticsDensity := density(countAll(body, logisticsMarkers), stats.Hanzi)
 	emotionCategories := 0
 	for _, markers := range emotionCategoryMarkers {
@@ -1393,7 +1397,10 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 	if quoteLenCV > 0 && quoteLenCV < 0.72 {
 		conveyorEvidenceCount++
 	}
-	conveyorEvidence := conveyorEvidenceCount >= 2 || actionLeadRatio >= 0.50 || logisticsDensity >= 5.0
+	// A high logistics density may simply describe the domain (orders,
+	// locations, records, delivery). It contributes evidence but cannot alone
+	// classify a dialogue conveyor; require another cadence/topology signal.
+	conveyorEvidence := conveyorEvidenceCount >= 2 || actionLeadRatio >= 0.50
 	microPeriod := dialogueMicroPeriodChain(body)
 
 	signals := []Signal{}
@@ -1420,14 +1427,14 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 	if len(quoteLens) >= 10 && denseDialogueWindows >= 1 && actionLeadRatio >= 0.35 && quoteLenCV > 0 && quoteLenCV < 0.72 {
 		signals = append(signals, sig("dialogue_length_conveyor", 50, "密集对白的发言长度和动作入口同时趋同，像按剧情岗位分配台词"))
 	}
-	if stats.Hanzi >= 1500 && dialogueParas >= 8 && logisticsDensity >= 5 && interiorityDensity < 2.0 {
+	if stats.Hanzi >= 1500 && dialogueParas >= 8 && logisticsDensity >= 5 && interiorityParagraphCount < 2 {
 		signals = append(signals, sig("pov_interiority_thin", 66, "主视角长时间只处理流程与任务，触发后的误判、欲望冲突和情绪余波过薄"))
-	} else if stats.Hanzi >= 1500 && dialogueParaRatio >= 0.32 && logisticsDensity >= 2.0 && interiorityDensity < 3.0 {
+	} else if stats.Hanzi >= 1500 && dialogueParaRatio >= 0.32 && logisticsDensity >= 2.0 && interiorityParagraphCount < 3 {
 		signals = append(signals, sig("pov_interiority_low", 46, "对白占比较高，但主视角主观体验不足"))
 	}
 	if stats.Hanzi >= 1800 && dialogueParas >= 8 && emotionCategories <= 1 && conveyorEvidence {
 		signals = append(signals, sig("emotion_range_flat", 44, "整章情绪温度单一，人物反应主要承担推进功能"))
-	} else if stats.Hanzi >= 1800 && emotionCategories <= 2 && interiorityDensity < 2.0 && logisticsDensity >= 2.0 {
+	} else if stats.Hanzi >= 1800 && emotionCategories <= 2 && interiorityParagraphCount < 2 && logisticsDensity >= 2.0 {
 		signals = append(signals, sig("emotion_range_thin", 30, "情绪类别和主观余波都偏少"))
 	}
 	return dim("小说叙事动力/人物体验", "narrative_dynamics", map[string]any{
@@ -1442,6 +1449,7 @@ func scoreNarrativeDynamics(body string, stats Stats) Dimension {
 		"dialogue_turn_length_cv":              quoteLenCV,
 		"conveyor_compound_evidence":           conveyorEvidence,
 		"conveyor_evidence_count":              conveyorEvidenceCount,
+		"interiority_paragraph_count":          interiorityParagraphCount,
 		"interiority_density_per_k":            interiorityDensity,
 		"logistics_density_per_k":              logisticsDensity,
 		"emotion_category_count":               emotionCategories,
@@ -2352,6 +2360,19 @@ func countAll(text string, needles []string) int {
 	total := 0
 	for _, needle := range needles {
 		total += strings.Count(text, needle)
+	}
+	return total
+}
+
+func countMarkerParagraphHits(paragraphs []string, markers []string) int {
+	total := 0
+	for _, paragraph := range paragraphs {
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(paragraph, marker) {
+				total++
+				break
+			}
+		}
 	}
 	return total
 }

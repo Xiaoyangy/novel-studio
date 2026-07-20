@@ -226,6 +226,11 @@ func TestLoadCurrentProjectedSimulationFailsClosedOnUncheckpointedArtifact(t *te
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.WorldSim.SaveSimulationCast(domain.SimulationCast{Assignments: []domain.TierAssignment{{
+		Name: "林澈", Tier: domain.TierProtagonistCircle,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
 		Version:      1,
 		Chapter:      1,
@@ -240,6 +245,40 @@ func TestLoadCurrentProjectedSimulationFailsClosedOnUncheckpointedArtifact(t *te
 			simulation,
 			checkpoint,
 		)
+	}
+}
+
+func TestLoadCurrentProjectedSimulationReopensCheckpointedArtifactWithSemanticGaps(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WorldSim.SaveSimulationCast(domain.SimulationCast{Assignments: []domain.TierAssignment{{
+		Name: "林澈", Tier: domain.TierProtagonistCircle,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Version:      1,
+		Chapter:      1,
+		SimulationID: "checkpointed-but-incomplete",
+		TimeWindow:   "当天",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifact(
+		domain.ChapterScope(1),
+		"chapter_world_simulation",
+		"meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	simulation, checkpoint, err := loadCurrentProjectedSimulation(st, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if simulation != nil || checkpoint != nil {
+		t.Fatalf("semantically incomplete checkpoint must reopen for simulation: simulation=%+v checkpoint=%+v", simulation, checkpoint)
 	}
 }
 

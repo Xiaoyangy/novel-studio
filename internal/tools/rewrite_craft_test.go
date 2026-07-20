@@ -73,6 +73,17 @@ func TestProjectAllCraftReceiptIsChapterizedContentAddressedAndFrozen(t *testing
 	if err := ValidateProjectAllCraftPlanCurrent(st, plan, receipt); err != nil {
 		t.Fatalf("exact project-all craft plan consumption rejected: %v", err)
 	}
+	autoPlan := domain.ChapterPlan{Chapter: 1}
+	autoPlan.CausalSimulation.ContextSources = []string{domain.CraftRecallReceiptSourceTokenV2(*receipt)}
+	if !MaterializeProjectAllCraftPlanConsumption(&autoPlan, receipt) {
+		t.Fatal("missing project-all craft rows were not materialized")
+	}
+	if len(autoPlan.CausalSimulation.ExternalRefs) != len(receipt.Attempts) {
+		t.Fatalf("materialized rows = %d, want %d", len(autoPlan.CausalSimulation.ExternalRefs), len(receipt.Attempts))
+	}
+	if err := ValidateProjectAllCraftPlanCurrent(st, autoPlan, receipt); err != nil {
+		t.Fatalf("materialized project-all craft consumption rejected: %v", err)
+	}
 	packet := newDraftRenderPacket(plan)
 	if len(packet.CraftMethods) != 2 {
 		t.Fatalf("chapterized craft needs did not survive plan-to-render projection: %+v", packet.CraftMethods)

@@ -38,6 +38,24 @@ func inspectDraftAIGCGate(st *store.Store, chapter int, content string) (aigc.Re
 	gate := draftAIGCGateResultFromReport(report)
 	if st != nil && chapter > 0 {
 		gate = corroborateDraftAIGCGate(st, chapter, content, report, gate)
+		if draftAIGCExternalProbabilityOnlySatisfied(content, report, gate) {
+			calibrated := *gate.ExternalAIProbabilityPercent
+			for _, value := range passingDraftAIGCProxyValues(
+				gate.PassExclusivePercent,
+				report.ZhuqueCompositePercent,
+				report.SegmentRiskFloor,
+				report.LegacyHeuristicPercent,
+			) {
+				calibrated = math.Max(calibrated, value)
+			}
+			gate.ExternalCorroborated = true
+			gate.EffectiveGatePercent = math.Round(calibrated*100) / 100
+			gate.Passed = !gate.Enforced || gate.EffectiveGatePercent < gate.PassExclusivePercent
+			gate.Calibration = "current_hash_external_probability_only;raw_local_diagnostic;mechanical_structural_gates_preserved"
+			gate.CorroborationBlockedBy = nil
+			gate.DiagnosticFocus = append(gate.DiagnosticFocus, gate.RewriteFocus...)
+			gate.RewriteFocus = nil
+		}
 	}
 	return report, gate
 }
@@ -63,11 +81,11 @@ func draftAIGCGateResultFromReport(report aigc.Report) draftAIGCGateResult {
 	}
 }
 
-// draftAIGCRawLocalGateResult restores the deterministic local decision that
-// existed before current-hash external corroboration. DeepSeek may lower the
-// effective diagnostic score, but it cannot spend the local gate on behalf of
-// the prose: raw whole-text failures still require rerender, while raw soft
-// failures require one bounded edit before a named-platform retest or commit.
+// draftAIGCRawLocalGateResult preserves the raw local decision for audit and
+// diagnostics. A same-body DeepSeek pass may clear only a probability-only
+// disagreement through draftAIGCExternalProbabilityOnlySatisfied below; true
+// whole-text, integrity, mechanical and structural failures still use this raw
+// result and remain blocking.
 func draftAIGCRawLocalGateResult(report aigc.Report, gate draftAIGCGateResult) draftAIGCGateResult {
 	raw := gate
 	if raw.PassExclusivePercent <= 0 {
@@ -86,6 +104,133 @@ func draftAIGCRawLocalGateResult(report aigc.Report, gate draftAIGCGateResult) d
 
 func draftAIGCRawLocalPassed(report aigc.Report, gate draftAIGCGateResult) bool {
 	return draftAIGCRawLocalGateResult(report, gate).Passed
+}
+
+// draftAIGCExternalProbabilityOnlySatisfied recognizes the narrow case where
+// the local detector and the independent DeepSeek judge disagree only about a
+// probability estimate for these exact bytes. corroborateDraftAIGCGate records
+// ExternalAIProbabilityPercent only after checking advice completeness,
+// blocking state, the strict <4% boundary and exact body SHA, so the pointer is
+// also the durable same-body identity proof here.
+//
+// This is deliberately not a general external override. The whole-text,
+// segment and legacy values are probability proxies, so an exact-body provider
+// pass may demote them to diagnostics. Content-integrity evidence and every
+// non-AIGC mechanical or structural prose violation remain hard. Raw local
+// scores and rewrite diagnostics stay visible in the returned artifact.
+func draftAIGCExternalProbabilityOnlySatisfied(content string, report aigc.Report, gate draftAIGCGateResult) bool {
+	if !draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		return false
+	}
+	return len(draftAIGCExternalCurrentBodyBlockers(content)) == 0
+}
+
+// draftAIGCExternalProbabilityComponentSatisfied resolves only the stochastic
+// authorship-probability component of the local gate.  Concrete mechanical
+// warnings are deliberately not part of this predicate: after an exact-body
+// provider pass they remain eligible for the single bounded local-soft edit.
+// Integrity damage, extreme exact repetition and deterministic prose/fact
+// failures are not calibratable and therefore remain fail-closed.
+func draftAIGCExternalProbabilityComponentSatisfied(content string, report aigc.Report, gate draftAIGCGateResult) bool {
+	raw := draftAIGCRawLocalGateResult(report, gate)
+	if raw.Passed || !raw.Enforced || gate.ExternalAIProbabilityPercent == nil ||
+		*gate.ExternalAIProbabilityPercent < 0 || *gate.ExternalAIProbabilityPercent >= raw.PassExclusivePercent {
+		return false
+	}
+	return draftAIGCLocalProbabilityComponentCalibratable(content, report)
+}
+
+func draftAIGCLocalProbabilityOnly(content string, report aigc.Report) bool {
+	if !draftAIGCLocalProbabilityComponentCalibratable(content, report) ||
+		len(draftAIGCExternalCurrentBodyBlockers(content)) > 0 {
+		return false
+	}
+	return true
+}
+
+// draftAIGCLocalProbabilityComponentCalibratable recognizes probability
+// proxies that an independent exact-body provider may adjudicate. Statistical
+// structural warnings (dialogue conveyor, thin POV, rhythm, etc.) are handled
+// separately as mechanical local-soft work and must not turn the probability
+// proxy into a whole-draft rerender capability.
+func draftAIGCLocalProbabilityComponentCalibratable(content string, report aigc.Report) bool {
+	if report.ContentIntegrityFloor > 0 || draftAIGCHasExtremeLongNgramRepetition(report) {
+		return false
+	}
+	for _, violation := range qualityrules.Lint(content) {
+		if strings.TrimSpace(violation.Rule) == "aigc_ratio" {
+			continue
+		}
+		if reviewreport.IsDeterministicMechanicalViolation(violation) {
+			return false
+		}
+	}
+	for _, blocker := range draftAIGCCorroborationBlockers(content, report) {
+		switch blocker {
+		case "whole_text_or_segment_risk", "legacy_consensus_high":
+			// These are probability estimates over the same exact body.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// draftAIGCManagedProviderPendingWholeText reports the narrow managed-writing
+// state in which a current, checkpoint-bound body has only a local
+// whole-text/segment probability signal and still lacks a complete exact-body
+// DeepSeek conclusion. Such a signal remains visible but may not mint a
+// rerender capability or consume the sealed convergence budget before the
+// provider adjudicates these bytes.
+func draftAIGCManagedProviderPendingWholeText(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) (bool, error) {
+	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) ||
+		!draftAIGCLocalProbabilityComponentCalibratable(content, report) {
+		return false, nil
+	}
+	bodySHA := reviewreport.BodySHA256(content)
+	tracked, err := pipelineManagedCurrentDraftTracked(st, chapter, bodySHA)
+	if err != nil || !tracked {
+		return false, err
+	}
+	status, err := loadDraftExternalJudgeStatus(st.Dir(), chapter)
+	if err != nil {
+		return false, err
+	}
+	return status == nil || strings.TrimSpace(status.BodySHA256) != bodySHA || !status.AdviceComplete, nil
+}
+
+// draftAIGCWholeDraftRerenderRequired is the managed-writing routing decision.
+// The raw whole-text signal stays visible in diagnostics, but a calibratable
+// probability proxy must first reach an exact-body provider conclusion and
+// cannot itself consume a whole-render attempt. A provider rejection, true
+// non-calibratable risk, or an unmanaged legacy flow retains the old bounded
+// whole-rerender behavior.
+func draftAIGCWholeDraftRerenderRequired(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) (bool, error) {
+	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) {
+		return false, nil
+	}
+	if draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		return false, nil
+	}
+	pending, err := draftAIGCManagedProviderPendingWholeText(st, chapter, content, report, gate)
+	if err != nil || pending {
+		return false, err
+	}
+	return true, nil
+}
+
+func draftAIGCExternalCurrentBodyBlockers(content string) []qualityrules.Violation {
+	var blockers []qualityrules.Violation
+	for _, violation := range qualityrules.Lint(content) {
+		if strings.TrimSpace(violation.Rule) == "aigc_ratio" {
+			continue
+		}
+		if reviewreport.IsBlockingMechanicalViolation(violation) ||
+			reviewreport.IsStructuralProseViolation(violation) {
+			blockers = append(blockers, violation)
+		}
+	}
+	return blockers
 }
 
 func corroborateDraftAIGCGate(st *store.Store, chapter int, content string, report aigc.Report, gate draftAIGCGateResult) draftAIGCGateResult {
@@ -155,6 +300,14 @@ func draftAIGCCorroborationBlockers(content string, report aigc.Report) []string
 	if report.ContentIntegrityFloor > 0 {
 		blockers = append(blockers, "content_integrity_floor")
 	}
+	// Repeated12Extra is an exact count over the current bytes, not a model
+	// probability.  Only treat a large duplicate footprint as hard evidence so
+	// ordinary refrains and recurring names remain eligible for provider
+	// calibration, while pasted/template paragraphs cannot pass on a low
+	// external percentage alone.
+	if draftAIGCHasExtremeLongNgramRepetition(report) {
+		blockers = append(blockers, "deterministic_long_ngram_repeat")
+	}
 	if (report.WholeTextSegmentGate >= aigc.PassExclusivePercent && !draftAIGCMarginalHumanWholeSegment(report)) ||
 		report.ZhuqueSegmentProxy.SuspectedAIRatioPercent > 0 {
 		blockers = append(blockers, "whole_text_or_segment_risk")
@@ -168,6 +321,12 @@ func draftAIGCCorroborationBlockers(content string, report aigc.Report) []string
 		}
 	}
 	return blockers
+}
+
+func draftAIGCHasExtremeLongNgramRepetition(report aigc.Report) bool {
+	repeated := report.Stats.Repeated12Extra
+	hanzi := report.Stats.Hanzi
+	return repeated >= 40 && hanzi > 0 && repeated*10 >= hanzi
 }
 
 // draftAIGCHasWholeTextStructuralBlock distinguishes a deterministic whole-text
@@ -209,6 +368,12 @@ func currentDraftLocalStructuralRerenderRequirement(st *store.Store, chapter int
 		return nil, false
 	}
 	report, gate := inspectDraftAIGCGate(st, chapter, content)
+	if base == nil || !RequiresRegisteredExternalRetest(base) {
+		required, routeErr := draftAIGCWholeDraftRerenderRequired(st, chapter, content, report, gate)
+		if routeErr != nil || !required {
+			return nil, false
+		}
+	}
 	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) {
 		return nil, false
 	}
@@ -266,6 +431,12 @@ func requireDraftAIGCGate(st *store.Store, chapter int, content string) error {
 	if rawGate.Passed {
 		return nil
 	}
+	if draftAIGCExternalProbabilityOnlySatisfied(content, report, gate) {
+		return nil
+	}
+	if draftAIGCLocalSoftSatisfiedAfterBoundedEdit(st, chapter, content, report, gate) {
+		return nil
+	}
 	if err := persistDraftAIGCRerenderRequirement(st, chapter, content, report, gate); err != nil {
 		return fmt.Errorf("第 %d 章 AIGC 阻断已确认，但整章重渲染标记写入失败: %v: %w", chapter, err, errs.ErrStoreWrite)
 	}
@@ -298,6 +469,21 @@ func checkpointDraftStructuralBlock(st *store.Store, chapter int, content string
 	}
 	if !draftAIGCHasWholeTextStructuralBlock(content, report, gate) {
 		return nil
+	}
+	if draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		return nil
+	}
+	if pending, err := draftAIGCManagedProviderPendingWholeText(st, chapter, content, report, gate); err != nil {
+		return err
+	} else if pending {
+		return nil
+	}
+	// Persist the exact failed body into the plan-owned convergence ledger before
+	// returning control to the Host. This must precede checkpoint idempotence: a
+	// process crash may leave the checkpoint durable while the older build never
+	// wrote the outer ledger, and a retry must repair that missing record.
+	if err := recordRenderConvergenceStructuralBlock(st, chapter, content); err != nil {
+		return fmt.Errorf("record plan-owned structural convergence failure: %w", err)
 	}
 	bodyHash := reviewreport.BodySHA256(content)
 	epochKey := renderOnlyCausalEpochKey(st, chapter)
@@ -337,6 +523,14 @@ func persistDraftAIGCRerenderRequirement(st *store.Store, chapter int, content s
 	if len(rawGate.RewriteFocus) == 0 || !draftAIGCHasWholeTextStructuralBlock(content, report, rawGate) {
 		return nil
 	}
+	if draftAIGCExternalProbabilityComponentSatisfied(content, report, gate) {
+		return nil
+	}
+	if pending, err := draftAIGCManagedProviderPendingWholeText(st, chapter, content, report, rawGate); err != nil {
+		return err
+	} else if pending {
+		return nil
+	}
 	return SetDraftExternalRerenderRequirement(st.Dir(), draftAIGCRerenderRequirement(chapter, content, rawGate))
 }
 
@@ -365,6 +559,9 @@ func draftAIGCRerenderRequirement(chapter int, content string, gate draftAIGCGat
 
 func draftQualityGateNextStep(wordContract chapterWordContractResult, gate draftAIGCGateResult) string {
 	if !wordContract.Passed {
+		return draftWordContractNextStep(wordContract)
+	}
+	if gate.ExternalAIProbabilityPercent != nil && gate.Passed {
 		return draftWordContractNextStep(wordContract)
 	}
 	if gate.Enforced && gate.RawLocalGatePercent >= gate.PassExclusivePercent {

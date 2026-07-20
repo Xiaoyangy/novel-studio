@@ -268,6 +268,109 @@ func TestRenderOnlyReplanEscalationDerivesHistoricalDraftAttempts(t *testing.T) 
 	}
 }
 
+func TestRenderOnlyReplanEscalationUsesExplicitStructuralSetInMixedHistory(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "混合结构失败历史"}
+	plan.CausalSimulation.ReviewRefinement.IterationLimit = 3
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	appendDraft := func(body string, structural bool) {
+		t.Helper()
+		if err := s.Drafts.SaveDraft(1, body); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+			t.Fatal(err)
+		}
+		if !structural {
+			return
+		}
+		report, gate := inspectDraftAIGCGate(s, 1, body)
+		if !draftAIGCHasWholeTextStructuralBlock(body, report, gate) {
+			t.Fatalf("fixture body must be an explicit whole-text structural failure: %+v", gate)
+		}
+		if err := checkpointDraftStructuralBlock(s, 1, body, report, gate); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	firstBlocked := strings.Repeat("林澈把第一件事情办完。", 180)
+	appendDraft(firstBlocked, true)
+	normalPassingOrSoft := strings.Repeat("林澈核完票据，停下来听沈知遥说完，再决定下一步。", 90)
+	appendDraft(normalPassingOrSoft, false)
+	secondBlocked := strings.Repeat("林澈把第二件事情办完。", 180)
+	appendDraft(secondBlocked, true)
+	if err := SetDraftExternalRerenderRequirement(s.Dir(), DraftExternalRerenderRequirement{
+		Chapter: 1, EvaluatedBodySHA256: reviewreport.BodySHA256(secondBlocked),
+		AIProbabilityPercent: 79, PassExclusivePercent: 4,
+		AdviceComplete: true, RevisionPlan: []string{"重组整章场景"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	escalation := InspectRenderOnlyReplanEscalation(s, 1)
+	if escalation.Required || escalation.Attempts != 2 || escalation.Limit != 3 {
+		t.Fatalf("normal middle draft was inferred as a third structural failure: %+v", escalation)
+	}
+
+	thirdBlocked := strings.Repeat("林澈把第三件事情办完。", 180)
+	appendDraft(thirdBlocked, true)
+	escalation = InspectRenderOnlyReplanEscalation(s, 1)
+	if !escalation.Required || escalation.Attempts != 3 || escalation.Limit != 3 {
+		t.Fatalf("third explicit structural checkpoint did not exhaust the exact budget: %+v", escalation)
+	}
+}
+
+func TestRenderOnlyReplanBudgetIsOwnedByPlanNotCandidateCommit(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "同一计划"}
+	plan.CausalSimulation.ReviewRefinement.IterationLimit = 2
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	appendBlocked := func(body string) {
+		t.Helper()
+		if err := s.Drafts.SaveDraft(1, body); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "draft", "drafts/01.draft.md"); err != nil {
+			t.Fatal(err)
+		}
+		report, gate := inspectDraftAIGCGate(s, 1, body)
+		if !draftAIGCHasWholeTextStructuralBlock(body, report, gate) {
+			t.Fatalf("fixture is not structural: %+v", gate)
+		}
+		if err := checkpointDraftStructuralBlock(s, 1, body, report, gate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendBlocked(strings.Repeat("林澈把第一项办完，然后继续下一项。", 160))
+	// Candidate commit precedes formal review. It must not manufacture a fresh
+	// plan budget for the next whole-body replacement.
+	if _, err := s.Checkpoints.AppendArtifact(domain.ChapterScope(1), "commit", "drafts/01.draft.md"); err != nil {
+		t.Fatal(err)
+	}
+	appendBlocked(strings.Repeat("林澈把第二项办完，然后继续下一项。", 160))
+	escalation := InspectRenderOnlyReplanEscalation(s, 1)
+	if !escalation.Required || escalation.Attempts != 2 || escalation.Limit != 2 {
+		t.Fatalf("candidate commit reset the same-plan structural budget: %+v", escalation)
+	}
+}
+
 func TestDraftStructuralBlockCheckpointIsDistinctHashIdempotent(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {

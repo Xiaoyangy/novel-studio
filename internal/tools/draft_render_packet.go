@@ -42,6 +42,7 @@ type draftRenderPacket struct {
 	EntertainmentPlan       draftEntertainmentPlan           `json:"reader_entertainment_plan,omitempty"`
 	TrendLanguagePlan       []draftTrendLanguagePlan         `json:"trend_language_plan,omitempty"`
 	LongformOpening         draftLongformOpening             `json:"longform_opening,omitempty"`
+	AntiAIRenderContract    *draftAntiAIRenderContract       `json:"anti_ai_render_contract,omitempty"`
 	EventTimingSafeguards   *draftEventTimingSafeguards      `json:"event_timing_safeguards,omitempty"`
 	VoiceCards              []draftVoiceCard                 `json:"voice_cards,omitempty"`
 	VisualCards             []draftVisualCard                `json:"visual_cards,omitempty"`
@@ -142,6 +143,20 @@ type draftLongformOpening struct {
 type draftEventTimingSafeguards struct {
 	ObjectResponseBudget string `json:"object_response_budget,omitempty"`
 	DialogueFunctionPlan string `json:"dialogue_function_plan,omitempty"`
+}
+
+// draftAntiAIRenderContract is the prose-safe, prospective projection of the
+// formal anti-AI execution plan. Drafter needs the chapter-specific risks and
+// causal counter-moves before it writes; detector scores, metric targets and
+// fixed-cadence recipes remain planning/review-only inputs.
+type draftAntiAIRenderContract struct {
+	RiskSignals          []string `json:"risk_signals,omitempty"`
+	CounterMoves         []string `json:"counter_moves,omitempty"`
+	SentenceRhythmPolicy string   `json:"sentence_rhythm_policy,omitempty"`
+	ObjectResponseBudget string   `json:"object_response_budget,omitempty"`
+	DialogueFunctionPlan string   `json:"dialogue_function_plan,omitempty"`
+	ReviewChecks         []string `json:"review_checks,omitempty"`
+	UsagePolicy          string   `json:"usage_policy"`
 }
 
 // draftCraftMethod is the prose-safe projection of a receipt-backed external
@@ -301,6 +316,13 @@ func applyWorldSimulationContextProfile(result map[string]any) {
 	status := chapterWorldSimulationContextStatus(result)
 	working, _ := result["working_memory"].(map[string]any)
 	hasRewriteSource := hasContextKey(result, "rewrite_source")
+	// The cumulative ledger is the compact direct pre-state. Keep it, the exact
+	// predecessor contract and due obligations, but reduce historical transition
+	// deltas to content-addressed receipts. Replaying every old delta beside its
+	// folded state duplicates authority and can make a later chapter impossible
+	// to start before any model call.
+	compactWorldSimulationProjectAllState(result)
+	compactNextChapterOutlineContractRefs(result, working)
 	if status == "ready" || status == "ready_to_finalize" {
 		// A finalized simulation (or a gap-free partial that only needs the
 		// atomic finalize call) has already passed the character-authority
@@ -339,7 +361,99 @@ func applyWorldSimulationContextProfile(result map[string]any) {
 	if status == "ready" || status == "ready_to_finalize" {
 		result["world_simulation_context_policy"] = "当前 simulation 已正式 ready，或 gaps 已清零只待 finalize；全量 authority/character_decisions 已折叠为校验收据，禁止重发或重建。按 chapter_world_simulation.planning_policy 执行唯一下一步。"
 	} else {
-		result["world_simulation_context_policy"] = "simulation_character_authority.entries 与 simulation_characters 一一对应，是全角色身份、状态和未知边界的权威入口；公共规则在 mode_policies，blocking 角色的 exact contract 仍在各 entry。完整 dossiers、写法资料、正文渲染历史与重复项目报告已隐藏，禁止补猜。"
+		result["world_simulation_context_policy"] = "simulation_character_authority.entries 与 simulation_characters 一一对应，是全角色身份、状态和未知边界的权威入口；公共规则在 active_mode_policies/mode_policies，blocking 角色的 exact contract 仍在各 entry。完整 dossiers、写法资料、正文渲染历史与重复项目报告已隐藏，禁止补猜。"
+	}
+}
+
+// compactNextChapterOutlineContractRefs removes structural payoff receipts from
+// focused world-simulation and ready-planning views.
+// The complete receipts remain durable in outline.json and are loaded again when
+// that chapter becomes current; they are not current-world facts. Keep the full
+// adjacent narrative boundary -- title, core event, hook and scenes -- so a
+// penultimate-chapter simulation still knows exactly where the climax must stop
+// and what the terminal chapter inherits.
+func compactNextChapterOutlineContractRefs(result, working map[string]any) {
+	compact := func(container map[string]any) {
+		if container == nil {
+			return
+		}
+		switch next := container["next_chapter_outline"].(type) {
+		case domain.OutlineEntry:
+			next.ContractRefs = nil
+			container["next_chapter_outline"] = next
+		case *domain.OutlineEntry:
+			if next != nil {
+				clone := *next
+				clone.ContractRefs = nil
+				container["next_chapter_outline"] = clone
+			}
+		case map[string]any:
+			delete(next, "contract_refs")
+		}
+	}
+	compact(result)
+	compact(working)
+}
+
+func compactWorldSimulationProjectAllState(result map[string]any) {
+	if result == nil {
+		return
+	}
+	receipt := func(transition domain.ProjectedPlanningTransitionV2) map[string]any {
+		return map[string]any{
+			"chapter":                   transition.Chapter,
+			"bundle_digest":             transition.BundleDigest,
+			"projected_post_state_root": transition.ProjectedPostStateRoot,
+		}
+	}
+	compact := func(state domain.ProjectedPlanningContextV2) map[string]any {
+		recent := make([]any, 0, len(state.RecentTransitions))
+		for _, transition := range state.RecentTransitions {
+			recent = append(recent, receipt(transition))
+		}
+		return map[string]any{
+			"version":              state.Version,
+			"generation_id":        state.GenerationID,
+			"next_chapter":         state.NextChapter,
+			"through_chapter":      state.ThroughChapter,
+			"state_root":           state.StateRoot,
+			"predecessor_contract": state.PredecessorContract,
+			"cumulative_state":     state.CumulativeState,
+			"recent_transitions":   recent,
+			"open_obligations":     state.OpenObligations,
+			"context_digest":       state.ContextDigest,
+		}
+	}
+	switch state := result["project_all_state"].(type) {
+	case domain.ProjectedPlanningContextV2:
+		result["project_all_state"] = compact(state)
+	case *domain.ProjectedPlanningContextV2:
+		if state != nil {
+			result["project_all_state"] = compact(*state)
+		}
+	case map[string]any:
+		switch transitions := state["recent_transitions"].(type) {
+		case []any:
+			recent := make([]any, 0, len(transitions))
+			for _, raw := range transitions {
+				entry, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				recent = append(recent, map[string]any{
+					"chapter":                   entry["chapter"],
+					"bundle_digest":             entry["bundle_digest"],
+					"projected_post_state_root": entry["projected_post_state_root"],
+				})
+			}
+			state["recent_transitions"] = recent
+		case []domain.ProjectedPlanningTransitionV2:
+			recent := make([]any, 0, len(transitions))
+			for _, transition := range transitions {
+				recent = append(recent, receipt(transition))
+			}
+			state["recent_transitions"] = recent
+		}
 	}
 }
 
@@ -361,6 +475,16 @@ func applyPlanningContextProfile(result map[string]any) {
 	}
 	status := chapterWorldSimulationContextStatus(result)
 	sanitizePlanningWorldSimulation(result)
+	if status == "ready" {
+		compactReadyPlanningProjectAllState(result)
+		compactNextChapterOutlineContractRefs(result, working)
+		compactReadyPlanningFutureOutline(result, working)
+		// The finalized all-character simulation has already consumed current
+		// off-screen events. Replaying the same horizon ledger beside its POV
+		// projection is duplicate authority and can overflow focused planning.
+		deleteContextKey(result, "horizon_events")
+		deleteContextKey(result, "horizon_events_usage")
+	}
 	// Planning never consumes the full dossier-authority packet. Before the
 	// simulation is ready, plan_structure is mechanically blocked and the full
 	// packet remains available through profile=world_simulation. Once ready, the
@@ -376,6 +500,147 @@ func applyPlanningContextProfile(result map[string]any) {
 		compactFinalizedPlanningContext(result, working, formalPlan)
 	}
 	result["planning_context_policy"] = "全角色决定和权威档案保留在正式 world simulation 中；本阶段只依据精确 protagonist_projection、逐条 preserve_facts/coverage receipt、结构化 rewrite_brief 与带来源的 RAG craft receipt 生成主视角 plan。simulation 未 ready 时 plan_structure 会机械拒绝。"
+	compactSealedConvergencePlanningContext(result)
+}
+
+func compactReadyPlanningProjectAllState(result map[string]any) {
+	if result == nil {
+		return
+	}
+	receipt := func(transition domain.ProjectedPlanningTransitionV2) map[string]any {
+		return map[string]any{
+			"chapter":                   transition.Chapter,
+			"bundle_digest":             transition.BundleDigest,
+			"projected_post_state_root": transition.ProjectedPostStateRoot,
+		}
+	}
+	mapReceipt := func(transition map[string]any) map[string]any {
+		return map[string]any{
+			"chapter":                   transition["chapter"],
+			"bundle_digest":             transition["bundle_digest"],
+			"projected_post_state_root": transition["projected_post_state_root"],
+		}
+	}
+	compact := func(state domain.ProjectedPlanningContextV2) map[string]any {
+		// Cumulative state and full transition deltas were already consumed by
+		// the finalized world simulation. Planner needs the content-addressed
+		// identity, exact predecessor contract, open obligations and a short
+		// recent-ID window to publish the next transition without replaying the
+		// whole projected ledger.
+		transitions := state.RecentTransitions
+		if len(transitions) > 2 {
+			transitions = transitions[len(transitions)-2:]
+		}
+		recent := make([]any, 0, len(transitions))
+		for _, transition := range transitions {
+			recent = append(recent, receipt(transition))
+		}
+		return map[string]any{
+			"version":              state.Version,
+			"generation_id":        state.GenerationID,
+			"next_chapter":         state.NextChapter,
+			"through_chapter":      state.ThroughChapter,
+			"state_root":           state.StateRoot,
+			"context_digest":       state.ContextDigest,
+			"predecessor_contract": state.PredecessorContract,
+			"open_obligations":     state.OpenObligations,
+			"recent_transitions":   recent,
+		}
+	}
+	switch state := result["project_all_state"].(type) {
+	case domain.ProjectedPlanningContextV2:
+		result["project_all_state"] = compact(state)
+	case *domain.ProjectedPlanningContextV2:
+		if state != nil {
+			copy := compact(*state)
+			result["project_all_state"] = copy
+		}
+	case map[string]any:
+		delete(state, "cumulative_state")
+		switch transitions := state["recent_transitions"].(type) {
+		case []any:
+			if len(transitions) > 2 {
+				transitions = transitions[len(transitions)-2:]
+			}
+			recent := make([]any, 0, len(transitions))
+			for _, raw := range transitions {
+				switch transition := raw.(type) {
+				case map[string]any:
+					recent = append(recent, mapReceipt(transition))
+				case domain.ProjectedPlanningTransitionV2:
+					recent = append(recent, receipt(transition))
+				case *domain.ProjectedPlanningTransitionV2:
+					if transition != nil {
+						recent = append(recent, receipt(*transition))
+					}
+				}
+			}
+			state["recent_transitions"] = recent
+		case []domain.ProjectedPlanningTransitionV2:
+			if len(transitions) > 2 {
+				transitions = transitions[len(transitions)-2:]
+			}
+			recent := make([]any, 0, len(transitions))
+			for _, transition := range transitions {
+				recent = append(recent, receipt(transition))
+			}
+			state["recent_transitions"] = recent
+		}
+	}
+}
+
+func compactReadyPlanningFutureOutline(result, working map[string]any) {
+	if result == nil || working == nil {
+		return
+	}
+	currentChapter := 0
+	switch current := working["current_chapter_outline"].(type) {
+	case domain.OutlineEntry:
+		currentChapter = current.Chapter
+	case *domain.OutlineEntry:
+		if current != nil {
+			currentChapter = current.Chapter
+		}
+	case map[string]any:
+		switch chapter := current["chapter"].(type) {
+		case int:
+			currentChapter = chapter
+		case float64:
+			currentChapter = int(chapter)
+		}
+	}
+	entries, ok := working["future_outline_window"].([]domain.OutlineEntry)
+	if !ok {
+		return
+	}
+	lean := make([]domain.OutlineEntry, 0, min(len(entries), 3))
+	for _, entry := range entries {
+		// current_chapter_outline and next_chapter_outline already retain the
+		// full adjacent contracts. The horizon needs only later core/hook facts
+		// to prevent premature payoff; its detailed scene choreography is a
+		// duplicate and a strong source of future leakage.
+		if currentChapter > 0 && entry.Chapter <= currentChapter+1 {
+			continue
+		}
+		entry.Scenes = nil
+		entry.ContractRefs = nil
+		lean = append(lean, entry)
+		if len(lean) == 3 {
+			break
+		}
+	}
+	if len(lean) == 0 {
+		// The envelope exposes a root mirror beside working_memory. Deleting only
+		// the canonical copy leaves the original full window orphaned at the root,
+		// where generic mirror de-duplication can no longer recognize it.
+		deleteContextKey(result, "future_outline_window")
+		return
+	}
+	// Keep both representations synchronized until trimByBudget removes the root
+	// mirror. Assigning only working_memory would leave a full root copy behind.
+	result["future_outline_window"] = lean
+	working["future_outline_window"] = lean
+	working["future_outline_policy"] = "当前章与下一章保留完整大纲；更远窗口只保留标题、核心事件和钩子，用于防止提前兑现，不得复制未来场景编排。"
 }
 
 func applyDraftContextProfile(result map[string]any) {
@@ -1216,6 +1481,7 @@ func compactWorldSimulationAuthority(result map[string]any) {
 	if !ok || len(authority) == 0 {
 		return
 	}
+	const groundedPolicyRef = "simulation_character_authority.active_mode_policies.project_all_grounded"
 	// Codex preserves the head and tail when one tool message exceeds its text
 	// budget. Keep every still-active actor at the head of this otherwise stable
 	// roster so an already-present prefix cannot hide the only decisions the
@@ -1263,10 +1529,9 @@ func compactWorldSimulationAuthority(result map[string]any) {
 		case "reuse_saved_decision":
 			entry["locked_policy"] = "决定已在 partial 落盘；不得重发、改写或从旧正文重建。"
 		case domain.SimulationAuthorityModeGrounded:
-			// Grounded actors must expose the exact server-validated inputs, but the
-			// active entry also carries its complete decision policy. mode_policies is
-			// still useful shared documentation, but it follows entries in serialized
-			// JSON and may land inside Codex's middle-clipped region.
+			// Grounded actors expose the exact server-validated inputs. Their common
+			// policy lives once in active_mode_policies, which sorts ahead of entries
+			// in JSON and therefore remains visible when Codex clips the middle.
 			add("description", item.Description, strings.TrimSpace(item.Description) != "")
 			entry["current_location"] = item.CurrentLocation
 			entry["current_status"] = item.CurrentStatus
@@ -1284,7 +1549,13 @@ func compactWorldSimulationAuthority(result map[string]any) {
 			add("relationships", item.Relationships, len(item.Relationships) > 0)
 			add("knowledge_boundary", item.KnowledgeBoundary, strings.TrimSpace(item.KnowledgeBoundary) != "")
 			add("decision_model", item.DecisionModel, strings.TrimSpace(item.DecisionModel) != "")
-			entry["decision_policy"] = item.DecisionPolicy
+			if item.DecisionPolicy == projectAllGroundedDecisionPolicy {
+				entry["decision_policy_ref"] = groundedPolicyRef
+			} else {
+				// Required-knowledge addenda and any future per-character policy
+				// variants are not equivalent to the shared base policy.
+				entry["decision_policy"] = item.DecisionPolicy
+			}
 			entry["communication_boundary"] = item.CommunicationBoundary
 		case "authoritative":
 			// Only current causal inputs belong here. Arc is deliberately omitted:
@@ -1315,10 +1586,13 @@ func compactWorldSimulationAuthority(result map[string]any) {
 		entries = append(entries, entry)
 	}
 	result["simulation_character_authority"] = map[string]any{
+		"active_mode_policies": map[string]string{
+			"project_all_grounded": projectAllGroundedDecisionPolicy,
+		},
 		"format": "layered_v1",
 		"mode_policies": map[string]string{
 			"authoritative":        "仅用 entry 中 current_*、desires/boundaries、resources、relationships、knowledge_boundary、required_knowledge_boundaries、decision_model 和通信边界推演；required_knowledge_boundaries 必须逐条原样进入提交的 knowledge_boundary，不得把未下发 arc 当当前事实。",
-			"project_all_grounded": projectAllGroundedDecisionPolicy,
+			"project_all_grounded": groundedPolicyRef,
 			"reuse_saved_decision": "该角色已落盘，禁止重发。",
 			"hold_baseline":        "把角色实名放入 simulate_chapter_world.authority_contract_characters，由服务端物化 hold_baseline_contract；不得手抄或补职业、地点、关系、资源、通信、动机或未来行动。",
 			"rewrite_source_only":  "把角色实名放入 simulate_chapter_world.authority_contract_characters，由服务端物化 rewrite_source_only_contract；不得手抄或改写 preserve_facts/rewrite_source_evidence。",
@@ -1328,7 +1602,7 @@ func compactWorldSimulationAuthority(result map[string]any) {
 	}
 	if policy, ok := result["simulation_character_authority_policy"].(map[string]any); ok {
 		policy["transport_format"] = "layered_v1"
-		policy["transport_policy"] = "公共 mode policy 已提升到 simulation_character_authority.mode_policies；blocking 角色通过 authority_contract_characters 服务端物化，entry 保留 exact contract 仅供审计。"
+		policy["transport_policy"] = "project_all_grounded 全文位于 simulation_character_authority.active_mode_policies，entries/mode_policies 通过 ref 引用；blocking 角色通过 authority_contract_characters 服务端物化，entry 保留 exact contract 仅供审计。"
 	}
 }
 
@@ -1578,8 +1852,11 @@ func newDraftRenderPacket(plan domain.ChapterPlan) draftRenderPacket {
 		EntertainmentPlan:     leanEntertainmentPlan(sim.EntertainmentPlan),
 		TrendLanguagePlan:     leanTrendLanguagePlan(sim.TrendLanguage),
 		LongformOpening:       leanLongformOpening(sim.LongformOpening),
-		// The full anti_ai_execution_plan remains mandatory upstream. Only story
-		// event timing that may not exist elsewhere crosses the prose boundary.
+		// Give Drafter the chapter-specific, prose-safe execution contract before
+		// it writes. Metric targets and fixed-cadence detector recipes are removed
+		// by the projection; the complete formal plan remains authoritative on disk.
+		AntiAIRenderContract: proseAntiAIRenderContract(sim.AntiAIPlan),
+		// Keep the legacy timing view during the additive packet migration.
 		EventTimingSafeguards: proseEventTimingSafeguards(sim.AntiAIPlan),
 		VoiceCards:            selectEssentialVoiceCards(voices, protagonist, dialogueScenes, visualCards, 5),
 		// A first chapter can introduce the protagonist, love interest, parents,
@@ -1645,6 +1922,7 @@ func compactDraftPacketForProse(packet *draftRenderPacket) {
 	packet.ContinuityChecks = compactStrings(packet.ContinuityChecks)
 	packet.ForbiddenMoves = compactStrings(packet.ForbiddenMoves)
 	packet.ProtagonistProjection.ObservableEffects = nil
+	packet.AntiAIRenderContract = proseAntiAIRenderContractFromPacket(packet.AntiAIRenderContract)
 	packet.EventTimingSafeguards = proseEventTimingSafeguardsFromPacket(packet.EventTimingSafeguards)
 	packet.CandidateBeats = limitCandidateBeats(packet.CandidateBeats, 3)
 	packet.RevealBudget = compactStrings(packet.RevealBudget)
@@ -1656,6 +1934,80 @@ func compactDraftPacketForProse(packet *draftRenderPacket) {
 
 func proseFacingPreserveFacts(facts []string) []string {
 	return canonicalPreserveFacts(nil, facts)
+}
+
+func proseAntiAIRenderContract(plan domain.AntiAIExecutionPlan) *draftAntiAIRenderContract {
+	projected := proseAntiAIRenderContractFromPacket(&draftAntiAIRenderContract{
+		RiskSignals:          append([]string(nil), plan.RiskSignals...),
+		CounterMoves:         append([]string(nil), plan.CounterMoves...),
+		SentenceRhythmPolicy: strings.TrimSpace(plan.SentenceRhythmPolicy),
+		ObjectResponseBudget: strings.TrimSpace(plan.ObjectResponseBudget),
+		DialogueFunctionPlan: strings.TrimSpace(plan.DialogueFunctionPlan),
+		ReviewChecks:         append([]string(nil), plan.ReviewChecks...),
+	})
+	if projected != nil {
+		return projected
+	}
+	return defaultProseAntiAIRenderContract()
+}
+
+// defaultProseAntiAIRenderContract is the prospective first-draft baseline for
+// ordinary plans that do not need a repair-specific anti-AI dossier. It keeps
+// the Drafter focused on reader-visible causality without exposing or inventing
+// detector metrics, fixed cadence formulas or sentence-count recipes.
+func defaultProseAntiAIRenderContract() *draftAntiAIRenderContract {
+	return &draftAntiAIRenderContract{
+		RiskSignals: []string{
+			"防台账、对白传送带、连续“没有 X，只 Y”式戏剧否定",
+		},
+		CounterMoves: []string{
+			"刺激先改判断再成选择；硬事实并场，无后果流程离屏",
+			"POV 内省落在判断摇摆、欲望冲突或可感代价；不撒通用身体反应",
+			"多源证据只保留 3—5 个功能锚点，其余概括并场，不按来源逐项堆成清单",
+			"删掉不承载选择、阻力或后果的弱过渡，让真正命中的动作直接承接后果",
+		},
+		SentenceRhythmPolicy: "句段随观察、犹疑、冲突和余波换挡。",
+		ObjectResponseBudget: "物件或界面只在改变判断、关系或安全后果时回应。",
+		DialogueFunctionPlan: "配角对白必须以主动误解、反驳或拒绝改变局面。",
+		ReviewChecks: []string{
+			"复核上述合同已落实。",
+		},
+		UsagePolicy: "首稿前执行；章级优先。",
+	}
+}
+
+func proseAntiAIRenderContractFromPacket(contract *draftAntiAIRenderContract) *draftAntiAIRenderContract {
+	if contract == nil {
+		return nil
+	}
+	out := &draftAntiAIRenderContract{
+		RiskSignals:          sanitizeProseAntiAIStrings(contract.RiskSignals, 8),
+		CounterMoves:         sanitizeProseAntiAIStrings(contract.CounterMoves, 8),
+		SentenceRhythmPolicy: sanitizeProseTimingText(contract.SentenceRhythmPolicy),
+		ObjectResponseBudget: sanitizeProseTimingText(contract.ObjectResponseBudget),
+		DialogueFunctionPlan: sanitizeProseTimingText(contract.DialogueFunctionPlan),
+		ReviewChecks:         sanitizeProseAntiAIStrings(contract.ReviewChecks, 8),
+		UsagePolicy:          "首稿前执行；章级优先。",
+	}
+	if len(out.RiskSignals) == 0 && len(out.CounterMoves) == 0 &&
+		out.SentenceRhythmPolicy == "" && out.ObjectResponseBudget == "" &&
+		out.DialogueFunctionPlan == "" && len(out.ReviewChecks) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeProseAntiAIStrings(values []string, limit int) []string {
+	out := make([]string, 0, min(len(values), limit))
+	for _, value := range values {
+		if safe := sanitizeProseTimingText(value); safe != "" {
+			out = append(out, safe)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return compactStrings(out)
 }
 
 func proseEventTimingSafeguards(plan domain.AntiAIExecutionPlan) *draftEventTimingSafeguards {
@@ -1679,7 +2031,7 @@ func proseEventTimingSafeguardsFromPacket(safeguards *draftEventTimingSafeguards
 	return out
 }
 
-var proseTimingMetricRecipePattern = regexp.MustCompile(`(?i)(?:\b(?:cv|ttr|detector)\b|(?:aigc|ai|生成|文本|朱雀).{0,6}(?:检测|概率|阈值|分数)|句长(?:曲线|指标|分布)|段长(?:曲线|指标|分布)|词汇丰富度|每[零〇一二两三四五六七八九十百0-9０-９几]+(?:句|段|字|行)|固定(?:句长|段长|间隔|周期)|周期配方)`)
+var proseTimingMetricRecipePattern = regexp.MustCompile(`(?i)(?:\b(?:cv|ttr|detector)\b|(?:aigc|ai|生成|文本|全文|整章|朱雀).{0,8}(?:检测|概率|阈值|分数)|(?:检测|判定).{0,6}(?:概率|阈值|分数|百分比|百分率|%|％)|(?:概率|阈值|分数).{0,8}(?:低于|高于|小于|大于|不超过|至少|至多|%|％|[0-9０-９])|句长(?:曲线|指标|分布)|段长(?:曲线|指标|分布)|词汇丰富度|每[零〇一二两三四五六七八九十百0-9０-９几]+(?:句|段|字|行)|固定(?:句长|段长|间隔|周期)|周期配方)`)
 
 func sanitizeProseTimingText(value string) string {
 	value = strings.TrimSpace(value)
@@ -2149,26 +2501,23 @@ func compactLiterarySourceRefs(values []string) []string {
 }
 
 func draftVisibilityFromSimulation(simulation map[string]any) (visible, excluded []string) {
-	raw, ok := simulation["character_decisions"]
-	if !ok {
+	if _, ok := simulation["character_decisions"]; !ok {
 		return nil, nil
 	}
-	var decisions []domain.CharacterWorldDecision
-	switch values := raw.(type) {
-	case []domain.CharacterWorldDecision:
-		decisions = values
-	default:
-		encoded, err := json.Marshal(values)
-		if err != nil || json.Unmarshal(encoded, &decisions) != nil {
-			return nil, nil
-		}
+	encoded, err := json.Marshal(simulation)
+	if err != nil {
+		return nil, nil
 	}
-	for _, decision := range decisions {
+	var sim domain.ChapterWorldSimulation
+	if json.Unmarshal(encoded, &sim) != nil {
+		return nil, nil
+	}
+	for _, decision := range sim.CharacterDecisions {
 		name := strings.TrimSpace(decision.Character)
 		if name == "" {
 			continue
 		}
-		if decision.VisibleToPOV {
+		if characterWorldDecisionNameObservableToPOV(sim, decision) {
 			visible = append(visible, name)
 		} else {
 			excluded = append(excluded, name)

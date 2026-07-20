@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	editrules "github.com/chenhongyang/novel-studio/internal/editor/rules"
@@ -66,6 +67,13 @@ func (t *SaveReviewTool) Schema() map[string]any {
 		schema.Property("verdict", schema.Enum("维度结论（可省略：系统按 score 自动推导，≥80 pass / ≥60 warning / <60 fail）", "pass", "warning", "fail")),
 		schema.Property("comment", schema.String("该维度的简要结论；每个维度必填，aesthetic 必须引用原文或具体统计事实")).Required(),
 	)
+	publicationSchema := schema.Object(
+		schema.Property("primary_title", schema.String("正式主标题；必须与正文核心卖点一致")).Required(),
+		schema.Property("alternate_titles", schema.Array("2—3 个不重复的备选书名", schema.String("备选书名"))).Required(),
+		schema.Property("hook_lead", schema.String("15—80 字发布导语；必须以正在发生的冲突或异常抓人")).Required(),
+		schema.Property("spoiler_free_blurb", schema.String("无剧透简介；交代人物处境、核心机制和阅读承诺，不泄露真凶、终局反转或结局")).Required(),
+		schema.Property("tags", schema.Array("恰好 5 个检索标签", schema.String("标签"))).Required(),
+	)
 	return schema.Object(
 		schema.Property("chapter", schema.Int("审阅的章节号（全局审阅填最新章节号）")).Required(),
 		schema.Property("scope", schema.Enum("审阅范围", "chapter", "global", "arc")).Required(),
@@ -77,6 +85,7 @@ func (t *SaveReviewTool) Schema() map[string]any {
 		schema.Property("verdict", schema.Enum("审阅结论", "accept", "polish", "rewrite")).Required(),
 		schema.Property("summary", schema.String("审阅总结")).Required(),
 		schema.Property("affected_chapters", schema.Array("需要重写或打磨的章节号列表（verdict 为 polish/rewrite 时必填）", schema.Int(""))),
+		schema.Property("publication", publicationSchema),
 	)
 }
 
@@ -132,6 +141,23 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		applyGate(verdict, reason)
 	}
 	escalationReason := strings.Join(escalationReasons, "；")
+	terminalAdvisoryReason := ""
+	if normalized, reason, normalizeErr := normalizeTerminalGlobalReviewVerdict(r, finalVerdict); normalizeErr != nil {
+		return nil, normalizeErr
+	} else if normalized != finalVerdict {
+		finalVerdict = normalized
+		terminalAdvisoryReason = reason
+		// A terminal warning is still persisted in dimensions/issues and writing
+		// assets, but it is not executable chapter work.  Keeping the model's
+		// affected_chapters here would create a pending_rewrites queue which the
+		// immutable sealed acceptance chain cannot legally consume.
+		r.AffectedChapters = nil
+		if escalationReason == "" {
+			escalationReason = reason
+		} else {
+			escalationReason += "；" + reason
+		}
+	}
 
 	progress, _ := t.store.Progress.Load()
 	affected := r.AffectedChapters
@@ -153,6 +179,18 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 
 	r.Verdict = finalVerdict
 	r.AffectedChapters = affected
+	if r.Scope == "global" {
+		bookDigest, err := t.store.World.CurrentBookBodySHA256(r.Chapter)
+		if err != nil {
+			return nil, fmt.Errorf("bind global review to current manuscript: %w", err)
+		}
+		r.BookBodySHA256 = bookDigest
+		if finalVerdict == "accept" {
+			if err := ValidateShortPublicationPackage(r.Publication); err != nil {
+				return nil, fmt.Errorf("global accept publication package: %w", err)
+			}
+		}
+	}
 
 	// 根据最终 verdict 更新 Progress。
 	// 写失败必须早返回——后续会 append review checkpoint，若此处吞 err 会让 Coordinator
@@ -361,6 +399,10 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		"review_rag_indexed":         ragIndexed,
 		"project_memory_rag_indexed": projectMemoryRAGIndexed,
 	}
+	if terminalAdvisoryReason != "" {
+		result["terminal_advisory_accepted"] = true
+		result["terminal_advisory_reason"] = terminalAdvisoryReason
+	}
 	// Task 068 边界复评事实：verdict 落在 polish/rewrite 边界（关键维度 55-65 分，
 	// 或 critical/error issue 与 accept 并存）时透出 boundary_review_suggested，
 	// 由 Coordinator 决定是否让同一 judge 复评一次（上限 1 次）；judge 置信度
@@ -546,7 +588,7 @@ func (t *SaveReviewTool) completeBookIfReady(r domain.ReviewEntry, progress *dom
 }
 
 func (t *SaveReviewTool) completeShortBookAfterGlobalReview(r domain.ReviewEntry, progress *domain.Progress) (bool, string, error) {
-	if progress.Layered || !domain.StructurallyComplete(progress) || r.Chapter != progress.LatestCompleted() {
+	if !domain.StructurallyComplete(progress) || r.Chapter != progress.LatestCompleted() {
 		return false, "", nil
 	}
 	meta, _ := t.store.RunMeta.Load()
@@ -575,32 +617,78 @@ func (t *SaveReviewTool) writeMergedManuscript(progress *domain.Progress) error 
 	}
 	chapters := append([]int(nil), progress.CompletedChapters...)
 	slices.Sort(chapters)
-
-	var b strings.Builder
-	if name := strings.TrimSpace(progress.NovelName); name != "" {
-		fmt.Fprintf(&b, "# %s\n\n", name)
-	}
-	for i, ch := range chapters {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		title := strings.TrimSpace(titles[ch])
-		if title == "" {
-			fmt.Fprintf(&b, "## 第 %d 章\n\n", ch)
-		} else {
-			fmt.Fprintf(&b, "## 第 %d 章 %s\n\n", ch, title)
-		}
+	merged := make([]store.MergedManuscriptChapter, 0, len(chapters))
+	for _, ch := range chapters {
 		text, err := t.store.Drafts.LoadChapterText(ch)
 		if err != nil {
 			return fmt.Errorf("load chapter %d: %w", ch, err)
 		}
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return fmt.Errorf("chapter %d final text is empty", ch)
-		}
-		b.WriteString(text)
+		merged = append(merged, store.MergedManuscriptChapter{
+			Number: ch,
+			Title:  titles[ch],
+			Text:   text,
+		})
 	}
-	return t.store.Drafts.SaveMergedManuscript(b.String())
+	manuscript, err := store.BuildMergedManuscript(progress.NovelName, merged)
+	if err != nil {
+		return err
+	}
+	return t.store.Drafts.SaveMergedManuscript(manuscript)
+}
+
+// ValidateShortPublicationPackage applies the deterministic shape contract used
+// by both save_review and the pipeline finalizer.
+func ValidateShortPublicationPackage(publication *domain.ShortPublicationPackage) error {
+	if publication == nil {
+		return fmt.Errorf("publication is required")
+	}
+	publication.PrimaryTitle = strings.TrimSpace(publication.PrimaryTitle)
+	publication.HookLead = strings.TrimSpace(publication.HookLead)
+	publication.SpoilerFreeBlurb = strings.TrimSpace(publication.SpoilerFreeBlurb)
+	if publication.PrimaryTitle == "" || utf8.RuneCountInString(publication.PrimaryTitle) > 40 {
+		return fmt.Errorf("primary_title must contain 1—40 characters")
+	}
+	if len(publication.AlternateTitles) < 2 || len(publication.AlternateTitles) > 3 {
+		return fmt.Errorf("alternate_titles must contain 2—3 titles")
+	}
+	seenTitles := map[string]struct{}{strings.ToLower(publication.PrimaryTitle): {}}
+	for i := range publication.AlternateTitles {
+		title := strings.TrimSpace(publication.AlternateTitles[i])
+		if title == "" || utf8.RuneCountInString(title) > 40 {
+			return fmt.Errorf("alternate_titles[%d] must contain 1—40 characters", i)
+		}
+		key := strings.ToLower(title)
+		if _, exists := seenTitles[key]; exists {
+			return fmt.Errorf("alternate_titles must be unique and differ from primary_title")
+		}
+		seenTitles[key] = struct{}{}
+		publication.AlternateTitles[i] = title
+	}
+	leadRunes := utf8.RuneCountInString(publication.HookLead)
+	if leadRunes < 15 || leadRunes > 80 {
+		return fmt.Errorf("hook_lead must contain 15—80 characters, got %d", leadRunes)
+	}
+	blurbRunes := utf8.RuneCountInString(publication.SpoilerFreeBlurb)
+	if blurbRunes < 30 || blurbRunes > 500 {
+		return fmt.Errorf("spoiler_free_blurb must contain 30—500 characters, got %d", blurbRunes)
+	}
+	if len(publication.Tags) != 5 {
+		return fmt.Errorf("tags must contain exactly 5 items")
+	}
+	seenTags := make(map[string]struct{}, len(publication.Tags))
+	for i := range publication.Tags {
+		tag := strings.TrimSpace(publication.Tags[i])
+		if tag == "" || utf8.RuneCountInString(tag) > 16 {
+			return fmt.Errorf("tags[%d] must contain 1—16 characters", i)
+		}
+		key := strings.ToLower(tag)
+		if _, exists := seenTags[key]; exists {
+			return fmt.Errorf("tags must be unique")
+		}
+		seenTags[key] = struct{}{}
+		publication.Tags[i] = tag
+	}
+	return nil
 }
 
 var expectedReviewDimensions = map[string]struct{}{
@@ -875,6 +963,64 @@ func issueSeverityReviewGate(issues []domain.ConsistencyIssue) (string, string) 
 		return "polish", fmt.Sprintf("error issues 必须打磨 %v", compactIssueLabels(errors))
 	}
 	return "", ""
+}
+
+// normalizeTerminalGlobalReviewVerdict closes a narrow mismatch between the
+// general review verdict and the immutable sealed-book lifecycle.  The Editor
+// contract says warning-only observations are publication advice, while the
+// generic scorecard deliberately upgrades every warning to polish and a model
+// can also submit an unsupported rewrite verdict.  That conservatism is useful
+// during mutable chapter production, but at terminal global review it used to
+// enqueue already-accepted sealed chapters into pending_rewrites even though
+// ordinary rewrite is (correctly) forbidden.
+//
+// Only an exact advisory surface may be normalized.  Contract misses, factual
+// or continuity signals, failed dimensions, and error/critical issues remain
+// hard rejects and must cross the explicit all-chapter rebase boundary.  The
+// publication package is validated before any review/progress write so an
+// Editor that omitted it can retry the same tool call without leaving a half
+// terminal state.
+func normalizeTerminalGlobalReviewVerdict(
+	r domain.ReviewEntry,
+	finalVerdict string,
+) (string, string, error) {
+	if r.Scope != "global" || (finalVerdict != "polish" && finalVerdict != "rewrite") {
+		return finalVerdict, "", nil
+	}
+	if r.ContractStatus != "met" || len(r.ContractMisses) > 0 {
+		return finalVerdict, "", nil
+	}
+
+	advisoryDimensions := map[string]struct{}{
+		"pacing":             {},
+		"hook":               {},
+		"aesthetic":          {},
+		"ai_voice_detection": {},
+	}
+	for _, dimension := range r.Dimensions {
+		if dimension.Score >= 80 && dimension.Verdict == "pass" {
+			continue
+		}
+		if _, advisory := advisoryDimensions[dimension.Dimension]; !advisory ||
+			dimension.Score < 60 || dimension.Verdict != "warning" {
+			return finalVerdict, "", nil
+		}
+	}
+	for _, issue := range r.Issues {
+		if issue.Severity != "warning" {
+			return finalVerdict, "", nil
+		}
+		if _, advisory := advisoryDimensions[issue.Type]; !advisory {
+			return finalVerdict, "", nil
+		}
+	}
+	if err := ValidateShortPublicationPackage(r.Publication); err != nil {
+		return finalVerdict, "", fmt.Errorf(
+			"global warning-only review is non-blocking but needs a valid publication package before terminal accept; resubmit save_review with the same evidence and publication: %w",
+			err,
+		)
+	}
+	return "accept", "全文终审仅含非事实性 warning，作为发布建议保留，不触发 sealed 正史返工", nil
 }
 
 func compactIssueLabels(values []string) []string {

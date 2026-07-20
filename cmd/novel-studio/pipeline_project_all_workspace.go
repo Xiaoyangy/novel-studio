@@ -65,6 +65,14 @@ func preparePipelineProjectAllWorkspace(
 		); err != nil {
 			return "", fmt.Errorf("project-all workspace identity invalid; rerun with --restart: %w", err)
 		}
+		st := store.NewStore(workspace)
+		if err := repairPipelineProjectAllWorldDeltaVisibility(
+			st,
+			generationID,
+			baseChapter,
+		); err != nil {
+			return "", fmt.Errorf("repair project-all world-delta visibility: %w", err)
+		}
 		return workspace, nil
 	} else if !os.IsNotExist(err) {
 		return "", err
@@ -586,6 +594,7 @@ func materializeProjectAllOutline(liveOutputDir, workspace string) error {
 func applyPipelineProjectAllObligationsToOutline(
 	st *store.Store,
 	registry domain.ObligationRegistryV2,
+	predecessor *domain.ProjectedPlanningPredecessorContractV2,
 	chapter int,
 ) (*domain.OutlineEntry, error) {
 	if st == nil || chapter <= 0 {
@@ -614,6 +623,16 @@ func applyPipelineProjectAllObligationsToOutline(
 			obligation.ID,
 			mode,
 			strings.TrimSpace(obligation.Contract),
+		))
+	}
+	if predecessor != nil && predecessor.Chapter == chapter-1 &&
+		strings.TrimSpace(predecessor.OutgoingConsequenceID) != "" &&
+		strings.TrimSpace(predecessor.OutgoingConsequenceText) != "" {
+		additions = append(additions, fmt.Sprintf(
+			"[project-all predecessor-state:%s] 第%d章不可逆前态已完成：%s；本章只能推进由此前态产生的新后果、证据回看或人物反应，不得把同一状态转移重新安排为当前章现场。",
+			strings.TrimSpace(predecessor.OutgoingConsequenceID),
+			predecessor.Chapter,
+			strings.TrimSpace(predecessor.OutgoingConsequenceText),
 		))
 	}
 	sort.Strings(additions)
@@ -707,8 +726,6 @@ func advancePipelineProjectAllWorkspace(
 			value string
 		}{
 			{field: "location", value: decision.Location},
-			{field: "goal", value: decision.CurrentGoal},
-			{field: "pressure", value: decision.Pressure},
 			{field: "knowledge", value: decision.KnowledgeBoundary},
 			{field: "decision", value: decision.Decision},
 			{field: "status", value: decision.StateAfter},
@@ -919,17 +936,22 @@ func savePipelineProjectAllWorldDelta(
 		if pipelineProjectAllAuthorityNoOp(decision) {
 			continue
 		}
+		currentAction := strings.TrimSpace(decision.Action)
+		if decision.CompletionState == "completed" || decision.CompletionState == "instant" {
+			currentAction = ""
+		}
 		delta.CharacterDeltas = append(delta.CharacterDeltas, domain.CharacterChapterDelta{
 			Character:         decision.Character,
 			Location:          decision.Location,
 			Status:            decision.StateAfter,
 			VisibleInChapter:  decision.VisibleToPOV,
-			CurrentAction:     decision.Action,
+			CurrentAction:     currentAction,
 			Decision:          decision.Decision,
 			DecisionReason:    decision.DecisionReason,
 			KnowledgeBoundary: decision.KnowledgeBoundary,
 			ButterflyEffects:  projectAllButterflyEffectTexts(decision.ButterflyEffects),
 			WorldImpact:       decision.ImmediateResult,
+			NextPotential:     decision.ImmediateResult,
 			TimelineConsistency: fallbackProjectAllText(
 				decision.Time,
 				simulation.TimeWindow,
@@ -939,11 +961,15 @@ func savePipelineProjectAllWorldDelta(
 	appendWorld := func(kind string, mutations []domain.StateMutationV2) {
 		for _, mutation := range mutations {
 			delta.WorldDeltas = append(delta.WorldDeltas, domain.WorldChapterDelta{
-				Kind:                 kind,
-				Entity:               fallbackProjectAllText(mutation.Object, mutation.Subject),
-				Change:               mutation.After,
-				Evidence:             mutation.Cause,
-				VisibleToProtagonist: kind != "obligation",
+				Kind:     kind,
+				Entity:   fallbackProjectAllText(mutation.Object, mutation.Subject),
+				Change:   mutation.After,
+				Evidence: mutation.Cause,
+				VisibleToProtagonist: pipelineProjectAllWorldMutationVisibleToProtagonist(
+					kind,
+					mutation,
+					simulation,
+				),
 			})
 		}
 	}
@@ -956,6 +982,103 @@ func savePipelineProjectAllWorldDelta(
 	appendWorld("foreshadow", projected.Foreshadows)
 	appendWorld("obligation", projected.Obligations)
 	return st.SaveChapterWorldDelta(delta)
+}
+
+// pipelineProjectAllWorldMutationVisibleToProtagonist is deliberately
+// conservative. ProjectedDelta contains the full simulated world, including
+// off-screen antagonist state. A character decision being visible in the
+// chapter does not imply that every field on that decision (especially its
+// real location or private state_after) is known to the POV protagonist.
+// Only the protagonist's own mutations and values explicitly present in the
+// simulation's observable projection are marked known.
+func pipelineProjectAllWorldMutationVisibleToProtagonist(
+	kind string,
+	mutation domain.StateMutationV2,
+	simulation *domain.ChapterWorldSimulation,
+) bool {
+	if strings.TrimSpace(kind) == "obligation" || simulation == nil {
+		return false
+	}
+	protagonist := strings.TrimSpace(simulation.ProtagonistProjection.Protagonist)
+	if protagonist != "" && strings.TrimSpace(mutation.Subject) == protagonist {
+		return true
+	}
+	value := compactPipelineProjectAllVisibilityText(mutation.After)
+	if value == "" {
+		return false
+	}
+	for _, effect := range simulation.ProtagonistProjection.ObservableEffects {
+		if strings.Contains(compactPipelineProjectAllVisibilityText(effect), value) {
+			return true
+		}
+	}
+	return false
+}
+
+func compactPipelineProjectAllVisibilityText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), "")
+}
+
+// repairPipelineProjectAllWorldDeltaVisibility upgrades resumable shadow
+// workspaces produced before visibility became projection-aware. It touches
+// only non-canon chapters from the same project-all generation; sealed canon
+// and the immutable planning bundles remain unchanged.
+func repairPipelineProjectAllWorldDeltaVisibility(
+	st *store.Store,
+	generationID string,
+	baseChapter int,
+) error {
+	if st == nil {
+		return nil
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return err
+	}
+	if progress == nil {
+		return nil
+	}
+	for _, chapter := range progress.CompletedChapters {
+		if chapter <= baseChapter {
+			continue
+		}
+		delta, err := st.LoadChapterWorldDelta(chapter)
+		if err != nil {
+			return err
+		}
+		if delta == nil || strings.TrimSpace(delta.GenerationID) != strings.TrimSpace(generationID) {
+			continue
+		}
+		simulation, err := st.LoadChapterWorldSimulation(chapter)
+		if err != nil {
+			return err
+		}
+		if simulation == nil {
+			continue
+		}
+		changed := false
+		for i := range delta.WorldDeltas {
+			item := &delta.WorldDeltas[i]
+			visible := pipelineProjectAllWorldMutationVisibleToProtagonist(
+				item.Kind,
+				domain.StateMutationV2{
+					Subject: item.Entity,
+					After:   item.Change,
+				},
+				simulation,
+			)
+			if item.VisibleToProtagonist != visible {
+				item.VisibleToProtagonist = visible
+				changed = true
+			}
+		}
+		if changed {
+			if err := st.SaveChapterWorldDelta(*delta); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func projectAllButterflyEffectTexts(values []domain.DecisionButterflyEffect) []string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -14,9 +15,61 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+func TestPipelineReconcilesExplicitPromptChapterWordsForDownstreamRecovery(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Sources: []string{"system_defaults", "startup_prompt"},
+		Structured: rules.Structured{
+			ChapterWords: &rules.WordRange{Min: 2000, Max: 3300},
+		},
+		Uncertain: []string{
+			"未设置 chapter_words：只给出了全书总字数和章数",
+			"第三人称视角要求未提升到 structured",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := pipelineReconcileExplicitPromptChapterWords(
+		st,
+		"正文严格控制在2.8万—3万字，共12章，单章约 2200—2600 字。",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("explicit downstream prompt range should replace the stale default")
+	}
+	snapshot, err := st.UserRules.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || snapshot.Structured.ChapterWords == nil ||
+		snapshot.Structured.ChapterWords.Min != 2200 ||
+		snapshot.Structured.ChapterWords.Max != 2600 {
+		t.Fatalf("chapter_words not reconciled: %+v", snapshot)
+	}
+	if !slices.Contains(snapshot.Sources, "pipeline_prompt_explicit") {
+		t.Fatalf("explicit prompt source missing: %+v", snapshot.Sources)
+	}
+	if len(snapshot.Uncertain) != 1 || strings.Contains(snapshot.Uncertain[0], "chapter_words") {
+		t.Fatalf("stale chapter_words uncertainty survived: %+v", snapshot.Uncertain)
+	}
+
+	changed, err = pipelineReconcileExplicitPromptChapterWords(st, "单章约2200—2600字")
+	if err != nil || changed {
+		t.Fatalf("same explicit range should be idempotent: changed=%v err=%v", changed, err)
+	}
+}
 
 func TestPipelineDraftNeedsExternalJudgeIncludesFirstUnjudgedHash(t *testing.T) {
 	for _, test := range []struct {
@@ -990,9 +1043,10 @@ func TestLoadPipelineStateInvalidatesRunIdentityChange(t *testing.T) {
 func TestPipelineRunIdentityBindsFromToAndBudget(t *testing.T) {
 	base := pipelineRunIdentityDigest(pipelineFlags{Start: 1, End: 3, Budget: time.Minute})
 	for name, flags := range map[string]pipelineFlags{
-		"from":   {Start: 2, End: 3, Budget: time.Minute},
-		"to":     {Start: 1, End: 4, Budget: time.Minute},
-		"budget": {Start: 1, End: 3, Budget: 2 * time.Minute},
+		"from":             {Start: 2, End: 3, Budget: time.Minute},
+		"to":               {Start: 1, End: 4, Budget: time.Minute},
+		"budget":           {Start: 1, End: 3, Budget: 2 * time.Minute},
+		"architect-target": {Start: 1, End: 3, Budget: time.Minute, ArchitectTarget: "book_world"},
 	} {
 		if got := pipelineRunIdentityDigest(flags); got == base {
 			t.Fatalf("%s change did not alter pipeline run identity", name)
@@ -1104,11 +1158,11 @@ func TestPipelineStageArgsPassesReviewRewriteOptions(t *testing.T) {
 }
 
 func TestParsePipelineFlagsSupportsOpeningRefresh(t *testing.T) {
-	flags, extra, err := parsePipelineFlags([]string{"--refresh-architect", "--refresh-zero-init", "--force-rerender", "--stages", "architect,zero-init"})
+	flags, extra, err := parsePipelineFlags([]string{"--refresh-architect", "--architect-target", "book_world", "--refresh-zero-init", "--force-rerender", "--stages", "architect,zero-init"})
 	if err != nil {
 		t.Fatalf("parsePipelineFlags: %v", err)
 	}
-	if len(extra) != 0 || !flags.RefreshArchitect || !flags.RefreshZeroInit || !flags.ForceRerender {
+	if len(extra) != 0 || !flags.RefreshArchitect || flags.ArchitectTarget != "book_world" || !flags.RefreshZeroInit || !flags.ForceRerender {
 		t.Fatalf("unexpected refresh flags: flags=%+v extra=%v", flags, extra)
 	}
 }
@@ -1379,6 +1433,192 @@ func TestPipelineArchitectRefreshPromptLocksGoldenThreeAndStageBoundary(t *testi
 	}
 }
 
+func TestPipelineArchitectRefreshPromptReplansWholeShortBookAtChapterZero(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{TotalChapters: 12}); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := pipelineArchitectRefreshPrompt(dir, "重做12章现实悬疑短篇，保留双女主")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"章零短篇全书刷新", "premise", "characters", "world_rules", "book_world", "world_codex", "compass", "重做完整12章", "每轮只调用一次 save_foundation",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("short refresh prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "只重做前三章") {
+		t.Fatalf("chapter-zero short refresh must not be restricted to three chapters:\n%s", prompt)
+	}
+}
+
+func TestPipelineArchitectShortRefreshRunPromptPinsOneFoundationType(t *testing.T) {
+	for run, want := range []string{
+		"premise", "characters", "world_rules", "book_world", "world_codex", "update_compass", "layered_outline",
+	} {
+		prompt := pipelineArchitectShortRefreshRunPrompt("BASE", run+1)
+		if !strings.Contains(prompt, `save_foundation(type="`+want+`")`) ||
+			!strings.Contains(prompt, `subagent(agent="architect_long"`) ||
+			!strings.Contains(prompt, "Coordinator 自己禁止调用 novel_context") ||
+			!strings.Contains(prompt, "novel_context(chapter=1, profile=planning)") ||
+			!strings.Contains(prompt, "BASE") {
+			t.Fatalf("run %d did not pin %s:\n%s", run+1, want, prompt)
+		}
+	}
+}
+
+func TestPipelineArchitectShortTargetSelectionAndRevision(t *testing.T) {
+	targets, err := pipelineArchitectShortSelectedTargets("book_world")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Type != "book_world" || !slices.Equal(targets[0].Artifacts, []string{"book_world.json"}) {
+		t.Fatalf("unexpected selected targets: %+v", targets)
+	}
+	if _, err := pipelineArchitectShortSelectedTargets("not-a-foundation"); err == nil || !strings.Contains(err.Error(), "未知 --architect-target") {
+		t.Fatalf("unknown target accepted: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "book_world.json")
+	if err := os.WriteFile(path, []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := pipelineArchitectShortTargetRevision(dir, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	after, err := pipelineArchitectShortTargetRevision(dir, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("same-content target rewrite must still change the revision proof")
+	}
+}
+
+func TestPipelineArchitectPromptLocksOutlineAllArcSpanForShortFiction(t *testing.T) {
+	prompt, err := pipelineArchitectPrompt(t.TempDir(), "写一篇12章现实悬疑短篇")
+	if err != nil {
+		t.Fatalf("pipelineArchitectPrompt: %v", err)
+	}
+	for _, want := range []string{"每个弧占 8—16 章", "一卷一弧 12 章", "不得拆成三个 4 章弧"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("architect prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPipelineBookWordTotalIsHardAtDelivery(t *testing.T) {
+	target := domain.BookScaleTarget{MinWords: 28000, MaxWords: 30000}
+	if err := validatePipelineBookWordTotal(target, 29000); err != nil {
+		t.Fatalf("in-range total rejected: %v", err)
+	}
+	for _, total := range []int{27999, 30001} {
+		if err := validatePipelineBookWordTotal(target, total); err == nil || !strings.Contains(err.Error(), "全书正文总字数硬门禁") {
+			t.Fatalf("out-of-range total %d accepted: %v", total, err)
+		}
+	}
+}
+
+func TestPipelineNormalizeOutlineAllArcSpansPreservesTwelveChapterContent(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	var arcs []domain.ArcOutline
+	for arc := 1; arc <= 3; arc++ {
+		var chapters []domain.OutlineEntry
+		for i := 1; i <= 4; i++ {
+			chapter := (arc-1)*4 + i
+			chapters = append(chapters, domain.OutlineEntry{
+				Chapter: chapter, Title: fmt.Sprintf("第%d章", chapter),
+				CoreEvent: fmt.Sprintf("事件%d", chapter), Hook: fmt.Sprintf("钩子%d", chapter),
+				Scenes: []string{fmt.Sprintf("场景%d", chapter)},
+			})
+		}
+		arcs = append(arcs, domain.ArcOutline{
+			Index: arc, Title: fmt.Sprintf("旧弧%d", arc), Goal: fmt.Sprintf("目标%d", arc), Chapters: chapters,
+		})
+	}
+	before := domain.FlattenOutline([]domain.VolumeOutline{{Index: 1, Title: "全书", Arcs: arcs}})
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{Index: 1, Title: "全书", Arcs: arcs}}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := pipelineNormalizeOutlineAllArcSpans(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected three four-chapter arcs to be normalized")
+	}
+	afterVolumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterVolumes) != 1 || len(afterVolumes[0].Arcs) != 1 || afterVolumes[0].Arcs[0].ChapterSpan() != 12 {
+		t.Fatalf("normalized outline = %+v, want one twelve-chapter arc", afterVolumes)
+	}
+	after := domain.FlattenOutline(afterVolumes)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("chapter content changed during structural migration:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestPipelineNormalizeOutlineAllCompassScaleAddsExplicitExactRanges(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	chapters := make([]domain.OutlineEntry, 12)
+	for i := range chapters {
+		chapters[i] = domain.OutlineEntry{Chapter: i + 1, Title: fmt.Sprintf("第%d章", i+1)}
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1, Title: "全书", Arcs: []domain.ArcOutline{{Index: 1, Title: "主弧", Chapters: chapters}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveCompass(domain.StoryCompass{
+		EndingDirection: "闭环", EstimatedScale: "单卷12章，正文2.8万—3万字",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := pipelineNormalizeOutlineAllCompassScale(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected natural-language exact scale to be normalized")
+	}
+	compass, err := st.Outline.LoadCompass()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := domain.ParseBookScaleRange(compass.EstimatedScale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.BookScaleRange{MinVolumes: 1, MaxVolumes: 1, MinChapters: 12, MaxChapters: 12}
+	if got != want || !strings.Contains(compass.EstimatedScale, "正文2.8万—3万字") {
+		t.Fatalf("normalized scale=%q parsed=%+v want=%+v", compass.EstimatedScale, got, want)
+	}
+}
+
 func TestVerifyPipelineZeroInitStageKeepsEvidenceAfterChapterOne(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
@@ -1441,6 +1681,11 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.Progress.Init("鬼城", 3); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture exercises incremental delivery sedimentation, not the
+	// short-book whole-manuscript finalization gate.
+	if err := st.RunMeta.SetPlanningTier(domain.PlanningTierLong); err != nil {
 		t.Fatal(err)
 	}
 	chapterText := "正文原文不应该进入 RAG。江烬把欠费单压住。"

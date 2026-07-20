@@ -56,6 +56,7 @@ type Host struct {
 	mu         sync.Mutex
 	lifecycle  lifecycle
 	cocreating bool // 阶段共创占用：paused 窗口内堵住 import/simulate/continue 的并发介入
+	closed     bool // protects terminal channel close against an in-flight waitDone signal
 	closeOnce  sync.Once
 }
 
@@ -68,8 +69,23 @@ const (
 	lifecycleCompleted lifecycle = "completed"
 )
 
+// NewOptions contains process-local host wiring. WriterSessionIdentity changes
+// only where the Planner subagent appends its audit transcript; it does not
+// rename the logical writer role or alter normal resume/context behavior.
+type NewOptions struct {
+	WriterSessionIdentity string
+}
+
 // New 创建 Host。
 func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
+	return NewWithOptions(cfg, bundle, NewOptions{})
+}
+
+// NewWithOptions creates a Host with narrow process-local wiring overrides.
+func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions) (*Host, error) {
+	if err := agents.ValidateSubAgentSessionIdentity(opts.WriterSessionIdentity); err != nil {
+		return nil, err
+	}
 	cfg.FillDefaults()
 	if err := cfg.ValidateBase(); err != nil {
 		return nil, err
@@ -120,14 +136,14 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 
 	var router *flow.Dispatcher
 	var budget *BudgetSentinel
-	coordinator, askUser, restore, coordinatorCtxMgr, applyThinking := agents.BuildCoordinator(cfg, store, models, bundle, usage.Record, func(string) {
+	coordinator, askUser, restore, coordinatorCtxMgr, applyThinking := agents.BuildCoordinatorWithOptions(cfg, store, models, bundle, usage.Record, func(string) {
 		if budget != nil && budget.HandleBoundary() {
 			return
 		}
 		if router != nil {
 			router.Dispatch()
 		}
-	})
+	}, agents.CoordinatorBuildOptions{WriterSessionIdentity: opts.WriterSessionIdentity})
 	store.Signals.ClearStaleSignals()
 
 	h := &Host{
@@ -502,7 +518,18 @@ func (h *Host) Close() {
 	if err := h.usage.SaveNow(); err != nil {
 		slog.Warn("usage 退出前落盘失败", "module", "usage", "err", err)
 	}
+	h.closeTerminalChannels()
+}
+
+func (h *Host) closeTerminalChannels() {
 	h.closeOnce.Do(func() {
+		// waitDone may return from coordinator.WaitForIdle at the same instant a
+		// headless caller unwinds and closes Host. Sending to a closed buffered
+		// channel panics even inside a non-blocking select, so close and signal
+		// must share this mutex.
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.closed = true
 		close(h.done)
 		close(h.events)
 		close(h.streamCh)
@@ -556,6 +583,15 @@ func (h *Host) waitDone() {
 		}
 	}
 
+	h.signalDone()
+}
+
+func (h *Host) signalDone() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
 	select {
 	case h.done <- struct{}{}:
 	default:

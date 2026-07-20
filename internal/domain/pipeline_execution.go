@@ -19,6 +19,7 @@ const (
 	PipelineExecutionOutlineAll PipelineExecutionMode = "outline_all"
 	PipelineExecutionPreplan    PipelineExecutionMode = "preplan"
 	PipelineExecutionProjectAll PipelineExecutionMode = "project_all"
+	PipelineExecutionPromote    PipelineExecutionMode = "promote"
 	PipelineExecutionRender     PipelineExecutionMode = "render"
 )
 

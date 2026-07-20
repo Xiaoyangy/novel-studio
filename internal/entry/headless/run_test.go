@@ -1,14 +1,47 @@
 package headless
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/host"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+func TestSealedConvergenceDeterministicPreconditionStopsOnFirstFailure(t *testing.T) {
+	events := []host.Event{
+		{Category: "ERROR", Agent: "writer", Detail: `writer → novel_context: novel_context profile="planning" 的关键上下文无法安全收敛：hard=65536 actual=88205`},
+		{Category: "ERROR", Agent: "writer", Detail: "writer → novel_context: same immutable failure repeated"},
+		{Category: "ERROR", Agent: "writer", Detail: "writer → novel_context: same immutable failure repeated"},
+	}
+	observedCalls := 0
+	for _, event := range events {
+		observedCalls++
+		if err := sealedConvergenceDeterministicPreconditionError(event, 5); err != nil {
+			break
+		}
+	}
+	if observedCalls != 1 {
+		t.Fatalf("deterministic convergence precondition repeated %d times, want exactly 1", observedCalls)
+	}
+	ordinary := host.Event{Category: "ERROR", Agent: "writer", Detail: "plan_details 缺少一个可由 Planner 补齐的字段"}
+	if err := sealedConvergenceDeterministicPreconditionError(ordinary, 5); err != nil {
+		t.Fatalf("ordinary repairable planner error was made fatal: %v", err)
+	}
+	authority := host.Event{Category: "ERROR", Agent: "writer", Detail: "stored project-all authority receipt invalid: active project-all authority binding no longer matches receipt"}
+	if err := sealedConvergenceDeterministicPreconditionError(authority, 5); err == nil {
+		t.Fatal("immutable authority binding failure did not stop immediately")
+	}
+	projectedState := host.Event{Category: "ERROR", Agent: "writer", Detail: "plan_details 缺少 novel_context 返回的 exact project-all-state authoritative source token"}
+	if err := sealedConvergenceDeterministicPreconditionError(projectedState, 5); err == nil {
+		t.Fatal("missing immutable project-all state binding did not stop immediately")
+	}
+}
 
 func TestInspectRenderOnlyReplanStopRejectsExhaustedCausalEpoch(t *testing.T) {
 	dir := t.TempDir()
@@ -33,6 +66,102 @@ func TestInspectRenderOnlyReplanStopRejectsExhaustedCausalEpoch(t *testing.T) {
 	}
 	if cp := st.Checkpoints.LatestByStep(domain.ChapterScope(1), "plan"); cp == nil || cp.Digest != "plan-epoch" {
 		t.Fatalf("stop inspection mutated frozen plan: %+v", cp)
+	}
+}
+
+func TestInspectRenderOnlyReplanStopAbortsBeforeThirdProjectionOnCombinedLedger(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "冻结"}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceOutputDir := filepath.Join(t.TempDir(), "output", "novel")
+	candidateID := "render-ch0001-headless-event"
+	manifest := map[string]any{
+		"version": "pipeline-render-candidate.v2", "candidate_id": candidateID,
+		"generation_id": "generation", "chapter": 1,
+		"plan_digest": plan.Digest, "plan_checkpoint_seq": plan.Seq,
+		"projected_bundle_digest":  "sha256:bundle",
+		"promotion_receipt_digest": "sha256:promotion",
+		"source_output_dir":        sourceOutputDir,
+	}
+	ledger := map[string]any{
+		"version": "pipeline-render-convergence.v1", "candidate_id": candidateID,
+		"generation_id": "generation", "chapter": 1,
+		"plan_digest": plan.Digest, "plan_checkpoint_seq": plan.Seq,
+		"projected_bundle_digest":  "sha256:bundle",
+		"promotion_receipt_digest": "sha256:promotion", "failure_limit": 3,
+		"records": []map[string]any{
+			{"body_sha256": strings.Repeat("a", 64), "semantic_reject": true},
+			{"body_sha256": strings.Repeat("b", 64), "structural_block": true},
+			{"body_sha256": strings.Repeat("c", 64), "structural_block": true},
+		},
+	}
+	writeJSON := func(path string, value any) {
+		t.Helper()
+		raw, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(path, raw, 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	writeJSON(filepath.Join(dir, "meta", "planning", "render_candidate.json"), manifest)
+	writeJSON(filepath.Join(
+		filepath.Dir(sourceOutputDir), ".render-candidates", "convergence", candidateID, "ledger.json",
+	), ledger)
+
+	thirdProjectionCalls := 0
+	err = inspectRenderOnlyReplanStop(dir, 1)
+	if err == nil {
+		thirdProjectionCalls++
+	}
+	if !tools.IsRenderConvergencePlanStageRequired(err) {
+		t.Fatalf("post-tool event did not return typed combined-ledger stop: %v", err)
+	}
+	if thirdProjectionCalls != 0 {
+		t.Fatalf("headless event boundary dispatched a third prose projection: %d", thirdProjectionCalls)
+	}
+}
+
+func TestShouldStopAfterChapterDraftUsesNewWholeDraftCheckpointOnly(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(5), "draft", "drafts/05.draft.md", "old-draft"); err != nil {
+		t.Fatal(err)
+	}
+	baseline := latestChapterDraftSeq(dir, 5)
+	if shouldStopAfterChapterDraft(dir, 5, baseline) {
+		t.Fatal("an old recovered draft checkpoint stopped the new Host turn")
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(5), "edit", "drafts/05.draft.md", "edited-draft"); err != nil {
+		t.Fatal(err)
+	}
+	if shouldStopAfterChapterDraft(dir, 5, baseline) {
+		t.Fatal("an edit checkpoint was mistaken for a new whole-body render")
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(5), "draft", "drafts/05.draft.md", "new-draft"); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterChapterDraft(dir, 5, baseline) {
+		t.Fatal("new whole-body draft checkpoint did not stop frozen render Host")
+	}
+	if shouldStopAfterChapterDraft(dir, 4, baseline) || shouldStopAfterChapterDraft(dir, 0, baseline) {
+		t.Fatal("wrong/disabled chapter inherited the render draft stop")
 	}
 }
 
@@ -162,6 +291,44 @@ func TestShouldStopAfterChapterCommitRequiresNewCheckpoint(t *testing.T) {
 	}
 	if !shouldStopAfterChapterCommit(dir, 1, initial) {
 		t.Fatal("new commit checkpoint should return control to pipeline review")
+	}
+}
+
+func TestShouldStopAfterGlobalReviewRequiresNewGlobalCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveReview(domain.ReviewEntry{
+		Chapter: 2, Scope: "global", Verdict: "rewrite", Summary: "旧全文终审",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(2), "review", "reviews/02-global.json", "review", "commit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	initial := latestGlobalReviewSeq(dir, 2)
+	if shouldStopAfterGlobalReview(dir, 2, initial) {
+		t.Fatal("an existing global review must not stop a resumed finalizer")
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(2), "commit", "chapters/02.md", "new-body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveReview(domain.ReviewEntry{
+		Chapter: 2, Scope: "global", Verdict: "accept", Summary: "新全文终审",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(2), "review", "reviews/02-global.json", "review", "commit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterGlobalReview(dir, 2, initial) {
+		t.Fatal("a new global review checkpoint should return control to pipeline finalization")
 	}
 }
 

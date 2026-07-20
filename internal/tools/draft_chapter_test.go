@@ -118,6 +118,12 @@ func TestDraftNeedsConsistencyCheckAfterEdit(t *testing.T) {
 	if !draftNeedsConsistencyCheck(st, 1) {
 		t.Fatal("edit after consistency was ignored as a new body event")
 	}
+	if err := os.Remove(filepath.Join(st.Dir(), "drafts", "01.draft.md")); err != nil {
+		t.Fatal(err)
+	}
+	if draftNeedsConsistencyCheck(st, 1) {
+		t.Fatal("quarantined/missing draft was mistaken for a live unchecked payload")
+	}
 }
 
 func TestDraftChapterRejectsPipelineWritingWithoutPlan(t *testing.T) {

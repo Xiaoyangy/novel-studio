@@ -34,6 +34,9 @@ func agentToRole(name string) string {
 	if strings.HasPrefix(name, "architect_") {
 		return "architect"
 	}
+	if strings.HasPrefix(name, "convergence_planner_fresh_") {
+		return "writer"
+	}
 	if name == "world_simulator" {
 		// 全角色世界推演仍属于 writer，不跟随正文渲染模型。
 		return "writer"
@@ -68,6 +71,32 @@ func plannerShouldStopAfterToolResult(toolName string, result json.RawMessage) b
 	}
 	_ = json.Unmarshal(result, &r)
 	return r.Planned && r.Staged == ""
+}
+
+// pipelineRenderDrafterShouldStopAfterToolResult enforces the frozen-render
+// handoff mechanically. Ordinary interactive Drafter sessions keep their
+// historical self-check/commit loop; only the exact active render lease stops
+// after one successful whole-body write so the outer pipeline can judge those
+// bytes before any further prose tool runs.
+func pipelineRenderDrafterShouldStopAfterToolResult(
+	st *store.Store,
+	toolName string,
+	result json.RawMessage,
+) bool {
+	if st == nil || toolName != "draft_chapter" {
+		return false
+	}
+	var written struct {
+		Written bool   `json:"written"`
+		Chapter int    `json:"chapter"`
+		Mode    string `json:"mode"`
+	}
+	if json.Unmarshal(result, &written) != nil || !written.Written || written.Mode != "write" || written.Chapter <= 0 {
+		return false
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	return err == nil && lock != nil && lock.Mode == domain.PipelineExecutionRender &&
+		lock.TargetChapter == written.Chapter
 }
 
 type writingContextProfile struct {
@@ -167,6 +196,50 @@ type FlowBoundaryHook func(toolName string)
 // writer/editor → 对应子代理。空 level = 沿用模型/provider 默认。其它 role 名忽略。
 type ApplyThinking func(role string, level agentcore.ThinkingLevel)
 
+// CoordinatorBuildOptions contains process-local session-routing overrides.
+// WriterSessionIdentity is intentionally limited to the ordinary Planner
+// subagent: it lets a sealed-convergence paid attempt write a fresh audit
+// transcript without changing the logical agent name, tools, model role, flow
+// gates, or any normal writer invocation.
+type CoordinatorBuildOptions struct {
+	WriterSessionIdentity string
+}
+
+var subAgentSessionIdentityRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
+
+// ValidateSubAgentSessionIdentity rejects path-like or ambiguous identities.
+// Empty means the normal SessionStore routing policy and is always valid.
+func ValidateSubAgentSessionIdentity(identity string) error {
+	if identity == "" {
+		return nil
+	}
+	if strings.TrimSpace(identity) != identity || !subAgentSessionIdentityRe.MatchString(identity) {
+		return fmt.Errorf("invalid subagent session identity %q", identity)
+	}
+	return nil
+}
+
+func newSubAgentMessageHandler(
+	st *store.Store,
+	lookup store.ModelLookup,
+	recordUsage UsageRecorder,
+	writerSessionIdentity string,
+) func(agentName, task string, msg agentcore.AgentMessage) {
+	base := st.Sessions.SubAgentLogger(lookup)
+	return func(agentName, task string, msg agentcore.AgentMessage) {
+		sessionIdentity := agentName
+		if agentName == "writer" && writerSessionIdentity != "" {
+			sessionIdentity = writerSessionIdentity
+		}
+		base(sessionIdentity, task, msg)
+		// Runtime usage remains attributed to the logical role. The override is
+		// only an append-path identity and must not create a new billing role.
+		if recordUsage != nil {
+			recordUsage(agentName, msg)
+		}
+	}
+}
+
 const ThinkingUltra agentcore.ThinkingLevel = "ultra"
 
 // ParseThinkingLevel 把配置字符串转 agentcore.ThinkingLevel。
@@ -219,6 +292,24 @@ func BuildCoordinator(
 	bundle assets.Bundle,
 	recordUsage UsageRecorder,
 	onFlowBoundary FlowBoundaryHook,
+) (*agentcore.Agent, *tools.AskUserTool, *ctxpack.WriterRestorePack, *corecontext.ContextEngine, ApplyThinking) {
+	return BuildCoordinatorWithOptions(
+		cfg, store, models, bundle, recordUsage, onFlowBoundary,
+		CoordinatorBuildOptions{},
+	)
+}
+
+// BuildCoordinatorWithOptions is the process-scoped variant used by narrow
+// pipeline sidecars. Ordinary hosts call BuildCoordinator and retain the exact
+// historical session routing behavior.
+func BuildCoordinatorWithOptions(
+	cfg bootstrap.Config,
+	store *store.Store,
+	models *bootstrap.ModelSet,
+	bundle assets.Bundle,
+	recordUsage UsageRecorder,
+	onFlowBoundary FlowBoundaryHook,
+	buildOpts CoordinatorBuildOptions,
 ) (*agentcore.Agent, *tools.AskUserTool, *ctxpack.WriterRestorePack, *corecontext.ContextEngine, ApplyThinking) {
 	// 共享工具
 	// Task 072：real_lm 维度配置注入（未配置时 ai_gate 报告无痕）。
@@ -336,14 +427,59 @@ func BuildCoordinator(
 		}
 		return models.ForRoleWithFailover(role, reportFailover)
 	}
+	executionBounds := currentAgentExecutionBounds(store)
 	architectModel := roleModel("architect")
 	writerModel := writersampler.New(roleModel("writer"))
-	drafterModel := writersampler.New(roleModel("drafter"))
+	drafterBaseModel := roleModel("drafter")
+	coordinatorModel := roleModel("coordinator")
+	drafterJudgeModel := roleModel("reviewer")
+	if executionBounds.Render {
+		drafterBaseModel = withModelCallTimeout(
+			drafterBaseModel, "drafter", executionBounds.DrafterCallTimeout,
+		)
+		coordinatorModel = withModelCallTimeout(
+			coordinatorModel, "coordinator", executionBounds.CoordinatorCallTimeout,
+		)
+		// The sampler judge is advisory and deterministically falls back when it
+		// times out; it must not outlive the prose call it is selecting for.
+		drafterJudgeModel = withModelCallTimeout(
+			drafterJudgeModel, "drafter_sampler_judge", executionBounds.CoordinatorCallTimeout,
+		)
+	}
+	drafterModel := writersampler.New(drafterBaseModel)
 	// Task 067：三采样 pairwise 终选用 reviewer 角色（异族裁判；未配置回落 editor）。
 	writerModel.Judge = roleModel("reviewer")
-	drafterModel.Judge = roleModel("reviewer")
+	drafterModel.Judge = drafterJudgeModel
+	var drafterRuntimeModel agentcore.ChatModel = drafterModel
+	if executionBounds.Render {
+		// Bound the complete sampler/control/prose/one-repair invocation, not only
+		// each nested base-model request.
+		drafterRuntimeModel = withModelCallTimeout(
+			drafterRuntimeModel, "drafter_total", executionBounds.DrafterCallTimeout,
+		)
+	}
 	editorModel := roleModel("editor")
-	coordinatorModel := roleModel("coordinator")
+	drafterMaxTurns := cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 80), 80)
+	finalizerMaxTurns := cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 30), 30)
+	drafterMaxRetries := subagentMaxRetries
+	coordinatorMaxTurns := 100_000
+	coordinatorMaxRetries := subagentMaxRetries
+	if executionBounds.Render {
+		drafterMaxTurns = cappedMaxTurns(drafterMaxTurns, executionBounds.DrafterTurns)
+		finalizerMaxTurns = cappedMaxTurns(finalizerMaxTurns, executionBounds.FinalizerTurns)
+		drafterMaxRetries = executionBounds.ModelMaxRetries
+		coordinatorMaxTurns = executionBounds.CoordinatorTurns
+		coordinatorMaxRetries = executionBounds.ModelMaxRetries
+		slog.Info("render execution limits applied",
+			"module", "agent",
+			"coordinator_max_turns", coordinatorMaxTurns,
+			"drafter_max_turns", drafterMaxTurns,
+			"finalizer_max_turns", finalizerMaxTurns,
+			"model_max_retries", drafterMaxRetries,
+			"coordinator_call_timeout", executionBounds.CoordinatorCallTimeout,
+			"drafter_call_timeout", executionBounds.DrafterCallTimeout,
+		)
+	}
 
 	// Coordinator 的 ContextManager 在 Agent 构造时一次性生成，按启动模型解析。
 	// 运行中 /model 切换到更小窗口的模型时，建议用户显式配置 context_window 兜底。
@@ -365,13 +501,12 @@ func BuildCoordinator(
 		provider, name, _ := models.CurrentSelection(role)
 		return provider, name
 	}
-	baseOnMsg := store.Sessions.SubAgentLogger(modelLookup)
-	onMsg := func(agentName, task string, msg agentcore.AgentMessage) {
-		baseOnMsg(agentName, task, msg)
-		if recordUsage != nil {
-			recordUsage(agentName, msg)
-		}
-	}
+	onMsg := newSubAgentMessageHandler(
+		store,
+		modelLookup,
+		recordUsage,
+		buildOpts.WriterSessionIdentity,
+	)
 	baseCoordinatorLog := store.Sessions.CoordinatorLogger(modelLookup)
 	coordinatorOnMessage := func(msg agentcore.AgentMessage) {
 		baseCoordinatorLog(msg)
@@ -504,15 +639,18 @@ func BuildCoordinator(
 	drafter := subagent.Config{
 		Name:               "drafter",
 		Description:        "正文渲染者：基于已定稿的章节计划写出正文、自审并提交",
-		Model:              drafterModel,
+		Model:              drafterRuntimeModel,
 		SystemPrompt:       bundle.Prompts.Drafter,
 		Tools:              drafterTools,
-		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 80), 80),
-		MaxRetries:         subagentMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(drafterModel, cfg, "drafter"),
+		MaxTurns:           drafterMaxTurns,
+		MaxRetries:         drafterMaxRetries,
+		ThinkingLevel:      resolvedRoleThinking(drafterRuntimeModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
-		OnMessage:          onMsg,
+		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
+			return pipelineRenderDrafterShouldStopAfterToolResult(store, toolName, result)
+		},
+		OnMessage: onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
 			return reminder.NewWriterStopGuard(store)
 		},
@@ -521,13 +659,13 @@ func BuildCoordinator(
 	draftFinalizer := subagent.Config{
 		Name:        "draft_finalizer",
 		Description: "草稿验收者：恢复已有且晚于当前 plan 的草稿，只做局部修复、检查和提交，不重新生成整章",
-		Model:       drafterModel,
+		Model:       drafterRuntimeModel,
 		SystemPrompt: bundle.Prompts.Drafter + "\n\n你处于草稿恢复验收阶段。必须先读取 source=draft。" +
 			"工具集中没有 draft_chapter；只在发现明确硬伤时用 edit_chapter 做最小替换，然后 check_consistency 并 commit_chapter。",
 		Tools:              draftFinalizerTools,
-		MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("drafter", 30), 30),
-		MaxRetries:         subagentMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(drafterModel, cfg, "drafter"),
+		MaxTurns:           finalizerMaxTurns,
+		MaxRetries:         drafterMaxRetries,
+		ThinkingLevel:      resolvedRoleThinking(drafterRuntimeModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
@@ -580,12 +718,12 @@ func BuildCoordinator(
 		agentcore.WithModel(coordinatorModel),
 		agentcore.WithSystemPrompt(bundle.Prompts.Coordinator),
 		agentcore.WithTools(subagentTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
-		agentcore.WithMaxTurns(100_000),
+		agentcore.WithMaxTurns(coordinatorMaxTurns),
 		agentcore.WithOnMessage(coordinatorOnMessage),
 		agentcore.WithToolsAreIdempotent(false),
 		// subagent 是流程主通道；真实错误应显式返回给 Host，而不是在单次 run 内永久禁用工具。
 		agentcore.WithMaxToolErrors(0),
-		agentcore.WithMaxRetries(subagentMaxRetries),
+		agentcore.WithMaxRetries(coordinatorMaxRetries),
 		agentcore.WithContextManager(coordinatorEngine),
 		agentcore.WithStopGuard(reminder.NewStopGuard(store, nil)),
 		agentcore.WithMiddlewares(flowBoundaryMiddleware(onFlowBoundary)),

@@ -113,6 +113,47 @@ func ragFactReceiptContext(receipt *domain.RAGFactReceipt) map[string]any {
 	}
 }
 
+// attachCurrentRAGFactReceiptContext keeps staged planning self-contained after
+// the one allowed novel_context call. A convergence Planner may be forbidden
+// from reading context again, so every plan_structure/non-final plan_details
+// response must replay the exact current hit refs it is later required to
+// consume. The live-index check remains fail-closed; this is visibility only,
+// not a relaxation of formal-plan provenance validation.
+func attachCurrentRAGFactReceiptContext(
+	st *store.Store,
+	chapter int,
+	response map[string]any,
+) error {
+	if st == nil || chapter <= 0 || response == nil {
+		return nil
+	}
+	context, err := currentRAGFactReceiptContext(st, chapter)
+	if err != nil {
+		return err
+	}
+	if context != nil {
+		response["rag_fact_receipt"] = context
+	}
+	return nil
+}
+
+func currentRAGFactReceiptContext(st *store.Store, chapter int) (map[string]any, error) {
+	if st == nil || chapter <= 0 {
+		return nil, nil
+	}
+	receipt, err := st.RAG.LoadLatestRAGFactReceipt(chapter)
+	if err != nil {
+		return nil, fmt.Errorf("load current RAG fact receipt: %w", err)
+	}
+	if receipt == nil {
+		return nil, nil
+	}
+	if err := validateRAGFactReceiptCurrent(st, *receipt); err != nil {
+		return nil, err
+	}
+	return ragFactReceiptContext(receipt), nil
+}
+
 func bindLatestRAGFactReceiptToPlan(st *store.Store, plan *domain.ChapterPlan) error {
 	if st == nil || plan == nil || plan.Chapter <= 0 {
 		return nil

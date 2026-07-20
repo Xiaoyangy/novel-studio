@@ -56,8 +56,30 @@ var (
 // write-eligible plan. A stale plan is an input error, not a prose failure: its
 // obsolete facts must never become the baseline for a new candidate.
 func InspectDraftHardFactAnchors(st *store.Store, chapter int, content string) (DraftHardFactAnchorResult, error) {
+	return inspectDraftHardFactAnchors(st, chapter, content, false)
+}
+
+// InspectDraftHardFactAnchorsForExternalJudge is the read-only pipeline
+// preflight variant. It may inspect an unjudged expression-only replacement
+// against its exact sealed plan, but does not grant any prose-write capability.
+func InspectDraftHardFactAnchorsForExternalJudge(st *store.Store, chapter int, content string) (DraftHardFactAnchorResult, error) {
+	return inspectDraftHardFactAnchors(st, chapter, content, true)
+}
+
+func inspectDraftHardFactAnchors(
+	st *store.Store,
+	chapter int,
+	content string,
+	forExternalJudge bool,
+) (DraftHardFactAnchorResult, error) {
 	result := DraftHardFactAnchorResult{}
-	guard, err := validateCurrentChapterRenderPlan(st, chapter)
+	var guard currentChapterRenderPlanGuard
+	var err error
+	if forExternalJudge {
+		guard, err = validateCurrentChapterRenderPlanForExternalJudge(st, chapter)
+	} else {
+		guard, err = validateCurrentChapterRenderPlan(st, chapter)
+	}
 	if err != nil {
 		return result, fmt.Errorf("第 %d 章 hard-fact anchor 检查前 plan freshness 复验失败: %w", chapter, err)
 	}

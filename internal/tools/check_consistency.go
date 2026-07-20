@@ -117,11 +117,26 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 	}
 	aigcReport, aigcGate := inspectDraftAIGCGate(t.store, a.Chapter, content)
 	rawAIGCGate := draftAIGCRawLocalGateResult(aigcReport, aigcGate)
+	externalProbabilityOnlyAccepted := draftAIGCExternalProbabilityOnlySatisfied(content, aigcReport, aigcGate)
+	currentBodyMechanicalBlockers := draftAIGCExternalCurrentBodyBlockers(content)
+	boundedLocalSoftAccepted := draftAIGCLocalSoftSatisfiedAfterBoundedEdit(
+		t.store,
+		a.Chapter,
+		content,
+		aigcReport,
+		aigcGate,
+	)
+	if err := persistDraftAIGCRerenderRequirement(t.store, a.Chapter, content, aigcReport, aigcGate); err != nil {
+		return nil, fmt.Errorf("persist draft structural rerender requirement: %w", err)
+	}
 	if err := checkpointDraftStructuralBlock(t.store, a.Chapter, content, aigcReport, aigcGate); err != nil {
 		return nil, fmt.Errorf("checkpoint draft structural block: %w", err)
 	}
 	result["aigc_gate_check"] = aigcGate
 	result["aigc_raw_local_gate_check"] = rawAIGCGate
+	result["aigc_external_probability_only_accepted"] = externalProbabilityOnlyAccepted
+	result["aigc_current_body_mechanical_structural_blockers"] = currentBodyMechanicalBlockers
+	result["aigc_bounded_local_soft_edit_accepted"] = boundedLocalSoftAccepted
 	externalGate, externalRerenderErr := InspectDraftExternalGateWithStore(t.store, a.Chapter)
 	if externalRerenderErr != nil {
 		return nil, fmt.Errorf("inspect draft external gate: %w", externalRerenderErr)
@@ -141,7 +156,14 @@ func (t *CheckConsistencyTool) Execute(_ context.Context, args json.RawMessage) 
 			}
 		}
 	}
-	if !rawAIGCGate.Passed {
+	if !rawAIGCGate.Passed && !externalProbabilityOnlyAccepted && !boundedLocalSoftAccepted {
+		if aigcGate.ExternalAIProbabilityPercent != nil {
+			for _, violation := range currentBodyMechanicalBlockers {
+				hardGateViolations = append(hardGateViolations, fmt.Sprintf(
+					"current_body_mechanical_structural: rule=%s severity=%s actual=%v；该规则由当前草稿实时 lint 命中，不来自旧 formal review artifact",
+					violation.Rule, violation.Severity, violation.Actual))
+			}
+		}
 		nextAction := "按 aigc_gate_check.rewrite_focus 使用 edit_chapter 重排草稿"
 		if externalGate.Status == DraftExternalGateRerenderAuthorized {
 			nextAction = "按 draft_external_ai_review 使用 draft_chapter(mode=write) 整章覆盖；禁止局部 edit"

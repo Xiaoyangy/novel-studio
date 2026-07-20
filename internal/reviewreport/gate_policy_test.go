@@ -85,10 +85,10 @@ func TestAcceptedWarningOnlyGateDowngradesToOptional(t *testing.T) {
 			Limit:    1,
 		}},
 	}
-	voice := &domain.AIVoiceAnalysis{RedFlags: []domain.AIVoiceRedFlag{{
-		Rule:     "supporting_dialogue_ratio",
-		Severity: "warning",
-	}}}
+	voice := &domain.AIVoiceAnalysis{
+		Metrics:  domain.ChapterAIVoiceMetrics{SentenceCount: 40, DialogueRatio: 0.299},
+		RedFlags: []domain.AIVoiceRedFlag{{Rule: "supporting_dialogue_ratio", Severity: "warning", Actual: 0.299, Limit: 0.30}},
+	}
 	editor := &domain.ReviewEntry{
 		Chapter:        1,
 		Verdict:        "accept",
@@ -376,6 +376,207 @@ func TestEditorChineseAliasesCanExplicitlyClearReviewedStructuralWarnings(t *tes
 	}
 }
 
+func TestEditorRuleIDClearanceCanExplicitlyClearReviewedStructuralWarnings(t *testing.T) {
+	bodyHash := BodySHA256("第一章\n\n壶面先映出画外的手，程野压住猜测，等姜岚追问后才回答。")
+	payload := &MechanicalGatePayload{
+		Chapter: 1, BodySHA256: bodyHash,
+		RuleViolations: []rules.Violation{
+			{Rule: "object_response_rhythm_flat", Severity: rules.SeverityWarning, Actual: 4},
+			{Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning, Actual: 2},
+			{Rule: "pov_interiority_thin", Severity: rules.SeverityWarning, Actual: 3},
+		},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter: 1, BodySHA256: bodyHash, Verdict: "rewrite", ContractStatus: "met",
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Score: 100, Verdict: "pass"},
+			{Dimension: "character", Score: 100, Verdict: "pass"},
+			{Dimension: "pacing", Score: 100, Verdict: "pass"},
+			{Dimension: "continuity", Score: 100, Verdict: "pass"},
+			{Dimension: "foreshadow", Score: 100, Verdict: "pass"},
+			{Dimension: "hook", Score: 100, Verdict: "pass"},
+			{Dimension: "aesthetic", Score: 100, Verdict: "pass"},
+			{Dimension: "ai_voice_detection", Score: 100, Verdict: "pass", Comment: "object_response_rhythm_flat（延迟）：壶面倒影先出现画外手势，数段后再独立确认，延迟与缺席均已发生，rule ID清除。dialogue_conveyor_overuse：对白中有姜岚追问、程野应声与保留的沉默，后续未连续滚九段以上，不触发。pov_interiority_thin：这个念头压住了她报出猜测的冲动，已超过单纯情绪标签，rule ID清除。无 structural warning 阻断本章。"},
+		},
+	}
+	for _, violation := range payload.RuleViolations {
+		if !EditorExplicitlySupportsStructuralProseWarningClearance(editor, payload, violation) {
+			t.Fatalf("rule-ID exact-body clearance did not cover %s", violation.Rule)
+		}
+	}
+
+	missingEvidence := *editor
+	missingEvidence.Dimensions = append([]domain.DimensionScore(nil), editor.Dimensions...)
+	missingEvidence.Dimensions[7].Comment = "dialogue_conveyor_overuse 是 warning，rule ID清除。"
+	if EditorExplicitlySupportsStructuralProseWarningClearance(&missingEvidence, payload, payload.RuleViolations[1]) {
+		t.Fatal("rule-ID clearance without concrete prose evidence must remain blocking")
+	}
+}
+
+func TestEditorExactBodyAIVoiceWarningClearanceIsRuleSpecific(t *testing.T) {
+	bodyHash := BodySHA256("第二章\n\n程野只把四项弱信息压入待核。")
+	catalogEvidence := "镜头稍稍偏过，餐盒侧面的封签露出半截分店字样"
+	flags := []domain.AIVoiceRedFlag{
+		{Rule: "supporting_dialogue_ratio", Severity: "warning", Actual: 0.07, Limit: 0.12},
+		{Rule: "catalog_stuffing", Severity: "warning", Paragraph: 44, Evidence: catalogEvidence, Actual: 8, Limit: 7},
+	}
+	analysis := &domain.AIVoiceAnalysis{Chapter: 2, BodySHA256: bodyHash, Metrics: domain.ChapterAIVoiceMetrics{SentenceCount: 108}, RedFlags: flags}
+	mechanical := &MechanicalGatePayload{Chapter: 2, BodySHA256: bodyHash, AIGCReport: aigc.Report{AIGCPercent: 2}}
+	dimensions := []domain.DimensionScore{
+		{Dimension: "consistency", Score: 100, Verdict: "pass"}, {Dimension: "character", Score: 100, Verdict: "pass"},
+		{Dimension: "pacing", Score: 100, Verdict: "pass"}, {Dimension: "continuity", Score: 100, Verdict: "pass"},
+		{Dimension: "foreshadow", Score: 100, Verdict: "pass"}, {Dimension: "hook", Score: 90, Verdict: "pass"},
+		{Dimension: "aesthetic", Score: 90, Verdict: "pass"},
+		{Dimension: "ai_voice_detection", Score: 70, Verdict: "warning", Comment: "red flag 1：supporting_dialogue_ratio 实际 0.07，rule ID supporting_dialogue_ratio，severity warning；本章场景为程野独处停车场、仅接收姜岚转达结论，叙事限定程野视角，姜岚的转述构成有效打断，无需改写。red flag 2：catalog_stuffing 第44段「" + catalogEvidence + "」，rule ID catalog_stuffing，severity warning；该段随即接程野将四项并栏、压入待核的后续动作，不触发返工。"},
+	}
+	editor := &domain.ReviewEntry{Chapter: 2, BodySHA256: bodyHash, Verdict: "accept", ContractStatus: "met", Dimensions: dimensions}
+
+	for _, flag := range flags {
+		if !EditorExplicitlySupportsAIVoiceWarningClearance(editor, mechanical, analysis, flag) {
+			t.Fatalf("exact-body evidence did not clear %s", flag.Rule)
+		}
+	}
+	if !AcceptedWarningOnlyGate(mechanical, analysis, editor) {
+		t.Fatal("all exact-body AI voice warnings were explicitly cleared")
+	}
+
+	generic := *editor
+	generic.Dimensions = append([]domain.DimensionScore(nil), dimensions...)
+	generic.Dimensions[7].Comment = "supporting_dialogue_ratio 是 severity warning，符合本章场景，无需改写。"
+	if EditorExplicitlySupportsAIVoiceWarningClearance(&generic, mechanical, analysis, flags[0]) {
+		t.Fatal("generic reassurance without scene evidence must remain blocking")
+	}
+	splitSentence := *editor
+	splitSentence.Dimensions = append([]domain.DimensionScore(nil), dimensions...)
+	splitSentence.Dimensions[7].Comment = "supporting_dialogue_ratio 是 severity warning。程野独处停车场，仅接收姜岚转达结论，转述构成有效打断，无需改写。"
+	if EditorExplicitlySupportsAIVoiceWarningClearance(&splitSentence, mechanical, analysis, flags[0]) {
+		t.Fatal("rule and evidence in different sentences must remain blocking")
+	}
+	suggested := *editor
+	suggested.Dimensions = append([]domain.DimensionScore(nil), dimensions...)
+	suggested.Dimensions[7].Comment = dimensions[7].Comment + "supporting_dialogue_ratio 建议改写。"
+	if EditorExplicitlySupportsAIVoiceWarningClearance(&suggested, mechanical, analysis, flags[0]) {
+		t.Fatal("a same-sentence rewrite suggestion must remain blocking")
+	}
+	wrongHash := *editor
+	wrongHash.BodySHA256 = BodySHA256("另一份正文")
+	if EditorExplicitlySupportsAIVoiceWarningClearance(&wrongHash, mechanical, analysis, flags[0]) {
+		t.Fatal("another body hash must never clear the warning")
+	}
+	errorFlag := flags[0]
+	errorFlag.Severity = "error"
+	if EditorExplicitlySupportsAIVoiceWarningClearance(editor, mechanical, analysis, errorFlag) {
+		t.Fatal("error-level flags must never be cleared")
+	}
+	errorEditor := *editor
+	errorEditor.Issues = []domain.ConsistencyIssue{{Severity: "error", Description: "当前章仍有硬错"}}
+	if EditorExplicitlySupportsAIVoiceWarningClearance(&errorEditor, mechanical, analysis, flags[0]) {
+		t.Fatal("an Editor error must never be cleared by warning commentary")
+	}
+}
+
+func TestAcceptedWarningOnlyGateAllowsOnlyCorroboratedContextualDialogueRatioError(t *testing.T) {
+	bodyHash := BodySHA256("第四章\n\n程野盯着七条配送轨迹，姜岚问她漏了什么。")
+	flag := domain.AIVoiceRedFlag{
+		Rule: "supporting_dialogue_ratio", Severity: "error", Actual: 0.0349, Limit: 0.12,
+	}
+	analysis := &domain.AIVoiceAnalysis{
+		Chapter: 4, BodySHA256: bodyHash,
+		Metrics:  domain.ChapterAIVoiceMetrics{Chapter: 4, ParagraphCount: 37, SentenceCount: 101, DialogueRatio: 0.0349},
+		RedFlags: []domain.AIVoiceRedFlag{flag},
+	}
+	mechanical := &MechanicalGatePayload{
+		Chapter: 4, BodySHA256: bodyHash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 7.2, ZhuqueCompositePercent: 0.65, LegacyHeuristicPercent: 2.75,
+			Stats: aigc.Stats{Hanzi: 2300, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(100), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 7.2}},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter: 4, BodySHA256: bodyHash, Verdict: "accept", ContractStatus: "met",
+		Issues: []domain.ConsistencyIssue{{Type: "aesthetic", Severity: "warning", Description: "一段自省可再压缩，不影响整体。"}},
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Score: 100, Verdict: "pass"},
+			{Dimension: "character", Score: 100, Verdict: "pass"},
+			{Dimension: "pacing", Score: 100, Verdict: "pass"},
+			{Dimension: "continuity", Score: 100, Verdict: "pass"},
+			{Dimension: "foreshadow", Score: 100, Verdict: "pass"},
+			{Dimension: "hook", Score: 100, Verdict: "pass"},
+			{Dimension: "aesthetic", Score: 90, Verdict: "pass"},
+			{Dimension: "ai_voice_detection", Score: 90, Verdict: "pass", Comment: "rule ID: supporting_dialogue_ratio, actual 0.0349 < 0.12, severity: error —— 本章仅二人同室、骑手静默、许知遥受控无声，姜岚两次主动提问已构成必要冲突，无需改写，不触发返工。aigc_ratio 是本地整章概率代理，同哈希 DeepSeek 2% 后仅作诊断项，无需改写。"},
+		},
+	}
+	external := &ExternalAIJudge{
+		BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true,
+	}
+
+	if !ApplyExternalCorroborationWithEditor(mechanical, external, editor) {
+		t.Fatal("same-hash 2% external judge should calibrate the clean mechanical gate")
+	}
+	if !EditorExplicitlySupportsContextualDialogueRatioErrorClearance(editor, mechanical, analysis, flag) {
+		t.Fatal("strict scene evidence should clear this one ratio-threshold false positive")
+	}
+	if !AcceptedWarningOnlyGate(mechanical, analysis, editor) {
+		t.Fatal("persisted accepted gate should retain the reconciled exact-body verdict")
+	}
+	if got := RewriteDisposition(mechanical, analysis, external, editor); got != "可选" {
+		t.Fatalf("RewriteDisposition = %q, want 可选", got)
+	}
+
+	otherError := *analysis
+	otherError.RedFlags = append([]domain.AIVoiceRedFlag(nil), analysis.RedFlags...)
+	otherError.RedFlags = append(otherError.RedFlags, domain.AIVoiceRedFlag{Rule: "figurative_density", Severity: "error", Actual: 0.5, Limit: 0.3})
+	if AcceptedWarningOnlyGate(mechanical, &otherError, editor) {
+		t.Fatal("an unrelated error-level AI-voice flag must remain blocking")
+	}
+	failedDimension := *editor
+	failedDimension.Dimensions = append([]domain.DimensionScore(nil), editor.Dimensions...)
+	failedDimension.Dimensions[2].Score = 70
+	failedDimension.Dimensions[2].Verdict = "warning"
+	if AcceptedWarningOnlyGate(mechanical, analysis, &failedDimension) {
+		t.Fatal("a non-passing Editor dimension must remain blocking")
+	}
+	contractMiss := *editor
+	contractMiss.ContractStatus = "partial"
+	if AcceptedWarningOnlyGate(mechanical, analysis, &contractMiss) {
+		t.Fatal("a contract miss must remain blocking")
+	}
+	structuralIssue := *editor
+	structuralIssue.Issues = []domain.ConsistencyIssue{{Type: "pacing", Severity: "warning", Description: "当前节奏仍需修复"}}
+	if AcceptedWarningOnlyGate(mechanical, analysis, &structuralIssue) {
+		t.Fatal("the exceptional path must not erase a non-aesthetic Editor issue")
+	}
+	uncorroborated := *mechanical
+	uncorroborated.ExternalCorroborated = false
+	uncorroborated.ExternalAIProbabilityPercent = nil
+	uncorroborated.AIGCCalibration = ""
+	uncorroborated.AIGCReport = mechanical.AIGCReport
+	uncorroborated.AIGCReport.HumanAnchorFinalCap = nil
+	if AcceptedWarningOnlyGate(&uncorroborated, analysis, editor) {
+		t.Fatal("Editor prose alone must not clear an error without same-hash external <4% corroboration")
+	}
+}
+
+func TestStructuralClearanceAcceptsConcreteNonblockingSynonym(t *testing.T) {
+	bodyHash := BodySHA256("第二章\n\n程野险些把熟悉当成答案。")
+	violation := rules.Violation{Rule: "pov_interiority_thin", Severity: rules.SeverityWarning}
+	payload := &MechanicalGatePayload{Chapter: 2, BodySHA256: bodyHash, RuleViolations: []rules.Violation{violation}}
+	editor := &domain.ReviewEntry{Chapter: 2, BodySHA256: bodyHash, ContractStatus: "met", Dimensions: []domain.DimensionScore{
+		{Dimension: "consistency", Score: 100, Verdict: "pass"}, {Dimension: "character", Score: 100, Verdict: "pass"},
+		{Dimension: "pacing", Score: 100, Verdict: "pass"}, {Dimension: "continuity", Score: 100, Verdict: "pass"},
+		{Dimension: "foreshadow", Score: 100, Verdict: "pass"}, {Dimension: "hook", Score: 90, Verdict: "pass"},
+		{Dimension: "aesthetic", Score: 90, Verdict: "pass"},
+		{Dimension: "ai_voice_detection", Score: 70, Verdict: "warning", Comment: "pov_interiority_thin 仅命中1处，本章已有两处主观体验改变判断，不构成阻断。"},
+	}}
+	if !EditorExplicitlySupportsStructuralProseWarningClearance(editor, payload, violation) {
+		t.Fatal("“不构成阻断” with same-sentence rule and judgment evidence should clear the warning")
+	}
+}
+
 func TestCurrentHashExternalPassCalibratesExplicitlyClearedStructuralWarning(t *testing.T) {
 	bodyHash := BodySHA256("第三章\n\n林澈把手机塞回口袋，先看了一眼桥口的人群。")
 	payload := &MechanicalGatePayload{
@@ -434,6 +635,109 @@ func TestCurrentHashExternalPassCalibratesExplicitlyClearedStructuralWarning(t *
 	}
 	if !AcceptedWarningOnlyGate(payload, nil, editor) {
 		t.Fatal("calibrated warning-only gate should be accepted as advisory")
+	}
+}
+
+func newC10AggregateDiagnosticFixture() (*MechanicalGatePayload, *domain.ReviewEntry, *ExternalAIJudge) {
+	bodyHash := BodySHA256("第十章\n\n程野把两路音轨重新对齐，仍没有替任何一列下结论。")
+	payload := &MechanicalGatePayload{
+		Chapter: 10, BodySHA256: bodyHash,
+		AIGCReport: aigc.Report{
+			AIGCPercent: 1.96, BlendedAIGCPercent: 1.96,
+			Dimensions: map[string]aigc.Dimension{
+				"structure_fingerprint": {
+					Name: "结构指纹", Score: 48,
+					Signals: []aigc.Signal{{Name: "transition_density", Evidence: "转折密度与段落重复聚合值"}},
+				},
+			},
+			Stats: aigc.Stats{Hanzi: 2500, HumanAnchor: map[string]any{
+				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(100), "blockers": []string{},
+			}},
+		},
+		RuleViolations: []rules.Violation{
+			{Rule: "not_but_overuse", Severity: rules.SeverityWarning, Actual: 2, Limit: 1},
+			{Rule: "object_response_rhythm_flat", Severity: rules.SeverityWarning, Actual: 4},
+		},
+	}
+	dimensions := []domain.DimensionScore{
+		{Dimension: "consistency", Score: 100, Verdict: "pass"},
+		{Dimension: "character", Score: 100, Verdict: "pass"},
+		{Dimension: "pacing", Score: 100, Verdict: "pass"},
+		{Dimension: "continuity", Score: 100, Verdict: "pass"},
+		{Dimension: "foreshadow", Score: 100, Verdict: "pass"},
+		{Dimension: "hook", Score: 90, Verdict: "pass"},
+		{Dimension: "aesthetic", Score: 100, Verdict: "pass"},
+		{Dimension: "ai_voice_detection", Score: 100, Verdict: "pass", Comment: "机械门禁项：not_but_overuse 2 次，主体两处间隔超过15段，语境不同且无模板感，判通过；object_response_rhythm_flat 显示4处延迟，但原文中的没有追问、没有立即圈它、没有偏向任何一列全部嵌入合理人物决策步骤，并非单调重复节奏，不影响叙事推进，不触发返工。"},
+	}
+	editor := &domain.ReviewEntry{
+		Chapter: 10, BodySHA256: bodyHash, Verdict: "rewrite", ContractStatus: "met", Dimensions: dimensions,
+	}
+	external := &ExternalAIJudge{
+		BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
+		AIProbabilityPercent: 2, AdviceComplete: true,
+	}
+	return payload, editor, external
+}
+
+func TestC10EditorClearanceCalibratesAggregateDimensionToDiagnostic(t *testing.T) {
+	payload, editor, external := newC10AggregateDiagnosticFixture()
+	if got := BlockingAIGCDimensionReasons(payload.AIGCReport); len(got) != 1 {
+		t.Fatalf("pre-calibration aggregate reasons = %v, want one visible diagnostic", got)
+	}
+	for _, violation := range payload.RuleViolations {
+		if !EditorExplicitlySupportsStructuralProseWarningClearance(editor, payload, violation) {
+			t.Fatalf("C10 exact-body Editor clearance did not cover %s", violation.Rule)
+		}
+	}
+	if !ApplyExternalCorroborationWithEditor(payload, external, editor) {
+		t.Fatalf("C10 exact-body Editor and external 2%% pass should calibrate aggregate diagnostics; blockers=%v", payload.CorroborationBlockedBy)
+	}
+	if got := BlockingAIGCDimensionReasons(payload.AIGCReport); len(got) != 0 {
+		t.Fatalf("calibrated 48%% aggregate remained blocking: %v", got)
+	}
+	editor.Verdict = "accept"
+	if !AcceptedWarningOnlyGate(payload, nil, editor) {
+		t.Fatal("C10 calibrated warning-only review should be accepted")
+	}
+	if got := RewriteDisposition(payload, nil, external, editor); got != "可选" {
+		t.Fatalf("C10 RewriteDisposition = %q, want 可选", got)
+	}
+}
+
+func TestC10EditorClearanceRemainsFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*MechanicalGatePayload, *domain.ReviewEntry, *ExternalAIJudge)
+	}{
+		{name: "actual rewrite request", mutate: func(_ *MechanicalGatePayload, editor *domain.ReviewEntry, _ *ExternalAIJudge) {
+			editor.Dimensions[7].Comment += "建议改写后再审。"
+		}},
+		{name: "deterministic error", mutate: func(payload *MechanicalGatePayload, _ *domain.ReviewEntry, _ *ExternalAIJudge) {
+			payload.RuleViolations = append(payload.RuleViolations, rules.Violation{Rule: "impossible_line_of_sight", Severity: rules.SeverityError})
+		}},
+		{name: "failed dimension", mutate: func(_ *MechanicalGatePayload, editor *domain.ReviewEntry, _ *ExternalAIJudge) {
+			editor.Dimensions[2].Score = 50
+			editor.Dimensions[2].Verdict = "fail"
+		}},
+		{name: "external four percent", mutate: func(_ *MechanicalGatePayload, _ *domain.ReviewEntry, external *ExternalAIJudge) {
+			external.AIProbabilityPercent = 4
+		}},
+		{name: "external wrong body hash", mutate: func(_ *MechanicalGatePayload, _ *domain.ReviewEntry, external *ExternalAIJudge) {
+			external.BodySHA256 = BodySHA256("另一份正文")
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, editor, external := newC10AggregateDiagnosticFixture()
+			tt.mutate(payload, editor, external)
+			if ApplyExternalCorroborationWithEditor(payload, external, editor) {
+				t.Fatal("unsafe C10 case was calibrated")
+			}
+			if payload.AIGCReport.HumanAnchorFinalCap != nil {
+				t.Fatal("failed C10 calibration persisted a human-anchor cap")
+			}
+		})
 	}
 }
 
@@ -516,37 +820,60 @@ func TestCurrentHashExternalPassDemotesHighAggregateProxiesWhenSegmentsPass(t *t
 	}
 }
 
-func TestCurrentHashExternalPassCannotClearWholeTextCurveConsensusFloor(t *testing.T) {
+func TestCurrentHashExternalPassClearsWholeTextProbabilityProxyWithoutEditor(t *testing.T) {
 	bodyHash := BodySHA256("第一章\n\n整章作为一个检测片段，三条原始分布曲线同时高危。")
-	payload := &MechanicalGatePayload{
-		Chapter: 1, BodySHA256: bodyHash,
-		AIGCReport: aigc.Report{
-			AIGCPercent:          79.07,
-			BlendedAIGCPercent:   7.25,
-			WholeTextSegmentGate: 79.07,
-			SegmentRiskFloor:     79.07,
-			Stats: aigc.Stats{Hanzi: 2856, HumanAnchor: map[string]any{
-				"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(90), "blockers": []string{},
-			}},
-		},
-		RuleViolations: []rules.Violation{{Rule: "aigc_ratio", Severity: rules.SeverityWarning, Actual: 79.07}},
+	newPayload := func() *MechanicalGatePayload {
+		return &MechanicalGatePayload{
+			Chapter: 1, BodySHA256: bodyHash,
+			AIGCReport: aigc.Report{
+				AIGCPercent:          79.07,
+				BlendedAIGCPercent:   7.25,
+				WholeTextSegmentGate: 79.07,
+				SegmentRiskFloor:     79.07,
+				Stats: aigc.Stats{Hanzi: 2856, HumanAnchor: map[string]any{
+					"eligible": true, "strength": "strong", "anchor_type": "narrative_scene", "score": float64(90), "blockers": []string{},
+				}},
+			},
+			RuleViolations: []rules.Violation{{Rule: "aigc_ratio", Severity: rules.SeverityError, Actual: 79.07}},
+		}
 	}
 	external := &ExternalAIJudge{
 		BodySHA256: bodyHash, Verdict: "human_like", RiskLevel: "low",
 		AIProbabilityPercent: 2, AdviceComplete: true,
 	}
 
-	if ApplyExternalCorroboration(payload, external) {
-		t.Fatal("same-hash external pass must not clear a whole-text three-curve floor")
+	payload := newPayload()
+	if !ApplyExternalCorroboration(payload, external) {
+		t.Fatalf("same-hash provider pass should adjudicate probability proxies: %#v", payload.CorroborationBlockedBy)
 	}
-	if got := aigc.EffectiveGatePercent(payload.AIGCReport); got != 79.07 {
-		t.Fatalf("whole-text gate after corroboration = %.2f, want 79.07", got)
+	if got := aigc.EffectiveGatePercent(payload.AIGCReport); got != 2 {
+		t.Fatalf("calibrated whole-text gate = %.2f, want 2", got)
 	}
-	if payload.AIGCReport.HumanAnchorFinalCap != nil {
-		t.Fatalf("whole-text gate must not receive an external human-anchor cap: %.2f", *payload.AIGCReport.HumanAnchorFinalCap)
+	if payload.AIGCReport.AIGCPercent != 79.07 || payload.AIGCReport.SegmentRiskFloor != 79.07 {
+		t.Fatalf("raw probability diagnostics were erased: %+v", payload.AIGCReport)
 	}
-	if !containsString(payload.CorroborationBlockedBy, "whole_text_or_segment_risk") {
-		t.Fatalf("whole-text blocker missing from corroboration audit: %#v", payload.CorroborationBlockedBy)
+
+	wrongHash := *external
+	wrongHash.BodySHA256 = BodySHA256("另一份正文")
+	if ApplyExternalCorroboration(newPayload(), &wrongHash) {
+		t.Fatal("provider result from another body hash must not demote probability proxies")
+	}
+	atThreshold := *external
+	atThreshold.AIProbabilityPercent = 4
+	if ApplyExternalCorroboration(newPayload(), &atThreshold) {
+		t.Fatal("an external score exactly at 4% must fail the strict threshold")
+	}
+	incomplete := *external
+	incomplete.AdviceComplete = false
+	if ApplyExternalCorroboration(newPayload(), &incomplete) {
+		t.Fatal("an external result with incomplete advice must not calibrate")
+	}
+	hardPayload := newPayload()
+	hardPayload.RuleViolations = append(hardPayload.RuleViolations, rules.Violation{
+		Rule: "system_message_inline", Severity: rules.SeverityWarning,
+	})
+	if ApplyExternalCorroboration(hardPayload, external) {
+		t.Fatal("exact external pass must never override a deterministic hard blocker")
 	}
 }
 

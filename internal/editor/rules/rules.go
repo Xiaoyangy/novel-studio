@@ -30,55 +30,78 @@ var aphorismPatterns = []struct {
 	{rule: "aphorism_broken_people", re: regexp.MustCompile(`残缺的人[，,]?(?:才|就|会)[^。！？!?；;\n]{0,30}`)},
 }
 
+// "我从未"本身不是格言。庭审、合同争议和现场对质里，人物经常需要否认一个
+// 可核验事实，例如“我从未持有该账户”或“我从未进入过仓库”。只有把这类事实
+// 陈述当成可摘抄宣言，规则才应该介入；下面两组词把两者分开，避免对白一律豁免。
+var (
+	neverFactualPredicateRe = regexp.MustCompile(`^(?:持有|保管|控制|占有|管理|接触|收到|发送|转交|转让|转账|付款|借款|借用|购买|出售|使用|登录|登记|开立|授权|签署|签过|提交|删除|修改|下载|上传|拍摄|直播|下单|点过|配送|递送|拨打|联系|进入|离开|到过|去过|来过|见过|见到|认识|参与|担任|雇佣|指使|威胁|伤害|杀害|藏匿|拿过|碰过|收过|给过|说过|承诺|同意|承认|举报|报案|查过|看过|听过|等过)`)
+	neverFactualObjectRe    = regexp.MustCompile(`(?:账户|账号|银行卡|资产|款项|现金|合同|协议|文件|证件|签名|电话|号码|手机|电脑|订单|外卖|直播|录音|录像|照片|现场|仓库|房间|车辆|门禁|钥匙|凶器|药物|包裹|货物|转账|付款)`)
+	neverAbstractCueRe      = regexp.MustCompile(`(?:如此|这样|这般|真正|命运|真相|黑暗|光明|自由|救赎|孤独|完整|残缺|世界|人心|灵魂|意义|清醒|勇敢|恐惧|希望|绝望|幸福|永恒|人生)`)
+)
+
 var (
 	figurativeRe = regexp.MustCompile(`(像|好像|仿佛|宛如|如同|似|倒像)`)
 	quoteRe      = regexp.MustCompile(`[“「][^”」]{1,240}[”」]`)
-	waverRe      = regexp.MustCompile(`(?:犹豫|迟疑|没把握|不确定|差点|想躲|不敢|害怕|怕|改口|话到嘴边|没答|没有回答|没说完|说到一半|答非所问|先说了[^。！？!?；;\n]{0,12}又改成)`)
-	conflictRe   = regexp.MustCompile(`(质问|反问|逼问|对峙|拦住|证据|签字|审问|威胁|赔偿|交代|摊牌)`)
-	atmosphereRe = regexp.MustCompile(`(雨|雾|风|冷|潮|灰尘|霉味|灯|影|钟声|走廊|窗|门缝|古堡|墓园|月光)`)
-	hookRe       = regexp.MustCompile(`(下一秒|下一刻|下一章|第三响|谁|还没|没有结束|露出|钥匙|名单|照片|来信|遗书|信封|短信|血|契约|吗[？?]|[？！]{1,2})`)
+	// A genuine waver has an impulse followed by a deliberate override. Neither
+	// a bare hesitation word nor an ordinary reflex (for example “下意识抬手，
+	// 随后停住”) earns credit on its own.
+	waverImpulseRe  = regexp.MustCompile(`(?:第一反应|本想|原本想|一度想|想要|想去|想说|想答应|想拒绝|冲动|犹豫|迟疑|差点|险些|已经准备|正准备|刚要|正要|几乎[^。！？!?；;\n]{0,16}(?:作出|做出)?决定|先(?:说|答|承诺|拒绝|答应))`)
+	waverOverrideRe = regexp.MustCompile(`(?:强迫自己|又改口|改了主意|转而|反而|话到嘴边[^。！？!?；;\n]{0,12}(?:咽回|吞回|没说|没有说)|(?:却|但|随后|最终|还是)[^。！？!?；;\n]{0,20}(?:停住|收回|忍住|压住|放弃|拒绝|改口|改成|重新|再看|退出|关掉|删掉|没有(?:去|答应|开门|下车)|不再|不肯|不愿)|(?:收回|忍住|压住|放弃|拒绝|改口|重新(?:检查|核对|考虑)|退出(?:导航|路线)|没有(?:去|答应|开门|下车)|不再(?:碰|继续)|没说完))`)
+	conflictRe      = regexp.MustCompile(`(质问|反问|逼问|对峙|拦住|证据|签字|审问|威胁|赔偿|交代|摊牌)`)
+	atmosphereRe    = regexp.MustCompile(`(雨|雾|风|冷|潮|灰尘|霉味|灯|影|钟声|走廊|窗|门缝|古堡|墓园|月光)`)
+	hookRe          = regexp.MustCompile(`(下一秒|下一刻|下一章|第三响|谁|还没|没有结束|露出|钥匙|名单|照片|来信|遗书|信封|短信|血|契约|吗[？?]|[？！]{1,2})`)
 
-	numberedLadderRe     = regexp.MustCompile(`(?s)(第一|首先|一是|一、|1[.、）\)]).{0,80}?(第二|其次|二是|二、|2[.、）\)]).{0,80}?(第三|最后|三是|三、|3[.、）\)])`)
-	openingGoldRe        = regexp.MustCompile(`(命运|黑暗|自由|勇敢|恐惧|孤独|残缺|真相|世界|人心|从来|真正|原来|不是[^。！？!?；;\n]{0,20}而是|才会|终究|总会)`)
-	actionSensoryRe      = regexp.MustCompile(`(说|问|答|喊|推|拉|握|攥|摸|碰|退|走|站|坐|听|闻|嗅|疼|冷|热|雨|风|门|灯|血|气味|脚步|钟声|指尖|手套|杯|纸|钥匙)`)
-	purposeAnswerRe      = regexp.MustCompile(`我(?:从一开始|一开始|本来|原本|早就)[^。！？!?；;\n”」]{0,18}(?:为|为了|冲着|奔着)[^。！？!?；;\n”」]{0,20}(?:来|来的)|我就是[^。！？!?；;\n”」]{0,20}来的`)
-	hesitationRe         = regexp.MustCompile(`(?:沉默|迟疑|犹豫|改口|话到嘴边|没答|没有回答|答非所问|反问|只说了?半句|没说完|说到一半|隔了[^。！？!?；;\n]{0,8}(?:拍|秒)|半晌|一会儿)`)
-	endingQuestionRe     = regexp.MustCompile(`[？?]\s*$`)
-	endingGoldRe         = regexp.MustCompile(`(?:命运|人生|世界|人心|救赎|自由|勇敢|孤独|残缺|意义|真正|所谓|原来|终究|从来|难道|谁又能|又有谁|还算|才是|最终的答案|真正的答案|最终的选择|真正的选择)[^。！？!?；;\n]{0,48}[？?]\s*$`)
-	pendingArrivalHookRe = regexp.MustCompile(`第[一二三四五六七八九十百0-9]+(?:张|个|家|辆|封|份|位|道|次|批)?[^。！？!?；;\n]{0,24}(?:已经|正|还)?(?:停|摆|站|等|堵|落|送|到|出现)在(?:眼前|门外|桥头|路边)`)
-	endingSentenceRe     = regexp.MustCompile(`[^。！？!?；;\n]+[。！？!?]?`)
-	catalogRunRe         = regexp.MustCompile(`[\p{Han}A-Za-z0-9“”《》]{2,18}(?:[、，,；;][\p{Han}A-Za-z0-9“”《》]{2,18}){5,}`)
-	catalogSplitRe       = regexp.MustCompile(`[、，,；;]+`)
+	numberedLadderRe       = regexp.MustCompile(`(?s)(第一|首先|一是|一、|1[.、）\)]).{0,80}?(第二|其次|二是|二、|2[.、）\)]).{0,80}?(第三|最后|三是|三、|3[.、）\)])`)
+	openingGoldRe          = regexp.MustCompile(`(命运|黑暗|自由|勇敢|恐惧|孤独|残缺|真相|世界|人心|从来|真正|原来|不是[^。！？!?；;\n]{0,20}而是|才会|终究|总会)`)
+	actionSensoryRe        = regexp.MustCompile(`(说|问|答|喊|推|拉|握|攥|摸|碰|退|走|站|坐|听|闻|嗅|疼|冷|热|雨|风|门|灯|血|气味|脚步|钟声|指尖|手套|杯|纸|钥匙)`)
+	purposeAnswerRe        = regexp.MustCompile(`我(?:从一开始|一开始|本来|原本|早就)[^。！？!?；;\n”」]{0,18}(?:为|为了|冲着|奔着)[^。！？!?；;\n”」]{0,20}(?:来|来的)|我就是[^。！？!?；;\n”」]{0,20}来的`)
+	hesitationRe           = regexp.MustCompile(`(?:沉默|迟疑|犹豫|改口|话到嘴边|没答|没有回答|答非所问|反问|只说了?半句|没说完|说到一半|隔了[^。！？!?；;\n]{0,8}(?:拍|秒)|半晌|一会儿)`)
+	endingQuestionRe       = regexp.MustCompile(`[？?]\s*$`)
+	endingGoldRe           = regexp.MustCompile(`(?:命运|人生|世界|人心|救赎|自由|勇敢|孤独|残缺|意义|真正|所谓|原来|终究|从来|难道|谁又能|又有谁|还算|才是|最终的答案|真正的答案|最终的选择|真正的选择)[^。！？!?；;\n]{0,48}[？?]\s*$`)
+	pendingArrivalHookRe   = regexp.MustCompile(`第[一二三四五六七八九十百0-9]+(?:张|个|家|辆|封|份|位|道|次|批)?[^。！？!?；;\n]{0,24}(?:已经|正|还)?(?:停|摆|站|等|堵|落|送|到|出现)在(?:眼前|门外|桥头|路边)`)
+	endingSentenceRe       = regexp.MustCompile(`[^。！？!?；;\n]+[。！？!?]?`)
+	catalogRunRe           = regexp.MustCompile(`[\p{Han}A-Za-z0-9“”《》]{2,18}(?:[、，,；;][\p{Han}A-Za-z0-9“”《》]{2,18}){5,}`)
+	catalogSplitRe         = regexp.MustCompile(`[、，,；;]+`)
+	firstPersonQuoteLeadRe = regexp.MustCompile(`(?:^|[\n，,。！？!?；;])\s*我(?:说|问|答|喊|道|低声(?:说|问|答|喊|道)?)\s*[：:,，]?\s*$`)
+	firstPersonQuoteTailRe = regexp.MustCompile(`^\s*我(?:说|问|答|喊|道|低声(?:说|问|答|喊|道)?)(?:\s*[，,。！？!?；;：:]|\s*$)`)
 )
 
-const dialogueRatioNearMissTolerance = 0.005
+const (
+	dialogueRatioNearMissTolerance          = 0.005
+	minimumSupportingDialogueTurns          = 6
+	minimumSupportingDialogueParagraphRatio = 0.18
+)
 
 // AnalyzeChapter 运行确定性 AI 腔规则引擎。
 func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMetrics) domain.AIVoiceAnalysis {
-	paragraphs := splitParagraphs(text)
-	sentences := splitSentences(text)
+	bodyText := stripMarkdownTitle(text)
+	paragraphs := splitParagraphs(bodyText)
+	sentences := splitSentences(bodyText)
 	figurativeCount := countFigurativeSentences(sentences)
-	dialogueChars, supportingDialogue := dialogueStats(text)
-	totalChars := utf8.RuneCountInString(stripMarkdownTitle(text))
+	dialogue := dialogueStats(paragraphs)
+	totalChars := utf8.RuneCountInString(bodyText)
 	if totalChars <= 0 {
 		totalChars = 1
 	}
 	hits := aphorismHits(paragraphs)
 	patternFlags := textPatternRedFlags(paragraphs)
 	metrics := domain.ChapterAIVoiceMetrics{
-		Chapter:            chapter,
-		FigurativeCount:    figurativeCount,
-		FigurativeDensity:  ratio(figurativeCount, len(paragraphs)),
-		DialogueChars:      dialogueChars,
-		SupportingDialogue: supportingDialogue,
-		DialogueRatio:      float64(supportingDialogue) / float64(totalChars),
-		ParagraphCount:     len(paragraphs),
-		SentenceCount:      len(sentences),
-		ChapterFunction:    chapterFunction(text, dialogueChars, supportingDialogue, totalChars),
-		AphorismHits:       hits,
-		ProtagonistWaver:   waverRe.MatchString(text),
-		EndingHookUsed:     endingHookUsed(paragraphs),
-		GeneratedAt:        time.Now().Format(time.RFC3339),
+		Chapter:                          chapter,
+		FigurativeCount:                  figurativeCount,
+		FigurativeDensity:                ratio(figurativeCount, len(paragraphs)),
+		DialogueChars:                    dialogue.DialogueChars,
+		SupportingDialogue:               dialogue.SupportingChars,
+		DialogueRatio:                    float64(dialogue.SupportingChars) / float64(totalChars),
+		SupportingDialogueTurns:          dialogue.SupportingTurns,
+		SupportingDialogueParagraphs:     dialogue.SupportingParagraphs,
+		SupportingDialogueParagraphRatio: ratio(dialogue.SupportingParagraphs, len(paragraphs)),
+		ParagraphCount:                   len(paragraphs),
+		SentenceCount:                    len(sentences),
+		ChapterFunction:                  chapterFunction(bodyText, dialogue.DialogueChars, dialogue.SupportingChars, totalChars),
+		AphorismHits:                     hits,
+		ProtagonistWaver:                 protagonistWaver(paragraphs),
+		EndingHookUsed:                   endingHookUsed(paragraphs),
+		GeneratedAt:                      time.Now().Format(time.RFC3339),
 	}
 	metrics.AIVoiceScore = round4(clamp(aiVoiceScore(metrics, history)+textPatternRisk(patternFlags), 0, 1))
 	metrics.AIVoiceScoreHistory = append(metrics.AIVoiceScoreHistory, domain.AIVoiceScorePoint{
@@ -174,11 +197,54 @@ func splitSentences(text string) []string {
 	return out
 }
 
+func protagonistWaver(paragraphs []string) bool {
+	for i, paragraph := range paragraphs {
+		impulses := waverImpulseRe.FindAllStringIndex(paragraph, -1)
+		if len(impulses) == 0 {
+			continue
+		}
+		// In one paragraph, enforce textual order instead of accepting an
+		// override that was narrated before the impulse.
+		for _, override := range waverOverrideRe.FindAllStringIndex(paragraph, -1) {
+			for _, impulse := range impulses {
+				if override[0] >= impulse[1] {
+					return true
+				}
+			}
+		}
+		// A decision can resolve after one intervening beat, but not after an
+		// arbitrary later event that merely happens to contain reversal words.
+		for j := i + 1; j < len(paragraphs) && j <= i+2; j++ {
+			if waverOverrideRe.MatchString(paragraphs[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var plainChapterTitleRe = regexp.MustCompile(`^第[ 　]*[0-9零一二三四五六七八九十百千]+[ 　]*章(?:[ 　]+.*)?$`)
+
+// stripMarkdownTitle returns narrative body text for style analysis. The raw
+// chapter remains untouched for the independent plan/title consistency gate;
+// this function only prevents either supported heading format from becoming
+// paragraph 1 of the prose analysis.
 func stripMarkdownTitle(text string) string {
 	var lines []string
+	firstNonEmptySeen := false
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			if !firstNonEmptySeen {
+				firstNonEmptySeen = true
+			}
 			continue
+		}
+		if !firstNonEmptySeen && trimmed != "" {
+			firstNonEmptySeen = true
+			if plainChapterTitleRe.MatchString(trimmed) {
+				continue
+			}
 		}
 		lines = append(lines, line)
 	}
@@ -195,22 +261,34 @@ func countFigurativeSentences(sentences []string) int {
 	return count
 }
 
-func dialogueStats(text string) (dialogueChars int, supportingDialogue int) {
-	for _, loc := range quoteRe.FindAllStringIndex(text, -1) {
-		span := text[loc[0]:loc[1]]
-		size := utf8.RuneCountInString(span)
-		dialogueChars += size
-		windowStart := max(0, loc[0]-45)
-		windowEnd := min(len(text), loc[1]+45)
-		window := text[windowStart:windowEnd]
-		if strings.Contains(window, "我说") || strings.Contains(window, "我问") ||
-			strings.Contains(window, "我答") || strings.Contains(window, "我喊") ||
-			strings.Contains(window, "我低声") || strings.Contains(window, "我道") {
-			continue
+type dialogueStatsResult struct {
+	DialogueChars        int
+	SupportingChars      int
+	SupportingTurns      int
+	SupportingParagraphs int
+}
+
+func dialogueStats(paragraphs []string) dialogueStatsResult {
+	var stats dialogueStatsResult
+	for _, paragraph := range paragraphs {
+		paragraphHasSupportingDialogue := false
+		for _, loc := range quoteRe.FindAllStringIndex(paragraph, -1) {
+			span := paragraph[loc[0]:loc[1]]
+			size := utf8.RuneCountInString(span)
+			stats.DialogueChars += size
+			if firstPersonQuoteLeadRe.MatchString(paragraph[:loc[0]]) ||
+				firstPersonQuoteTailRe.MatchString(paragraph[loc[1]:]) {
+				continue
+			}
+			stats.SupportingChars += size
+			stats.SupportingTurns++
+			paragraphHasSupportingDialogue = true
 		}
-		supportingDialogue += size
+		if paragraphHasSupportingDialogue {
+			stats.SupportingParagraphs++
+		}
 	}
-	return dialogueChars, supportingDialogue
+	return stats
 }
 
 // infoDumpDigitRe 匹配对白里的数字串（房号/编号/日期），用于识别"罗列清单"的信息倾倒。
@@ -263,6 +341,9 @@ func aphorismHits(paragraphs []string) []domain.AphorismHit {
 				if match == "" {
 					continue
 				}
+				if pat.rule == "aphorism_i_never" && isFactualNeverDenial(match) {
+					continue
+				}
 				hits = append(hits, domain.AphorismHit{
 					Rule:      pat.rule,
 					Paragraph: pIdx + 1,
@@ -273,6 +354,14 @@ func aphorismHits(paragraphs []string) []domain.AphorismHit {
 		}
 	}
 	return hits
+}
+
+func isFactualNeverDenial(match string) bool {
+	remainder := strings.TrimSpace(strings.TrimPrefix(match, "我从未"))
+	if remainder == "" || neverAbstractCueRe.MatchString(remainder) {
+		return false
+	}
+	return neverFactualPredicateRe.MatchString(remainder) || neverFactualObjectRe.MatchString(remainder)
 }
 
 func textPatternRedFlags(paragraphs []string) []domain.AIVoiceRedFlag {
@@ -539,7 +628,7 @@ func aiVoiceScore(metrics domain.ChapterAIVoiceMetrics, history []domain.Chapter
 		score += math.Min(0.30, (metrics.FigurativeDensity-FigurativeDensityLimit)*1.25)
 	}
 	dialogueLimit := dialogueRatioLimitForMetrics(metrics)
-	if metrics.DialogueRatio < dialogueLimit {
+	if metrics.DialogueRatio < dialogueLimit && supportingDialogueInteractionSparse(metrics) {
 		score += math.Min(0.24, (dialogueLimit-metrics.DialogueRatio)*0.95)
 	}
 	score += math.Min(0.30, float64(len(metrics.AphorismHits))*0.12)
@@ -591,7 +680,7 @@ func redFlags(metrics domain.ChapterAIVoiceMetrics, history []domain.ChapterAIVo
 		})
 	}
 	dialogueLimit := dialogueRatioLimitForMetrics(metrics)
-	if metrics.DialogueRatio < dialogueLimit {
+	if metrics.DialogueRatio < dialogueLimit && supportingDialogueInteractionSparse(metrics) {
 		if !dialogueRatioNearMiss(metrics.DialogueRatio, dialogueLimit) {
 			severity := "warning"
 			if metrics.DialogueRatio < 0.04 {
@@ -666,6 +755,14 @@ func recentDistinctChapterMetrics(history []domain.ChapterAIVoiceMetrics, curren
 
 func dialogueRatioNearMiss(actual, limit float64) bool {
 	return limit > 0 && actual > 0 && actual >= limit-dialogueRatioNearMissTolerance
+}
+
+// A terse confrontation can carry several real exchanges while using very few
+// quoted characters. A low character ratio is therefore actionable only when
+// dialogue topology independently shows sparse interaction as well.
+func supportingDialogueInteractionSparse(metrics domain.ChapterAIVoiceMetrics) bool {
+	return metrics.SupportingDialogueTurns < minimumSupportingDialogueTurns ||
+		metrics.SupportingDialogueParagraphRatio < minimumSupportingDialogueParagraphRatio
 }
 
 func dialogueRatioLimitForMetrics(metrics domain.ChapterAIVoiceMetrics) float64 {

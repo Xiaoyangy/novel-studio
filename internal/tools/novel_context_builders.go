@@ -14,6 +14,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/stylestat"
@@ -381,7 +382,8 @@ func (t *ContextTool) prepareChapterContext(chapter int, requestedProfile string
 		warn("chapter_draft_parts", partsErr)
 	}
 
-	if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
+	workingBodySHA := currentChapterContextBodySHA(t.store, chapter)
+	if analysis, aiErr := t.loadAIVoiceRedFlagsForBody(chapter, workingBodySHA); aiErr == nil && analysis != nil {
 		if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
 			envelope.Working["ai_voice_redflags"] = actionable
 			envelope.Working["ai_voice_redflags_policy"] = "Editor 只按此处当前章 blocking/error/warning 评分；info/note 与 chapter_function_repetition 已过滤并保留在长期审阅档案。"
@@ -442,12 +444,12 @@ func (t *ContextTool) prepareChapterContext(chapter int, requestedProfile string
 		} else if reviewErr != nil {
 			warn("rewrite_review", reviewErr)
 		}
-		if gate, gateErr := t.loadMechanicalGateBrief(chapter); gateErr == nil && gate != nil {
+		if gate, gateErr := t.loadMechanicalGateBriefForBody(chapter, workingBodySHA); gateErr == nil && gate != nil {
 			brief["mechanical_gate"] = gate
 		} else if gateErr != nil {
 			warn("mechanical_gate", gateErr)
 		}
-		if analysis, aiErr := t.store.AIVoice.LoadRedFlags(chapter); aiErr == nil && analysis != nil {
+		if analysis, aiErr := t.loadAIVoiceRedFlagsForBody(chapter, workingBodySHA); aiErr == nil && analysis != nil {
 			if actionable := domain.ActionableAIVoiceAnalysis(analysis); actionable != nil {
 				brief["ai_voice_redflags"] = actionable
 			}
@@ -602,7 +604,7 @@ func loadDraftExternalJudgeContextWithStore(st *store.Store, chapter int) (map[s
 	}
 	if inspection.Status == DraftExternalGateRerenderAuthorized && inspection.Requirement != nil {
 		requirement := inspection.Requirement
-		return map[string]any{
+		result := map[string]any{
 			"evaluated_body_sha256":  requirement.EvaluatedBodySHA256,
 			"source":                 requirement.Source,
 			"ai_probability_percent": requirement.AIProbabilityPercent,
@@ -611,7 +613,20 @@ func loadDraftExternalJudgeContextWithStore(st *store.Store, chapter int) (map[s
 			"summary":                requirement.Summary,
 			"evidence":               requirement.Evidence,
 			"revision_plan":          requirement.RevisionPlan,
-		}, nil
+		}
+		// The durable requirement carries the minimum one-shot authorization.
+		// Preserve the richer exact-body DeepSeek advice when present so a sealed
+		// context can render from dialogue/voice/RAG guidance without exposing the
+		// rejected prose itself.
+		if status, statusErr := loadDraftExternalJudgeStatus(st.Dir(), chapter); statusErr != nil {
+			return nil, statusErr
+		} else if status != nil && strings.TrimSpace(status.BodySHA256) == strings.TrimSpace(requirement.EvaluatedBodySHA256) {
+			result["reasons"] = status.Reasons
+			result["dialogue_fix_plan"] = status.DialogueFixPlan
+			result["author_voice_plan"] = status.AuthorVoicePlan
+			result["rag_rules"] = status.RAGRules
+		}
+		return result, nil
 	}
 	path := filepath.Join(st.Dir(), "reviews", "drafts", fmt.Sprintf("%02d_deepseek_ai_judge.json", chapter))
 	raw, err := os.ReadFile(path)
@@ -1605,6 +1620,7 @@ func (t *ContextTool) loadMechanicalGateBrief(chapter int) (map[string]any, erro
 	}
 	report := payload.AIGCReport
 	brief := map[string]any{
+		"body_sha256":                payload.BodySHA256,
 		"json_path":                  selected.jsonRel,
 		"markdown_path":              selected.markdownRel,
 		"engine":                     report.Engine,
@@ -1632,6 +1648,52 @@ func (t *ContextTool) loadMechanicalGateBrief(chapter int) (map[string]any, erro
 		brief["rewrite_focus"] = mechanicalGateRewriteFocus(payload.RuleViolations, report)
 	}
 	return brief, nil
+}
+
+// loadMechanicalGateBriefForBody prevents a rejected formal body's mechanical
+// flags from being injected into a newer draft/finalizer hash. An empty
+// expected hash retains legacy behavior for planning contexts that have no
+// current prose artifact yet.
+func (t *ContextTool) loadMechanicalGateBriefForBody(chapter int, expectedBodySHA string) (map[string]any, error) {
+	brief, err := t.loadMechanicalGateBrief(chapter)
+	if err != nil || brief == nil || strings.TrimSpace(expectedBodySHA) == "" {
+		return brief, err
+	}
+	artifactSHA, _ := brief["body_sha256"].(string)
+	if strings.TrimSpace(artifactSHA) != strings.TrimSpace(expectedBodySHA) {
+		return nil, nil
+	}
+	return brief, nil
+}
+
+func (t *ContextTool) loadAIVoiceRedFlagsForBody(chapter int, expectedBodySHA string) (*domain.AIVoiceAnalysis, error) {
+	analysis, err := t.store.AIVoice.LoadRedFlags(chapter)
+	if err != nil || analysis == nil || strings.TrimSpace(expectedBodySHA) == "" {
+		return analysis, err
+	}
+	if strings.TrimSpace(analysis.BodySHA256) != strings.TrimSpace(expectedBodySHA) {
+		return nil, nil
+	}
+	return analysis, nil
+}
+
+// currentChapterContextBodySHA returns only a checkpoint-bound draft hash;
+// untracked/stale draft files cannot hide the current formal body.
+func currentChapterContextBodySHA(st *store.Store, chapter int) string {
+	if st == nil || chapter <= 0 {
+		return ""
+	}
+	if draft, err := st.Drafts.LoadDraft(chapter); err == nil && strings.TrimSpace(draft) != "" {
+		draftSHA := reviewreport.BodySHA256(draft)
+		if body, checkpointErr := CurrentChapterBodyCheckpoint(st, chapter); checkpointErr == nil && body != nil &&
+			strings.TrimSpace(body.Digest) == "sha256:"+draftSHA {
+			return draftSHA
+		}
+	}
+	if final, err := st.Drafts.LoadChapterText(chapter); err == nil && strings.TrimSpace(final) != "" {
+		return reviewreport.BodySHA256(final)
+	}
+	return ""
 }
 
 func compactAIGCDimensions(dimensions map[string]aigc.Dimension, limit, signalLimit int) []map[string]any {
@@ -1711,9 +1773,9 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 		case "pending_resource_as_fact":
 			focus = append(focus, "把待确认资源改成猜测、提案或谈判状态；确需成为事实时先让 commit_chapter 入账。")
 		case "project_contamination":
-			focus = append(focus, "删除跨项目污染词，回到本书的许闻溪/澄光生活/溪流助手/岗位合并/桥点职业转型事实；参考素材只能转译成写法，不能搬进正文。")
+			focus = append(focus, "删除跨项目污染词，只使用当前项目的正式 plan、事实锚点与用户规则；参考素材只能转译成写法，不能搬入正文，也不得自行补另一套人物或题材。")
 		case "deprecated_story_engine":
-			focus = append(focus, "旧版硬核取证引擎已禁用：不要写系统留痕、原始材料、正式邮件、会务核查或技术追查；改写成女性职场成长压力，如公开羞辱、岗位被合并、同事求助、会后约谈和权限/项目被暂停。")
+			focus = append(focus, "删除用户规则已禁用的旧故事引擎，只按当前 plan 的人物目标、冲突和可见后果重建场景；不得擅自换成另一种题材模板。")
 		case "micro_action_overuse":
 			focus = append(focus, "微动作只保留承载道具、伏笔或人物关系的少数几处，其余改成对话摩擦、环境反应、留白或删除。")
 		case "dramatic_negation_overuse":
@@ -1859,7 +1921,7 @@ func aigcDetectorRewriteFocus(report aigc.Report) []string {
 	}
 	if hasSignal("pov_interiority_thin", "pov_interiority_low", "emotion_range_flat", "emotion_range_thin") {
 		focus = append(focus, fmt.Sprintf(
-			"主视角仍被经营流程或对白原话压住（对白段占比 %.1f%%，主观密度 %.2f/千字，流程密度 %.2f/千字）：至少重建两条分处不同场景的完整人物链，每条都必须落成“刺激→主观体验或误判→人物如何调节、压住或转移→因此改变的选择→关系或现实余波”，并真正改变后续行动，不能只插在原流程之间。每增加一段主观链，删掉等量安装、票据、付款等流程或非必要对白原话。情绪名词、抬眼/攥手等微动作，以及“他意识到/他觉得”单独出现都不算主观链。",
+			"主视角仍被流程推进或对白原话压住（对白段占比 %.1f%%，主观密度 %.2f/千字，流程密度 %.2f/千字）：至少重建两条分处不同场景的完整人物链，每条都必须落成“刺激→主观体验或误判→人物如何调节、压住或转移→因此改变的选择→关系或现实余波”，并真正改变后续行动，不能只插在原流程之间。每增加一段主观链，删掉等量流程说明、证据罗列或非必要对白原话。情绪名词、抬眼/攥手等微动作，以及“他意识到/他觉得”单独出现都不算主观链。",
 			statFloat("dialogue_paragraph_ratio")*100, statFloat("interiority_density_per_k"), statFloat("logistics_density_per_k")))
 	}
 	if hasSignal("fast_detectgpt_curve_proxy_high", "sentence_classifier_consensus_flat", "bigram_unigram_curve_too_flat", "window_entropy_signature_flat") || report.Stats.SentenceCV < 0.50 || report.Stats.ParagraphCV < 0.50 {
@@ -1871,7 +1933,7 @@ func aigcDetectorRewriteFocus(report aigc.Report) []string {
 		focus = append(focus, "短句只占很少：在争执、失误或突然选择处允许自然断气、抢话和一句未说完的话；不要把每句话都补成主谓宾齐全的说明句，也不要为了指标制造无信息孤句。")
 	}
 	if hasSignal("zhuque_like_suspected_span_ratio_mid", "zhuque_like_ai_span_ratio_high") || report.WholeTextSegmentGate >= aigc.PassExclusivePercent {
-		focus = append(focus, "整章或主片段被同一风格覆盖时，必须重写整段的场景组织，不能只换同义词。先砍掉重复角色发言和重复经营步骤，再围绕一个人物选择重建该段。")
+		focus = append(focus, "整章或主片段被同一风格覆盖时，必须重写整段的场景组织，不能只换同义词。先砍掉重复角色发言和重复流程步骤，再围绕一个人物选择重建该段。")
 	}
 	if len(focus) == 0 {
 		focus = append(focus, "先删重复解释和同功能段落，再让主角的误判、关系理解或代价改变行动；不要靠补微动作、环境音、冷僻词或随机碎句制造人味。")

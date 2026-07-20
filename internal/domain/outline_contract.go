@@ -105,7 +105,7 @@ func OutlineAllArcSpanIssues(volumes []VolumeOutline) []OutlineContractIssue {
 var (
 	volumeScaleRangeRE  = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:卷|volumes?)`)
 	chapterScaleRangeRE = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:章|chapters?)`)
-	wordScaleRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(万)?\s*(?:字|words?)`)
+	wordScaleRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(万)?\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(万)?\s*(?:字|words?)`)
 	storyTimeRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(?:年|years?)`)
 )
 
@@ -185,15 +185,24 @@ func ResolveBookScaleTarget(value string, currentVolumes, currentChapters int) (
 			target.TargetChapters, OutlineAllMinArcChapters, target.TargetVolumes,
 		)
 	}
-	if m := wordScaleRangeRE.FindStringSubmatch(value); len(m) == 4 {
+	if m := wordScaleRangeRE.FindStringSubmatch(value); len(m) == 5 {
 		minValue, _ := strconv.ParseFloat(m[1], 64)
-		maxValue, _ := strconv.ParseFloat(m[2], 64)
-		factor := 1.0
-		if m[3] != "" {
-			factor = 10000
+		maxValue, _ := strconv.ParseFloat(m[3], 64)
+		minFactor, maxFactor := 1.0, 1.0
+		if m[2] != "" {
+			minFactor = 10000
 		}
-		target.MinWords = int(minValue*factor + 0.5)
-		target.MaxWords = int(maxValue*factor + 0.5)
+		if m[4] != "" {
+			maxFactor = 10000
+			// Chinese commonly elides the first unit in ranges such as
+			// “2.8—3万字”. Preserve that accepted spelling while also
+			// supporting the fully explicit “2.8万—3万字”.
+			if m[2] == "" && minValue < 1000 {
+				minFactor = maxFactor
+			}
+		}
+		target.MinWords = int(minValue*minFactor + 0.5)
+		target.MaxWords = int(maxValue*maxFactor + 0.5)
 		if target.MinWords <= 0 || target.MaxWords < target.MinWords {
 			return BookScaleTarget{}, fmt.Errorf("estimated_scale has invalid word range")
 		}

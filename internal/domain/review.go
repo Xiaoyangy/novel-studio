@@ -49,19 +49,33 @@ type DimensionScore struct {
 	Comment   string `json:"comment,omitempty"` // 该维度的简要结论
 }
 
+// ShortPublicationPackage is prose-facing metadata authored by the global
+// reviewer from the accepted manuscript. Deterministic chapter names, counts
+// and final checks are added by the pipeline finalizer rather than repeated by
+// the model.
+type ShortPublicationPackage struct {
+	PrimaryTitle     string   `json:"primary_title"`
+	AlternateTitles  []string `json:"alternate_titles"`
+	HookLead         string   `json:"hook_lead"`
+	SpoilerFreeBlurb string   `json:"spoiler_free_blurb"`
+	Tags             []string `json:"tags"`
+}
+
 // ReviewEntry Editor 的审阅条目。
 type ReviewEntry struct {
-	Chapter          int                `json:"chapter"`
-	BodySHA256       string             `json:"body_sha256,omitempty"`
-	Scope            string             `json:"scope"` // chapter / global / arc
-	Issues           []ConsistencyIssue `json:"issues"`
-	Dimensions       []DimensionScore   `json:"dimensions,omitempty"`      // 分维度评分
-	ContractStatus   string             `json:"contract_status,omitempty"` // met / partial / missed
-	ContractMisses   []string           `json:"contract_misses,omitempty"` // 未达成的 contract 条目
-	ContractNotes    string             `json:"contract_notes,omitempty"`  // 对 contract 履行情况的简述
-	Verdict          string             `json:"verdict"`                   // accept / polish / rewrite
-	Summary          string             `json:"summary"`
-	AffectedChapters []int              `json:"affected_chapters,omitempty"` // 需要重写/打磨的章节号
+	Chapter          int                      `json:"chapter"`
+	BodySHA256       string                   `json:"body_sha256,omitempty"`
+	Scope            string                   `json:"scope"` // chapter / global / arc
+	Issues           []ConsistencyIssue       `json:"issues"`
+	Dimensions       []DimensionScore         `json:"dimensions,omitempty"`      // 分维度评分
+	ContractStatus   string                   `json:"contract_status,omitempty"` // met / partial / missed
+	ContractMisses   []string                 `json:"contract_misses,omitempty"` // 未达成的 contract 条目
+	ContractNotes    string                   `json:"contract_notes,omitempty"`  // 对 contract 履行情况的简述
+	Verdict          string                   `json:"verdict"`                   // accept / polish / rewrite
+	Summary          string                   `json:"summary"`
+	AffectedChapters []int                    `json:"affected_chapters,omitempty"` // 需要重写/打磨的章节号
+	BookBodySHA256   string                   `json:"book_body_sha256,omitempty"`  // scope=global 时绑定 1..chapter 当前终稿字节
+	Publication      *ShortPublicationPackage `json:"publication,omitempty"`       // scope=global accept 的发布文案
 }
 
 // CriticalCount 返回 critical 级别问题数量。

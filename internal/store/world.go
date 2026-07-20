@@ -405,6 +405,13 @@ func (s *WorldStore) SaveReview(r domain.ReviewEntry) error {
 			r.BodySHA256 = chapterBodySHA256(body)
 		}
 	}
+	if r.Scope == "global" && strings.TrimSpace(r.BookBodySHA256) == "" {
+		// Keep the low-level store permissive for imported historical reviews, but
+		// bind every normal global review when the complete manuscript is present.
+		if digest, err := s.CurrentBookBodySHA256(r.Chapter); err == nil {
+			r.BookBodySHA256 = digest
+		}
+	}
 	return s.io.WriteJSON(reviewPath(r.Chapter, r.Scope), r)
 }
 
@@ -453,11 +460,46 @@ func (s *WorldStore) FirstUnacceptedChapterReview(chapters []int) int {
 	return 0
 }
 
-// HasAcceptedGlobalReview 检查指定章节锚点的全局/全文审阅是否已通过。
+// CurrentBookBodySHA256 binds the exact ordered bytes of chapters 1..chapter.
+// Length framing prevents two different chapter boundaries from producing the
+// same concatenated byte stream.
+func (s *WorldStore) CurrentBookBodySHA256(chapter int) (string, error) {
+	if chapter <= 0 {
+		return "", fmt.Errorf("book body hash requires a positive last chapter")
+	}
+	h := sha256.New()
+	for ch := 1; ch <= chapter; ch++ {
+		body, err := s.io.ReadFile(fmt.Sprintf("chapters/%02d.md", ch))
+		if err != nil {
+			return "", fmt.Errorf("read chapter %d for book body hash: %w", ch, err)
+		}
+		if len(body) == 0 {
+			return "", fmt.Errorf("chapter %d is empty while hashing book body", ch)
+		}
+		_, _ = fmt.Fprintf(h, "%08d:%016d\n", ch, len(body))
+		_, _ = h.Write(body)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// HasCurrentGlobalReview checks that the review binds the exact current bytes
+// of every chapter in its 1..chapter review range.
+func (s *WorldStore) HasCurrentGlobalReview(chapter int) bool {
+	var rv domain.ReviewEntry
+	err := s.io.ReadJSON(reviewPath(chapter, "global"), &rv)
+	if err != nil || rv.Scope != "global" || strings.TrimSpace(rv.BookBodySHA256) == "" {
+		return false
+	}
+	current, err := s.CurrentBookBodySHA256(chapter)
+	return err == nil && current == rv.BookBodySHA256
+}
+
+// HasAcceptedGlobalReview 检查指定章节锚点的全局/全文审阅是否已通过且仍绑定当前全文。
 func (s *WorldStore) HasAcceptedGlobalReview(chapter int) bool {
 	var rv domain.ReviewEntry
 	err := s.io.ReadJSON(reviewPath(chapter, "global"), &rv)
-	return err == nil && rv.Scope == "global" && rv.Verdict == "accept"
+	return err == nil && rv.Scope == "global" && rv.Verdict == "accept" &&
+		s.HasCurrentGlobalReview(chapter)
 }
 
 // ClearChapterReview invalidates every current-version review artifact for a

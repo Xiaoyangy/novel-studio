@@ -54,6 +54,10 @@ type State struct {
 	// 阶段拆分：下一个要处理的章节的计划是否已就绪可交 drafter 渲染。
 	// 未就绪 → 派 planner（writer）先推演落盘计划；就绪 → 派 drafter 渲染正文。
 	NextActionPlanReady bool
+	// Pipeline render execution is a frozen, chapter-scoped handoff. Its first
+	// Drafter may only materialize one whole-body draft; exact-hash/static/provider
+	// gates belong to the outer pipeline before any finalizer can run.
+	NextActionPipelineRender bool
 	// 同一 plan 下多个不同整章哈希反复触发 whole-text/segment 阻断时，
 	// render-only 已耗尽，必须优先重做世界推演与 POV plan。
 	NextActionStructuralReplanRequired bool
@@ -79,11 +83,12 @@ type State struct {
 	// A full rerender has consumed the blocking judgment's one-use hash token.
 	// Host must stop prose dispatch until the outer pipeline judges the new hash.
 	NextActionDraftExternalRejudgePending bool
-	// DeepSeek passed the exact hash, but the effective local gate still has a
-	// non-structural failure. Host may dispatch one targeted edit; that edit must
-	// stop immediately so the changed hash returns to the DeepSeek provider judge
-	// before commit or an explicitly configured automated hard-gate retest.
+	// The effective local gate has a deterministic non-whole-text failure. Host
+	// may dispatch one targeted edit either before the first provider call or when
+	// recovering an older passing hash; the changed final hash always returns to
+	// DeepSeek before commit or an automated-hard retest.
 	NextActionDraftLocalSoftEditPending bool
+	NextActionDraftLocalSoftBeforeJudge bool
 	// An explicitly configured automated detector/mode gate has passed for the
 	// exact current draft hash. User-reported spot checks never set this state.
 	NextActionDraftNamedPassFrozen bool
@@ -149,6 +154,13 @@ func Route(s State) *Instruction {
 			verb = "打磨"
 		}
 		if !s.NextActionPlanReady {
+			if task := strings.TrimSpace(s.NextActionPlanRepairTask); strings.HasPrefix(task, "Pipeline convergence replan") {
+				return &Instruction{
+					Agent: "writer", Task: task,
+					Reason:  fmt.Sprintf("第 %d 章 exhausted sealed render 只允许定向建立 successor plan", ch),
+					Chapter: ch,
+				}
+			}
 			if s.NextActionStructuralReplanRequired || (s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady) {
 				task := worldSimulationTask(ch, s.NextActionWorldSimulationGaps)
 				reason := fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", ch)
@@ -209,7 +221,7 @@ func Route(s State) *Instruction {
 		}
 		if s.NextActionDraftReady {
 			if s.NextActionDraftLocalSoftEditPending {
-				return draftLocalSoftEditInstruction(ch)
+				return draftLocalSoftEditInstruction(ch, s.NextActionDraftLocalSoftBeforeJudge)
 			}
 			if s.NextActionDraftNamedPassFrozen {
 				return draftNamedPassCommitInstruction(ch)
@@ -224,7 +236,7 @@ func Route(s State) *Instruction {
 			}
 			return &Instruction{
 				Agent:   "draft_finalizer",
-				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过，可对该哈希调用 commit_chapter 一次；用户外部平台只抽查，不要求替换稿跟随复测。软概率诊断本身不授权润色，但 commit_chapter 返回的 whole_text/segment、corroboration blocker 或确定性 AIGC 门禁属于结构级阻断。任何 commit_chapter 失败后必须立即结束子任务，禁止再次 commit、check、read 或 edit，外层 pipeline 会保存阻断证据并整章重渲染。只有在第一次提交前，rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；一旦编辑只允许一处并立即结束，交外层 DeepSeek provider judge 复判新哈希。禁止重新整章生成", ch, ch),
+				Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 读取当前 rewrite_brief（其中人工验收补充属于确定性约束），随后 check_consistency 并逐条核对。若当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过，可对该哈希调用 commit_chapter 一次；用户外部平台只抽查，不要求替换稿跟随复测。软概率诊断本身不授权润色，但 commit_chapter 返回的 whole_text/segment、corroboration blocker 或确定性 AIGC 门禁属于结构级阻断。read_chapter、novel_context、check_consistency 或 commit_chapter 任一返回错误后必须立即结束子任务，禁止重试或再次 commit、check、read、context、edit，外层 pipeline 会保存阻断证据并整章重渲染。只有在第一次提交前，rewrite_brief 中未完成的人工硬约束、确定性事实/范围/高置信模板硬伤才可 edit_chapter；edit_chapter 无论成功或返回错误都必须立即结束，禁止第二次调用，交外层 DeepSeek provider judge 复判新哈希。禁止重新整章生成", ch, ch),
 				Reason:  fmt.Sprintf("第 %d 章已有绑定当前 plan 的草稿，恢复时只需验收提交", ch),
 				Chapter: ch,
 			}
@@ -279,6 +291,23 @@ func Route(s State) *Instruction {
 		}
 	}
 
+	// An explicitly short project may still use one layered volume/arc as its
+	// sealed planning container. Once every chapter has an exact-body review, its
+	// whole-book review takes precedence over legacy arc summaries or new-volume
+	// expansion: this is a terminal short book, not the first arc of a long book.
+	if s.BookCompleteByChapters && s.NeedsFinalGlobalReview && !s.HasFinalGlobalReview {
+		return &Instruction{
+			Agent: "editor",
+			Task: fmt.Sprintf(
+				"对全书做短篇完稿审阅（scope=global，chapter=%d）。先用 read_chapter(source=final, from=1, to=%d, max_runes=40000) 读取完整终稿；按完整正文检查结构闭合、承诺兑现、角色弧线、伏笔回收、AI 味和标点。accept 时 save_review 必须同时提交 publication：正式主标题、2—3 个备选书名、15—80 字冲突导语、无剧透简介、恰好 5 个标签；这些文案必须由正文事实生成，不得泄露真凶、终局反转或结局。accept 后系统会汇总正文.md 并推进 complete；polish/rewrite 必须只列出确需返工的 affected_chapters",
+				s.LastCompleted,
+				s.LastCompleted,
+			),
+			Reason:  "短篇/三万字内项目需要全文汇总终审和正式发布文案",
+			Chapter: s.LastCompleted,
+		}
+	}
+
 	// 6-10. 未迁移分层工程的 legacy 弧末后处理。sealed_two_pass_v2 在
 	// 外层 render 中逐章验收，并以 arc completion receipt 聚合完整性；
 	// 此处 scope=arc 只是结构复盘，不能成为正文 acceptance。
@@ -318,14 +347,6 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	if !p.Layered && s.BookCompleteByChapters && s.NeedsFinalGlobalReview && !s.HasFinalGlobalReview {
-		return &Instruction{
-			Agent:   "editor",
-			Task:    fmt.Sprintf("对全书做短篇完稿审阅（scope=global，chapter=%d）。先用 read_chapter(source=final, from=1, to=%d, max_runes=40000) 读取完整终稿；按完整正文检查结构闭合、承诺兑现、角色弧线、伏笔回收、AI 味和标点。accept 后系统会汇总正文.md 并推进 complete；polish/rewrite 必须只列出确需返工的 affected_chapters", s.LastCompleted, s.LastCompleted),
-			Reason:  "短篇/三万字内项目需要全文汇总终审",
-			Chapter: s.LastCompleted,
-		}
-	}
 	if !p.Layered && s.BookCompleteByChapters {
 		return nil
 	}
@@ -340,6 +361,13 @@ func Route(s State) *Instruction {
 	}
 	// 阶段拆分：计划未落盘 → planner 先推演；已落盘 → drafter 渲染正文。
 	if !s.NextActionPlanReady {
+		if task := strings.TrimSpace(s.NextActionPlanRepairTask); strings.HasPrefix(task, "Pipeline convergence replan") {
+			return &Instruction{
+				Agent: "writer", Task: task,
+				Reason:  fmt.Sprintf("第 %d 章 exhausted sealed render 只允许定向建立 successor plan", next),
+				Chapter: next,
+			}
+		}
 		if s.NextActionStructuralReplanRequired || (s.NextActionWorldSimulationRequired && !s.NextActionWorldSimulationReady) {
 			task := worldSimulationTask(next, s.NextActionWorldSimulationGaps)
 			reason := fmt.Sprintf("第 %d 章必须先完成单世界全角色推演", next)
@@ -378,7 +406,7 @@ func Route(s State) *Instruction {
 	}
 	if s.NextActionDraftReady {
 		if s.NextActionDraftLocalSoftEditPending {
-			return draftLocalSoftEditInstruction(next)
+			return draftLocalSoftEditInstruction(next, s.NextActionDraftLocalSoftBeforeJudge)
 		}
 		if s.NextActionDraftNamedPassFrozen {
 			return draftNamedPassCommitInstruction(next)
@@ -393,10 +421,13 @@ func Route(s State) *Instruction {
 		}
 		return &Instruction{
 			Agent:   "draft_finalizer",
-			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft) 和 check_consistency。当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过时直接 commit_chapter；用户外部平台只抽查，不要求替换稿跟随复测。不得按概率代理提示继续润色。只对确定性事实/范围/高置信模板硬伤使用 edit_chapter；DeepSeek provider judge 通过稿一旦编辑，只允许一处并立即结束子任务，先交外层 DeepSeek provider judge 复判新哈希。禁止重新整章生成", next),
+			Task:    fmt.Sprintf("验收并提交第 %d 章现有草稿：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft)，随后 check_consistency 并逐条核对。若当前哈希已获 DeepSeek provider judge 严格 <4%% 且一致性门禁通过，只可调用 commit_chapter 一次。read_chapter、novel_context、check_consistency 或 commit_chapter 任一返回错误后必须立即结束子任务，禁止重试或再次 commit、check、read、context、edit，外层 pipeline 会根据已落盘阻断证据路由局部编辑或整章重渲染。只有在第一次提交前发现确定性事实/范围/高置信模板硬伤时才可 edit_chapter；edit_chapter 无论成功或返回错误都必须立即结束，禁止第二次调用，交外层 DeepSeek provider judge 复判新哈希。用户外部平台只抽查，不要求替换稿跟随复测。禁止重新整章生成", next, next),
 			Reason:  "已有绑定当前 plan 的草稿，恢复时只需验收提交",
 			Chapter: next,
 		}
+	}
+	if s.NextActionPipelineRender {
+		return pipelineRenderFirstDraftInstruction(next)
 	}
 	return &Instruction{
 		Agent:   "drafter",
@@ -406,14 +437,32 @@ func Route(s State) *Instruction {
 	}
 }
 
-func draftLocalSoftEditInstruction(chapter int) *Instruction {
+func pipelineRenderFirstDraftInstruction(chapter int) *Instruction {
+	return &Instruction{
+		Agent: "drafter",
+		Task: fmt.Sprintf(
+			"冻结 render 第 %d 章首稿：只调用一次 novel_context(chapter=%d, profile=draft)，随后只调用一次 draft_chapter(chapter=%d, mode=write) 写入完整正文。draft_chapter 返回 written=true 后立即结束本次 Drafter 子任务；禁止 read_chapter、check_consistency、edit_chapter、commit_chapter、draft_chapter_part、merge_chapter_parts、再次生成或派 draft_finalizer。即使工具返回字数、AIGC 或其他门禁提示，也禁止在本会话修补。控制权必须先交还外层 pipeline，由其依次核验当前精确草稿哈希、因果绑定与 hard-fact/title/word 静态门，并完成该精确哈希的 DeepSeek provider judge；只有这些门禁完成后，后续 Host turn 才可恢复验收或提交",
+			chapter, chapter, chapter,
+		),
+		Reason:  "pipeline render 首次正文落盘必须在 exact-hash/static/provider 门禁前立即暂停",
+		Chapter: chapter,
+	}
+}
+
+func draftLocalSoftEditInstruction(chapter int, beforeJudge bool) *Instruction {
+	phase := "当前精确哈希已通过 DeepSeek provider judge，但"
+	reason := fmt.Sprintf("第 %d 章 DeepSeek provider judge 已通过，允许消费一次本地软门禁编辑", chapter)
+	if beforeJudge {
+		phase = "当前精确哈希在 provider judge 之前已命中确定性文本规则，且"
+		reason = fmt.Sprintf("第 %d 章先消费一次确定性本地软门禁编辑，只判定最终新哈希", chapter)
+	}
 	return &Instruction{
 		Agent: "draft_finalizer",
 		Task: fmt.Sprintf(
-			"第 %d 章当前精确哈希已通过 DeepSeek provider judge，但本地有效 AIGC 门禁仍有非结构性失败：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 并运行 check_consistency，严格依据 aigc_gate_check.rewrite_focus 只选择一处可验证的局部硬伤。最多调用一次 edit_chapter；不得整章重写、不得调用 commit_chapter。edit 一旦落盘必须立即结束子任务，禁止再次 read/check/edit；外层 pipeline 将先用 DeepSeek provider judge 判定新哈希。用户外部抽查不作为后续放行前置",
-			chapter, chapter,
+			"第 %d 章%s本地有效 AIGC 门禁仍有非 whole-text/segment 的确定性失败：先 read_chapter(source=draft)，再调用一次 novel_context(chapter=%d, profile=draft) 并运行 check_consistency，严格依据 aigc_gate_check.rewrite_focus 只选择一处可验证的局部硬伤。read_chapter、novel_context 或 check_consistency 任一返回错误时立即结束，禁止重试。最多调用一次 edit_chapter；不得整章重写、不得调用 commit_chapter。edit_chapter 无论成功或返回错误都必须立即结束，禁止第二次调用；外层 pipeline 只会用 DeepSeek provider judge 判定新哈希（首次前移时即修改后的最终哈希）。用户外部抽查不作为后续放行前置",
+			chapter, phase, chapter,
 		),
-		Reason:  fmt.Sprintf("第 %d 章 DeepSeek provider judge 已通过，允许消费一次本地软门禁编辑", chapter),
+		Reason:  reason,
 		Chapter: chapter,
 	}
 }

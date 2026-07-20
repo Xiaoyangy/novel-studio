@@ -257,6 +257,148 @@ func TestRAGFactReceiptNoMaterialIsExplicit(t *testing.T) {
 	}
 }
 
+func TestStagedPlanningResponsesReplayCurrentRAGFactReceiptHits(t *testing.T) {
+	st := newRAGFactReceiptTestStore(t, []domain.RAGChunk{{
+		ID:         "fact:night-rent",
+		SourcePath: "summaries/00.json",
+		SourceKind: "chapter_summary_facts",
+		Facet:      "plot",
+		Context:    "夜租商铺 租约 账单",
+		Summary:    "欠费单必须先由承租人确认。",
+		Text:       "项目事实：欠费单由承租人确认；钥匙交接后才能开始试营业。",
+	}})
+	if _, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := st.RAG.LoadLatestRAGFactReceipt(1)
+	if err != nil || receipt == nil || receipt.NoMaterial || len(receipt.Hits) == 0 {
+		t.Fatalf("planning prefetch did not issue a material receipt: receipt=%+v err=%v", receipt, err)
+	}
+
+	structureRaw, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStagedRAGFactReceipt := func(stage string, raw json.RawMessage) {
+		t.Helper()
+		var response struct {
+			Receipt struct {
+				ReceiptID           string `json:"receipt_id"`
+				SourceToken         string `json:"source_token"`
+				SelectedFactsSHA256 string `json:"selected_facts_sha256"`
+				NoMaterial          bool   `json:"no_material"`
+				Hits                []struct {
+					Ref string `json:"ref"`
+				} `json:"hits"`
+			} `json:"rag_fact_receipt"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatalf("decode %s response: %v", stage, err)
+		}
+		got := response.Receipt
+		if got.ReceiptID != receipt.ID || got.SourceToken != receipt.SourceToken() ||
+			got.SelectedFactsSHA256 != receipt.SelectedFactsSHA256 || got.NoMaterial ||
+			len(got.Hits) != len(receipt.Hits) || got.Hits[0].Ref != receipt.Hits[0].Ref {
+			t.Fatalf("%s response lost exact current fact hits: got=%+v want=%+v raw=%s", stage, got, receipt, raw)
+		}
+	}
+	assertStagedRAGFactReceipt("plan_structure", structureRaw)
+
+	detailsRaw, err := NewPlanDetailsTool(st).Execute(context.Background(), json.RawMessage(
+		`{"chapter":1,"causal_simulation":{"decision_points":["先核对欠费单再交接钥匙"]}}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStagedRAGFactReceipt("plan_details", detailsRaw)
+}
+
+func TestStagedPlanRepairContextReplaysCurrentRAGFactReceiptWithoutRetrieval(t *testing.T) {
+	st := newRAGFactReceiptTestStore(t, []domain.RAGChunk{{
+		ID:         "fact:night-rent",
+		SourcePath: "summaries/00.json",
+		SourceKind: "chapter_summary_facts",
+		Facet:      "plot",
+		Context:    "夜租商铺 租约 账单",
+		Summary:    "欠费单必须先由承租人确认。",
+		Text:       "项目事实：欠费单由承租人确认；钥匙交接后才能开始试营业。",
+	}})
+	chunk := rag.RehashChunk(mustRAGFactChunk(t, st, "fact:night-rent"))
+	receipt, err := domain.NewRAGFactReceipt(
+		1,
+		"夜租商铺 租约 账单",
+		[]string{"夜租", "租约", "账单"},
+		"local_bm25_keyword_hybrid_v1",
+		"",
+		[]domain.RAGFactReceiptHit{{
+			Rank: 1, ChunkID: chunk.ID, ContentSHA256: chunk.Hash,
+			SourcePath: chunk.SourcePath, SourceKind: chunk.SourceKind, Facet: chunk.Facet,
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RAG.SaveRAGFactReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlanPartial(1, map[string]any{
+		"structure": map[string]any{
+			"chapter": 1, "title": "夜租商铺", "goal": "核对欠费单",
+			"conflict": "交接顺序不明", "hook": "钥匙仍在桌上",
+		},
+		"causal_simulation": map[string]any{"decision_points": []any{"先核对欠费单"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := st.RAG.LoadLatestRAGFactReceipt(1)
+	if err != nil || before == nil {
+		t.Fatalf("load receipt before staged context: receipt=%+v err=%v", before, err)
+	}
+	raw, err := NewContextTool(st, References{
+		LiteraryRenderingCards: `{"version":1,"cards":[{"id":"focalization-boundary","decision":"谁在感知"}]}`,
+	}, "default").Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"planning"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	pack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatalf("staged context lost reference_pack: %s", raw)
+	}
+	if _, ok := pack["literary_rendering_cards"].(map[string]any); !ok {
+		t.Fatalf("fact receipt overwrote literary cards: %#v", pack)
+	}
+	fact, ok := pack["rag_fact_receipt"].(map[string]any)
+	if !ok || fact["receipt_id"] != receipt.ID || fact["source_token"] != receipt.SourceToken() {
+		t.Fatalf("staged context lost exact receipt identity: %#v", pack["rag_fact_receipt"])
+	}
+	hits, ok := fact["hits"].([]any)
+	if !ok || len(hits) != 1 || hits[0].(map[string]any)["ref"] != receipt.Hits[0].Ref {
+		t.Fatalf("staged context lost exact hit refs: %#v", fact)
+	}
+	if selected, ok := payload["selected_memory"].(map[string]any); ok && selected["rag_recall"] != nil {
+		t.Fatalf("staged partial fast path performed/exposed a new retrieval: %#v", selected)
+	}
+	if pack["retrieval_trace"] != nil {
+		t.Fatalf("staged partial fast path exposed a new retrieval trace: %#v", pack["retrieval_trace"])
+	}
+	after, err := st.RAG.LoadLatestRAGFactReceipt(1)
+	if err != nil || after == nil {
+		t.Fatalf("load receipt after staged context: receipt=%+v err=%v", after, err)
+	}
+	if after.ID != before.ID || after.PayloadSHA256 != before.PayloadSHA256 ||
+		after.SelectedFactsSHA256 != before.SelectedFactsSHA256 || after.CreatedAt != before.CreatedAt ||
+		len(after.Hits) != len(before.Hits) || after.Hits[0].Ref != before.Hits[0].Ref {
+		t.Fatalf("staged partial fast path changed latest receipt: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestNonDraftContextFailsClosedWhenRAGFactReceiptCannotPersist(t *testing.T) {
 	st := newRAGFactReceiptTestStore(t, nil)
 	blocked := filepath.Join(st.Dir(), "meta", "rag", "fact_receipts")

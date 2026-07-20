@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rag"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
@@ -135,8 +137,9 @@ func TestPlanStructureNormalizesMaleProjectOutlineAnchors(t *testing.T) {
 	if got := structure["title"]; got != "失业饭桌" {
 		t.Fatalf("outline title must pin chapter name, got %#v", got)
 	}
-	if required := stringSliceFromAny(structure["required_beats"]); len(required) != 0 {
-		t.Fatalf("outline goal/hook must not be duplicated into prose checklist: %#v", required)
+	required := stringSliceFromAny(structure["required_beats"])
+	if len(required) != 1 || !strings.Contains(required[0], "林澈返乡饭桌受挤兑") {
+		t.Fatalf("formal contract must be pinned to the stable outline event: %#v", required)
 	}
 }
 
@@ -192,6 +195,29 @@ func TestFinalPlanGoalFollowsWorldSimulationDecision(t *testing.T) {
 	}
 	if plan.Title != "旧大纲标题" || plan.Hook != "打开下一步" {
 		t.Fatalf("title and hook should remain outline anchors: %+v", plan)
+	}
+}
+
+func TestProjectAllPredecessorStateBecomesContinuityAndForbiddenOnly(t *testing.T) {
+	plan := domain.ChapterPlan{Contract: domain.ChapterContract{
+		RequiredBeats: []string{"推进现场取证"},
+	}}
+	marker := "[project-all predecessor-state:out-ch011-rescue-complete] 第11章不可逆前态已完成：警方已经救出许知遥并控制两名嫌疑人；本章只能推进由此前态产生的新后果、证据回看或人物反应，不得把同一状态转移重新安排为当前章现场。"
+	applyProjectAllOutlineObligations(&plan, []string{marker})
+	if len(plan.Contract.RequiredBeats) != 1 || plan.Contract.RequiredBeats[0] != "推进现场取证" {
+		t.Fatalf("predecessor state must not become a required beat: %#v", plan.Contract.RequiredBeats)
+	}
+	if len(plan.Contract.ContinuityChecks) != 1 ||
+		!strings.Contains(plan.Contract.ContinuityChecks[0], marker) {
+		t.Fatalf("predecessor state missing from continuity checks: %#v", plan.Contract.ContinuityChecks)
+	}
+	if len(plan.Contract.ForbiddenMoves) != 1 ||
+		!strings.Contains(plan.Contract.ForbiddenMoves[0], "不得把 project-all predecessor-state") {
+		t.Fatalf("predecessor state missing no-restaging guard: %#v", plan.Contract.ForbiddenMoves)
+	}
+	applyProjectAllOutlineObligations(&plan, []string{marker})
+	if len(plan.Contract.ContinuityChecks) != 1 || len(plan.Contract.ForbiddenMoves) != 1 {
+		t.Fatalf("predecessor contract replay was not idempotent: %+v", plan.Contract)
 	}
 }
 
@@ -575,6 +601,628 @@ func TestPlanDetailsSourceAnchorsProjectHumanReadableProtagonistDecision(t *test
 	if got := merged["protagonist_decision"]; got != simulation.ProtagonistProjection.AvailableOptions[0] {
 		t.Fatalf("formal plan leaked authority sentinel instead of projected choice: %q", got)
 	}
+}
+
+func TestPlanDetailsSourceAnchorsRestoreServedCanonicalPlanningSources(t *testing.T) {
+	st := newPhaseTestStore(t)
+	if err := st.SaveSimulationRestartPolicy(domain.SimulationRestartPolicy{
+		Version: 1, Active: true, Mode: "restart", GenerationID: "generation-current",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveWorldFoundation(domain.WorldFoundation{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{{Name: "程野", Role: "主角", Tier: "core"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 2, Title: "实时核验", CoreEvent: "程野完成实时性核验", Hook: "地点仍未知",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	merged := map[string]any{
+		"context_sources": []any{domain.PlanningContextAccessTokenPrefix + strings.Repeat("a", 64)},
+	}
+	if err := applyPlanDetailsSourceAnchors(st, 2, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sources := stringSliceFromAny(merged["context_sources"])
+	for _, want := range []string{
+		"meta/simulation_restart_policy.md#generation_id=generation-current",
+		"meta/world_foundation.md",
+		"character_dossiers",
+		"outline.json#chapter=2",
+		"working_memory.current_chapter_outline#chapter=2",
+		"progression/chapter_contract#chapter=2",
+	} {
+		if !contextSourcesContain(sources, want) {
+			t.Fatalf("served canonical planning source %q was not restored: %#v", want, sources)
+		}
+	}
+
+	before := len(sources)
+	if err := applyPlanDetailsSourceAnchors(st, 2, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if after := len(stringSliceFromAny(merged["context_sources"])); after != before {
+		t.Fatalf("canonical source restoration must be idempotent: before=%d after=%d", before, after)
+	}
+}
+
+func TestPlanDetailsNormalizesCurrentRAGFactHitAliases(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 3)
+	alias := func(index int) string {
+		return domain.RAGFactReceiptTokenPrefix + receipt.ID + "#hit=" + fmt.Sprint(index)
+	}
+	merged := map[string]any{
+		"external_reference_plan": []any{map[string]any{
+			"query_or_need": "三段履约记录", "source_type": "RAG",
+			"source_refs": []any{alias(0)}, "retrieved_at": receipt.CreatedAt,
+			"freshness_requirement": "当前项目事实", "usable_details": []any{"送达先后不等于距离"},
+			"transformation_rule": "转成角色可见的记录错位", "do_not_use": []any{"不复制摘要"},
+		}},
+		"grounding_details": []any{map[string]any{
+			"detail": "观看端时间只形成待校时项", "source_ref": alias(1),
+			"transformed_as": "屏幕上的冲突时间戳", "scene_anchor": "桥湾核验",
+		}},
+		"reality_support_plan": []any{map[string]any{
+			"domain": "公共交付", "source_ref": alias(2), "usable_detail": "骑手正常交付即离开",
+			"transformed_as": "公共入口交接动作", "chapter_use": "候选点排除",
+			"forbidden_direct_use": []any{"不让骑手侦查"},
+		}},
+	}
+
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	external := merged["external_reference_plan"].([]any)[0].(map[string]any)
+	if got := stringSliceFromAny(external["source_refs"]); len(got) != 1 || got[0] != receipt.Hits[0].Ref {
+		t.Fatalf("external alias was not normalized: %#v", got)
+	}
+	grounding := merged["grounding_details"].([]any)[0].(map[string]any)
+	if got := grounding["source_ref"]; got != receipt.Hits[1].Ref {
+		t.Fatalf("grounding alias was not normalized: %#v", got)
+	}
+	support := merged["reality_support_plan"].([]any)[0].(map[string]any)
+	if got := support["source_ref"]; got != receipt.Hits[2].Ref {
+		t.Fatalf("reality-support alias was not normalized: %#v", got)
+	}
+}
+
+func TestPlanDetailsRehomesExternalShapedGroundingRAGFacts(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 6)
+	aliases := make([]any, 0, len(receipt.Hits))
+	for index := range receipt.Hits {
+		aliases = append(aliases, fmt.Sprintf("%s%s#hit=%d", domain.RAGFactReceiptTokenPrefix, receipt.ID, index))
+	}
+	merged := map[string]any{
+		"grounding_details": []any{map[string]any{
+			"source_type": "rag_fact", "source_refs": aliases,
+			"usable_details": []any{
+				"订单总送达先后不能直接换算成距离",
+				"观看端声音时刻与服务端片段顺序是不同证据层",
+				"普通骑手完成公共交付即离开",
+			},
+			"transformation_rule": "转成程野可见的记录错位与保守排除依据",
+			"do_not_use":          []any{"不编造延迟秒数", "不让骑手承担侦查风险"},
+			"scene_anchor":        "三段履约记录与桥湾观看端声音时间并列核验",
+		}},
+	}
+
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := merged["grounding_details"]; exists {
+		t.Fatalf("external-shaped grounding row was not rehomed: %#v", merged["grounding_details"])
+	}
+	external, ok := merged["external_reference_plan"].([]any)
+	if !ok || len(external) != 1 {
+		t.Fatalf("rehome did not create exactly one external fact row: %#v", merged["external_reference_plan"])
+	}
+	entry := external[0].(map[string]any)
+	refs := stringSliceFromAny(entry["source_refs"])
+	if len(refs) != len(receipt.Hits) {
+		t.Fatalf("rehome lost receipt refs: %#v", refs)
+	}
+	for index, hit := range receipt.Hits {
+		if refs[index] != hit.Ref || strings.Contains(refs[index], "#hit=") {
+			t.Fatalf("ref %d was not exact: got=%q want=%q", index, refs[index], hit.Ref)
+		}
+	}
+
+	// A later batch commonly replaces external_reference_plan with craft-only
+	// rows. Preserve the already staged current-receipt fact transformation,
+	// while retaining replacement semantics for every older craft row.
+	staged := append([]any(nil), external...)
+	craftReceipt, craftRow := planDetailsCraftExternalFixture()
+	mergeCausalSimulationPatch(merged, map[string]any{
+		"external_reference_plan": []any{craftRow},
+	})
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, craftReceipt, staged); err != nil {
+		t.Fatal(err)
+	}
+	external = merged["external_reference_plan"].([]any)
+	if len(external) != 2 {
+		t.Fatalf("craft replacement deleted or duplicated the staged fact row: %#v", external)
+	}
+	var factRows, craftRows int
+	for _, item := range external {
+		row := item.(map[string]any)
+		switch strings.ToLower(stringFromAny(row["source_type"])) {
+		case "rag":
+			factRows++
+		case craftSourceType:
+			craftRows++
+		}
+	}
+	if factRows != 1 || craftRows != 1 {
+		t.Fatalf("sequential merge lost fact/craft separation: fact=%d craft=%d rows=%#v", factRows, craftRows, external)
+	}
+
+	// Replaying the same staged rows remains idempotent.
+	staged = append([]any(nil), external...)
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, craftReceipt, staged); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(merged["external_reference_plan"].([]any)); got != 2 {
+		t.Fatalf("RAG fact preservation was not idempotent: got %d rows", got)
+	}
+
+	raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRAGFactPlanCurrent(st, plan); err != nil {
+		t.Fatalf("normalized partial did not become a consumable receipt-backed plan: %v", err)
+	}
+	packet := newDraftRenderPacket(plan)
+	if len(packet.FactAnchors) == 0 || packet.FactAnchors[0].Authority != "rag_fact_receipt" {
+		t.Fatalf("normalized facts did not project a receipt-backed render anchor: %#v", packet.FactAnchors)
+	}
+}
+
+func TestPlanDetailsDoesNotPreserveStaleOrIncompleteRAGFactRows(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 2)
+	craftReceipt, craftRow := planDetailsCraftExternalFixture()
+	staleRef := domain.RAGFactReceiptTokenPrefix + strings.Repeat("f", 24) +
+		"#chunk=stale#hash=" + strings.Repeat("a", 64)
+	complete := func(refs []any) map[string]any {
+		return map[string]any{
+			"query_or_need": "现场事实", "source_type": "RAG", "source_refs": refs,
+			"retrieved_at": receipt.CreatedAt, "freshness_requirement": "当前项目事实",
+			"usable_details": []any{"转成可见动作"}, "transformation_rule": "只支撑当前选择",
+			"do_not_use": []any{"不复制摘要"},
+		}
+	}
+	incomplete := complete([]any{receipt.Hits[0].Ref})
+	delete(incomplete, "transformation_rule")
+	staged := []any{
+		complete([]any{staleRef}),
+		complete([]any{receipt.Hits[0].Ref, staleRef}),
+		complete([]any{receipt.SourceToken()}),
+		incomplete,
+		map[string]any{
+			"query_or_need": "旧 craft", "source_type": craftSourceType,
+			"source_refs":  []any{craftReceiptSourceToken(strings.Repeat("e", 24)) + "#chunk=old#hash=h"},
+			"retrieved_at": "old", "freshness_requirement": "old", "usable_details": []any{"old"},
+			"transformation_rule": "old", "do_not_use": []any{"old"},
+		},
+	}
+	merged := map[string]any{
+		"external_reference_plan": []any{craftRow},
+	}
+
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, craftReceipt, staged); err != nil {
+		t.Fatal(err)
+	}
+	external := merged["external_reference_plan"].([]any)
+	if len(external) != 1 || strings.ToLower(stringFromAny(external[0].(map[string]any)["source_type"])) != craftSourceType {
+		t.Fatalf("stale/mixed/source-token/incomplete fact rows or old craft rows survived: %#v", external)
+	}
+	raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRAGFactPlanCurrent(st, plan); err == nil || !strings.Contains(err.Error(), "没有通过") {
+		t.Fatalf("invalid staged facts did not fail closed as unconsumed: %v", err)
+	}
+}
+
+func TestPlanDetailsSequentialPatchesPreserveCurrentRAGFactRow(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 1)
+	if _, err := NewPlanStructureTool(st).Execute(context.Background(), planStructureArgs(1)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := json.Marshal(map[string]any{
+		"chapter": 1,
+		"causal_simulation": map[string]any{
+			"grounding_details": []any{map[string]any{
+				"source_type":         "rag_fact",
+				"source_refs":         []any{fmt.Sprintf("%s%s#hit=0", domain.RAGFactReceiptTokenPrefix, receipt.ID)},
+				"usable_details":      []any{"送达先后不能直接换算成距离"},
+				"transformation_rule": "转成角色可见的记录错位",
+				"do_not_use":          []any{"不复制摘要"},
+				"scene_anchor":        "三段履约记录核验",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPlanDetailsTool(st).Execute(context.Background(), first); err != nil {
+		t.Fatalf("first plan_details rehome: %v", err)
+	}
+	second, err := json.Marshal(map[string]any{
+		"chapter": 1,
+		"causal_simulation": map[string]any{
+			"external_reference_plan": []any{map[string]any{
+				"query_or_need": "项目简报生活纹理", "source_type": "project_web_reference_brief",
+				"source_refs": []any{"meta/web_reference_brief.md"}, "retrieved_at": "2026-07-18T00:00:00Z",
+				"freshness_requirement": "稳定生活动作", "usable_details": []any{"公共入口交付"},
+				"transformation_rule": "只转成现场动作", "do_not_use": []any{"不复制网页摘要"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPlanDetailsTool(st).Execute(context.Background(), second); err != nil {
+		t.Fatalf("second plan_details replacement: %v", err)
+	}
+	partial, err := st.Drafts.LoadChapterPlanPartial(1)
+	if err != nil || partial == nil {
+		t.Fatalf("load sequential partial: partial=%+v err=%v", partial, err)
+	}
+	merged, _ := partial["causal_simulation"].(map[string]any)
+	external, _ := merged["external_reference_plan"].([]any)
+	if len(external) != 2 {
+		t.Fatalf("PlanDetailsTool replacement lost the staged fact row: %#v", external)
+	}
+	raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRAGFactPlanCurrent(st, plan); err != nil {
+		t.Fatalf("sequential PlanDetailsTool partial lost current RAG consumption: %v", err)
+	}
+}
+
+func TestPlanDetailsExternalRAGFactReceiptSetAliasesExpandToSelectedHits(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 2)
+	for name, setAlias := range map[string]string{
+		"canonical source token": receipt.SourceToken(),
+		"bare current id":        domain.RAGFactReceiptTokenPrefix + receipt.ID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			merged := map[string]any{
+				"external_reference_plan": []any{map[string]any{
+					"query_or_need": "本章事实锚点", "source_type": "RAG",
+					"source_refs": []any{setAlias}, "retrieved_at": receipt.CreatedAt,
+					"freshness_requirement": "当前项目事实", "usable_details": []any{"把选中事实转成可见核验动作"},
+					"transformation_rule": "只支撑本章既定选择", "do_not_use": []any{"不复制来源摘要"},
+				}},
+			}
+			if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			external := merged["external_reference_plan"].([]any)
+			refs, ok := strictPartialStringRefs(external[0].(map[string]any)["source_refs"])
+			if !ok || len(refs) != len(receipt.Hits) {
+				t.Fatalf("receipt set alias was not expanded to selected hits: %#v", refs)
+			}
+			for i, hit := range receipt.Hits {
+				if refs[i] != hit.Ref {
+					t.Fatalf("expanded ref[%d] = %q, want %q", i, refs[i], hit.Ref)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanDetailsMaterializesServerMetadataForExactCurrentRAGFactRow(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 1)
+	merged := map[string]any{
+		"external_reference_plan": []any{map[string]any{
+			"query_or_need":         "project-all-methodology",
+			"source_type":           "rag_fact",
+			"source_refs":           []any{receipt.Hits[0].Ref},
+			"retrieved_at":          "2020-01-01T00:00:00Z",
+			"freshness_requirement": "稳定写作方法；错误沿用了 craft receipt policy",
+			"usable_details": []any{
+				"把当前项目事实转成本章角色可见的核验动作",
+			},
+			"transformation_rule": "只支撑本章既定选择，不复制来源表述",
+			"do_not_use":          []any{"不从来源扩写未授权空间"},
+		}},
+	}
+
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := merged["external_reference_plan"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("exact receipt-backed row was lost: %#v", merged["external_reference_plan"])
+	}
+	row := rows[0].(map[string]any)
+	if row["query_or_need"] != receipt.Query || row["source_type"] != "RAG" ||
+		row["retrieved_at"] != receipt.CreatedAt ||
+		row["freshness_requirement"] != "当前项目事实 receipt；selected hits 与当前 RAG index 已由服务端校验" {
+		t.Fatalf("server-owned current receipt metadata was not materialized: %#v", row)
+	}
+	raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRAGFactPlanCurrent(st, plan); err != nil {
+		t.Fatalf("normalized exact current row did not pass the unchanged formal-plan guard: %v", err)
+	}
+}
+
+func TestPlanDetailsDoesNotMaterializeRAGMetadataWithoutExactCompleteBinding(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 1)
+	staleRef := domain.RAGFactReceiptTokenPrefix + strings.Repeat("f", 24) +
+		"#chunk=stale#hash=" + strings.Repeat("a", 64)
+	complete := func(refs []any) map[string]any {
+		return map[string]any{
+			"source_refs":         refs,
+			"usable_details":      []any{"转成本章可见事实"},
+			"transformation_rule": "只支撑本章既定选择",
+			"do_not_use":          []any{"不复制来源"},
+		}
+	}
+	tests := map[string]map[string]any{
+		"stale": complete([]any{staleRef}),
+		"mixed": complete([]any{receipt.Hits[0].Ref, staleRef}),
+		"explicit non fact authority": func() map[string]any {
+			row := complete([]any{receipt.Hits[0].Ref})
+			row["source_type"] = craftSourceType
+			return row
+		}(),
+		"incomplete transformation": func() map[string]any {
+			row := complete([]any{receipt.Hits[0].Ref})
+			delete(row, "do_not_use")
+			return row
+		}(),
+	}
+	for name, row := range tests {
+		t.Run(name, func(t *testing.T) {
+			merged := map[string]any{"external_reference_plan": []any{row}}
+			if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(stringFromAny(row["query_or_need"])) != "" ||
+				strings.TrimSpace(stringFromAny(row["retrieved_at"])) != "" ||
+				strings.TrimSpace(stringFromAny(row["freshness_requirement"])) != "" {
+				t.Fatalf("unbound or incomplete row received server metadata: %#v", row)
+			}
+			raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := decodeChapterPlanArgs(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateRAGFactPlanCurrent(st, plan); err == nil {
+				t.Fatal("unchanged hard receipt guard accepted an unbound or incomplete row")
+			}
+		})
+	}
+}
+
+func TestPlanDetailsRehomesProductionGroundingRAGFactsWithoutMetadata(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 3)
+	aliases := make([]any, 0, len(receipt.Hits))
+	for index := range receipt.Hits {
+		aliases = append(aliases, fmt.Sprintf("%s%s#hit=%d", domain.RAGFactReceiptTokenPrefix, receipt.ID, index))
+	}
+	merged := map[string]any{
+		"grounding_details": []any{map[string]any{
+			"source_refs":         aliases,
+			"usable_details":      []any{"订单时间戳只能形成宽窗", "公共交付后骑手立即离开"},
+			"transformation_rule": "转成本章可见的履约记录与安全边界",
+			"do_not_use":          []any{"不把预计送达写成实际完成"},
+		}},
+	}
+	if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := merged["grounding_details"]; exists {
+		t.Fatalf("production-shaped grounding row was not rehomed: %#v", merged["grounding_details"])
+	}
+	external, ok := merged["external_reference_plan"].([]any)
+	if !ok || len(external) != 1 {
+		t.Fatalf("expected one rehomed external row: %#v", merged["external_reference_plan"])
+	}
+	entry := external[0].(map[string]any)
+	if got := stringFromAny(entry["query_or_need"]); got != receipt.Query {
+		t.Fatalf("server receipt query metadata = %q", got)
+	}
+	refs, ok := strictPartialStringRefs(entry["source_refs"])
+	if !ok || len(refs) != len(receipt.Hits) {
+		t.Fatalf("rehome lost current receipt hits: %#v", refs)
+	}
+	for i, hit := range receipt.Hits {
+		if refs[i] != hit.Ref {
+			t.Fatalf("rehomed ref[%d] = %q, want %q", i, refs[i], hit.Ref)
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"chapter": 1, "causal_simulation": merged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decodeChapterPlanArgs(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRAGFactPlanCurrent(st, plan); err != nil {
+		t.Fatalf("production-shaped row did not become consumable: %v", err)
+	}
+}
+
+func TestPlanDetailsRAGFactHitAliasesFailClosed(t *testing.T) {
+	st, receipt := newPlanDetailsRAGFactReceiptFixture(t, 2)
+	current := fmt.Sprintf("%s%s#hit=0", domain.RAGFactReceiptTokenPrefix, receipt.ID)
+	tests := map[string][]any{
+		"wrong receipt":      {domain.RAGFactReceiptTokenPrefix + strings.Repeat("f", 24) + "#hit=0"},
+		"wrong bare receipt": {domain.RAGFactReceiptTokenPrefix + strings.Repeat("f", 24)},
+		"out of range":       {fmt.Sprintf("%s%s#hit=%d", domain.RAGFactReceiptTokenPrefix, receipt.ID, len(receipt.Hits))},
+		"negative":           {domain.RAGFactReceiptTokenPrefix + receipt.ID + "#hit=-1"},
+		"leading zero":       {domain.RAGFactReceiptTokenPrefix + receipt.ID + "#hit=01"},
+		"extra suffix":       {current + "#extra"},
+		"mixed":              {current, domain.RAGFactReceiptTokenPrefix + strings.Repeat("e", 24) + "#hit=1"},
+	}
+	for name, refs := range tests {
+		t.Run(name, func(t *testing.T) {
+			merged := map[string]any{
+				"grounding_details": []any{map[string]any{
+					"source_type": "rag_fact", "source_refs": refs,
+					"usable_details":      []any{"只能由当前精确命中支撑"},
+					"transformation_rule": "转成现场动作", "do_not_use": []any{"不复制摘要"},
+					"scene_anchor": "现场核验",
+				}},
+			}
+			if err := applyPlanDetailsSourceAnchors(st, 1, merged, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := merged["external_reference_plan"]; exists {
+				t.Fatalf("invalid or ambiguous aliases were rehomed: %#v", merged["external_reference_plan"])
+			}
+			if _, exists := merged["grounding_details"]; !exists {
+				t.Fatal("invalid aliases were silently discarded")
+			}
+		})
+	}
+}
+
+func TestPartialRAGFactRefResolverRepairsUnambiguousLocalAliases(t *testing.T) {
+	const receiptID = "0123456789abcdef01234567"
+	documentID := strings.Repeat("a", 16)
+	hit := domain.RAGFactReceiptHit{
+		ChunkID:       "local:" + documentID + ":002",
+		ContentSHA256: strings.Repeat("b", 64),
+	}
+	hit.Ref = domain.RAGFactReceiptHitRef(receiptID, hit)
+	receipt := &domain.RAGFactReceipt{ID: receiptID, Hits: []domain.RAGFactReceiptHit{hit}}
+	alias := domain.RAGFactReceiptTokenPrefix + receiptID + "#hit=0"
+	resolve := partialRAGFactRefResolver(receipt, map[string]string{alias: hit.Ref})
+
+	for name, input := range map[string]string{
+		"ordered hit alias": alias,
+		"exact chunk id":    hit.ChunkID,
+		"local document id": "local:" + documentID + strings.Repeat("c", 48),
+		"malformed current receipt chunk": domain.RAGFactReceiptTokenPrefix + receiptID +
+			"#chunk=local:" + documentID + strings.Repeat("d", 48) + "#hash=" + strings.Repeat("e", 64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := resolve(input); got != hit.Ref {
+				t.Fatalf("unambiguous current-receipt alias was not repaired: got=%q want=%q", got, hit.Ref)
+			}
+		})
+	}
+	if got := resolve(domain.RAGFactReceiptTokenPrefix + strings.Repeat("f", 24) + "#chunk=" + hit.ChunkID); got != "" {
+		t.Fatalf("wrong receipt alias must fail closed, got %q", got)
+	}
+	if got := resolve("local:" + documentID + "not-hex"); got != "" {
+		t.Fatalf("non-hex local alias must fail closed, got %q", got)
+	}
+}
+
+func TestPartialRAGFactRefResolverRejectsAmbiguousLocalDocumentAlias(t *testing.T) {
+	const receiptID = "0123456789abcdef01234567"
+	documentID := strings.Repeat("a", 16)
+	hits := []domain.RAGFactReceiptHit{
+		{ChunkID: "local:" + documentID + ":001", ContentSHA256: strings.Repeat("b", 64)},
+		{ChunkID: "local:" + documentID + ":002", ContentSHA256: strings.Repeat("c", 64)},
+	}
+	for index := range hits {
+		hits[index].Ref = domain.RAGFactReceiptHitRef(receiptID, hits[index])
+	}
+	receipt := &domain.RAGFactReceipt{ID: receiptID, Hits: hits}
+	resolve := partialRAGFactRefResolver(receipt, nil)
+	if got := resolve("local:" + documentID + strings.Repeat("d", 48)); got != "" {
+		t.Fatalf("document-only alias with multiple current hits must fail closed, got %q", got)
+	}
+	if got := resolve(hits[1].ChunkID); got != hits[1].Ref {
+		t.Fatalf("exact chunk id remains unambiguous: got=%q want=%q", got, hits[1].Ref)
+	}
+}
+
+func newPlanDetailsRAGFactReceiptFixture(t *testing.T, count int) (*store.Store, domain.RAGFactReceipt) {
+	t.Helper()
+	st := newPhaseTestStore(t)
+	chunks := make([]domain.RAGChunk, 0, count)
+	for index := 0; index < count; index++ {
+		chunks = append(chunks, rag.NormalizeChunk(domain.RAGChunk{
+			ID:         fmt.Sprintf("fact:plan-details-%d", index),
+			SourcePath: fmt.Sprintf("summaries/%02d.json", index),
+			SourceKind: "chapter_summary_facts",
+			Facet:      "plot",
+			Summary:    fmt.Sprintf("第 %d 条可用项目事实", index+1),
+			Text:       fmt.Sprintf("第 %d 条可用项目事实的完整文本。", index+1),
+		}))
+	}
+	if err := st.RAG.SaveIndexState(domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config:        domain.RAGIndexConfig{Collection: "local_keyword"},
+		Chunks:        chunks,
+		UpdatedAt:     "fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hits := make([]domain.RAGFactReceiptHit, 0, len(chunks))
+	for index, chunk := range chunks {
+		hits = append(hits, domain.RAGFactReceiptHit{
+			Rank: index + 1, ChunkID: chunk.ID, ContentSHA256: rag.RehashChunk(chunk).Hash,
+			SourcePath: chunk.SourcePath, SourceKind: chunk.SourceKind, Facet: chunk.Facet,
+		})
+	}
+	receipt, err := domain.NewRAGFactReceipt(1, "当前章节项目事实", []string{"当前", "事实"}, "local_keyword", "", hits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RAG.SaveRAGFactReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+	return st, receipt
+}
+
+func planDetailsCraftExternalFixture() (*domain.CraftRecallReceipt, map[string]any) {
+	id := "0123456789abcdef01234567"
+	ref := craftReceiptSourceToken(id) + "#chunk=craft:scene#hash=" + strings.Repeat("b", 64)
+	receipt := &domain.CraftRecallReceipt{
+		ID: id, CreatedAt: "2026-07-18T00:00:00Z",
+		Attempts: []domain.CraftRecallReceiptAttempt{{
+			Need: domain.CraftRecallNeed{ID: "project-all-scene"},
+			Hits: []domain.CraftRecallReceiptHit{{
+				Ref: ref, SourceKind: "craft_technique",
+			}},
+		}},
+	}
+	row := map[string]any{
+		"query_or_need": "project-all-scene", "source_type": "craft_technique",
+		"source_refs": []any{ref}, "retrieved_at": receipt.CreatedAt,
+		"freshness_requirement": "当前 craft receipt", "usable_details": []any{"场景由人物选择改变处境"},
+		"transformation_rule": "只迁移场景因果方法", "do_not_use": []any{"不复制来源情节"},
+	}
+	return receipt, row
 }
 
 func TestPlanDetailsRecommendedBatchesPreserveProjectContracts(t *testing.T) {

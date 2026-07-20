@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -161,6 +162,7 @@ type simulationCharacterAuthority struct {
 	RewriteSourceOnlyContract map[string]any               `json:"rewrite_source_only_contract,omitempty"`
 	projectAllGrounded        bool                         `json:"-"`
 	baseBlocking              bool                         `json:"-"`
+	canonicallyDeceased       bool                         `json:"-"`
 }
 
 func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulationCharacterAuthority {
@@ -205,6 +207,7 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 	}
 	projectAllInputs, projectAllErr := loadProjectAllAuthorityInputs(st, chapter)
 	projectAllFresh := projectAllErr == nil && projectAllInputs != nil
+	deceasedAuthority := canonicalDeceasedAuthoritySources(st, required)
 
 	result := make([]simulationCharacterAuthority, 0, len(required))
 	for _, name := range required {
@@ -358,6 +361,27 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 				}
 			}
 		}
+		if sources := deceasedAuthority[name]; len(sources) > 0 {
+			// A structured world rule outranks a generic living-character seed or
+			// dossier placeholder.  Keep identity/description for references to
+			// legacy materials, but remove every current-actor affordance so the
+			// simulator cannot turn an old record into a post-death action.
+			entry.canonicallyDeceased = true
+			entry.CurrentLocation = simulationAuthorityNotApplicable
+			entry.CurrentStatus = "deceased"
+			entry.CurrentGoal = ""
+			entry.CurrentAction = simulationAuthorityNotApplicable
+			entry.CurrentPressure = simulationAuthorityNotApplicable
+			entry.CurrentPressurePolicy = ""
+			entry.NextIndependentMove = simulationAuthorityNotApplicable
+			entry.Resources = nil
+			entry.Relationships = nil
+			entry.KnowledgeBoundary = ""
+			entry.RequiredKnowledgeBoundary = nil
+			entry.DecisionModel = ""
+			entry.CommunicationBoundary = domain.CommunicationBoundary{}
+			entry.AuthoritySources = append(entry.AuthoritySources, sources...)
+		}
 
 		if entry.CurrentLocation == simulationAuthorityUnknown {
 			entry.MissingAuthority = append(entry.MissingAuthority, "current_location")
@@ -383,11 +407,16 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		if entry.DecisionModel == "" {
 			entry.MissingAuthority = append(entry.MissingAuthority, "decision_model")
 		}
+		if entry.canonicallyDeceased {
+			entry.MissingAuthority = append(entry.MissingAuthority, "current_actor_not_applicable_deceased")
+		}
 		entry.MissingAuthority = compactStrings(entry.MissingAuthority)
-		entry.RequiredKnowledgeBoundary = preserveKnowledgeBoundaryClauses(st, chapter, name)
+		if !entry.canonicallyDeceased {
+			entry.RequiredKnowledgeBoundary = preserveKnowledgeBoundaryClauses(st, chapter, name)
+		}
 		entry.baseBlocking = len(entry.MissingAuthority) > 0
 		entry.Blocking = entry.baseBlocking && entry.SimulationStatus != "already_present"
-		projectAllGrounded := projectAllGroundingComplete &&
+		projectAllGrounded := !entry.canonicallyDeceased && projectAllGroundingComplete &&
 			onlyChapterLocalPlacementMissing(entry.MissingAuthority)
 		if projectAllGrounded {
 			entry.Blocking = false
@@ -397,6 +426,10 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		case entry.SimulationStatus == "already_present":
 			entry.AuthorityMode = "reuse_saved_decision"
 			entry.DecisionPolicy = projectAllReuseDecisionPolicy
+		case entry.canonicallyDeceased:
+			entry.AuthorityMode = "hold_baseline"
+			entry.DecisionPolicy = projectAllHoldBaselineDecisionPolicy
+			entry.HoldBaselineContract = holdBaselineContractPayload(name, chapter)
 		case projectAllGrounded:
 			entry.AuthorityMode = "project_all_grounded"
 			entry.DecisionPolicy = projectAllGroundedDecisionPolicy
@@ -420,6 +453,84 @@ func buildSimulationCharacterAuthority(st *store.Store, chapter int) []simulatio
 		result = append(result, entry)
 	}
 	return result
+}
+
+// canonicalDeceasedAuthoritySources extracts only explicit subject-bound death
+// declarations from structured world rules. It deliberately does not treat a
+// bare mention of "死亡" as identity evidence: in a sentence such as
+// "甲对三年前的死亡负有责任", 甲 is the responsible actor, not the deceased
+// character. The narrow patterns also recognize formulations such as
+// "不是……被动死者", where the negation rejects passivity rather than death.
+func canonicalDeceasedAuthoritySources(st *store.Store, characters []string) map[string][]string {
+	result := map[string][]string{}
+	if st == nil || len(characters) == 0 {
+		return result
+	}
+	rules, err := st.World.LoadWorldRules()
+	if err != nil {
+		return result
+	}
+	for _, rule := range rules {
+		category := strings.TrimSpace(rule.Category)
+		if category == "" {
+			category = "uncategorized"
+		}
+		fields := []struct {
+			label string
+			text  string
+		}{
+			{label: "rule", text: rule.Rule},
+			{label: "boundary", text: rule.Boundary},
+		}
+		for _, field := range fields {
+			if strings.TrimSpace(field.text) == "" {
+				continue
+			}
+			for _, character := range characters {
+				character = strings.TrimSpace(character)
+				if character == "" || !worldRuleDeclaresCharacterDeceased(character, field.text) {
+					continue
+				}
+				source := fmt.Sprintf("world_rules.json:%s:%s:deceased", category, field.label)
+				result[character] = appendAuthorityUnique(result[character], source)
+			}
+		}
+	}
+	return result
+}
+
+func worldRuleDeclaresCharacterDeceased(character, text string) bool {
+	character = strings.TrimSpace(character)
+	if character == "" || !strings.Contains(text, character) {
+		return false
+	}
+	name := regexp.QuoteMeta(character)
+	clauseText := `[^，。；！？\n]`
+	patterns := []string{
+		// Direct copular identity: 甲是/为/系旧案死者。
+		name + `(?:是|为|系|属于)` + clauseText + `{0,18}(?:死者|已故者|遇难者|亡者)`,
+		// Explicit aspect or time predicate: 甲已于三年前死亡；甲在旧案中身亡。
+		name + `(?:已|已经|早已|业已)` + clauseText + `{0,14}(?:死亡|去世|身亡|遇难|亡故)`,
+		name + `(?:于|在)` + clauseText + `{0,14}(?:死亡|去世|身亡|遇难|亡故)`,
+		name + `(?:死于|亡于|身亡于|遇难于|去世于)`,
+		name + `(?:死亡|去世|身亡|遇难|亡故|遇害|被害|殒命)`,
+		// "不是被动死者" denies a qualifier, not the death status itself.
+		name + `不是` + clauseText + `{0,18}(?:被动|沉默|无名|单纯|纯粹)` + clauseText + `{0,8}(?:死者|亡者)`,
+		// Appositive identity used in compact rules: 甲，旧案死者，……
+		name + `(?:，|：|、|\s)` + clauseText + `{0,10}(?:旧案|本案|事故|案件)` + clauseText + `{0,5}(?:死者|遇难者)`,
+	}
+	for _, clause := range splitSimulationClauses(text) {
+		if !strings.Contains(clause, character) {
+			continue
+		}
+		for _, pattern := range patterns {
+			matched, err := regexp.MatchString(pattern, clause)
+			if err == nil && matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func loadInitialCharacterDynamics(st *store.Store) map[string]domain.CharacterSimulationState {

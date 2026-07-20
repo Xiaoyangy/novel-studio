@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -233,7 +235,18 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 	}
 	partial.CharacterDecisions = canonicalizeCharacterWorldDecisions(t.store, partial.CharacterDecisions)
 	a.CharacterDecisions = canonicalizeCharacterWorldDecisions(t.store, a.CharacterDecisions)
+	a.CharacterDecisions = materializeProjectAllGroundedLockedFields(
+		t.store,
+		a.Chapter,
+		a.CharacterDecisions,
+	)
 	if err := validateIncomingSimulationCharacterAuthority(t.store, a.Chapter, a.CharacterDecisions); err != nil {
+		slog.Warn("simulate_chapter_world incoming authority rejected",
+			"module", "tools.simulate_chapter_world",
+			"chapter", a.Chapter,
+			"characters", strings.Join(characterDecisionNames(a.CharacterDecisions), ","),
+			"cause", err,
+		)
 		return nil, fmt.Errorf("simulate_chapter_world authority guard: %w: %w", err, errs.ErrToolPrecondition)
 	}
 	if strings.TrimSpace(a.TimeWindow) == "" && len(a.CharacterDecisions) == 0 &&
@@ -254,6 +267,13 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 		}
 	}
 	if err := validateIncomingSimulationSemanticInvariants(t.store, a.Chapter, a.CharacterDecisions, a.ProtagonistProjection, rewriteSource); err != nil {
+		slog.Warn("simulate_chapter_world incoming semantics rejected",
+			"module", "tools.simulate_chapter_world",
+			"chapter", a.Chapter,
+			"characters", strings.Join(characterDecisionNames(a.CharacterDecisions), ","),
+			"projection_protagonist", a.ProtagonistProjection.Protagonist,
+			"cause", err,
+		)
 		return nil, fmt.Errorf("simulate_chapter_world semantic guard: %w: %w", err, errs.ErrToolPrecondition)
 	}
 	if rewriteSource != nil {
@@ -280,6 +300,11 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 			partial.ProtagonistProjection,
 			inferCommitProtagonist(t.store),
 		); len(missing) > 0 {
+			slog.Warn("simulate_chapter_world projection rejected",
+				"module", "tools.simulate_chapter_world",
+				"chapter", a.Chapter,
+				"missing", strings.Join(missing, ","),
+			)
 			return nil, fmt.Errorf(
 				"simulate_chapter_world protagonist_projection 必须一次完整提交；缺少或无效字段：%s。project_all_grounded 只由服务端绑定 chosen_decision；available_options 和 decision_reason 仍必须是当下有效的 POV 投影: %w",
 				strings.Join(missing, "、"),
@@ -332,6 +357,11 @@ func (t *SimulateChapterWorldTool) Execute(_ context.Context, args json.RawMessa
 		return json.Marshal(result)
 	}
 	if len(gaps) > 0 {
+		slog.Warn("simulate_chapter_world finalize rejected",
+			"module", "tools.simulate_chapter_world",
+			"chapter", a.Chapter,
+			"gaps", strings.Join(gaps, "；"),
+		)
 		return nil, fmt.Errorf("第 %d 章全角色世界推演未完成：%s: %w", a.Chapter, strings.Join(gaps, "；"), errs.ErrToolPrecondition)
 	}
 	if err := consumePlanningContextAccessReceipt(
@@ -450,14 +480,189 @@ func validateIncomingSimulationSemanticInvariants(st *store.Store, chapter int, 
 	for _, decision := range decisions {
 		violations = append(violations, simulationDecisionKnowledgeGaps(decision)...)
 	}
+	violations = append(violations, repeatedCompletedCharacterDecisionGaps(st, chapter, decisions)...)
+	violations = append(violations, staleChapterCoreEventGoalGaps(chapter, decisions)...)
+	if gap := repeatedCompletedProtagonistDecisionGap(st, chapter, decisions, projection); gap != "" {
+		violations = append(violations, gap)
+	}
 	if len(violations) == 0 {
 		return nil
 	}
 	return fmt.Errorf("角色候选项/知识边界与硬事实冲突：%s", strings.Join(compactStrings(violations), "；"))
 }
 
+// repeatedCompletedCharacterDecisionGaps prevents any actor—not only the POV
+// protagonist—from replaying an action that the immediately preceding chapter
+// explicitly marked completed. A started or in-progress action may continue.
+// Exact matching is intentional: this is a mechanical continuity fuse, not a
+// semantic similarity classifier.
+func repeatedCompletedCharacterDecisionGaps(
+	st *store.Store,
+	chapter int,
+	decisions []domain.CharacterWorldDecision,
+) []string {
+	if st == nil || chapter <= 1 || len(decisions) == 0 {
+		return nil
+	}
+	previous, err := st.LoadChapterWorldSimulation(chapter - 1)
+	if err != nil || previous == nil {
+		return nil
+	}
+	completed := make(map[string]domain.CharacterWorldDecision, len(previous.CharacterDecisions))
+	for _, decision := range previous.CharacterDecisions {
+		name := strings.TrimSpace(decision.Character)
+		if name == "" || strings.TrimSpace(decision.CompletionState) != "completed" ||
+			simulationAuthorityDecisionPlaceholder(decision.Decision) {
+			continue
+		}
+		completed[name] = decision
+	}
+	var gaps []string
+	for _, current := range decisions {
+		name := strings.TrimSpace(current.Character)
+		prior, ok := completed[name]
+		if !ok || simulationAuthorityDecisionPlaceholder(current.Decision) {
+			continue
+		}
+		currentDecision := strings.TrimSpace(current.Decision)
+		currentAction := strings.TrimSpace(current.Action)
+		repeatedDecision := currentDecision != "" && currentDecision == strings.TrimSpace(prior.Decision)
+		repeatedAction := currentAction != "" && currentAction == strings.TrimSpace(prior.Action)
+		if !repeatedDecision && !repeatedAction {
+			continue
+		}
+		repeated := currentDecision
+		if !repeatedDecision {
+			repeated = currentAction
+		}
+		gaps = append(gaps, fmt.Sprintf(
+			"character %s repeats chapter %d completed decision/action %q; consume its consequence or choose a genuinely current action instead of replaying it",
+			name,
+			chapter-1,
+			repeated,
+		))
+	}
+	return compactStrings(gaps)
+}
+
+var chapterCoreEventGoalPattern = regexp.MustCompile(`第([0-9０-９]+|十二|十一|十|九|八|七|六|五|四|三|二|一)章核心事件`)
+
+// staleChapterCoreEventGoalGaps catches zero-init goal templates that were
+// accidentally persisted as terminal continuity. General references to prior
+// evidence remain valid; only the unmistakable "第X章核心事件" goal template
+// is chapter-bound and therefore rejected when X is not the current chapter.
+func staleChapterCoreEventGoalGaps(
+	chapter int,
+	decisions []domain.CharacterWorldDecision,
+) []string {
+	if chapter <= 0 {
+		return nil
+	}
+	var gaps []string
+	for _, decision := range decisions {
+		if simulationAuthorityDecisionPlaceholder(decision.Decision) ||
+			simulationAuthorityDecisionPlaceholder(decision.CurrentGoal) {
+			continue
+		}
+		goal := strings.Join(strings.Fields(decision.CurrentGoal), "")
+		matches := chapterCoreEventGoalPattern.FindAllStringSubmatch(goal, -1)
+		for _, match := range matches {
+			if len(match) != 2 {
+				continue
+			}
+			goalChapter, ok := parseChapterCoreEventGoalNumber(match[1])
+			if !ok || goalChapter == chapter {
+				continue
+			}
+			gaps = append(gaps, fmt.Sprintf(
+				"character %s current_goal still targets chapter %d core event while simulating chapter %d; replace it with the actor's current goal and keep prior facts in pressure, knowledge, or antecedents",
+				strings.TrimSpace(decision.Character),
+				goalChapter,
+				chapter,
+			))
+			break
+		}
+	}
+	return compactStrings(gaps)
+}
+
+func parseChapterCoreEventGoalNumber(value string) (int, bool) {
+	value = strings.TrimSpace(strings.NewReplacer(
+		"０", "0", "１", "1", "２", "2", "３", "3", "４", "4",
+		"５", "5", "６", "6", "７", "7", "８", "8", "９", "9",
+	).Replace(value))
+	if value != "" && value[0] >= '0' && value[0] <= '9' {
+		var chapter int
+		if _, err := fmt.Sscanf(value, "%d", &chapter); err == nil && chapter > 0 {
+			return chapter, true
+		}
+	}
+	chapters := map[string]int{
+		"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+		"七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12,
+	}
+	chapter, ok := chapters[value]
+	return chapter, ok
+}
+
+// repeatedCompletedProtagonistDecisionGap prevents a projected chapter from
+// laundering the previous chapter's finished action into a new POV decision.
+// Project-all carries the prior simulation into its shadow workspace, so an
+// exact repeat is mechanically detectable without interpreting prose. A
+// started/in_progress action may legitimately continue; only an exact choice
+// whose prior protagonist decision is explicitly completed is rejected.
+func repeatedCompletedProtagonistDecisionGap(
+	st *store.Store,
+	chapter int,
+	decisions []domain.CharacterWorldDecision,
+	projection domain.ProtagonistDecisionProjection,
+) string {
+	if st == nil || chapter <= 1 {
+		return ""
+	}
+	protagonist := strings.TrimSpace(projection.Protagonist)
+	if protagonist == "" {
+		protagonist = strings.TrimSpace(inferCommitProtagonist(st))
+	}
+	currentDecision := effectiveProtagonistDecision(projection)
+	for _, decision := range decisions {
+		if strings.TrimSpace(decision.Character) != protagonist ||
+			simulationAuthorityDecisionPlaceholder(decision.Decision) {
+			continue
+		}
+		if candidate := strings.TrimSpace(decision.Decision); candidate != "" {
+			currentDecision = candidate
+		}
+		break
+	}
+	if protagonist == "" || currentDecision == "" {
+		return ""
+	}
+	previous, err := st.LoadChapterWorldSimulation(chapter - 1)
+	if err != nil || previous == nil ||
+		strings.TrimSpace(effectiveProtagonistDecision(previous.ProtagonistProjection)) != currentDecision {
+		return ""
+	}
+	for _, decision := range previous.CharacterDecisions {
+		if strings.TrimSpace(decision.Character) == protagonist &&
+			strings.TrimSpace(decision.CompletionState) == "completed" {
+			return fmt.Sprintf(
+				"protagonist chosen_decision repeats chapter %d completed action %q; choose a current option that consumes its consequence instead of replaying it",
+				chapter-1,
+				currentDecision,
+			)
+		}
+	}
+	return ""
+}
+
 func chapterWorldSimulationHasCausalWork(sim domain.ChapterWorldSimulation) bool {
-	return len(sim.CharacterDecisions) > 0 || len(sim.RewriteFactCoverage) > 0 ||
+	for _, decision := range sim.CharacterDecisions {
+		if !simulationAuthorityDecisionPlaceholder(decision.Decision) {
+			return true
+		}
+	}
+	return len(sim.RewriteFactCoverage) > 0 ||
 		protagonistProjectionHasCausalWork(sim.ProtagonistProjection)
 }
 
@@ -557,6 +762,12 @@ func normalizeProtagonistProjection(st *store.Store, simulation *domain.ChapterW
 			return
 		}
 		projection.ChosenDecision = decisionText
+		if grounded && !containsExactString(projection.AvailableOptions, decisionText) {
+			projection.AvailableOptions = append(
+				[]string{decisionText},
+				projection.AvailableOptions...,
+			)
+		}
 		return
 	}
 }
@@ -809,6 +1020,10 @@ func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulatio
 			gaps = append(gaps, "rewrite protagonist_projection.chosen_decision must equal exact source action")
 		}
 	}
+	if gap := repeatedCompletedProtagonistDecisionGap(s, sim.Chapter, sim.CharacterDecisions, p); gap != "" {
+		gaps = append(gaps, gap)
+	}
+	gaps = append(gaps, repeatedCompletedCharacterDecisionGaps(s, sim.Chapter, sim.CharacterDecisions)...)
 	gaps = append(gaps, projectAllGroundedProjectionGaps(s, sim)...)
 	if expected, _, _, err := loadChapterRewriteSource(s, sim.Chapter); err == nil && expected != nil {
 		gaps = append(gaps, chapterWorldSimulationProjectionInvariantGaps(p, expected.PreserveFacts)...)
@@ -818,6 +1033,30 @@ func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulatio
 	}
 	gaps = append(gaps, chapterWorldSimulationQuantityGaps(s, sim)...)
 	return compactStrings(gaps)
+}
+
+// characterWorldDecisionNameObservableToPOV answers only whether an actor's
+// name/presence is explicitly observable. It does not expose that actor's full
+// private CharacterWorldDecision: a missing visible_to_pov bool may coexist
+// with one audible line in observable_effects. Hidden pressures are excluded.
+func characterWorldDecisionNameObservableToPOV(
+	sim domain.ChapterWorldSimulation,
+	decision domain.CharacterWorldDecision,
+) bool {
+	if decision.VisibleToPOV {
+		return true
+	}
+	name := strings.TrimSpace(decision.Character)
+	if name == "" {
+		return false
+	}
+	if name == strings.TrimSpace(sim.ProtagonistProjection.Protagonist) {
+		return true
+	}
+	observable := append([]string(nil), sim.ProtagonistProjection.ObservableEffects...)
+	observable = append(observable, sim.ProtagonistProjection.DecisionReason)
+	observable = append(observable, sim.ProtagonistProjection.CausalChain...)
+	return strings.Contains(strings.Join(compactStrings(observable), "\n"), name)
 }
 
 func storedSimulationCharacterAuthorityGap(s *store.Store, sim domain.ChapterWorldSimulation) string {

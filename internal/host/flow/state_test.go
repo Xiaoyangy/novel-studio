@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,6 +74,110 @@ func TestLoadStateRecoversDraftIntentIntoCallerCheckpointCache(t *testing.T) {
 	}
 	if got, err := st.Drafts.LoadDraft(1); err != nil || got != candidate {
 		t.Fatalf("failed overwrite guard changed recovered draft: got=%q err=%v", got, err)
+	}
+}
+
+func TestLoadStateMarksOnlyExactPipelineRenderTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mode          domain.PipelineExecutionMode
+		targetChapter int
+		want          bool
+	}{
+		{name: "exact render target", mode: domain.PipelineExecutionRender, targetChapter: 1, want: true},
+		{name: "other render chapter", mode: domain.PipelineExecutionRender, targetChapter: 2, want: false},
+		{name: "non-render pipeline mode", mode: domain.PipelineExecutionPreplan, targetChapter: 1, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := store.NewStore(t.TempDir())
+			if err := st.Init(); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Progress.Init("render-state", 3); err != nil {
+				t.Fatal(err)
+			}
+			lock := domain.PipelineExecutionLock{
+				Mode: tc.mode, TargetChapter: tc.targetChapter, Owner: "render-state-test",
+			}
+			if tc.mode == domain.PipelineExecutionRender {
+				lock.PlanDigest = "sha256:frozen-plan"
+			}
+			if err := st.Runtime.AcquirePipelineExecution(lock); err != nil {
+				t.Fatal(err)
+			}
+			state := LoadState(st)
+			if state.NextActionPipelineRender != tc.want {
+				t.Fatalf("NextActionPipelineRender=%v want=%v state=%+v", state.NextActionPipelineRender, tc.want, state)
+			}
+		})
+	}
+}
+
+func TestLoadStateClosesDrafterRouteOnCombinedRenderConvergenceLedger(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "candidate")
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "冻结"}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := st.Checkpoints.AppendArtifact(domain.ChapterScope(1), "plan", "drafts/01.plan.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceOutputDir := filepath.Join(root, "live", "novel")
+	candidateID := "render-ch0001-flow-total"
+	writeJSON := func(path string, value any) {
+		t.Helper()
+		raw, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(path, raw, 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	identity := map[string]any{
+		"version": "pipeline-render-candidate.v2", "candidate_id": candidateID,
+		"generation_id": "generation", "chapter": 1,
+		"plan_digest": plan.Digest, "plan_checkpoint_seq": plan.Seq,
+		"projected_bundle_digest":  "sha256:bundle",
+		"promotion_receipt_digest": "sha256:promotion",
+	}
+	manifest := make(map[string]any, len(identity)+1)
+	for key, value := range identity {
+		manifest[key] = value
+	}
+	manifest["source_output_dir"] = sourceOutputDir
+	ledger := make(map[string]any, len(identity)+3)
+	for key, value := range identity {
+		ledger[key] = value
+	}
+	ledger["version"] = "pipeline-render-convergence.v1"
+	ledger["failure_limit"] = 3
+	ledger["records"] = []map[string]any{
+		{"body_sha256": strings.Repeat("1", 64), "semantic_reject": true},
+		{"body_sha256": strings.Repeat("2", 64), "structural_block": true},
+		{"body_sha256": strings.Repeat("3", 64), "structural_block": true},
+	}
+	writeJSON(filepath.Join(dir, "meta", "planning", "render_candidate.json"), manifest)
+	writeJSON(filepath.Join(
+		filepath.Dir(sourceOutputDir), ".render-candidates", "convergence", candidateID, "ledger.json",
+	), ledger)
+
+	state := LoadState(st)
+	if !state.NextActionStructuralReplanRequired ||
+		state.NextActionStructuralReplanAttempts != 3 ||
+		state.NextActionStructuralReplanLimit != 3 || state.NextActionPlanReady {
+		t.Fatalf("combined ledger left drafter route open: %+v", state)
 	}
 }
 
@@ -318,11 +423,41 @@ func TestRenderOnlyReviewReusesCurrentCausalPlan(t *testing.T) {
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.Progress.Init("render-only-review-route", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, 1000, "scene", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetPendingRewritesAndFlow([]int{1}, "正式复审仅要求表达层重写", domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WorldSim.SaveSimulationCast(domain.SimulationCast{Assignments: []domain.TierAssignment{
+		{Name: "林澈", Tier: domain.TierProtagonistCircle},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const simulationID = "sealed-before-formal-review"
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: simulationID, TimeWindow: "正式复审前已经冻结的时段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
 	body := "第一章正文。\n\n【额度和限制与任务全挤在这里。】"
 	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "第一章"}); err != nil {
+	if err := s.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "第一章"}
+	plan.CausalSimulation.WorldSimulationID = simulationID
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
 		t.Fatal(err)
 	}
 	checkpointFlowChapterPlan(t, s, 1)
@@ -339,6 +474,9 @@ func TestRenderOnlyReviewReusesCurrentCausalPlan(t *testing.T) {
 		},
 	}
 	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveRewriteBrief(1, "# rewrite brief\n\n- AI味与主角内在判断偏薄，只重渲染表达。\n"); err != nil {
 		t.Fatal(err)
 	}
 	writeGate := func(rule string) {
@@ -361,15 +499,44 @@ func TestRenderOnlyReviewReusesCurrentCausalPlan(t *testing.T) {
 	}
 
 	writeGate("system_message_overpacked")
-	if !renderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
+	if !toolspkg.RenderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
 		t.Fatal("render-only system dialogue fix should reuse the current causal plan")
 	}
 	writeGate("semicolon_overuse")
-	if !renderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
+	if !toolspkg.RenderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
 		t.Fatal("render-only punctuation fix should reuse the current causal plan")
 	}
+	writeGate("pov_interiority_thin")
+	if !toolspkg.RenderOnlyReviewAllowsPlanReuse(s, 1) || !chapterPlanReadyForDraft(s, 1, true) {
+		t.Fatal("render-only interiority/presentation fix should reuse the current causal plan")
+	}
+	worldRequired, worldReady, worldGaps := toolspkg.ChapterWorldSimulationStatus(s, 1)
+	if !worldRequired || worldReady || !slices.ContainsFunc(worldGaps, func(gap string) bool {
+		return strings.Contains(gap, "rewrite_source does not match")
+	}) {
+		t.Fatalf("fixture must reproduce the post-review rewrite_source version gap: required=%v ready=%v gaps=%v", worldRequired, worldReady, worldGaps)
+	}
+	state := LoadState(s)
+	if !state.NextActionPlanReady || !state.NextActionReviewRerenderRequired {
+		t.Fatalf("expression-only review must retain the sealed plan and require a fresh draft: %+v", state)
+	}
+	instruction := Route(state)
+	if instruction == nil || instruction.Agent != "drafter" || instruction.Chapter != 1 {
+		t.Fatalf("expression-only review with a stale rewrite_source version must route directly to Drafter: %+v", instruction)
+	}
+	review.Dimensions[1].Verdict = "warning"
+	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if toolspkg.RenderOnlyReviewAllowsPlanReuse(s, 1) || chapterPlanReadyForDraft(s, 1, true) {
+		t.Fatal("character-dimension failures must not use the expression-only plan reuse path")
+	}
+	review.Dimensions[1].Verdict = "pass"
+	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
 	writeGate("pending_resource_as_fact")
-	if renderOnlyReviewAllowsPlanReuse(s, 1) || chapterPlanReadyForDraft(s, 1, true) {
+	if toolspkg.RenderOnlyReviewAllowsPlanReuse(s, 1) || chapterPlanReadyForDraft(s, 1, true) {
 		t.Fatal("resource/fact failures must return to causal replanning")
 	}
 }

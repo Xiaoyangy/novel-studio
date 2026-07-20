@@ -48,6 +48,15 @@ func guardPipelinePlanningExecution(st *store.Store, chapter int, tool string) e
 			errs.ErrToolPrecondition,
 		)
 	}
+	if lock.Mode == domain.PipelineExecutionPromote {
+		return fmt.Errorf(
+			"promote execution lock 正在机械提升第 %d 章（owner=%s）；%s 试图进入规划，已拒绝。promote 只能安装 sealed bundle，不得重新推演或改写 plan: %w",
+			lock.TargetChapter,
+			lock.Owner,
+			tool,
+			errs.ErrToolPrecondition,
+		)
+	}
 	if lock.Mode == domain.PipelineExecutionFoundation || lock.Mode == domain.PipelineExecutionOutlineAll {
 		return fmt.Errorf(
 			"%s execution lock 正在准备全书基础（owner=%s）；%s 试图提前规划第 %d 章，已拒绝: %w",
@@ -128,6 +137,14 @@ func guardPipelineGlobalPlanningExecution(st *store.Store, tool string) error {
 			tool,
 			errs.ErrToolPrecondition,
 		)
+	case domain.PipelineExecutionPromote:
+		return fmt.Errorf(
+			"promote execution lock 正在机械提升第 %d 章（owner=%s）；%s 试图改写全局配置、规划或正史状态，已拒绝: %w",
+			lock.TargetChapter,
+			lock.Owner,
+			tool,
+			errs.ErrToolPrecondition,
+		)
 	case domain.PipelineExecutionPreplan, domain.PipelineExecutionProjectAll:
 		return fmt.Errorf(
 			"planning execution lock 正在只推演第 %d 章（owner=%s）；%s 试图改写全局配置或正史状态，已拒绝。preplan/plan 阶段不得修改 user rules、progress、foundation、弧边界或 world tick: %w",
@@ -181,6 +198,16 @@ func guardPipelineProseExecution(st *store.Store, chapter int, tool string) erro
 	if lock.Mode == domain.PipelineExecutionPreplan || lock.Mode == domain.PipelineExecutionProjectAll {
 		return fmt.Errorf(
 			"preplan execution lock 正在推演第 %d 章（owner=%s）；%s 试图改写第 %d 章正文，已拒绝。推演阶段不得生成、编辑、合并或提交任何正文: %w",
+			lock.TargetChapter,
+			lock.Owner,
+			tool,
+			chapter,
+			errs.ErrToolPrecondition,
+		)
+	}
+	if lock.Mode == domain.PipelineExecutionPromote {
+		return fmt.Errorf(
+			"promote execution lock 正在机械提升第 %d 章（owner=%s）；%s 试图改写第 %d 章正文，已拒绝。promote 只能安装 sealed simulation/plan/render packet: %w",
 			lock.TargetChapter,
 			lock.Owner,
 			tool,

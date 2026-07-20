@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -42,6 +45,104 @@ func TestCurrentChapterRenderPlanRejectsStagedPartials(t *testing.T) {
 	}
 	if _, err := validateCurrentChapterRenderPlan(s, 1); err == nil || !strings.Contains(err.Error(), "simulation partial") {
 		t.Fatalf("formal simulation/plan bypassed staged world partial: %v", err)
+	}
+}
+
+func TestExpressionOnlyReviewClassifierDoesNotAuthorizeUnsealedPlan(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("expression-only-render-guard", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.MarkChapterComplete(1, 1000, "scene", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.SetPendingRewritesAndFlow([]int{1}, "正式复审仅要求表达层重写", domain.FlowRewriting); err != nil {
+		t.Fatal(err)
+	}
+	markPipelineManaged(t, s)
+	if err := s.WorldSim.SaveSimulationCast(domain.SimulationCast{Assignments: []domain.TierAssignment{
+		{Name: "林澈", Tier: domain.TierProtagonistCircle},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const simulationID = "sealed-before-formal-review"
+	if err := s.SaveChapterWorldSimulation(domain.ChapterWorldSimulation{
+		Chapter: 1, SimulationID: simulationID, TimeWindow: "正式复审前已经冻结的时段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "chapter_world_simulation", "meta/chapter_simulations/001.json",
+	); err != nil {
+		t.Fatal(err)
+	}
+	body := "第一章正文。\n\n【额度、限制与任务全挤在同一句里。】"
+	if err := s.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "第一章"}
+	plan.CausalSimulation.WorldSimulationID = simulationID
+	if err := s.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Checkpoints.AppendArtifactLatest(domain.ChapterScope(1), "plan", "drafts/01.plan.json"); err != nil {
+		t.Fatal(err)
+	}
+	bodyHash := reviewreport.BodySHA256(body)
+	review := domain.ReviewEntry{
+		Chapter: 1, BodySHA256: bodyHash, Scope: "chapter", ContractStatus: "met", Verdict: "rewrite",
+		Dimensions: []domain.DimensionScore{
+			{Dimension: "consistency", Verdict: "pass"},
+			{Dimension: "character", Verdict: "pass"},
+			{Dimension: "pacing", Verdict: "pass"},
+			{Dimension: "continuity", Verdict: "pass"},
+			{Dimension: "foreshadow", Verdict: "pass"},
+			{Dimension: "hook", Verdict: "pass"},
+		},
+	}
+	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Drafts.SaveRewriteBrief(1, "# rewrite brief\n\n- 降低 AI 味并增加主角内在判断，只重渲染表达。\n"); err != nil {
+		t.Fatal(err)
+	}
+	gate := reviewreport.MechanicalGatePayload{
+		Chapter: 1, BodySHA256: bodyHash,
+		RuleViolations: []rules.Violation{
+			{Rule: "pov_interiority_thin", Severity: rules.SeverityError},
+			{Rule: "dialogue_conveyor_overuse", Severity: rules.SeverityWarning},
+		},
+	}
+	raw, err := json.Marshal(gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Dir(), "reviews", "01_ai_gate.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	worldRequired, worldReady, gaps := ChapterWorldSimulationStatus(s, 1)
+	if !worldRequired || worldReady || !strings.Contains(strings.Join(gaps, "；"), "rewrite_source does not match") {
+		t.Fatalf("fixture must have only a post-freeze rewrite-source version blocker: required=%v ready=%v gaps=%v", worldRequired, worldReady, gaps)
+	}
+	if !RenderOnlyReviewAllowsPlanReuse(s, 1) {
+		t.Fatal("strict expression-only semantic classifier rejected its positive fixture")
+	}
+	if _, err := validateCurrentChapterRenderPlan(s, 1); err == nil {
+		t.Fatal("an unsealed plan must not turn semantic classification into a prose-write capability")
+	}
+
+	review.Dimensions[1].Verdict = "warning"
+	if err := s.World.SaveReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateCurrentChapterRenderPlan(s, 1); err == nil {
+		t.Fatal("character-dimension failure must not bypass simulation and rewrite-craft validation")
 	}
 }
 

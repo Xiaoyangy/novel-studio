@@ -52,6 +52,27 @@ func TestPipelineExecutionLeaseOwnershipAndRelease(t *testing.T) {
 	}
 }
 
+func TestPipelineExecutionPromoteLeaseNeedsNoRenderPlanDigest(t *testing.T) {
+	st := NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionPromote,
+		TargetChapter: 1,
+		Owner:         "promote-run",
+	}); err != nil {
+		t.Fatalf("acquire promote execution: %v", err)
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil || lock == nil {
+		t.Fatalf("load promote execution: lock=%+v err=%v", lock, err)
+	}
+	if lock.Mode != domain.PipelineExecutionPromote || lock.PlanDigest != "" {
+		t.Fatalf("unexpected promote execution lock: %+v", lock)
+	}
+}
+
 func TestPipelineExecutionExpiredLeaseCleansItself(t *testing.T) {
 	st := NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

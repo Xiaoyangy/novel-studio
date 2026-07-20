@@ -210,6 +210,13 @@ func ensureChapterPlannable(s *store.Store, chapter int) (skipped json.RawMessag
 // 记 checkpoint、透出事件编织冲突。plan_chapter 单发与 plan_details finalize 共用。
 func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan bool) (json.RawMessage, error) {
 	applyOutlineAnchorsToPlan(s, &plan, isRewritePlan)
+	if id := craftReceiptIDFromSources(plan.CausalSimulation.ContextSources); id != "" {
+		if receipt, err := s.RAG.LoadCraftRecallReceipt(id); err != nil {
+			return nil, fmt.Errorf("load project-all craft receipt: %w", err)
+		} else if receipt != nil && receipt.Stage == domain.ProjectAllCraftReceiptStage {
+			MaterializeProjectAllCraftPlanConsumption(&plan, receipt)
+		}
+	}
 	if err := applyRewriteAnchorsToPlan(s, &plan); err != nil {
 		return nil, err
 	}
@@ -385,7 +392,7 @@ func projectAllRevealBudgetItemMechanicallyEnforceable(item string) bool {
 	}
 	markers := []string{
 		"不提前给出", "不提前揭示", "不提前", "不解释", "不揭示",
-		"不说明", "不公开", "不点破", "不交代", "不写成", "不写",
+		"不说明", "不公开", "不展示", "不点破", "不交代", "不写成", "不写",
 		"不允许", "不得", "禁止", "不可", "不能", "不要", "避免",
 		"尚未", "仍未", "未曾",
 	}
@@ -512,6 +519,7 @@ func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string
 	}
 	var hard []string
 	var simulationOnly []string
+	var predecessorState []string
 	for _, scene := range scenes {
 		scene = strings.TrimSpace(scene)
 		switch {
@@ -519,6 +527,8 @@ func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string
 			hard = appendUniqueString(hard, scene)
 		case strings.HasPrefix(scene, "[project-all simulation-obligation:"):
 			simulationOnly = appendUniqueString(simulationOnly, scene)
+		case strings.HasPrefix(scene, "[project-all predecessor-state:"):
+			predecessorState = appendUniqueString(predecessorState, scene)
 		}
 	}
 	if len(hard) > 0 {
@@ -535,6 +545,17 @@ func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string
 		plan.Contract.ContinuityChecks = appendUniqueString(
 			plan.Contract.ContinuityChecks,
 			"跨章场外义务（只推进世界状态，不得越过 POV 知识边界）："+strings.Join(simulationOnly, "；"),
+		)
+	}
+	if len(predecessorState) > 0 {
+		plan.Contract.ContinuityChecks = appendUniqueString(
+			plan.Contract.ContinuityChecks,
+			"上一章不可逆前态（只能推进新后果、证据回看或人物反应）："+
+				strings.Join(predecessorState, "；"),
+		)
+		plan.Contract.ForbiddenMoves = appendUniqueString(
+			plan.Contract.ForbiddenMoves,
+			"不得把 project-all predecessor-state 标记中的已完成状态转移重新安排为本章新现场；只能从其后果开始。",
 		)
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
+	"github.com/chenhongyang/novel-studio/internal/userrules"
 	writersampler "github.com/chenhongyang/novel-studio/internal/writer/sampler"
 )
 
@@ -45,6 +46,12 @@ func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
 		return fmt.Errorf("交付沉淀找不到章节")
 	}
 	st := store.NewStore(outputDir)
+	if err := validatePipelineFullBookWordBudget(st, outputDir, chapters); err != nil {
+		return err
+	}
+	if err := requirePipelineFinalizedShortBook(outputDir); err != nil {
+		return err
+	}
 	if pending, err := st.RAG.LoadPendingUpserts(); err != nil {
 		return fmt.Errorf("读取待回填 RAG 队列失败: %w", err)
 	} else if pending != nil && len(pending.Chunks) > 0 {
@@ -128,6 +135,59 @@ func settlePipelineDelivery(outputDir string, flags pipelineFlags) error {
 	}
 	if err := writePipelineDeliveryMarkdown(outputDir, snapshots); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validatePipelineFullBookWordBudget(st *store.Store, outputDir string, chapters []int) error {
+	if st == nil {
+		return nil
+	}
+	receipt, err := st.LoadOutlineAllExecutionReceipt()
+	if err != nil || receipt == nil || receipt.TargetChapters <= 0 {
+		return err
+	}
+	if len(chapters) != receipt.TargetChapters {
+		return nil
+	}
+	for index, chapter := range chapters {
+		if chapter != index+1 {
+			return nil
+		}
+	}
+	target, err := domain.ResolveBookScaleTarget(
+		receipt.EstimatedScale,
+		receipt.TargetVolumes,
+		receipt.TargetChapters,
+	)
+	if err != nil {
+		return fmt.Errorf("交付前解析全书字数合同: %w", err)
+	}
+	if target.MinWords <= 0 || target.MaxWords <= 0 {
+		return nil
+	}
+	totalRunes := 0
+	for _, chapter := range chapters {
+		raw, readErr := os.ReadFile(filepath.Join(outputDir, "chapters", fmt.Sprintf("%02d.md", chapter)))
+		if readErr != nil {
+			return readErr
+		}
+		totalRunes += utf8.RuneCount(raw)
+	}
+	return validatePipelineBookWordTotal(target, totalRunes)
+}
+
+func validatePipelineBookWordTotal(target domain.BookScaleTarget, totalRunes int) error {
+	if target.MinWords <= 0 || target.MaxWords <= 0 {
+		return nil
+	}
+	if totalRunes < target.MinWords || totalRunes > target.MaxWords {
+		return fmt.Errorf(
+			"全书正文总字数硬门禁未通过：实际%d字，要求%d-%d字；交付已停止，需通过正式 rewrite/render 流程调整章节，不能用合并稿注水或删改",
+			totalRunes,
+			target.MinWords,
+			target.MaxWords,
+		)
 	}
 	return nil
 }
@@ -697,6 +757,9 @@ func nonEmptyFile(path string) bool {
 }
 
 func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) error {
+	if strings.TrimSpace(flags.ArchitectTarget) != "" && !flags.RefreshArchitect {
+		return fmt.Errorf("--architect-target 必须与 --refresh-architect 同时使用")
+	}
 	cfg, bundle, err := loadCfgBundle(opts)
 	if err != nil {
 		return err
@@ -708,9 +771,36 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 	if err := store.NewStore(cfg.OutputDir).Init(); err != nil {
 		return err
 	}
+	if changed, err := pipelineReconcileExplicitPromptChapterWords(
+		store.NewStore(cfg.OutputDir),
+		state.Prompt,
+	); err != nil {
+		return err
+	} else if changed {
+		fmt.Fprintln(os.Stderr, "[pipeline:architect] 已从创作总令恢复明确的单章字数硬区间")
+	}
 	if tools.FoundationCoreComplete(cfg.OutputDir) {
 		if flags.RefreshArchitect {
-			return pipelineRefreshArchitectOpening(opts, cfg, bundle, state.Prompt)
+			return pipelineRefreshArchitectOpening(opts, cfg, bundle, state.Prompt, flags.ArchitectTarget)
+		}
+		if pipelineArchitectCompassNeedsRepair(cfg.OutputDir) {
+			return pipelineRepairArchitectCompass(opts, cfg, bundle, state.Prompt, fmt.Errorf("compass.non_negotiables 缺失，outline-all 无法映射全书硬合同"))
+		}
+		if pipelineStageListContains(state.Stages, "outline-all") {
+			normalizedScale, err := pipelineNormalizeOutlineAllCompassScale(cfg.OutputDir)
+			if err != nil {
+				return err
+			}
+			if normalizedScale {
+				fmt.Fprintln(os.Stderr, "[pipeline:architect] 已为 compass.estimated_scale 补齐 outline-all 可解析的卷/章显式区间")
+			}
+			normalized, err := pipelineNormalizeOutlineAllArcSpans(cfg.OutputDir)
+			if err != nil {
+				return err
+			}
+			if normalized {
+				fmt.Fprintln(os.Stderr, "[pipeline:architect] 已无损重组 layered_outline 弧容器以满足 outline-all 的 8—16 章跨度；逐章内容保持不变")
+			}
 		}
 		fmt.Fprintln(os.Stderr, "[pipeline:architect] foundation 已齐，检查 Architect readiness")
 		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
@@ -746,7 +836,180 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 	return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
 }
 
-func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string) error {
+func pipelineReconcileExplicitPromptChapterWords(st *store.Store, prompt string) (bool, error) {
+	if st == nil {
+		return false, nil
+	}
+	rangeRule := userrules.ExplicitChapterWords(prompt)
+	if rangeRule == nil {
+		return false, nil
+	}
+	snapshot, err := st.UserRules.Load()
+	if err != nil || snapshot == nil {
+		return false, err
+	}
+	current := snapshot.Structured.ChapterWords
+	if current != nil && current.Min == rangeRule.Min && current.Max == rangeRule.Max {
+		return false, nil
+	}
+	snapshot.Structured.ChapterWords = rangeRule
+	snapshot.Sources = appendUniqueProjectAllString(snapshot.Sources, "pipeline_prompt_explicit")
+	filtered := snapshot.Uncertain[:0]
+	for _, item := range snapshot.Uncertain {
+		lower := strings.ToLower(item)
+		if strings.Contains(lower, "chapter_words") ||
+			strings.Contains(item, "单章") ||
+			strings.Contains(item, "每章") ||
+			strings.Contains(item, "章节字数") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	snapshot.Uncertain = filtered
+	if err := st.UserRules.Save(snapshot); err != nil {
+		return false, fmt.Errorf("保存创作总令的明确单章字数区间: %w", err)
+	}
+	return true, nil
+}
+
+func pipelineStageListContains(stages []string, target string) bool {
+	for _, stage := range stages {
+		if stage == target {
+			return true
+		}
+	}
+	return false
+}
+
+func pipelineNormalizeOutlineAllCompassScale(outputDir string) (bool, error) {
+	st := store.NewStore(outputDir)
+	compass, err := st.Outline.LoadCompass()
+	if err != nil || compass == nil {
+		return false, err
+	}
+	if _, err := domain.ParseBookScaleRange(compass.EstimatedScale); err == nil {
+		return false, nil
+	}
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		return false, err
+	}
+	volumeCount := domain.RealVolumeCount(volumes)
+	chapterCount := domain.TotalChapters(volumes)
+	if volumeCount <= 0 || chapterCount <= 0 {
+		return false, fmt.Errorf("outline-all 无法从 layered_outline 推导 compass 规模：volumes=%d chapters=%d", volumeCount, chapterCount)
+	}
+	existing := strings.TrimSpace(compass.EstimatedScale)
+	compass.EstimatedScale = fmt.Sprintf("%d-%d卷，%d-%d章", volumeCount, volumeCount, chapterCount, chapterCount)
+	if existing != "" {
+		compass.EstimatedScale += "；" + existing
+	}
+	if _, err := domain.ParseBookScaleRange(compass.EstimatedScale); err != nil {
+		return false, fmt.Errorf("outline-all compass 规模规范化失败: %w", err)
+	}
+	if err := st.Outline.SaveCompass(*compass); err != nil {
+		return false, fmt.Errorf("保存 outline-all 规范化 compass: %w", err)
+	}
+	return true, nil
+}
+
+// pipelineNormalizeOutlineAllArcSpans is a structural migration, not a story
+// rewrite. Architect occasionally returns a complete short-fiction outline as
+// three four-chapter dramatic acts, while outline-all's bounded mutation
+// protocol requires every arc container to span 8-16 chapters. When every arc
+// is already expanded, the host can repartition the exact ordered chapter
+// entries without asking a model to regenerate titles, events, hooks or scenes.
+func pipelineNormalizeOutlineAllArcSpans(outputDir string) (bool, error) {
+	st := store.NewStore(outputDir)
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		return false, err
+	}
+	if len(domain.OutlineAllArcSpanIssues(volumes)) == 0 {
+		return false, nil
+	}
+
+	changed := false
+	for volumeIndex := range volumes {
+		volume := &volumes[volumeIndex]
+		volumeSpan := 0
+		needsRepair := false
+		for _, arc := range volume.Arcs {
+			span := arc.ChapterSpan()
+			volumeSpan += span
+			if span < domain.OutlineAllMinArcChapters || span > domain.OutlineAllMaxArcChapters {
+				needsRepair = true
+			}
+		}
+		if !needsRepair {
+			continue
+		}
+
+		chapters := make([]domain.OutlineEntry, 0, volumeSpan)
+		titles := make([]string, 0, len(volume.Arcs))
+		goals := make([]string, 0, len(volume.Arcs))
+		refs := make([]domain.StoryContractRef, 0)
+		for _, arc := range volume.Arcs {
+			if !arc.IsExpanded() {
+				return false, fmt.Errorf(
+					"outline-all 弧跨度不合格且包含未展开骨架 V%dA%d；需由 Architect 按 8—16 章重新预留",
+					volume.Index, arc.Index,
+				)
+			}
+			chapters = append(chapters, arc.Chapters...)
+			if title := strings.TrimSpace(arc.Title); title != "" {
+				titles = append(titles, title)
+			}
+			if goal := strings.TrimSpace(arc.Goal); goal != "" {
+				goals = append(goals, goal)
+			}
+			refs = append(refs, arc.ContractRefs...)
+		}
+		spans, err := domain.RecommendedOutlineAllArcSpans(len(chapters))
+		if err != nil {
+			return false, fmt.Errorf("outline-all 无法无损重组第 %d 卷的 %d 章：%w", volume.Index, len(chapters), err)
+		}
+		if len(refs) > 0 {
+			return false, fmt.Errorf("outline-all 拒绝自动重组带既有 contract_refs 的第 %d 卷；需显式 rebase 后重规划", volume.Index)
+		}
+
+		newArcs := make([]domain.ArcOutline, 0, len(spans))
+		chapterOffset := 0
+		for arcIndex, span := range spans {
+			end := chapterOffset + span
+			arcTitle := strings.TrimSpace(volume.Title)
+			if len(spans) > 1 {
+				arcTitle = fmt.Sprintf("%s（第%d段）", firstNonEmptyString(arcTitle, strings.Join(titles, " / ")), arcIndex+1)
+			} else if arcTitle == "" {
+				arcTitle = strings.Join(titles, " / ")
+			}
+			newArcs = append(newArcs, domain.ArcOutline{
+				Index:    arcIndex + 1,
+				Title:    arcTitle,
+				Goal:     strings.Join(goals, "；"),
+				Chapters: append([]domain.OutlineEntry(nil), chapters[chapterOffset:end]...),
+			})
+			chapterOffset = end
+		}
+		volume.Arcs = newArcs
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	if issues := domain.OutlineAllArcSpanIssues(volumes); len(issues) > 0 {
+		return false, fmt.Errorf("outline-all 弧跨度无损重组后仍不合格：%s", summarizeOutlineContractIssues(issues, 12))
+	}
+	if err := st.Outline.SaveLayeredOutline(volumes); err != nil {
+		return false, fmt.Errorf("保存 outline-all 弧跨度迁移后的 layered_outline: %w", err)
+	}
+	if err := st.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		return false, fmt.Errorf("保存 outline-all 弧跨度迁移后的 flat outline: %w", err)
+	}
+	return true, nil
+}
+
+func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt, requestedTarget string) error {
 	refreshPrompt, err := pipelineArchitectRefreshPrompt(cfg.OutputDir, prompt)
 	if err != nil {
 		return err
@@ -755,9 +1018,57 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 	if err != nil {
 		return err
 	}
+	shortChapterZero, _ := pipelineArchitectShortChapterZero(cfg.OutputDir)
+	if shortChapterZero {
+		targets, err := pipelineArchitectShortSelectedTargets(requestedTarget)
+		if err != nil {
+			return err
+		}
+		for _, target := range targets {
+			const maxTargetAttempts = 3
+			updated := false
+			for attempt := 1; attempt <= maxTargetAttempts; attempt++ {
+				beforeTarget, err := pipelineArchitectShortTargetRevision(cfg.OutputDir, target)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "[pipeline:architect] 刷新 foundation %s（尝试 %d/%d）\n", target.Type, attempt, maxTargetAttempts)
+				if err := headless.Run(cfg, bundle, headless.Options{
+					Prompt:                    pipelineArchitectShortRefreshTargetPrompt(refreshPrompt, target),
+					PreserveUserRules:         true,
+					StopAfterFoundationChange: true,
+				}); err != nil {
+					return err
+				}
+				afterTarget, err := pipelineArchitectShortTargetRevision(cfg.OutputDir, target)
+				if err != nil {
+					return err
+				}
+				if afterTarget != beforeTarget {
+					updated = true
+					break
+				}
+				fmt.Fprintf(os.Stderr, "[pipeline:architect] %s 本轮未发生目标落盘，保持同一目标重试\n", target.Type)
+			}
+			if !updated {
+				return fmt.Errorf("Architect 连续 %d 次未真正保存指定 foundation %s；拒绝把路由结束误判为刷新成功", maxTargetAttempts, target.Type)
+			}
+		}
+		after, err := pipelineOpeningFoundationDigest(cfg.OutputDir)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(requestedTarget) == "" && after == before {
+			return fmt.Errorf("Architect 已逐项落盘但开篇大纲指纹仍未变化")
+		}
+		return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+	}
+	if strings.TrimSpace(requestedTarget) != "" {
+		return fmt.Errorf("--architect-target 只适用于第0章、3万字内的短篇 foundation 刷新")
+	}
 	const maxRefreshRuns = 3
 	for run := 1; run <= maxRefreshRuns; run++ {
-		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次刷新开篇 foundation\n", run, maxRefreshRuns)
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次刷新 foundation\n", run, maxRefreshRuns)
 		if err := headless.Run(cfg, bundle, headless.Options{
 			Prompt:                    refreshPrompt,
 			PreserveUserRules:         true,
@@ -776,6 +1087,78 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 	return fmt.Errorf("Architect 刷新 %d 次后开篇大纲指纹仍未变化", maxRefreshRuns)
 }
 
+type pipelineArchitectShortRefreshTarget struct {
+	Type        string
+	Description string
+	Artifacts   []string
+}
+
+var pipelineArchitectShortRefreshTargets = []pipelineArchitectShortRefreshTarget{
+	{Type: "premise", Description: "恢复一句话故事、旧案统一引擎、双女主关系、两次反转与终局方向", Artifacts: []string{"premise.md"}},
+	{Type: "characters", Description: "修复全部人物身份、关系、生死权限、欲望与当前行动边界", Artifacts: []string{"characters.json"}},
+	{Type: "world_rules", Description: "修复数据灰产旧案、两次指定反转、证据流转与现实处置硬规则", Artifacts: []string{"world_rules.json"}},
+	{Type: "book_world", Description: "修复组织、空间、经济利益与女性地址/路线数据灰产的同一世界引擎", Artifacts: []string{"book_world.json"}},
+	{Type: "world_codex", Description: "修复旧案机制、资料来源与现实制度细节；调用时必须带 change_reason=用户创作总令纠偏、change_evidence=本轮 prompt 的具体硬合同", Artifacts: []string{"world_codex.json"}},
+	{Type: "update_compass", Description: "修复 open_threads、non_negotiables、ending_direction 与明确规模", Artifacts: []string{"meta/compass.json"}},
+	{Type: "layered_outline", Description: "最后重做完整短篇章纲；一卷一弧覆盖全书并同步 flat outline", Artifacts: []string{"layered_outline.json", "outline.json"}},
+}
+
+func pipelineArchitectShortRefreshRunPrompt(base string, run int) string {
+	index := run - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(pipelineArchitectShortRefreshTargets) {
+		index = len(pipelineArchitectShortRefreshTargets) - 1
+	}
+	return pipelineArchitectShortRefreshTargetPrompt(base, pipelineArchitectShortRefreshTargets[index])
+}
+
+func pipelineArchitectShortRefreshTargetPrompt(base string, target pipelineArchitectShortRefreshTarget) string {
+	return fmt.Sprintf(
+		"[宿主强制路由：Coordinator 必须逐字服从]\n当前顶层角色是 Coordinator。Coordinator 本轮唯一合法动作是立即调用 subagent(agent=\"architect_long\", task=<本提示中从“Architect 执行任务”开始的全部要求>)。Coordinator 自己禁止调用 novel_context 或任何 foundation/章节工具，禁止服从 flow router 的 writer 指令，禁止派 writer/drafter/editor，也禁止先输出分析；必须把本任务交给 architect_long。\n\n[Architect 执行任务]\n本回合只允许调用一次 save_foundation(type=%q)，任务：%s。禁止保存或重存任何其他 foundation 类型；即使其他项仍有问题也留给后续宿主回合。由 architect_long 先且只调用一次 novel_context(chapter=1, profile=planning) 获取紧凑上下文；若读取失败，直接依据下方创作总令完成本类型，不得改用无 chapter 的完整上下文。保存后立即停止，严禁派 writer。\n\n%s\n\n[再次确认本轮边界]\nCoordinator 只能派 architect_long；architect_long 唯一允许的持久化调用是 save_foundation(type=%q)。不得调用 premise/characters/world_rules/book_world/world_codex/update_compass/layered_outline 中的其他类型，保存后立即结束。\n",
+		target.Type,
+		target.Description,
+		base,
+		target.Type,
+	)
+}
+
+func pipelineArchitectShortSelectedTargets(requested string) ([]pipelineArchitectShortRefreshTarget, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return append([]pipelineArchitectShortRefreshTarget(nil), pipelineArchitectShortRefreshTargets...), nil
+	}
+	for _, target := range pipelineArchitectShortRefreshTargets {
+		if target.Type == requested {
+			return []pipelineArchitectShortRefreshTarget{target}, nil
+		}
+	}
+	return nil, fmt.Errorf("未知 --architect-target %q；可选：premise, characters, world_rules, book_world, world_codex, update_compass, layered_outline", requested)
+}
+
+func pipelineArchitectShortTargetRevision(outputDir string, target pipelineArchitectShortRefreshTarget) (string, error) {
+	h := sha256.New()
+	for _, rel := range target.Artifacts {
+		path := filepath.Join(outputDir, filepath.FromSlash(rel))
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				_, _ = fmt.Fprintf(h, "%s\x00missing\x00", rel)
+				continue
+			}
+			return "", fmt.Errorf("读取 Architect 目标产物 %s 失败: %w", rel, err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("读取 Architect 目标产物 %s 失败: %w", rel, err)
+		}
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00", rel, info.ModTime().UnixNano(), info.Size())
+		_, _ = h.Write(raw)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func pipelineOpeningFoundationDigest(outputDir string) (string, error) {
 	h := sha256.New()
 	for _, rel := range []string{"outline.json", "layered_outline.json"} {
@@ -789,6 +1172,9 @@ func pipelineOpeningFoundationDigest(outputDir string) (string, error) {
 }
 
 func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string, cause error) error {
+	if pipelineArchitectCompassNeedsRepair(cfg.OutputDir) {
+		return pipelineRepairArchitectCompass(opts, cfg, bundle, prompt, cause)
+	}
 	if repaired, err := pipelineAutoRepairBookWorldStructure(cfg.OutputDir); err != nil {
 		return err
 	} else if repaired {
@@ -806,7 +1192,10 @@ func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bun
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 Architect readiness 修复\n", run, maxRepairRuns)
-		if err := headless.Run(cfg, bundle, headless.Options{Prompt: repairPrompt}); err != nil {
+		if err := headless.Run(cfg, bundle, headless.Options{
+			Prompt:            repairPrompt,
+			PreserveUserRules: true,
+		}); err != nil {
 			return err
 		}
 		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
@@ -816,6 +1205,51 @@ func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bun
 		}
 	}
 	return fmt.Errorf("Architect readiness 修复 %d 次后仍未通过：%w", maxRepairRuns, cause)
+}
+
+func pipelineArchitectCompassNeedsRepair(outputDir string) bool {
+	compass, err := store.NewStore(outputDir).Outline.LoadCompass()
+	return err != nil || compass == nil || strings.TrimSpace(compass.EndingDirection) == "" || len(compass.OpenThreads) == 0 || len(compass.NonNegotiables) == 0
+}
+
+func pipelineRepairArchitectCompass(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string, cause error) error {
+	compassPath := filepath.Join(cfg.OutputDir, "meta", "compass.json")
+	current, err := os.ReadFile(compassPath)
+	if err != nil {
+		return fmt.Errorf("读取 compass 失败，无法执行受限迁移: %w", err)
+	}
+	var b strings.Builder
+	b.WriteString("[Pipeline Architect compass 受限迁移]\n")
+	b.WriteString("当前 foundation 除 compass.non_negotiables 外均已完成。本轮只允许派 architect_long，最多读取一次 novel_context，然后只调用一次 save_foundation(type=\"update_compass\", scale=\"short\", content=<完整 compass JSON>)。严禁保存 premise、characters、world_rules、book_world、world_codex 或 outline，严禁写正文。\n")
+	b.WriteString("完整 compass 必须保留当前 ending_direction、open_threads、estimated_scale，并新增 non_negotiables 数组。数组写 6—10 条从本项目创作总令与当前 foundation 逐项提取的具体硬合同，每条都必须能被 outline-all 映射到明确章位或兑现事件；至少覆盖用户明确指定的篇幅/章数、主角身份与能力边界、核心关系、故事发动机、关键时限或数字机关、反转与证据公平性、现实处置边界以及结局承诺。没有出现在本项目输入中的题材、角色、机制或结局不得补入；不得只写抽象主题词。保存后立即停止。\n")
+	if cause != nil {
+		b.WriteString("\n[当前 readiness 错误]\n" + cause.Error() + "\n")
+	}
+	if strings.TrimSpace(prompt) != "" {
+		b.WriteString("\n[创作总令，仅用于提取硬合同]\n" + prompt + "\n")
+	}
+	b.WriteString("\n[当前 compass.json]\n```json\n" + string(current) + "\n```\n")
+	const maxRuns = 2
+	for run := 1; run <= maxRuns; run++ {
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 compass 受限迁移\n", run, maxRuns)
+		if err := headless.Run(cfg, bundle, headless.Options{
+			Prompt:                    b.String(),
+			PreserveUserRules:         true,
+			StopAfterFoundationChange: true,
+		}); err != nil {
+			return err
+		}
+		if pipelineArchitectCompassNeedsRepair(cfg.OutputDir) {
+			cause = fmt.Errorf("compass.non_negotiables 迁移后仍为空")
+			continue
+		}
+		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
+			return nil
+		} else {
+			cause = err
+		}
+	}
+	return fmt.Errorf("Architect compass 迁移 %d 次后仍未通过：%w", maxRuns, cause)
 }
 
 func pipelineAutoRepairBookWorldStructure(outputDir string) (bool, error) {
@@ -998,6 +1432,14 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	b.WriteString("[Pipeline Architect 阶段]\n")
 	b.WriteString("本阶段只允许完成 Architect foundation，不允许进入正文写作。\n")
 	b.WriteString("必须派 architect_long/architect_short，并通过 save_foundation 落盘完整核心设定：premise、characters、world_rules、book_world、world_codex、compass，以及 layered_outline 或 outline。\n")
+	b.WriteString("这是可断点续跑阶段：Architect 首先读取一次 novel_context，已经存在且有效的 foundation 类型视为完成，禁止重新生成或覆盖；只保存缺失、过期或 readiness 明确判错的类型。每次恢复必须优先新增至少一个缺失类型，不能从 premise 开始重放。单项保持完成校验所需的最小充分篇幅，避免在 15 分钟子 Agent 硬时限内反复输出超长 JSON。\n")
+	existing, missing := pipelineArchitectFoundationPresence(outputDir)
+	b.WriteString("[本次断点资产清单]\n")
+	b.WriteString("已存在且本轮禁止重存：" + strings.Join(existing, "、") + "。\n")
+	b.WriteString("本轮只允许保存的缺失类型：" + strings.Join(missing, "、") + "。若缺失列表为空，直接结束并交给宿主 readiness，不得重放任何资产。\n")
+	b.WriteString("保存 compass（save_foundation type=update_compass）时必须同时包含 ending_direction、open_threads、estimated_scale 和非空 non_negotiables；estimated_scale 必须包含机器可读的显式范围，例如固定单卷12章也要写成“1-1卷，12-12章”，不能只写“单卷12章”；non_negotiables 应是 6—10 条可由 outline-all 逐章映射、不得推迟或删除的本书具体硬合同，禁止只写抽象主题。\n")
+	b.WriteString("下游 outline-all 要求 layered_outline 的每个弧占 8—16 章。若全书是 8—16 章短篇，必须保存为一卷一弧并让该弧覆盖全书（例如 12 章短篇只能是一卷一弧 12 章），不得拆成三个 4 章弧；起承转合仍写进逐章事件，不靠短弧分组表达。\n")
+	b.WriteString("book_world 的形状固定：protagonist_position 必须是一句话字符串；vision_pillars 必须是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 必须是对象 {economic:{base,controlled_by,tension}, cultural:{...}, political:{...}, historical:{...}}，不得把两个 pillars 写成数组。\n")
 	b.WriteString("完成 foundation 后立即停止，宿主会在下一阶段执行 zero-init；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter。\n")
 	b.WriteString("请特别落实用户硬规则：复杂项目按现实时间尺度合理压缩，不得把复杂工程写成和小项目同一时间节奏。\n")
 	if prompt != "" {
@@ -1013,13 +1455,68 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	return b.String(), nil
 }
 
+func pipelineArchitectFoundationPresence(outputDir string) (existing, missing []string) {
+	type asset struct {
+		name  string
+		paths []string
+	}
+	assets := []asset{
+		{name: "premise", paths: []string{filepath.Join(outputDir, "premise.md")}},
+		{name: "characters", paths: []string{filepath.Join(outputDir, "characters.json")}},
+		{name: "world_rules", paths: []string{filepath.Join(outputDir, "world_rules.json")}},
+		{name: "book_world", paths: []string{filepath.Join(outputDir, "book_world.json")}},
+		{name: "world_codex", paths: []string{filepath.Join(outputDir, "world_codex.json")}},
+		{name: "compass", paths: []string{filepath.Join(outputDir, "meta", "compass.json")}},
+		{name: "layered_outline 或 outline", paths: []string{
+			filepath.Join(outputDir, "layered_outline.json"),
+			filepath.Join(outputDir, "outline.json"),
+		}},
+	}
+	for _, item := range assets {
+		present := false
+		for _, path := range item.paths {
+			if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Size() > 0 {
+				present = true
+				break
+			}
+		}
+		if present {
+			existing = append(existing, item.name)
+		} else {
+			missing = append(missing, item.name)
+		}
+	}
+	if len(existing) == 0 {
+		existing = []string{"无"}
+	}
+	if len(missing) == 0 {
+		missing = []string{"无"}
+	}
+	return existing, missing
+}
+
 func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
-	_ = outputDir
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("--refresh-architect 需要 --prompt/--prompt-file 说明本次重规划目标")
 	}
+	shortChapterZero, totalChapters := pipelineArchitectShortChapterZero(outputDir)
 	var b strings.Builder
+	if shortChapterZero {
+		fmt.Fprintf(&b, "[Pipeline Architect 章零短篇全书刷新阶段]\n这是尚未写正文的%d章短篇全书重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation。\n", totalChapters)
+		b.WriteString("按以下顺序逐项检查并修复；每轮只调用一次 save_foundation 保存最靠前的未完成项，随后立即停止，宿主会以新回合继续：\n")
+		b.WriteString("1. premise：恢复本项目创作总令的一句话故事、题材引擎与主角关系，不得用相邻但不同的故事替换。\n")
+		b.WriteString("2. characters：逐人恢复创作总令明确的身份、能力、关系、知识边界与生死状态；角色只能执行其时点、权限和可见证据允许的行动。\n")
+		b.WriteString("3. world_rules：纠正本项目的因果硬规则、反转公平性、信息权限、证据或资源来源及现实处置边界；未被创作总令要求的机制不得新增。\n")
+		b.WriteString("4. book_world 与 world_codex：只在与创作总令冲突时依次修复，使组织、空间、历史事件和资源/材料流转支持同一个故事，不保留题材漂移。\n")
+		b.WriteString("5. compass：同步纠正 open_threads/non_negotiables/ending_direction，使每条用户硬合同都有唯一章位且不被相邻合同冒名替代。\n")
+		fmt.Fprintf(&b, "6. layered_outline/outline：最后重做完整%d章的结果级结构，不只改黄金三章；一次保存 layered_outline 并由工具同步 flat outline。必须逐章消除重复、错章、提前兑现和缺失的字面机关。\n", totalChapters)
+		b.WriteString("每一项已经逐字服从本轮创作总令时才可跳过；不得因为文件存在就视为完成。保留创作总令明确给出的书名、主角姓名与职业、人物关系、时限/数字机关、题材边界和结局承诺；不得从示例、旧项目或模型偏好补入其他故事的事实。完成上述全部项目后停止。严禁 plan_chapter、draft_chapter、commit_chapter，严禁派 writer/drafter/editor。\n\n")
+		b.WriteString("[本次用户与市场校准要求]\n")
+		b.WriteString(prompt)
+		b.WriteString("\n")
+		return b.String(), nil
+	}
 	b.WriteString("[Pipeline Architect 开篇刷新阶段]\n")
 	b.WriteString("这是已有长篇项目的开篇重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation，再通过 save_foundation 同步更新 layered_outline 与 outline。\n")
 	b.WriteString("只重做前三章的结果级结构和必要标题，保留书名、总题材、人物关系、能力与秘密边界、长期卷弧和已经确认的世界设定；不得借机重写整本书。\n")
@@ -1031,6 +1528,15 @@ func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
 	b.WriteString(prompt)
 	b.WriteString("\n")
 	return b.String(), nil
+}
+
+func pipelineArchitectShortChapterZero(outputDir string) (bool, int) {
+	progress, err := store.NewStore(outputDir).Progress.Load()
+	if err != nil || progress == nil || progress.TotalChapters <= 0 || progress.TotalChapters > 16 {
+		return false, 0
+	}
+	return progress.LatestCompleted() == 0 && len(progress.PendingRewrites) == 0,
+		progress.TotalChapters
 }
 
 func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
@@ -1192,7 +1698,11 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 		} else {
 			fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 第 %d/%d 次恢复初始 world_tick\n", run, maxWorldTickRuns)
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{Prompt: prompt, StopAfterInitialWorldTick: true}); err != nil {
+		if err := headless.Run(cfg, bundle, headless.Options{
+			Prompt:                    prompt,
+			PreserveUserRules:         true,
+			StopAfterInitialWorldTick: true,
+		}); err != nil {
 			return err
 		}
 	}
@@ -1738,6 +2248,7 @@ func pipelineWriteConfigured(
 	cfg bootstrap.Config,
 	bundle assets.Bundle,
 ) error {
+	timingInvocationID := newPipelineTimingInvocationID(time.Now())
 	if flags.RenderOnly {
 		// A sealed prose pass is reproducible only when every Coordinator,
 		// Drafter and sampling-Judge request stays on its configured primary
@@ -1762,13 +2273,15 @@ func pipelineWriteConfigured(
 		}
 	}
 	maxWriteRuns := 4
-	if flags.RenderOnly {
-		// A frozen render is one execution attempt, not a generic Writer
-		// self-healing loop. Any stop or structural budget exhaustion returns to
-		// the caller with the exact plan intact; it must never create/finalize a
-		// staged plan or silently start a fresh planning session.
-		maxWriteRuns = 1
-	}
+	// A frozen render may need more than one Host turn even when it produces
+	// only one accepted chapter body. Pipeline-managed prose must stop after the
+	// first whole-body write, obtain a provider judgment for that exact hash,
+	// then resume with draft_finalizer for check/commit. Keep those bounded turns
+	// inside the same isolated render candidate; recreating the candidate would
+	// discard the only draft the judge is required to inspect and deterministically
+	// repeat generation forever. The render execution lock still forbids every
+	// planner/world-simulator route, and the causal render-attempt limit is checked
+	// before each turn below.
 	for run := 1; run <= maxWriteRuns; run++ {
 		currentStore := store.NewStore(cfg.OutputDir)
 		if flags.RenderOnly && flags.StopAfterCommit > 0 {
@@ -1780,7 +2293,20 @@ func pipelineWriteConfigured(
 		if pipelineWriteGoalReached(prog, flags.WriteTo) {
 			return nil
 		}
-		if !flags.RenderOnly {
+		if flags.RenderOnly {
+			if judged, err := pipelineJudgePendingRenderOnlyDraftHash(opts, cfg.OutputDir, prog); err != nil {
+				return err
+			} else if judged {
+				prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
+			}
+			// The judge may have converted this exact hash into the final
+			// plan-budget failure. Persist and enforce that fact before Host can
+			// dispatch another whole-chapter writer in this same process.
+			currentStore = store.NewStore(cfg.OutputDir)
+			if err := pipelineRequireRenderAttemptAvailable(currentStore, flags.StopAfterCommit); err != nil {
+				return err
+			}
+		} else {
 			if judged, err := pipelineJudgePendingDraftHash(opts, cfg.OutputDir, prog); err != nil {
 				return err
 			} else if judged {
@@ -1792,6 +2318,16 @@ func pipelineWriteConfigured(
 		prog, _ = store.NewStore(cfg.OutputDir).Progress.Load()
 		if err := ensurePipelineSimulationRestartReady(cfg.OutputDir, prog); err != nil {
 			return err
+		}
+		if handled, err := pipelineTryMechanicalSealedFinalize(
+			context.Background(),
+			currentStore,
+			flags,
+			run,
+		); err != nil {
+			return err
+		} else if handled {
+			return nil
 		}
 		prompt := ""
 		if flags.RenderOnly {
@@ -1830,15 +2366,45 @@ func pipelineWriteConfigured(
 		if flags.RenderOnly {
 			stopOnRenderReplan = flags.StopAfterCommit
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{
+		hostTurnStarted := time.Now()
+		if flags.RenderOnly {
+			fmt.Fprintf(os.Stderr,
+				"[pipeline:timing] ch%02d frozen_host_turn=%d/%d started\n",
+				flags.StopAfterCommit, run, maxWriteRuns,
+			)
+		}
+		hostTurnErr := headless.Run(cfg, bundle, headless.Options{
 			Prompt:                    prompt,
 			StopAfterChapter:          flags.WriteTo,
 			StopAfterRewriteCommit:    flags.StopAfterCommit,
 			StopOnRenderReplanChapter: stopOnRenderReplan,
 			SkipQueueReplay:           true,
 			DisableLiveRAG:            flags.RenderOnly,
-		}); err != nil {
-			return err
+		})
+		if flags.RenderOnly {
+			status := "ok"
+			if hostTurnErr != nil {
+				status = "error"
+			}
+			recordPipelineChapterTiming(
+				cfg.OutputDir,
+				timingInvocationID,
+				"frozen_host_turn",
+				flags.StopAfterCommit,
+				run,
+				hostTurnStarted,
+				0,
+				status,
+				hostTurnErr,
+			)
+			fmt.Fprintf(os.Stderr,
+				"[pipeline:timing] ch%02d frozen_host_turn=%d/%d status=%s elapsed=%s\n",
+				flags.StopAfterCommit, run, maxWriteRuns, status,
+				time.Since(hostTurnStarted).Round(time.Millisecond),
+			)
+		}
+		if hostTurnErr != nil {
+			return hostTurnErr
 		}
 		if flags.StopAfterCommit > 0 && latestPipelineChapterCommitSeq(cfg.OutputDir, flags.StopAfterCommit) > commitSeqBefore {
 			return nil
@@ -1850,11 +2416,210 @@ func pipelineWriteConfigured(
 		// 未达标：可能是零章卡点收工（下轮循环顶部自动 zero-init），
 		// 也可能是 provider/工具瞬时错误——都走同一条自愈路径：续跑。
 		if flags.RenderOnly {
-			return fmt.Errorf("render-only 第 %d 章单次冻结执行未产生目标 commit；已保留正式 plan，禁止自动续跑或重规划", flags.StopAfterCommit)
+			resumable, reason, err := pipelineRenderOnlyCandidateResumeStatus(
+				store.NewStore(cfg.OutputDir),
+				flags.StopAfterCommit,
+			)
+			if err != nil {
+				return err
+			}
+			if !resumable {
+				return fmt.Errorf("render-only 第 %d 章冻结执行未产生目标 commit，且没有可安全恢复的 exact-body 草稿；已保留正式 plan，禁止自动重规划", flags.StopAfterCommit)
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:write] 第 %d 章候选已保留（%s）；第 %d/%d 个冻结 Host turn 结束，下轮先判定同一草稿哈希，再恢复 check/commit\n",
+				flags.StopAfterCommit,
+				reason,
+				run,
+				maxWriteRuns,
+			)
+			continue
 		}
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d/%d 次运行未达标，自动续跑\n", run, maxWriteRuns)
 	}
+	if flags.RenderOnly {
+		return fmt.Errorf(
+			"render-only 第 %d 章在同一隔离候选内完成 %d 个冻结 Host turn 后仍未 commit；候选草稿与正式 plan 均保留，禁止重规划",
+			flags.StopAfterCommit,
+			maxWriteRuns,
+		)
+	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+type pipelineMechanicalSealedFinalizeFunc func(
+	context.Context,
+	*store.Store,
+	int,
+) (tools.SealedMechanicalFinalizeResult, error)
+
+// pipelineTryMechanicalSealedFinalize is a narrow Host fast path for an
+// already-judged sealed draft. Every non-sealed, rewrite, edit or unapproved
+// state returns control to the existing headless router unchanged.
+func pipelineTryMechanicalSealedFinalize(
+	ctx context.Context,
+	st *store.Store,
+	flags pipelineFlags,
+	attempt int,
+) (bool, error) {
+	return pipelineTryMechanicalSealedFinalizeWith(
+		ctx,
+		st,
+		flags,
+		attempt,
+		tools.FinalizeSealedDraftMechanically,
+	)
+}
+
+func pipelineTryMechanicalSealedFinalizeWith(
+	ctx context.Context,
+	st *store.Store,
+	flags pipelineFlags,
+	attempt int,
+	finalize pipelineMechanicalSealedFinalizeFunc,
+) (bool, error) {
+	if !flags.RenderOnly || flags.StopAfterCommit <= 0 {
+		return false, nil
+	}
+	if st == nil || finalize == nil {
+		return false, fmt.Errorf("render-only mechanical finalizer is not configured")
+	}
+	started := time.Now().UTC()
+	result, finalizeErr := finalize(ctx, st, flags.StopAfterCommit)
+	finished := time.Now().UTC()
+	status := string(result.Disposition)
+	if finalizeErr != nil {
+		status = "error"
+	} else if status == "" {
+		status = "invalid_result"
+	}
+	timing := pipelineTimingRecord{
+		InvocationID: newPipelineTimingInvocationID(started),
+		RunIdentity:  fmt.Sprintf("sealed-ch%02d", flags.StopAfterCommit),
+		Scope:        "chapter",
+		Stage:        "mechanical_finalize",
+		Chapter:      flags.StopAfterCommit,
+		Attempt:      attempt,
+		Status:       status,
+		StartedAt:    started.Format(time.RFC3339Nano),
+		FinishedAt:   finished.Format(time.RFC3339Nano),
+		ElapsedMS:    finished.Sub(started).Milliseconds(),
+	}
+	if finalizeErr != nil {
+		timing.Error = finalizeErr.Error()
+	}
+	if err := appendPipelineTiming(st.Dir(), timing); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"[pipeline:timing] ch%02d mechanical_finalize 耗时记录失败：%v\n",
+			flags.StopAfterCommit,
+			err,
+		)
+	}
+	if finalizeErr != nil {
+		return false, fmt.Errorf(
+			"render-only 第 %d 章 Host 机械 finalizer 失败（已失败关闭，禁止同轮 LLM 猜测恢复）：%w",
+			flags.StopAfterCommit,
+			finalizeErr,
+		)
+	}
+
+	switch result.Disposition {
+	case tools.SealedMechanicalFinalizeCommitted:
+		fmt.Fprintf(os.Stderr,
+			"[pipeline:write] 第 %d 章 exact-body DeepSeek 已批准；Host 机械 consistency+commit 完成（%s），跳过 draft_finalizer LLM\n",
+			flags.StopAfterCommit,
+			time.Since(started).Round(time.Millisecond),
+		)
+		return true, nil
+	case tools.SealedMechanicalFinalizeNeedsAgent:
+		fmt.Fprintf(os.Stderr,
+			"[pipeline:write] 第 %d 章机械 consistency 需要正文处理（%s）；恢复原 draft_finalizer 路由\n",
+			flags.StopAfterCommit,
+			result.Reason,
+		)
+		return false, nil
+	case tools.SealedMechanicalFinalizeNotApplicable:
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"render-only 第 %d 章 Host 机械 finalizer 返回未知状态 %q",
+			flags.StopAfterCommit,
+			result.Disposition,
+		)
+	}
+}
+
+// pipelineJudgePendingRenderOnlyDraftHash runs the same exact-body managed
+// preflight as ordinary pipeline writing, but keeps an isolated render
+// candidate out of the live RAG index. The successful DeepSeek cache remains
+// inside the candidate and is reused by the post-commit exact-body review.
+func pipelineJudgePendingRenderOnlyDraftHash(
+	opts cliOptions,
+	outputDir string,
+	progress *domain.Progress,
+) (bool, error) {
+	return pipelineJudgePendingRenderOnlyDraftHashWithJudge(
+		opts,
+		outputDir,
+		progress,
+		draftAIJudgePipeline,
+	)
+}
+
+func pipelineJudgePendingRenderOnlyDraftHashWithJudge(
+	opts cliOptions,
+	outputDir string,
+	progress *domain.Progress,
+	judge pipelineDraftAIJudgeFunc,
+) (bool, error) {
+	if judge == nil {
+		return pipelineJudgePendingDraftHashWithJudge(opts, outputDir, progress, nil)
+	}
+	noSedimentJudge := func(judgeOpts cliOptions, args []string) error {
+		candidateArgs := append([]string(nil), args...)
+		candidateArgs = append(candidateArgs, "--no-sediment", "--primary-only")
+		return judge(judgeOpts, candidateArgs)
+	}
+	return pipelineJudgePendingDraftHashWithJudge(
+		opts,
+		outputDir,
+		progress,
+		noSedimentJudge,
+	)
+}
+
+// pipelineRenderOnlyCandidateResumeStatus proves that another Host turn will
+// operate on a durable exact-body draft in the same candidate. Merely finding
+// drafts/NN.draft.md is insufficient: the checkpoint must bind its current
+// bytes, otherwise a crash-written or stale payload must return to the outer
+// recovery path instead of being treated as judgeable prose.
+func pipelineRenderOnlyCandidateResumeStatus(
+	st *store.Store,
+	chapter int,
+) (bool, string, error) {
+	if st == nil || chapter <= 0 {
+		return false, "", nil
+	}
+	inspection, err := tools.InspectDraftExternalGateWithStore(st, chapter)
+	if err != nil {
+		return false, "", fmt.Errorf("render-only 第 %d 章检查候选恢复状态: %w", chapter, err)
+	}
+	draft, err := st.Drafts.LoadDraft(chapter)
+	if err != nil {
+		return false, "", fmt.Errorf("render-only 第 %d 章读取候选草稿: %w", chapter, err)
+	}
+	if strings.TrimSpace(draft) == "" {
+		return false, "", nil
+	}
+	if _, err := tools.CurrentChapterBodyCheckpoint(st, chapter); err != nil {
+		return false, "", fmt.Errorf("render-only 第 %d 章候选草稿没有 current exact-body checkpoint: %w", chapter, err)
+	}
+	reason := string(inspection.Status)
+	if strings.TrimSpace(reason) == "" {
+		reason = "exact-body draft pending finalization"
+	}
+	return true, reason, nil
 }
 
 // pipelineRequireRenderAttemptAvailable must run before pending-draft judging
@@ -1862,6 +2627,9 @@ func pipelineWriteConfigured(
 // split pipeline stops with every planning artifact intact; only an explicit
 // plan stage may create a new causal epoch.
 func pipelineRequireRenderAttemptAvailable(st *store.Store, chapter int) error {
+	if err := requirePipelineRenderConvergenceAvailable(st); err != nil {
+		return err
+	}
 	escalation := tools.InspectRenderOnlyReplanEscalation(st, chapter)
 	if !escalation.Required {
 		return nil
@@ -1876,6 +2644,13 @@ func pipelineRequireRenderAttemptAvailable(st *store.Store, chapter int) error {
 }
 
 type pipelineDraftAIJudgeFunc func(cliOptions, []string) error
+
+// Three minutes is the hard wall-clock ceiling for the managed exact-body
+// judge operation. The DeepSeek scheduler gives this whole window to the
+// primary call; an early malformed response may spend only the remaining time
+// on one same-hash format repair. Successful exact-body results are cached and
+// never called again under the same review identity.
+const pipelineManagedDraftJudgeBudget = 3 * time.Minute
 
 type pipelineCausalQuarantineEntry struct {
 	Source     string `json:"source"`
@@ -1898,6 +2673,7 @@ type pipelinePendingDraftPreflight struct {
 	HasDraft    bool
 	Invalidated bool
 	ManifestRel string
+	Reason      string
 }
 
 func pipelineJudgePendingDraftHash(opts cliOptions, outputDir string, progress *domain.Progress) (bool, error) {
@@ -1937,6 +2713,17 @@ func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, p
 		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章旧草稿未绑定当前 plan/body epoch或 rewrite 因果输入，已隔离到 %s；跳过外判并回到推演/规划/渲染\n", chapter, preflight.ManifestRel)
 		return false, nil
 	}
+	// A tombstone-bound formal rewrite seed exists only to hand its exact review
+	// and rewrite brief to the next Drafter turn.  Re-running static hard-fact or
+	// provider gates against bytes already rejected by that same fresh review is
+	// both redundant and harmful: rewrite_source freshness inside those gates can
+	// quarantine the sealed plan before Host has a chance to produce the required
+	// new hash.  The strict expression-only classifier keeps factual, character
+	// and contract failures on the ordinary preflight/replan path.
+	if isRewrite && tools.ReviewRequiresFreshDraft(st, chapter) &&
+		tools.RenderOnlyReviewAllowsPlanReuse(st, chapter) {
+		return false, nil
+	}
 	// An explicit rerender request supersedes the current draft hash. Do this
 	// after causal freshness but before exact-body delivery gates and every
 	// external-gate inspection: a named detector obligation is
@@ -1950,7 +2737,7 @@ func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, p
 		return false, fmt.Errorf("第 %d 章候选零成本正文预检失败: %w", chapter, staticErr)
 	}
 	if staticPreflight.Invalidated {
-		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章候选未通过 hard-fact/title/word 零成本正文门，已隔离到 %s；跳过外判并回到 Drafter\n", chapter, staticPreflight.ManifestRel)
+		fmt.Fprintf(os.Stderr, "[pipeline:write] 第 %d 章候选未通过 hard-fact/title/word 零成本正文门，已隔离到 %s；跳过外判并回到 Drafter。原因：%s\n", chapter, staticPreflight.ManifestRel, staticPreflight.Reason)
 		return false, nil
 	}
 	inspection, err := tools.InspectDraftExternalGateWithStore(st, chapter)
@@ -1976,9 +2763,43 @@ func pipelineJudgePendingDraftHashWithJudge(opts cliOptions, outputDir string, p
 	if judge == nil {
 		return true, fmt.Errorf("第 %d 章草稿外判执行器未配置，已保持复判锁", chapter)
 	}
-	if err := judge(judgeOpts, []string{"--chapter", strconv.Itoa(chapter), "--budget", "5m"}); err != nil {
+	judgeStarted := time.Now()
+	if err := judge(judgeOpts, []string{
+		"--chapter", strconv.Itoa(chapter),
+		"--budget", pipelineManagedDraftJudgeBudget.String(),
+	}); err != nil {
+		recordPipelineChapterTiming(
+			outputDir,
+			newPipelineTimingInvocationID(judgeStarted),
+			"exact_hash_judge",
+			chapter,
+			1,
+			judgeStarted,
+			pipelineManagedDraftJudgeBudget,
+			"error",
+			err,
+		)
+		fmt.Fprintf(os.Stderr,
+			"[pipeline:timing] ch%02d exact_hash_judge status=error elapsed=%s budget=%s\n",
+			chapter, time.Since(judgeStarted).Round(time.Millisecond), pipelineManagedDraftJudgeBudget,
+		)
 		return true, fmt.Errorf("第 %d 章草稿外判失败，已保持复判锁，未继续生成: %w", chapter, err)
 	}
+	recordPipelineChapterTiming(
+		outputDir,
+		newPipelineTimingInvocationID(judgeStarted),
+		"exact_hash_judge",
+		chapter,
+		1,
+		judgeStarted,
+		pipelineManagedDraftJudgeBudget,
+		"ok",
+		nil,
+	)
+	fmt.Fprintf(os.Stderr,
+		"[pipeline:timing] ch%02d exact_hash_judge status=ok elapsed=%s budget=%s\n",
+		chapter, time.Since(judgeStarted).Round(time.Millisecond), pipelineManagedDraftJudgeBudget,
+	)
 	after, err := tools.InspectDraftExternalGateWithStore(st, chapter)
 	if err != nil {
 		return true, fmt.Errorf("复核第 %d 章草稿外部门禁: %w", chapter, err)
@@ -2032,14 +2853,16 @@ func pipelinePreflightManagedDraftCausal(st *store.Store, chapter int, isRewrite
 		causalReasons = append(causalReasons, escalation.Reason)
 	}
 	if isRewrite {
-		if err := tools.ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
-			invalidatePlan = true
-			causalReasons = append(causalReasons, err.Error())
-			worldRequired, worldReady, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
-			if worldRequired && !worldReady {
-				invalidateWorld = true
-				if len(gaps) > 0 {
-					causalReasons = append(causalReasons, "world simulation gaps: "+strings.Join(gaps, "；"))
+		if !tools.RenderOnlyReviewAllowsPlanReuse(st, chapter) {
+			if err := tools.ValidateReusableCausalPlanForRerender(st, chapter); err != nil {
+				invalidatePlan = true
+				causalReasons = append(causalReasons, err.Error())
+				worldRequired, worldReady, gaps := tools.ChapterWorldSimulationStatus(st, chapter)
+				if worldRequired && !worldReady {
+					invalidateWorld = true
+					if len(gaps) > 0 {
+						causalReasons = append(causalReasons, "world simulation gaps: "+strings.Join(gaps, "；"))
+					}
 				}
 			}
 		}
@@ -2122,7 +2945,7 @@ func pipelinePreflightManagedDraftStatic(st *store.Store, chapter int) (pipeline
 	content := string(draftRaw)
 
 	var reasons []string
-	anchors, err := tools.InspectDraftHardFactAnchors(st, chapter, content)
+	anchors, err := tools.InspectDraftHardFactAnchorsForExternalJudge(st, chapter, content)
 	if err != nil {
 		return result, err
 	}
@@ -2146,16 +2969,12 @@ func pipelinePreflightManagedDraftStatic(st *store.Store, chapter int) (pipeline
 		reasons = append(reasons, fmt.Sprintf("chapter title mismatch: body=%q plan=%q", heading, plan.Title))
 	}
 
-	snapshot, err := st.UserRules.Load()
+	wordReason, err := pipelineManagedDraftWordRangeReason(st, chapter, content)
 	if err != nil {
 		return result, err
 	}
-	actualWords := utf8.RuneCountInString(content)
-	if snapshot != nil && snapshot.Structured.ChapterWords != nil {
-		rule := snapshot.Structured.ChapterWords
-		if (rule.Min > 0 && actualWords < rule.Min) || (rule.Max > 0 && actualWords > rule.Max) {
-			reasons = append(reasons, fmt.Sprintf("chapter word count out of range: actual=%d required=%d-%d", actualWords, rule.Min, rule.Max))
-		}
+	if wordReason != "" {
+		reasons = append(reasons, wordReason)
 	}
 	if len(reasons) == 0 {
 		return result, nil
@@ -2167,7 +2986,46 @@ func pipelinePreflightManagedDraftStatic(st *store.Store, chapter int) (pipeline
 	}
 	result.Invalidated = true
 	result.ManifestRel = manifestRel
+	result.Reason = strings.Join(reasons, "；")
 	return result, nil
+}
+
+func pipelineManagedDraftWordRangeReason(st *store.Store, chapter int, content string) (string, error) {
+	snapshot, err := st.UserRules.Load()
+	if err != nil {
+		return "", err
+	}
+	actualWords := utf8.RuneCountInString(content)
+	effectiveMin := 0
+	effectiveMax := 0
+	if snapshot != nil && snapshot.Structured.ChapterWords != nil {
+		rule := snapshot.Structured.ChapterWords
+		effectiveMin = rule.Min
+		effectiveMax = rule.Max
+	}
+	dynamicBounds, err := tools.InspectSealedShortChapterWordBounds(st, chapter)
+	if err != nil {
+		return "", err
+	}
+	wordReasonPrefix := "chapter word count out of range"
+	if dynamicBounds.Active {
+		effectiveMin = dynamicBounds.Min
+		effectiveMax = dynamicBounds.Max
+		wordReasonPrefix = fmt.Sprintf(
+			"sealed short cumulative word count out of range (prior_accepted_chapters=%d prior_accepted=%d book=%d-%d absolute_chapter=%d-%d)",
+			dynamicBounds.PriorAcceptedChapters,
+			dynamicBounds.PriorAcceptedRunes,
+			dynamicBounds.BookMin,
+			dynamicBounds.BookMax,
+			dynamicBounds.ChapterMin,
+			dynamicBounds.ChapterMax,
+		)
+	}
+	if (effectiveMin > 0 && actualWords < effectiveMin) ||
+		(effectiveMax > 0 && actualWords > effectiveMax) {
+		return fmt.Sprintf("%s: actual=%d required=%d-%d", wordReasonPrefix, actualWords, effectiveMin, effectiveMax), nil
+	}
+	return "", nil
 }
 
 func pipelineFirstChapterHeading(content string) string {
@@ -2591,7 +3449,7 @@ func resolveStages(raw string) ([]string, error) {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / deliver）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver）", s)
 		}
 		stages = append(stages, s)
 	}
@@ -2896,7 +3754,7 @@ func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) strin
 		StrictPrimaryModels      bool
 		RenderToolProtocol       string
 	}{
-		Schema:                   "sealed-render-input-v2-20260716",
+		Schema:                   "sealed-render-input-v3-20260720",
 		Provider:                 cfg.Provider,
 		Model:                    cfg.ModelName,
 		ReasoningEffort:          cfg.ReasoningEffort,
@@ -2911,7 +3769,7 @@ func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) strin
 		CoordinatorPrompt:        bundle.Prompts.Coordinator,
 		SamplingProtocol:         writersampler.ProtocolDigest(),
 		StrictPrimaryModels:      true,
-		RenderToolProtocol:       "frozen-render-tools.v2:no-planner,no-live-rag,no-web;draft,read,check,commit;server-owned-hidden-delta",
+		RenderToolProtocol:       "frozen-render-tools.v3:no-planner,no-live-rag,no-web;draft,read,check,commit;server-owned-hidden-delta;anti_ai_render_contract-v1-prospective",
 	})
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])

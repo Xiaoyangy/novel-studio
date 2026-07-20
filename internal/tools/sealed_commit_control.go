@@ -11,6 +11,40 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
+// sealedCommitSchemaUsesServerControlPlane reports whether commit_chapter is
+// currently running under the exact sealed render lease whose world/offscreen
+// fields are replaced by applySealedCommitControlPlane. Keeping this check
+// narrower than "render lock exists" is important: ordinary and legacy writes
+// still need the model-authored ledger fields exposed by the full tool schema.
+//
+// This is only a schema/prompt optimization. Execute always calls
+// applySealedCommitControlPlane again and performs its stronger active
+// generation, projected bundle and digest validation before accepting bytes.
+func sealedCommitSchemaUsesServerControlPlane(st *store.Store) bool {
+	if st == nil {
+		return false
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil || lock == nil ||
+		lock.Mode != domain.PipelineExecutionRender ||
+		lock.TargetChapter <= 0 ||
+		strings.TrimSpace(lock.PlanDigest) == "" {
+		return false
+	}
+	var frozen struct {
+		Chapter           int    `json:"chapter"`
+		PlanDigest        string `json:"plan_digest"`
+		ProjectionBinding string `json:"projection_binding"`
+	}
+	raw, err := os.ReadFile(filepath.Join(st.Dir(), "meta", "planning", "current_frozen_plan.json"))
+	if err != nil || json.Unmarshal(raw, &frozen) != nil {
+		return false
+	}
+	return frozen.ProjectionBinding == "sealed_v2" &&
+		frozen.Chapter == lock.TargetChapter &&
+		strings.TrimSpace(frozen.PlanDigest) == strings.TrimSpace(lock.PlanDigest)
+}
+
 // applySealedCommitControlPlane replaces model-authored world/offscreen ledger
 // arguments with the exact server-side transition from the promoted bundle.
 // The Drafter is intentionally not shown hidden character state, so requiring

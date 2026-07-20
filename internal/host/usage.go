@@ -634,6 +634,9 @@ func agentRoleName(agentName string) string {
 	if strings.HasPrefix(agentName, "architect_") {
 		return "architect"
 	}
+	if strings.HasPrefix(agentName, "convergence_planner_fresh_") {
+		return "writer"
+	}
 	if agentName == "world_simulator" {
 		return "writer"
 	}

@@ -1811,7 +1811,7 @@ func TestWorldSimulationProfileKeepsActiveGroundedAuthorityVisibleAfterCodexMidd
 		"current_pressure_policy": "outline_authorized_concise",
 		"knowledge_boundary":      knowledgeBoundary,
 		"decision_model":          decisionModel,
-		"decision_policy":         projectAllGroundedDecisionPolicy,
+		"decision_policy_ref":     "simulation_character_authority.active_mode_policies.project_all_grounded",
 	} {
 		if got := strings.TrimSpace(fmt.Sprint(grounded[key])); got != want {
 			t.Fatalf("grounded compact entry lost %s:\nwant=%q\ngot=%q", key, want, got)
@@ -1828,9 +1828,16 @@ func TestWorldSimulationProfileKeepsActiveGroundedAuthorityVisibleAfterCodexMidd
 			t.Fatalf("grounded compact entry retained duplicated/non-current field %q: %#v", removed, grounded)
 		}
 	}
+	if _, duplicated := grounded["decision_policy"]; duplicated {
+		t.Fatalf("grounded entry duplicated the shared decision policy: %#v", grounded)
+	}
+	activeModePolicies := packet["active_mode_policies"].(map[string]any)
+	if got := fmt.Sprint(activeModePolicies[domain.SimulationAuthorityModeGrounded]); got != projectAllGroundedDecisionPolicy {
+		t.Fatalf("active grounded mode policy was lost or changed: %q", got)
+	}
 	modePolicies := packet["mode_policies"].(map[string]any)
-	if got := fmt.Sprint(modePolicies[domain.SimulationAuthorityModeGrounded]); got != projectAllGroundedDecisionPolicy {
-		t.Fatalf("grounded shared mode policy was lost or changed: %q", got)
+	if got := fmt.Sprint(modePolicies[domain.SimulationAuthorityModeGrounded]); got != "simulation_character_authority.active_mode_policies.project_all_grounded" {
+		t.Fatalf("grounded mode policy did not reference its active copy: %q", got)
 	}
 
 	visible := compactCodexTextEquivalentForTest(string(raw), codexPerMessageTextRuneBudget)
@@ -1846,6 +1853,156 @@ func TestWorldSimulationProfileKeepsActiveGroundedAuthorityVisibleAfterCodexMidd
 	}
 	if !strings.Contains(visible, string(encodedGrounded)) {
 		t.Fatalf("complete Liang grounded contract is not model-visible after clipping: %s", encodedGrounded)
+	}
+	if !strings.Contains(visible, projectAllGroundedDecisionPolicy) {
+		t.Fatal("active grounded policy is not model-visible before the clipped entries region")
+	}
+}
+
+func TestCompactWorldSimulationAuthorityDeduplicatesOnlyExactGroundedPolicy(t *testing.T) {
+	const groundedPolicyRef = "simulation_character_authority.active_mode_policies.project_all_grounded"
+
+	authority := make([]simulationCharacterAuthority, 0, 7)
+	for i := 1; i <= 6; i++ {
+		name := fmt.Sprintf("grounded-%d", i)
+		authority = append(authority, simulationCharacterAuthority{
+			Character:               name,
+			Role:                    fmt.Sprintf("role-%d", i),
+			Tier:                    "important",
+			Aliases:                 []string{fmt.Sprintf("alias-%d", i)},
+			Description:             fmt.Sprintf("description-%d", i),
+			CurrentLocation:         fmt.Sprintf("location-%d", i),
+			CurrentStatus:           fmt.Sprintf("status-%d", i),
+			CurrentGoal:             fmt.Sprintf("goal-%d", i),
+			CurrentAction:           fmt.Sprintf("action-%d", i),
+			CurrentPressure:         fmt.Sprintf("pressure-%d", i),
+			CurrentPressurePolicy:   "exact_continuity",
+			Resources:               []string{fmt.Sprintf("resource-%d", i)},
+			Relationships:           []string{fmt.Sprintf("relationship-%d", i)},
+			KnowledgeBoundary:       fmt.Sprintf("knowledge-%d", i),
+			DecisionModel:           fmt.Sprintf("decision-model-%d", i),
+			CommunicationBoundary:   domain.CommunicationBoundary{CanContactProtagonist: true, Channels: []string{fmt.Sprintf("channel-%d", i)}, Delay: fmt.Sprintf("delay-%d", i), FailureModes: []string{fmt.Sprintf("failure-%d", i)}, InfoAllowed: fmt.Sprintf("info-%d", i)},
+			VisibleInCurrentChapter: i%2 == 0,
+			SimulationStatus:        "required_missing",
+			AuthorityMode:           domain.SimulationAuthorityModeGrounded,
+			AuthoritySources:        []string{fmt.Sprintf("source-%d", i)},
+			MissingAuthority:        []string{"chapter_local_placement"},
+			DecisionPolicy:          projectAllGroundedDecisionPolicy,
+		})
+	}
+	variant := simulationCharacterAuthority{
+		Character:                 "grounded-policy-variant",
+		Role:                      "variant-role",
+		Tier:                      "important",
+		Aliases:                   []string{"variant-alias"},
+		Description:               "variant-description",
+		CurrentLocation:           "variant-location",
+		CurrentStatus:             "variant-status",
+		CurrentGoal:               "variant-goal",
+		CurrentAction:             "variant-action",
+		CurrentPressure:           "variant-pressure",
+		CurrentPressurePolicy:     "outline_authorized_concise",
+		Resources:                 []string{"variant-resource"},
+		Relationships:             []string{"variant-relationship"},
+		KnowledgeBoundary:         "variant-knowledge",
+		RequiredKnowledgeBoundary: []string{"required-lock"},
+		DecisionModel:             "variant-decision-model",
+		CommunicationBoundary:     domain.CommunicationBoundary{Channels: []string{"letter"}, Delay: "one-day", FailureModes: []string{"lost"}, InfoAllowed: "required-lock"},
+		VisibleInCurrentChapter:   true,
+		SimulationStatus:          "required_missing",
+		AuthorityMode:             domain.SimulationAuthorityModeGrounded,
+		AuthoritySources:          []string{"variant-source"},
+		MissingAuthority:          []string{"chapter_local_placement"},
+		DecisionPolicy:            projectAllGroundedDecisionPolicy + projectAllRequiredKnowledgePolicy,
+	}
+	authority = append(authority, variant)
+
+	result := map[string]any{
+		"simulation_character_authority": authority,
+	}
+	compactWorldSimulationAuthority(result)
+	packet := result["simulation_character_authority"].(map[string]any)
+	entries := packet["entries"].([]map[string]any)
+	if len(entries) != len(authority) {
+		t.Fatalf("grounded roster changed: got=%d want=%d", len(entries), len(authority))
+	}
+
+	for i, item := range authority {
+		want := map[string]any{
+			"character":                     item.Character,
+			"authority_mode":                item.AuthorityMode,
+			"simulation_status":             item.SimulationStatus,
+			"blocking":                      item.Blocking,
+			"visible_in_current_chapter":    item.VisibleInCurrentChapter,
+			"role":                          item.Role,
+			"tier":                          item.Tier,
+			"aliases":                       item.Aliases,
+			"authority_sources":             item.AuthoritySources,
+			"missing_authority":             item.MissingAuthority,
+			"required_knowledge_boundaries": append([]string{}, item.RequiredKnowledgeBoundary...),
+			"description":                   item.Description,
+			"current_location":              item.CurrentLocation,
+			"current_status":                item.CurrentStatus,
+			"current_goal":                  item.CurrentGoal,
+			"current_action":                item.CurrentAction,
+			"current_pressure":              item.CurrentPressure,
+			"current_pressure_policy":       item.CurrentPressurePolicy,
+			"resources":                     append([]string{}, item.Resources...),
+			"relationships":                 item.Relationships,
+			"knowledge_boundary":            item.KnowledgeBoundary,
+			"decision_model":                item.DecisionModel,
+			"communication_boundary":        item.CommunicationBoundary,
+		}
+		if item.DecisionPolicy == projectAllGroundedDecisionPolicy {
+			want["decision_policy_ref"] = groundedPolicyRef
+		} else {
+			want["decision_policy"] = item.DecisionPolicy
+		}
+		gotJSON, err := json.Marshal(entries[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantJSON, err := json.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("grounded current-state transport changed for %s:\nwant=%s\ngot=%s", item.Character, wantJSON, gotJSON)
+		}
+	}
+	if got := entries[6]["decision_policy"]; got != variant.DecisionPolicy {
+		t.Fatalf("differing grounded policy was not preserved exactly: %q", got)
+	}
+	if _, replaced := entries[6]["decision_policy_ref"]; replaced {
+		t.Fatalf("differing grounded policy was incorrectly replaced by a shared ref: %#v", entries[6])
+	}
+
+	compactJSON, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldPacket map[string]any
+	if err := json.Unmarshal(compactJSON, &oldPacket); err != nil {
+		t.Fatal(err)
+	}
+	delete(oldPacket, "active_mode_policies")
+	oldPacket["mode_policies"].(map[string]any)[domain.SimulationAuthorityModeGrounded] = projectAllGroundedDecisionPolicy
+	for _, rawEntry := range oldPacket["entries"].([]any) {
+		entry := rawEntry.(map[string]any)
+		if _, shared := entry["decision_policy_ref"]; !shared {
+			continue
+		}
+		delete(entry, "decision_policy_ref")
+		entry["decision_policy"] = projectAllGroundedDecisionPolicy
+	}
+	oldJSON, err := json.Marshal(oldPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := len(oldJSON) - len(compactJSON)
+	t.Logf("six exact grounded policies save %d transport bytes", saved)
+	if saved <= 6_398 {
+		t.Fatalf("grounded policy compaction saves %d bytes, must exceed the 6,398-byte C12 overflow", saved)
 	}
 }
 
@@ -2560,10 +2717,25 @@ func TestFinalizedDraftContextCompactsRepeatedPreserveAuthoritiesUnder64KiB(t *t
 			t.Fatalf("story timing safeguard %q missing: %s", want, timingJSON)
 		}
 	}
+	antiAIJSON, _ := json.Marshal(packet["anti_ai_render_contract"])
+	for _, want := range []string{
+		"饭桌对白压住人物犹疑",
+		"对白传送带让人物替作者念流程",
+		"让林澈先误判；再因安全后果改口",
+		"让父亲护场改变林澈随后守密的选择",
+		"饭桌保留长问短答",
+		"风险发现处自然收短",
+		"风险发现是否改变人物选择",
+		"父亲护场是否留下关系余波",
+	} {
+		if !strings.Contains(string(antiAIJSON), want) {
+			t.Fatalf("prose-safe anti-AI contract %q missing from draft context: %s", want, antiAIJSON)
+		}
+	}
 	packetJSON, _ := json.Marshal(packet)
-	for _, forbidden := range []string{"CV", "0.62", "每三句", "检测概率", "4%", "饭桌对白压住人物犹疑", "让林澈先误判", "anti_ai_execution_plan"} {
+	for _, forbidden := range []string{"CV", "0.62", "每三句", "检测概率", "4%", "anti_ai_execution_plan"} {
 		if strings.Contains(string(packetJSON), forbidden) {
-			t.Fatalf("planning/review recipe %q leaked into prose contract: %s", forbidden, packetJSON)
+			t.Fatalf("detector/fixed-cadence recipe %q leaked into prose contract: %s", forbidden, packetJSON)
 		}
 	}
 	receipt := payload["formal_plan_receipt"].(map[string]any)
@@ -2588,6 +2760,63 @@ func TestFinalizedDraftContextCompactsRepeatedPreserveAuthoritiesUnder64KiB(t *t
 			if strings.Contains(string(encoded), fact) {
 				t.Fatalf("fact text repeated outside render packet: %q in %s", fact, encoded)
 			}
+		}
+	}
+}
+
+func TestDraftContextFreezingCarriesC5ProseSafeAntiAIRules(t *testing.T) {
+	plan := &domain.ChapterPlan{
+		Chapter: 5,
+		Title:   "两下，停一停，再两下",
+		CausalSimulation: domain.ChapterCausalSimulation{
+			AntiAIPlan: domain.AntiAIExecutionPlan{
+				RiskSignals: []string{
+					"多源证据被逐项播报成流程台账",
+					"句长CV低于0.62；叫名、策略改变和警方反应被压成一句摘要",
+				},
+				CounterMoves: []string{
+					"每三句插入动作并把TTR维持在0.72以上",
+					"叫名独立成现场转折，后场再呈现控制变化、撞碗录音和警方重排",
+					"让程野亲手撤回标记、并轴、留在原地，承担误判余波",
+				},
+				SentenceRhythmPolicy: "段长CV偏低；排伪段用一段较长的屏幕观察承载信息，结论以短句截断；每五句换一次长度",
+				ObjectResponseBudget: "屏幕只在桥湾排伪、南栈回执并轴和警方指令三处承担关键回应",
+				DialogueFunctionPlan: "孟乔对白只负责排除桥湾；贺铎只用叫名完成反向识别",
+				ReviewChecks: []string{
+					"全文检测概率必须低于4%",
+					"叫名后的控制变化、撞碗录音和00:40重排是否在独立后果场出现",
+				},
+			},
+		},
+	}
+	result := map[string]any{
+		"working_memory": map[string]any{"chapter_plan": plan},
+		"chapter_plan":   plan,
+	}
+	raw, err := finalizeContextResult(result, 5, "draft")
+	if err != nil {
+		t.Fatalf("build C5 draft context: %v", err)
+	}
+	frozen, err := canonicalFrozenDraftRenderPayload(raw)
+	if err != nil {
+		t.Fatalf("canonicalize C5 frozen render input: %v", err)
+	}
+	for _, want := range []string{
+		"anti_ai_render_contract",
+		"多源证据被逐项播报成流程台账",
+		"叫名、策略改变和警方反应被压成一句摘要",
+		"叫名独立成现场转折，后场再呈现控制变化、撞碗录音和警方重排",
+		"让程野亲手撤回标记、并轴、留在原地，承担误判余波",
+		"排伪段用一段较长的屏幕观察承载信息",
+		"叫名后的控制变化、撞碗录音和00:40重排是否在独立后果场出现",
+	} {
+		if !strings.Contains(string(frozen), want) {
+			t.Fatalf("C5 prose-safe anti-AI rule %q missing from frozen render input: %s", want, frozen)
+		}
+	}
+	for _, forbidden := range []string{"CV", "TTR", "0.62", "0.72", "每三句", "每五句", "检测概率", "4%", "anti_ai_execution_plan"} {
+		if strings.Contains(string(frozen), forbidden) {
+			t.Fatalf("C5 detector/fixed-cadence recipe %q leaked into frozen render input: %s", forbidden, frozen)
 		}
 	}
 }

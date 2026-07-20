@@ -130,28 +130,34 @@ type pipelinePreplanReceipt struct {
 }
 
 type pipelineFrozenPlan struct {
-	Version                 string            `json:"version"`
-	Chapter                 int               `json:"chapter"`
-	PlanPath                string            `json:"plan_path"`
-	PlanDigest              string            `json:"plan_digest"`
-	PlanCheckpointSeq       int64             `json:"plan_checkpoint_seq"`
-	BaselineCommitSeq       int64             `json:"baseline_commit_seq"`
-	BaselineCompletedDigest string            `json:"baseline_completed_digest"`
-	BaselineCanonRoot       string            `json:"baseline_canon_root"`
-	BaselineChapterSHA256   map[string]string `json:"baseline_chapter_sha256"`
-	RenderDependencySHA256  map[string]string `json:"render_dependency_sha256"`
-	PipelineRunInputDigest  string            `json:"pipeline_run_input_digest"`
-	RenderContextPath       string            `json:"render_context_path"`
-	RenderContextSHA256     string            `json:"render_context_sha256"`
-	PlanningGenerationID    string            `json:"planning_generation_id"`
-	PlanningDependencyRoot  string            `json:"planning_dependency_root"`
-	ProjectionBinding       string            `json:"projection_binding"`
-	ProjectedPlanSHA256     string            `json:"projected_plan_sha256,omitempty"`
-	ProjectedPreStateRoot   string            `json:"projected_pre_state_root,omitempty"`
-	ProjectedPostStateRoot  string            `json:"projected_post_state_root,omitempty"`
-	ProjectedBundleDigest   string            `json:"projected_bundle_digest,omitempty"`
-	PromotionReceiptDigest  string            `json:"promotion_receipt_digest,omitempty"`
-	FrozenAt                string            `json:"frozen_at"`
+	Version                         string            `json:"version"`
+	Chapter                         int               `json:"chapter"`
+	PlanPath                        string            `json:"plan_path"`
+	PlanDigest                      string            `json:"plan_digest"`
+	PlanCheckpointSeq               int64             `json:"plan_checkpoint_seq"`
+	BaselineCommitSeq               int64             `json:"baseline_commit_seq"`
+	BaselineCompletedDigest         string            `json:"baseline_completed_digest"`
+	BaselineCanonRoot               string            `json:"baseline_canon_root"`
+	BaselineChapterSHA256           map[string]string `json:"baseline_chapter_sha256"`
+	RenderDependencySHA256          map[string]string `json:"render_dependency_sha256"`
+	PipelineRunInputDigest          string            `json:"pipeline_run_input_digest"`
+	RenderContextPath               string            `json:"render_context_path"`
+	RenderContextSHA256             string            `json:"render_context_sha256"`
+	PlanningGenerationID            string            `json:"planning_generation_id"`
+	PlanningDependencyRoot          string            `json:"planning_dependency_root"`
+	ProjectionBinding               string            `json:"projection_binding"`
+	ProjectedPlanSHA256             string            `json:"projected_plan_sha256,omitempty"`
+	ProjectedPreStateRoot           string            `json:"projected_pre_state_root,omitempty"`
+	ProjectedPostStateRoot          string            `json:"projected_post_state_root,omitempty"`
+	ProjectedBundleDigest           string            `json:"projected_bundle_digest,omitempty"`
+	PromotionReceiptDigest          string            `json:"promotion_receipt_digest,omitempty"`
+	RenderInputUpgradeID            string            `json:"render_input_upgrade_id,omitempty"`
+	RenderInputUpgradeReceiptDigest string            `json:"render_input_upgrade_receipt_digest,omitempty"`
+	// ConvergenceReplanReceiptDigest is present only when a durably exhausted
+	// sealed render budget caused one plan-only successor epoch. The immutable
+	// projected bundle and original promotion remain authoritative.
+	ConvergenceReplanReceiptDigest string `json:"convergence_replan_receipt_digest,omitempty"`
+	FrozenAt                       string `json:"frozen_at"`
 }
 
 type pipelineRenderReceipt struct {
@@ -455,6 +461,14 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if mode, modeErr := store.NewStore(cfg.OutputDir).LoadWritingPipelineMode(); modeErr != nil {
+		return modeErr
+	} else if mode != nil && mode.Mode == domain.WritingPipelineModeSealedTwoPassV2 {
+		// Ordinary sealed planning remains project-all only. The sole exception
+		// is the separately verified plan-only successor after a durable render
+		// convergence ledger reaches its hard limit.
+		return pipelineSealedConvergenceReplan(opts, flags)
+	}
 	if err := ensurePipelineRAGReady(cfg); err != nil {
 		return fmt.Errorf("plan 阶段 RAG 就绪检查失败: %w", err)
 	}
@@ -749,8 +763,14 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			currentInputDigest = pipelineRenderInputDigest(cfg, bundle)
 		}
 		if frozen.PipelineRunInputDigest == "" || frozen.PipelineRunInputDigest != currentInputDigest {
-			return fmt.Errorf("render 模型/provider/prompt 运行输入已漂移（frozen=%s current=%s）；必须重新执行 plan",
-				frozen.PipelineRunInputDigest, currentInputDigest)
+			if !flags.RefreshRenderInput {
+				return fmt.Errorf("render 模型/provider/prompt 运行输入已漂移（frozen=%s current=%s）；必须重新执行 plan，或对尚未开始的 sealed 候选稿显式使用 --refresh-render-input",
+					frozen.PipelineRunInputDigest, currentInputDigest)
+			}
+			frozen, err = pipelineUpgradeFrozenRenderInput(st, frozen, currentInputDigest)
+			if err != nil {
+				return fmt.Errorf("render 显式升级 model/provider/prompt 绑定: %w", err)
+			}
 		}
 		actionable, _, actionErr := pipelineCurrentActionableChapter(st, flags)
 		if actionErr != nil {
@@ -760,6 +780,9 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			return fmt.Errorf("render 当前可行动章是第 %d 章，但冻结计划属于第 %d 章；必须先单独执行 plan", actionable, frozen.Chapter)
 		}
 		chapter = actionable
+		if err := requireFrozenPipelineRenderConvergenceAvailable(cfg.OutputDir, frozen); err != nil {
+			return err
+		}
 		if err := pipelineRequireRenderAttemptAvailable(st, chapter); err != nil {
 			return err
 		}
@@ -855,6 +878,23 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	directoryPublishTransactionID := ""
 	reviewAlreadyAccepted := false
 	var sealedActualMatch *pipelineSealedActualDeltaMatch
+	var sealedBodyEvidenceMatcher pipelineSealedActualBodyEvidenceMatchFunc
+	if sealedV2 {
+		sealedBodyEvidenceMatcher = func(
+			snapshot *pipelineRenderedChapterSnapshot,
+		) (pipelineSealedActualDeltaMatch, error) {
+			if snapshot == nil {
+				return pipelineSealedActualDeltaMatch{}, fmt.Errorf("sealed body-evidence matcher snapshot is nil")
+			}
+			return matchPipelineSealedRenderActualDelta(
+				snapshot.Store,
+				&sealedBinding.Bundle,
+				nil,
+				snapshot.Body,
+				sealedBinding,
+			)
+		}
+	}
 	if sealedV2 {
 		transactionID, idErr := pipelineRenderTransactionID(frozen)
 		if idErr != nil {
@@ -880,6 +920,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			bundle,
 			frozen,
 			cp,
+			sealedBodyEvidenceMatcher,
 		)
 		if err != nil {
 			return err
@@ -889,6 +930,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			&sealedBinding.Bundle,
 			nil,
 			candidateSnapshot.Body,
+			sealedBinding,
 		)
 		if matchErr != nil {
 			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-match-error")
@@ -975,6 +1017,19 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		reviewArgs = append(reviewArgs, "--budget", flags.Budget.String())
 	}
 	if !reviewAlreadyAccepted {
+		if sealedV2 {
+			if err := runPipelineSealedActualBodyEvidencePreflight(
+				cfg.OutputDir,
+				rendered,
+				sealedBodyEvidenceMatcher,
+			); err != nil {
+				return fmt.Errorf(
+					"render 第 %d 章 deterministic body-evidence preflight 失败（formal review 未调用）: %w",
+					chapter,
+					err,
+				)
+			}
+		}
 		if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
 			return fmt.Errorf("render 第 %d 章 fresh exact-body review 失败: %w", chapter, err)
 		}
@@ -999,6 +1054,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			&sealedBinding.Bundle,
 			nil,
 			rendered.Body,
+			sealedBinding,
 		)
 		if matchErr != nil {
 			return fmt.Errorf("render 第 %d 章 actual projected delta 核验失败: %w", chapter, matchErr)
@@ -1556,6 +1612,9 @@ func loadAndVerifyPipelineFrozenPlan(outputDir string) (*pipelineFrozenPlan, *do
 			contextEnvelope.PayloadSHA256,
 		)
 	}
+	if err := validatePipelineRenderInputUpgradeReceipt(outputDir, &frozen); err != nil {
+		return nil, nil, fmt.Errorf("冻结计划 render input upgrade 回执无效: %w", err)
+	}
 	return &frozen, cp, nil
 }
 
@@ -1834,6 +1893,34 @@ func verifyPipelinePlanStage(outputDir string, evidence domain.PipelineStageEvid
 	if err != nil {
 		evidence.Missing = append(evidence.Missing, pipelineFrozenPlanPath)
 		return evidence, err
+	}
+	if frozen.ProjectionBinding == "sealed_v2" {
+		if strings.TrimSpace(frozen.ConvergenceReplanReceiptDigest) == "" {
+			return evidence, fmt.Errorf("ordinary sealed promotion is not a standalone plan stage")
+		}
+		st := store.NewStore(outputDir)
+		if _, err := validatePipelineSealedRenderBinding(st, frozen, false); err != nil {
+			return evidence, fmt.Errorf("sealed convergence replan successor binding invalid: %w", err)
+		}
+		if err := validatePipelineFrozenRenderDependencies(outputDir, frozen); err != nil {
+			return evidence, err
+		}
+		if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, frozen.Chapter); err != nil {
+			return evidence, fmt.Errorf("sealed convergence replan render freshness invalid: %w", err)
+		}
+		receiptRel := filepath.ToSlash(filepath.Join(
+			pipelineSealedConvergenceReplanReceiptDir,
+			frozen.ConvergenceReplanReceiptDigest+".json",
+		))
+		evidence.Artifacts = append(evidence.Artifacts,
+			pipelineFrozenPlanPath,
+			frozen.PlanPath,
+			frozen.RenderContextPath,
+			receiptRel,
+		)
+		evidence.Checkpoints = append(evidence.Checkpoints, fmt.Sprintf("chapter:%d:plan#%d:%s", frozen.Chapter, cp.Seq, cp.Digest))
+		evidence.Message = fmt.Sprintf("chapter %d sealed convergence successor plan frozen", frozen.Chapter)
+		return evidence, nil
 	}
 	var preplan pipelinePreplanReceipt
 	if err := readPipelinePlanningJSON(filepath.Join(outputDir, pipelinePlanningReceiptPath), &preplan); err != nil {
@@ -2337,6 +2424,9 @@ func pipelineCanonRoot(outputDir string, progress *domain.Progress) (string, err
 			if entry.Type()&os.ModeSymlink != 0 {
 				return fmt.Errorf("canonical planning snapshot refuses symlink %s", slashRel)
 			}
+			if pipelineAtomicWriteTempName(entry.Name()) {
+				return nil
+			}
 			if pipelineCanonSnapshotExcluded(slashRel, false) {
 				return nil
 			}
@@ -2411,6 +2501,35 @@ func pipelineCanonSnapshotExcluded(rel string, isDir bool) bool {
 	default:
 		return false
 	}
+}
+
+func pipelineAtomicWriteTempName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if marker := strings.LastIndex(name, ".tmp-"); marker > 0 && pipelineAllDecimalDigits(name[marker+len(".tmp-"):]) {
+		return true
+	}
+	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp") {
+		stem := strings.TrimSuffix(name, ".tmp")
+		if marker := strings.LastIndex(stem, "-"); marker > 1 && pipelineAllDecimalDigits(stem[marker+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func pipelineAllDecimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func writePipelinePlanningJSON(path string, value any) (string, error) {

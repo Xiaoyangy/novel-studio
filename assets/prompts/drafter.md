@@ -10,7 +10,7 @@
 
 严格按顺序执行，所有产物通过工具落盘。
 
-1. 调用一次 `novel_context(chapter=N, profile="draft")`。必须确认 `render_packet.version=11` 且正式 plan / receipt 绑定有效，以 `render_packet` 为正文唯一素材入口；`chapter_plan` 只用于标题、范围和禁区。先按 `chapter_pipeline_instruction` 与 `hard_contract_policy` 锁住 `mandatory_beats`、`fact_anchors`、`forbidden_moves`、事实连续性、准确金额、精确次数/先后、知识/授权边界和安全后果，再按 `soft_material_policy` 从 `soft_*`、文学镜头与 `craft_methods` 中少量择取。用户最新规则和章级精确合同优先于专项 style，专项 style 优先于通用写法建议。
+1. 调用一次 `novel_context(chapter=N, profile="draft")`。必须确认 `render_packet.version=11` 且正式 plan / receipt 绑定有效，以 `render_packet` 为正文唯一素材入口；`chapter_plan` 只用于标题、范围和禁区。第一次写正文前必须先执行下方“首稿预渲染基线”；若 `render_packet.anti_ai_render_contract` 存在，必须完整读取，其中比通用基线更具体的章级定性规则优先细化基线。字段缺失也不得跳过基线。随后按 `chapter_pipeline_instruction` 与 `hard_contract_policy` 锁住 `mandatory_beats`、`fact_anchors`、`forbidden_moves`、事实连续性、准确金额、精确次数/先后、知识/授权边界和安全后果，最后按 `soft_material_policy` 从 `soft_*`、文学镜头与 `craft_methods` 中少量择取。用户最新规则和章级精确合同优先于专项 style，专项 style 优先于通用写法建议。
 2. 严守渲染边界：
    - 现场实名角色只取 `render_packet.visible_characters`；`excluded_named_characters` 中的人不得行动、发言或通过巧合消息现身。
    - 正文只允许渲染 `render_packet.mandatory_beats` / `fact_anchors` 中已经授权给 POV 的结果、主角现场感知和经合法传播路径抵达的信息；不得反推已隐藏的世界状态。
@@ -81,7 +81,14 @@
 - **章末保后果，不抄镜头**：`chapter_pipeline_instruction` 或硬合同指定了最后一个动作、信息边界和截断时机时必须精确落地，不能提前半句或拖后半句；在没有精确截点时，`ending_consequence_contract` 的 `consequence`、`next_chapter_pull` 和禁用项必须成立，`ending_anchor_candidate` 只是候选镜头。若新的现场人物、主动请求、未完成动作或可见结果更能让读者翻页，可以替换计划指定的最后一个物件，不得为了对账把章末改成票据、材料、测试记录的静态清单。
 - **反 AI 味**：规避 `anti_ai_tone` 的结构/用词/描写/对话/节奏五类模式；禁"他终于明白/这意味着/前所未有的恐惧/命运齿轮"类套话。先删掉重复表达同一意思的句子，只在人物注意力真正变化时切换承载方式；不设“每2-3句必换一次”的固定节拍。疲劳词/套句阈值见 `user_rules.structured`，commit 时强制检查。
 - **结构性 warning 必修**：`isolated_sentence_overuse`、`object_response_overuse`、`object_response_rhythm_flat`、`paragraph_start_repetition`、`not_but_overuse`、`state_clause_pile`、`templated_dialogue_chain`、`dialogue_conveyor_overuse`、`pov_interiority_thin` 不是可选润色；命中说明结构指纹或 AI 味已过重，提交前必须改写。`isolated_sentence_overuse` 现在只指 12 字内碎句连续成串，不指普通的一句一段；修复时只合并无信息碎片。命中“对白传送带 + 主观体验薄”时，禁止靠动作标签、微表情或零散心理句补比例：先删掉或合并整轮功能问答，移除不必开口的人，只保留真正改变选择、权力或关系的台词；再让时间、路程、体力、花费、误判或难堪改变主角下一步。若删掉心理句后下一动作完全不变，或物流仍只是步骤/票据清单，就还没有修好。
-- **AI 味按读者效果修，不读取 detector 配方**：完整 `anti_ai_execution_plan` 只供规划与审阅，正文侧不会收到风险指标、句法处方、counter moves 或 review checks。若 `render_packet.event_timing_safeguards` 存在，只把其中物件回应时机与对白功能当作剧情边界；不要据此平均分配段落，也不要自行补出任何 detector 指标或统一算法。
+- **AI 味按读者效果前置执行，不读取 detector 配方**：第一次调用 `draft_chapter` 前，无论 `anti_ai_render_contract` 字段是否存在，都必须先执行以下首稿预渲染基线；这是对旧 sealed render packet 的兼容合同，不等待检测、审稿或失败返工后再补。
+  - 风险先查：避免把证据、规则或流程按计划顺序逐项播报成台账；避免人物轮流补齐信息形成对白传送带；避免相邻段落只更换对象却重复同一种说明或验证功能；避免用密集微动作、动作标签或零散心理句代替真实人物反应。
+  - 因果修复：让刺激先改变主视角人物的注意、判断或误判，再落成选择与可见后果；不改变选择的信息压缩或离屏。能在同一人物因果现场完成的硬事实合并，不为合同逐项另造场景。删除无需开口的人和只负责解释规则的话轮，让保留的回应改变选择、权力或关系。
+  - 节奏策略：句段长短服从观察、犹疑、冲突、决断和余波的自然换挡；允许完整长气口、短截断和停顿，不按预设间隔机械轮换。
+  - 物件预算：物件、屏幕和消息只在改变判断、选择、关系或安全后果时回应；不用等距弹窗或反复提示替人物解释。
+  - 对白功能：每场对白只承担眼前冲突或关系位移；允许沉默、拒答、误解与改口，不让人物轮流补齐背景和规则。
+  - 语义自检：检查相邻段落是否只换名词却重复同一功能；核心信息是否通过人物判断、选择和后果落地，而非由旁白或对白复述；是否用微动作、动作标签或界面提示代替真实主观因果；是否仍有不改变选择与后果的流程可以压缩或离屏。
+  若 `render_packet.anti_ai_render_contract` 存在，它是上游净化后的正文安全合同：可能是非空章级 `anti_ai_execution_plan` 的定性投影，也可能是与上述要求同义的通用基线。必须完整读取其中的风险、因果 counter moves、节奏策略、物件/对白预算和语义自检，并以更具体的章级规则优先细化上述基线；若不存在，只执行基线，不得假定上游曾提供完整专项计划。两种情况都必须在首次成稿中落实，不得把规则当句序清单，也不得自行补出任何 detector 分数、CV/TTR、固定间隔或统一算法。`render_packet.event_timing_safeguards` 是兼容性的物件/对白剧情边界，与章级合同冲突时以章级合同为准。
   - 段落或句法过平时，先改变相邻段落承担的事情：争执、判断、跳时、结果或余波必须真的换挡；不得按固定间隔插长句、碎句、声音或物件。
   - 同一词反复出现时，先判断它是不是人物此刻真正盯住的对象。必要重复可以保留；不必要重复就删掉整句或合并信息，不做机械同义词轮换。
   - 对白像传送带时，删掉无需开口的人和只负责说明规则的话轮，让保留的回应改变选择、权力或关系；不靠插话、漏答、微动作和动作标签伪造自然。

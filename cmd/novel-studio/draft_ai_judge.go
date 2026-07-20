@@ -24,11 +24,12 @@ import (
 )
 
 type draftAIJudgeFlags struct {
-	Chapter    int
-	Start      int
-	End        int
-	Budget     time.Duration
-	NoSediment bool
+	Chapter     int
+	Start       int
+	End         int
+	Budget      time.Duration
+	NoSediment  bool
+	PrimaryOnly bool
 }
 
 func hasDraftAIJudgeFlag(argv []string) bool {
@@ -50,6 +51,7 @@ func parseDraftAIJudgeFlags(argv []string) (draftAIJudgeFlags, error) {
 	fs.IntVar(&flags.End, "to", 0, "结束章号（含）")
 	fs.DurationVar(&flags.Budget, "budget", flags.Budget, "每章外审墙钟预算")
 	fs.BoolVar(&flags.NoSediment, "no-sediment", false, "不把本轮通用建议沉淀到 RAG")
+	fs.BoolVar(&flags.PrimaryOnly, "primary-only", false, "只允许 reviewer 的主 provider/model，不自动切换 fallback")
 	if err := fs.Parse(argv); err != nil {
 		return flags, err
 	}
@@ -89,6 +91,15 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 	if err := normalizeOutputDirForInvocation(&cfg, projectDir); err != nil {
 		return err
 	}
+	if flags.NoSediment {
+		// Isolated sealed-render candidates may read only their frozen local
+		// artifacts. Do not initialize or mutate the project's live vector index
+		// merely to obtain an exact-body provider judgment.
+		cfg.DisableLiveRAG = true
+	}
+	if flags.PrimaryOnly {
+		cfg.DisableModelFailover = true
+	}
 	rules.EnsureHomeRulesDir()
 	eng, err := host.New(cfg, assets.Load(cfg.Style))
 	if err != nil {
@@ -116,16 +127,18 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 	}
 
 	var embedder rag.Embedder
-	if value, enabled, loadErr := bootstrap.NewRAGEmbedder(cfg); loadErr == nil && enabled {
-		embedder = value
-	} else if loadErr != nil {
-		fmt.Fprintf(os.Stderr, "[draft-ai-judge] RAG embedding 初始化失败，仅写本地索引：%v\n", loadErr)
-	}
 	var vectorWriter rag.VectorWriter
-	if value, enabled, loadErr := bootstrap.NewRAGQdrantClient(cfg, false); loadErr == nil && enabled {
-		vectorWriter = value
-	} else if loadErr != nil {
-		fmt.Fprintf(os.Stderr, "[draft-ai-judge] Qdrant 初始化失败，仅写本地索引：%v\n", loadErr)
+	if !flags.NoSediment {
+		if value, enabled, loadErr := bootstrap.NewRAGEmbedder(cfg); loadErr == nil && enabled {
+			embedder = value
+		} else if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "[draft-ai-judge] RAG embedding 初始化失败，仅写本地索引：%v\n", loadErr)
+		}
+		if value, enabled, loadErr := bootstrap.NewRAGQdrantClient(cfg, false); loadErr == nil && enabled {
+			vectorWriter = value
+		} else if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "[draft-ai-judge] Qdrant 初始化失败，仅写本地索引：%v\n", loadErr)
+		}
 	}
 
 	failed := 0
@@ -147,6 +160,10 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 		preserveRegisteredRetest := toolspkg.RequiresRegisteredExternalRetest(existingGate.Requirement)
 		fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d DeepSeek(%s/%s) 裸正文预审中（预算 %s）...\n", chapter, provider, model, flags.Budget)
 		result := loadOrGenerateDeepSeekAIJudge(eng.Dir(), reviewer, selection, chapter, body, flags.Budget)
+		fmt.Fprintf(os.Stderr,
+			"[draft-ai-judge:timing] ch%02d elapsed=%s cache=%t model_calls=%d\n",
+			chapter, result.Elapsed.Round(time.Millisecond), result.CacheHit, result.ModelCalls,
+		)
 		if result.CacheLoadErr != nil {
 			fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 缓存无效，已回源模型：%v\n", chapter, result.CacheLoadErr)
 		}
@@ -165,23 +182,20 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 		}
 		sanitizeDeepSeekAIJudgeForProject(st, artifact)
 		if !artifact.AdviceComplete {
-			// Project sanitization can invalidate an older cached response even
-			// when its model-facing JSON was complete. A fresh response can lose a
-			// suggestion for the same reason, so both paths get one bounded retry.
-			fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 建议经项目门禁净化后不完整，已回源 DeepSeek 重新估分\n", chapter)
-			fresh, freshErr := runDeepSeekAIJudge(reviewer, selection, chapter, body, flags.Budget)
-			if freshErr != nil || fresh == nil {
-				fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 缓存净化后回源失败：%v\n", chapter, freshErr)
-				failed++
-				continue
+			// Sanitization is deterministic for the same project/body/protocol.
+			// Re-calling DeepSeek under the identical cache identity cannot prove a
+			// new fact and used to add another full provider budget. Persist the
+			// fail-closed artifact; only a changed protocol/prompt may call again.
+			if saveErr := saveDraftDeepSeekAIJudge(eng.Dir(), artifact); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 净化后不完整结果写入失败：%v\n", chapter, saveErr)
+			} else {
+				fmt.Fprintf(os.Stderr,
+					"[draft-ai-judge] ch%02d 建议经项目门禁净化后不完整；同一 body/cache key 禁止重复回源，已保留精确结果并失败闭锁：%s\n",
+					chapter, artifact.AdviceWarning,
+				)
 			}
-			if saveErr := saveDeepSeekAIJudgeCache(eng.Dir(), fresh); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 刷新缓存写入失败：%v\n", chapter, saveErr)
-				failed++
-				continue
-			}
-			artifact = fresh
-			sanitizeDeepSeekAIJudgeForProject(st, artifact)
+			failed++
+			continue
 		}
 		if saveErr := saveDraftDeepSeekAIJudge(eng.Dir(), artifact); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "[draft-ai-judge] ch%02d 结果写入失败：%v\n", chapter, saveErr)
