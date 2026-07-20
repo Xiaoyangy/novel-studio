@@ -45,12 +45,14 @@ func (e WorldEvent) Validate() error {
 
 // WorldTick 世界推演游标：记录离屏世界已推演覆盖到的位置。落盘 meta/world_tick.json。
 type WorldTick struct {
-	TickID         string `json:"tick_id"` // "v2-a1"
-	Volume         int    `json:"volume,omitempty"`
-	Arc            int    `json:"arc,omitempty"`
-	ThroughChapter int    `json:"through_chapter"` // 推演已覆盖到的章
-	EventCount     int    `json:"event_count,omitempty"`
-	UpdatedAt      string `json:"updated_at,omitempty"`
+	TickID         string   `json:"tick_id"` // "v2-a1"
+	Volume         int      `json:"volume,omitempty"`
+	Arc            int      `json:"arc,omitempty"`
+	ThroughChapter int      `json:"through_chapter"` // 推演已覆盖到的章
+	EventCount     int      `json:"event_count,omitempty"`
+	GenerationID   string   `json:"generation_id,omitempty"`
+	Warnings       []string `json:"warnings,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
 }
 
 // NominateForeshadowCandidates 确定性伏笔提名：模拟范式的独有红利——离屏事件里

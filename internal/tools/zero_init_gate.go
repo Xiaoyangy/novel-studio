@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -26,7 +29,9 @@ const zeroInitFreshnessGrace = 2 * time.Second
 // before the first chapter can be written. Keep the producer and every
 // consumer pinned to this single value so a legacy ready:true artifact cannot
 // bypass a newer prewriting contract.
-const ZeroInitReadinessSchemaVersion = 3
+const ZeroInitReadinessSchemaVersion = 5
+
+const zeroInitUserRulesDependency = "meta/user_rules.json"
 
 // foundationFreshnessFiles 参与 readiness 过期判定的 foundation 工件。
 // 任何一个在 readiness 生成之后被重写，零章推演资产就可能引用了旧设定。
@@ -38,6 +43,90 @@ const ZeroInitReadinessSchemaVersion = 3
 var foundationFreshnessFiles = []string{
 	"premise.md", "characters.json", "world_rules.json",
 	"layered_outline.json", "outline.json", "world_codex.json",
+	zeroInitUserRulesDependency,
+}
+
+// CaptureZeroInitFoundationDependencies returns the content-addressed
+// foundation snapshot sealed by a zero-init readiness receipt. user_rules is
+// mandatory and semantically validated because it is the sole chapter-length
+// contract; the remaining entries retain their historical optional/existing
+// behavior and are captured whenever present.
+func CaptureZeroInitFoundationDependencies(dir string) (map[string]string, error) {
+	userRulesDigest, err := ValidateZeroInitUserRules(dir)
+	if err != nil {
+		return nil, err
+	}
+	dependencies := map[string]string{
+		zeroInitUserRulesDependency: userRulesDigest,
+	}
+	layeredAuthority := zeroInitLayeredOutlineAuthority(dir)
+	for _, rel := range foundationFreshnessFiles {
+		if rel == zeroInitUserRulesDependency {
+			continue
+		}
+		if rel == "outline.json" && layeredAuthority {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("读取 zero-init foundation dependency %s: %w", rel, err)
+		}
+		dependencies[rel] = zeroInitSHA256(data)
+	}
+	return dependencies, nil
+}
+
+func zeroInitLayeredOutlineAuthority(dir string) bool {
+	st := store.NewStore(dir)
+	layered, err := st.Outline.LoadLayeredOutline()
+	return err == nil && len(domain.FlattenOutline(layered)) > 0
+}
+
+// ValidateZeroInitUserRules verifies the mandatory book-level word-count
+// contract and returns the exact-file digest used by the readiness receipt.
+// Hashing raw bytes deliberately catches content changes even when a caller
+// preserves or rewinds mtime.
+func ValidateZeroInitUserRules(dir string) (string, error) {
+	path := filepath.Join(dir, zeroInitUserRulesDependency)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("%s 不存在", zeroInitUserRulesDependency)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s 无法读取: %w", zeroInitUserRulesDependency, err)
+	}
+	var snapshot struct {
+		Structured struct {
+			ChapterWords *struct {
+				Min int `json:"min"`
+				Max int `json:"max"`
+			} `json:"chapter_words"`
+		} `json:"structured"`
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return "", fmt.Errorf("%s 无法解析: %w", zeroInitUserRulesDependency, err)
+	}
+	words := snapshot.Structured.ChapterWords
+	if words == nil {
+		return "", fmt.Errorf("%s 缺少 structured.chapter_words", zeroInitUserRulesDependency)
+	}
+	if words.Min <= 0 || words.Max <= 0 || words.Min > words.Max {
+		return "", fmt.Errorf(
+			"%s structured.chapter_words 非法（min=%d max=%d，要求 min/max>0 且 min<=max）",
+			zeroInitUserRulesDependency,
+			words.Min,
+			words.Max,
+		)
+	}
+	return zeroInitSHA256(data), nil
+}
+
+func zeroInitSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // EnsureWorldCodexForChapterOne 第 1 章前的全局世界法典门禁：
@@ -86,11 +175,12 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 		return false, "meta/first_chapter_generation_readiness.json 不存在（尚未执行 zero-init）"
 	}
 	var r struct {
-		SchemaVersion int      `json:"schema_version"`
-		Ready         bool     `json:"ready"`
-		GeneratedAt   string   `json:"generated_at"`
-		Missing       []string `json:"missing"`
-		Issues        []string `json:"issues"`
+		SchemaVersion          int               `json:"schema_version"`
+		Ready                  bool              `json:"ready"`
+		GeneratedAt            string            `json:"generated_at"`
+		Missing                []string          `json:"missing"`
+		Issues                 []string          `json:"issues"`
+		FoundationDependencies map[string]string `json:"foundation_dependencies"`
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
 		return false, "readiness 工件无法解析，需重跑 zero-init"
@@ -101,13 +191,37 @@ func ZeroInitReadinessState(dir string) (bool, string) {
 	if !r.Ready {
 		return false, fmt.Sprintf("readiness ready=false（missing=%d issues=%d，详见 meta/first_chapter_generation_readiness.md）", len(r.Missing), len(r.Issues))
 	}
+	currentDependencies, err := CaptureZeroInitFoundationDependencies(dir)
+	if err != nil {
+		return false, fmt.Sprintf("zero-init foundation dependency 无效：%v，需重跑 zero-init", err)
+	}
+	if len(r.FoundationDependencies) == 0 {
+		return false, "readiness 缺少 foundation_dependencies 摘要，需重跑 zero-init --overwrite"
+	}
+	if _, ok := r.FoundationDependencies[zeroInitUserRulesDependency]; !ok {
+		return false, "readiness foundation_dependencies 缺少 meta/user_rules.json，需重跑 zero-init --overwrite"
+	}
+	for rel, current := range currentDependencies {
+		sealed, ok := r.FoundationDependencies[rel]
+		if !ok {
+			return false, fmt.Sprintf("readiness foundation_dependencies 缺少 %s，需重跑 zero-init --overwrite", rel)
+		}
+		if sealed != current {
+			return false, fmt.Sprintf("%s 内容摘要与零章初始化 receipt 不一致（foundation 变更），零章资产已过期", rel)
+		}
+	}
+	for rel := range r.FoundationDependencies {
+		if _, ok := currentDependencies[rel]; !ok {
+			return false, fmt.Sprintf("readiness 绑定的 foundation dependency %s 已删除或不再受支持，零章资产已过期", rel)
+		}
+	}
 	generatedAt, err := time.Parse(time.RFC3339, r.GeneratedAt)
 	if err != nil {
 		return false, "readiness generated_at 无法解析，需重跑 zero-init"
 	}
+	layeredAuthority := zeroInitLayeredOutlineAuthority(dir)
 	for _, rel := range foundationFreshnessFiles {
-		if rel == "outline.json" &&
-			nonEmptyRegularFile(filepath.Join(dir, "layered_outline.json")) {
+		if rel == "outline.json" && layeredAuthority {
 			// preplan rewrites the flat outline as a deterministic projection
 			// of layered_outline.json. The authored layered outline remains
 			// freshness-checked; its derived compatibility view must not make

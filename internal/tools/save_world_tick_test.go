@@ -73,6 +73,23 @@ func TestSaveWorldTickHappyPath(t *testing.T) {
 	}
 }
 
+func TestSaveWorldTickRetryKeepsReceiptEventCountIdempotent(t *testing.T) {
+	tool, st := newWorldTickTool(t)
+	args := `{
+		"volume":1,"arc":1,"through_chapter":0,
+		"events":[{"chapter":0,"actors":["林昭"],"summary":"林昭整理开篇前证据","visibility_chapter":1}]
+	}`
+	execWorldTick(t, tool, args)
+	result := execWorldTick(t, tool, args)
+	if result["saved_events"] != float64(0) {
+		t.Fatalf("retry should deduplicate event append: %v", result)
+	}
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil || tick == nil || tick.EventCount != 1 {
+		t.Fatalf("retry corrupted world_tick event_count: %+v err=%v", tick, err)
+	}
+}
+
 func TestSaveWorldTickGuards(t *testing.T) {
 	tool, _ := newWorldTickTool(t)
 	// 先落一次游标到 24
@@ -100,6 +117,51 @@ func TestSaveWorldTickGuards(t *testing.T) {
 	// 可见性被修正为不早于发生章
 	if events := mustLoadEvents(t, tool); events[len(events)-1].VisibilityChapter != 10 {
 		t.Fatalf("可见性未修正: %+v", events[len(events)-1])
+	}
+}
+
+func TestSaveWorldTickStrictInitialScopeRejectsWarningsBeforeWriting(t *testing.T) {
+	tool, st := newWorldTickTool(t)
+	if err := st.SaveSimulationRestartPolicy(domain.SimulationRestartPolicy{
+		Version:      1,
+		Active:       true,
+		GenerationID: "simulation-strict-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionWorldTick,
+		TargetChapter: 1,
+		Owner:         "strict-world-tick-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"volume":1,"arc":1,"through_chapter":0,
+		"events":[{"chapter":0,"actors":["未入册角色"],"summary":"未授权角色提前介入","visibility_chapter":1}]
+	}`)); err == nil || !strings.Contains(err.Error(), "preflight produced warnings") {
+		t.Fatalf("strict world_tick should reject warnings: %v", err)
+	}
+	if events, err := st.WorldSim.LoadWorldEvents(); err != nil || len(events) != 0 {
+		t.Fatalf("strict warning wrote events: %+v err=%v", events, err)
+	}
+	if tick, err := st.WorldSim.LoadTick(); err != nil || tick != nil {
+		t.Fatalf("strict warning wrote tick: %+v err=%v", tick, err)
+	}
+
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"volume":1,"arc":1,"through_chapter":0,
+		"events":[{"chapter":0,"actors":["林昭"],"summary":"林昭开篇前整理当前可见证据","visibility_chapter":1}]
+	}`))
+	if err != nil {
+		t.Fatalf("strict valid tick: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("strict valid tick returned no receipt")
+	}
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil || tick == nil || tick.GenerationID != "simulation-strict-test" || len(tick.Warnings) != 0 {
+		t.Fatalf("strict tick identity not persisted: %+v err=%v", tick, err)
 	}
 }
 

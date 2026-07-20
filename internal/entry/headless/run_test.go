@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -81,11 +82,36 @@ func TestShouldStopAfterInitialWorldTickRequiresSubstantiveEvents(t *testing.T) 
 	if err := st.Progress.SetLayered(true); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Outline.SavePremise("县城商户在开篇前形成现实经营压力。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Title: "第一卷",
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Title: "第一弧",
+			Chapters: []domain.OutlineEntry{{
+				Chapter:   1,
+				Title:     "开张",
+				CoreEvent: "县城商户形成第一笔可见交易",
+			}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := rules.BuildSnapshot([]rules.Candidate{rules.SystemDefaults()})
+	if err := st.UserRules.Save(&snapshot); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v0-a0", ThroughChapter: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if shouldStopAfterInitialWorldTickReady(dir) {
 		t.Fatal("empty zero-init world_tick baseline must not stop the stage")
+	}
+	if err := st.Characters.Save([]domain.Character{{Name: "县城商户", Role: "开篇群体角色"}}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := st.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
 		TickID:            "v1-a1",

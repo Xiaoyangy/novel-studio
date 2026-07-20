@@ -356,6 +356,37 @@ func TestFoundationExecutionLockAllowsOnlyFoundationMutation(t *testing.T) {
 	}
 }
 
+func TestWorldTickExecutionLockAllowsOnlyWorldTickMutation(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionWorldTick,
+		TargetChapter: 1,
+		Owner:         "world-tick-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardPipelineGlobalPlanningExecution(st, "save_world_tick"); err != nil {
+		t.Fatalf("world_tick lock rejected its sole mutation: %v", err)
+	}
+	for _, tool := range []string{"save_user_rules", "save_foundation", "save_arc_summary"} {
+		if err := guardPipelineGlobalPlanningExecution(st, tool); err == nil ||
+			!strings.Contains(err.Error(), "world_tick execution lock") {
+			t.Fatalf("world_tick lock allowed %s: %v", tool, err)
+		}
+	}
+	if err := guardPipelinePlanningExecution(st, 1, "plan_chapter"); err == nil ||
+		!strings.Contains(err.Error(), "试图提前规划") {
+		t.Fatalf("world_tick lock allowed chapter planning: %v", err)
+	}
+	if err := guardPipelineProseExecution(st, 1, "draft_chapter"); err == nil ||
+		!strings.Contains(err.Error(), "基础阶段不得") {
+		t.Fatalf("world_tick lock allowed prose mutation: %v", err)
+	}
+}
+
 func TestRenderExecutionBindsProseToExactFormalPlanDigest(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

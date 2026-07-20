@@ -111,14 +111,23 @@ func (s *WorldSimStore) LoadWorldEvents() ([]domain.WorldEvent, error) {
 	return events, nil
 }
 
-// ResetActivityState 清理活动推演游标与离屏事件流。章节/设定种子不动，
-// 用于 --reset-simulation-state 切换 generation 后重新生成 canon 世界 tick。
+// ResetActivityState 清理当前 generation 的全部活动推演工件。章节/设定种子不动，
+// 用于 --reset-simulation-state 切换 generation 或拒绝不合格初始 tick 后重新生成；
+// 不能只删事件和游标而留下同一次失败调用写入的 agenda/social/tier 残片。
 func (s *WorldSimStore) ResetActivityState() error {
 	return s.io.WithWriteLock(func() error {
-		if err := s.io.RemoveFileUnlocked(worldEventsPath); err != nil {
-			return err
+		for _, rel := range []string{
+			worldEventsPath,
+			"meta/world_tick.json",
+			"meta/offscreen_agenda.json",
+			"meta/simulation_tiers.json",
+			"meta/social_mood.json",
+		} {
+			if err := s.io.RemoveFileUnlocked(rel); err != nil {
+				return err
+			}
 		}
-		return s.io.RemoveFileUnlocked("meta/world_tick.json")
+		return nil
 	})
 }
 

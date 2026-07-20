@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
@@ -44,6 +45,23 @@ func TestZeroInitPipelineScaffoldsRequiredDynamicAssets(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
 			t.Fatalf("expected %s: %v", rel, err)
 		}
+	}
+	var readinessReceipt struct {
+		FoundationDependencies map[string]string `json:"foundation_dependencies"`
+	}
+	readinessData, err := os.ReadFile(filepath.Join(dir, "meta", "first_chapter_generation_readiness.json"))
+	if err != nil {
+		t.Fatalf("read readiness receipt: %v", err)
+	}
+	if err := json.Unmarshal(readinessData, &readinessReceipt); err != nil {
+		t.Fatalf("parse readiness receipt: %v", err)
+	}
+	wantDependencies, err := tools.CaptureZeroInitFoundationDependencies(dir)
+	if err != nil {
+		t.Fatalf("capture readiness dependencies: %v", err)
+	}
+	if got, want := readinessReceipt.FoundationDependencies["meta/user_rules.json"], wantDependencies["meta/user_rules.json"]; got == "" || got != want {
+		t.Fatalf("readiness receipt did not seal user_rules digest: got=%q want=%q", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "drafts", "01.plan.json")); !os.IsNotExist(err) {
 		t.Fatalf("zero-init should not create official writer plan, stat err=%v", err)
@@ -870,6 +888,7 @@ func seedZeroInitProject(t *testing.T) string {
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	saveZeroInitTestUserRules(t, st)
 	if err := st.Outline.SavePremise("失业风控员江烬进入一座按契约和账单运转的鬼城，为妹妹江禾寻找活路。"); err != nil {
 		t.Fatalf("SavePremise: %v", err)
 	}
@@ -962,6 +981,7 @@ func seedSecondAlgorithmProject(t *testing.T) string {
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	saveZeroInitTestUserRules(t, st)
 	if err := st.Outline.SavePremise("AI改变职业的都市女性成长小说。澄光科技上市前夜，运营产品经理许闻溪在AI提效项目里被默认可替代，她要重新给自己的能力定价，并和梁渡在缓慢试探中建立信任。"); err != nil {
 		t.Fatalf("SavePremise: %v", err)
 	}
@@ -1088,6 +1108,20 @@ func zeroInitSecondAlgorithmWorldCodex() domain.WorldCodex {
 		EquipmentCategories: []domain.CodexGradedCategory{{Name: "职业资源", Description: "发言机会、客户反馈、培训名额、排班时间", Grades: []string{"临时", "可用", "已回填"}}},
 		Sections:            sections,
 		ImmutabilityPolicy:  "修订必须提供 change_reason 与 change_evidence。",
+	}
+}
+
+func saveZeroInitTestUserRules(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Version: rules.SnapshotVersion,
+		Status:  rules.StatusReady,
+		Structured: rules.Structured{
+			ChapterWords: &rules.WordRange{Min: 2000, Max: 3300},
+		},
+		Sources: []string{"test"},
+	}); err != nil {
+		t.Fatalf("SaveUserRules: %v", err)
 	}
 }
 

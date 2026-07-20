@@ -80,6 +80,15 @@ func TestWorldSimStoreResetActivityStateClearsEventsAndTick(t *testing.T) {
 	if err := s.WorldSim.SaveTick(domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1}); err != nil {
 		t.Fatalf("save tick: %v", err)
 	}
+	if err := s.WorldSim.SaveAgendaLedger(domain.OffscreenAgendaLedger{Agendas: []domain.CharacterAgenda{{Name: "许闻溪", CurrentGoal: "推进旧目标"}}}); err != nil {
+		t.Fatalf("save agenda: %v", err)
+	}
+	if err := s.WorldSim.SaveSimulationCast(domain.SimulationCast{Assignments: []domain.TierAssignment{{Name: "许闻溪", Tier: domain.TierSupporting}}}); err != nil {
+		t.Fatalf("save simulation tiers: %v", err)
+	}
+	if err := s.Methodology.SaveSocialMood(domain.SocialMood{Mood: "旧情绪", Intensity: 0.5}); err != nil {
+		t.Fatalf("save social mood: %v", err)
+	}
 	if err := s.WorldSim.ResetActivityState(); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
@@ -88,6 +97,15 @@ func TestWorldSimStoreResetActivityStateClearsEventsAndTick(t *testing.T) {
 	}
 	if tick, err := s.WorldSim.LoadTick(); err != nil || tick != nil {
 		t.Fatalf("tick should be cleared: %+v err=%v", tick, err)
+	}
+	if agenda, err := s.WorldSim.LoadAgendaLedger(); err != nil || len(agenda.Agendas) != 0 {
+		t.Fatalf("agenda should be cleared: %+v err=%v", agenda, err)
+	}
+	if cast, err := s.WorldSim.LoadSimulationCast(); err != nil || len(cast.Assignments) != 0 {
+		t.Fatalf("simulation tiers should be cleared: %+v err=%v", cast, err)
+	}
+	if mood, err := s.Methodology.LoadSocialMood(); err != nil || mood != nil {
+		t.Fatalf("social mood should be cleared: %+v err=%v", mood, err)
 	}
 }
 
