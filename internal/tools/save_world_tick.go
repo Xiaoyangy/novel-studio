@@ -154,6 +154,56 @@ func (t *SaveWorldTickTool) Execute(_ context.Context, args json.RawMessage) (js
 			a.Events[i].VisibilityChapter = a.Events[i].Chapter
 		}
 	}
+	if lock, err := t.store.Runtime.LoadPipelineExecution(); err != nil {
+		return nil, fmt.Errorf("load execution lock for world_tick preflight: %w: %w", errs.ErrStoreRead, err)
+	} else if lock != nil && lock.Mode == domain.PipelineExecutionWorldTick {
+		for _, agenda := range a.AgendaUpdates {
+			if agenda.LastAdvancedChapter == 0 {
+				agenda.LastAdvancedChapter = a.ThroughChapter
+			}
+			if err := agenda.Validate(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("日程 %q 非法: %v", agenda.Name, err))
+			}
+		}
+		if a.SocialMood != nil {
+			mood := *a.SocialMood
+			mood.Chapter = a.ThroughChapter
+			if err := mood.Validate(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("social_mood 非法: %v", err))
+			}
+		}
+		for _, upd := range a.TierUpdates {
+			if _, ok := known[strings.TrimSpace(upd.Name)]; !ok {
+				warnings = append(warnings, fmt.Sprintf("分层角色 %q 不在角色册/势力册中", upd.Name))
+			}
+		}
+		if len(a.ClockUpdates) > 0 {
+			world, worldErr := t.store.World.LoadBookWorld()
+			if worldErr != nil || world == nil {
+				warnings = append(warnings, "book_world 不可读，不能校验势力钟")
+			} else {
+				for _, upd := range a.ClockUpdates {
+					matched := false
+					for _, faction := range world.Factions {
+						if !worldFactionMatches(faction, upd.Target) {
+							continue
+						}
+						matched = true
+						if faction.Clock == nil || faction.Clock.Segments <= 0 {
+							warnings = append(warnings, fmt.Sprintf("势力 %q 未设有效进度钟", upd.Target))
+						}
+						break
+					}
+					if !matched {
+						warnings = append(warnings, fmt.Sprintf("势力钟目标 %q 不在 book_world 势力册中", upd.Target))
+					}
+				}
+			}
+		}
+		if len(warnings) > 0 {
+			return nil, fmt.Errorf("initial world_tick preflight produced warnings and was not persisted: %s: %w", strings.Join(warnings, "；"), errs.ErrToolPrecondition)
+		}
+	}
 
 	tickID := fmt.Sprintf("v%d-a%d", a.Volume, a.Arc)
 	// 故事时钟锚定：结构化时间合同里的章节/弧 schedule 最权威；没有
@@ -270,12 +320,30 @@ func (t *SaveWorldTickTool) Execute(_ context.Context, args json.RawMessage) (js
 		}
 	}
 
+	generationID := ""
+	if policy, err := t.store.LoadSimulationRestartPolicy(); err != nil {
+		return nil, fmt.Errorf("load simulation generation for world tick: %w: %w", errs.ErrStoreWrite, err)
+	} else if policy != nil {
+		generationID = strings.TrimSpace(policy.GenerationID)
+	}
+	allEvents, err := t.store.WorldSim.LoadWorldEvents()
+	if err != nil {
+		return nil, fmt.Errorf("reload world events for tick receipt: %w: %w", errs.ErrStoreWrite, err)
+	}
+	currentTickEventCount := 0
+	for _, event := range allEvents {
+		if strings.TrimSpace(event.TickID) == tickID {
+			currentTickEventCount++
+		}
+	}
 	if err := t.store.WorldSim.SaveTick(domain.WorldTick{
 		TickID:         tickID,
 		Volume:         a.Volume,
 		Arc:            a.Arc,
 		ThroughChapter: a.ThroughChapter,
-		EventCount:     len(saved),
+		EventCount:     currentTickEventCount,
+		GenerationID:   generationID,
+		Warnings:       append([]string(nil), warnings...),
 	}); err != nil {
 		return nil, fmt.Errorf("save world tick: %w: %w", errs.ErrStoreWrite, err)
 	}

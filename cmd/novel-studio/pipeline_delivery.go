@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1677,12 +1678,30 @@ func pipelineEnsureArchitectReadiness(opts cliOptions, outputDir string) error {
 	return nil
 }
 
-func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) error {
+func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) (returnErr error) {
 	st := store.NewStore(cfg.OutputDir)
 	if err := tools.EnsureInitialWorldTickForChapterOne(st); err == nil {
 		fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 初始 world_tick 已就绪")
 		return nil
 	}
+	userRulesDigest, err := pipelineInitialWorldTickUserRulesDigest(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
+	restoreFoundationLock, err := pipelineAcquireInitialWorldTickExecution(st)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := restoreFoundationLock(); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
+	defer func() {
+		if err := pipelineVerifyInitialWorldTickUserRulesDigest(cfg.OutputDir, userRulesDigest); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
 	prompt := pipelineInitialWorldTickPrompt(cfg.OutputDir)
 	const maxWorldTickRuns = 3
 	for run := 1; run <= maxWorldTickRuns; run++ {
@@ -1698,11 +1717,7 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 		} else {
 			fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 第 %d/%d 次恢复初始 world_tick\n", run, maxWorldTickRuns)
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                    prompt,
-			PreserveUserRules:         true,
-			StopAfterInitialWorldTick: true,
-		}); err != nil {
+		if err := headless.Run(cfg, bundle, pipelineInitialWorldTickHeadlessOptions(prompt)); err != nil {
 			return err
 		}
 	}
@@ -1710,6 +1725,68 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 		return fmt.Errorf("zero-init 阶段未完成初始 world_tick：%w", err)
 	}
 	return nil
+}
+
+func pipelineAcquireInitialWorldTickExecution(st *store.Store) (func() error, error) {
+	if st == nil {
+		return nil, fmt.Errorf("initial world_tick execution requires a store")
+	}
+	lock, err := st.Runtime.LoadPipelineExecution()
+	if err != nil {
+		return nil, fmt.Errorf("load foundation execution lock for initial world_tick: %w", err)
+	}
+	if lock == nil || lock.Mode != domain.PipelineExecutionFoundation {
+		return nil, fmt.Errorf("initial world_tick requires the active foundation execution lock")
+	}
+	worldTickLock := *lock
+	worldTickLock.Mode = domain.PipelineExecutionWorldTick
+	if err := st.Runtime.AcquirePipelineExecution(worldTickLock); err != nil {
+		return nil, fmt.Errorf("acquire world_tick-only execution lock: %w", err)
+	}
+	return func() error {
+		current, err := st.Runtime.LoadPipelineExecution()
+		if err != nil {
+			return fmt.Errorf("load world_tick-only execution lock for restore: %w", err)
+		}
+		if current == nil || current.Mode != domain.PipelineExecutionWorldTick || current.Owner != lock.Owner {
+			return fmt.Errorf("world_tick-only execution lock changed before foundation restore")
+		}
+		restored := *current
+		restored.Mode = domain.PipelineExecutionFoundation
+		if err := st.Runtime.AcquirePipelineExecution(restored); err != nil {
+			return fmt.Errorf("restore foundation execution lock after initial world_tick: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+func pipelineInitialWorldTickUserRulesDigest(outputDir string) (string, error) {
+	path := filepath.Join(outputDir, "meta", "user_rules.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("snapshot read-only meta/user_rules.json before initial world_tick: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func pipelineVerifyInitialWorldTickUserRulesDigest(outputDir, before string) error {
+	after, err := pipelineInitialWorldTickUserRulesDigest(outputDir)
+	if err != nil {
+		return err
+	}
+	if before != after {
+		return fmt.Errorf("initial world_tick changed read-only meta/user_rules.json (before=%s after=%s); stage rejected", before, after)
+	}
+	return nil
+}
+
+func pipelineInitialWorldTickHeadlessOptions(prompt string) headless.Options {
+	return headless.Options{
+		Prompt:                    prompt,
+		StopAfterInitialWorldTick: true,
+		PreserveUserRules:         true,
+	}
 }
 
 func pipelineResetInvalidInitialWorldTick(outputDir string) error {
@@ -1736,7 +1813,13 @@ func pipelineInitialWorldTickPrompt(outputDir string) string {
 	b.WriteString("[Pipeline zero-init 初始 world_tick 阶段]\n")
 	b.WriteString("Architect foundation 与 zero-init readiness 已完成；本阶段只补齐第 1 章写作前的离屏世界信息流。\n")
 	b.WriteString("必须派 architect_long 调用 save_world_tick，为第 1 章前生成开局镜头外事件、可见路径、势力/角色 agenda 推进和信息回收路径。\n")
-	b.WriteString("硬约束：events.actors 与 faction_clock_updates.target 只能使用下方角色名、势力 id/name/aliases；工具返回任何 warnings 都不算通过。严禁写古代/官署/主角家族/旧案/黑市/导师这类非本书题材元素。\n")
+	b.WriteString("现有 meta/user_rules.json 是只读长期约束；严禁调用 save_user_rules，严禁用本阶段内部提示覆盖或改写用户规则。\n")
+	b.WriteString("硬约束：events.actors 与 faction_clock_updates.target 只能使用下方角色名、势力 id/name/aliases；工具返回任何 warnings 都不算通过。不得引入 premise、user_rules、world_rules 与冻结首弧没有授权的题材、人物、组织或机制。\n")
+	if forbidden := pipelineWorldTickForbiddenTopics(outputDir); len(forbidden) > 0 {
+		b.WriteString("本书明确排除的题材元素：")
+		b.WriteString(strings.Join(forbidden, "、"))
+		b.WriteString("；只能作为禁用边界说明，不能成为事件事实。\n")
+	}
 	if brief := pipelineWorldTickCanonBrief(outputDir); brief != "" {
 		b.WriteString("\n[本书 canon 锚点]\n")
 		b.WriteString(brief)
@@ -1749,21 +1832,46 @@ func pipelineInitialWorldTickPrompt(outputDir string) string {
 func pipelineWorldTickCanonBrief(outputDir string) string {
 	st := store.NewStore(outputDir)
 	var b strings.Builder
+	if policy, err := st.LoadSimulationRestartPolicy(); err == nil && policy != nil && strings.TrimSpace(policy.GenerationID) != "" {
+		fmt.Fprintf(&b, "当前推演 generation_id：%s；world_tick 只能服务此 generation。\n", strings.TrimSpace(policy.GenerationID))
+	}
+	if snap, err := st.UserRules.Load(); err == nil && snap != nil {
+		if genre := strings.TrimSpace(snap.Structured.Genre); genre != "" {
+			fmt.Fprintf(&b, "题材：%s\n", genre)
+		}
+		if words := snap.Structured.ChapterWords; words != nil {
+			fmt.Fprintf(&b, "单章承载：%d—%d 字（user_rules 唯一字数口径）。\n", words.Min, words.Max)
+		}
+		if preferences := strings.TrimSpace(snap.Preferences); preferences != "" {
+			b.WriteString("用户长期约束摘要：")
+			b.WriteString(pipelineCompactText(preferences, 2400))
+			b.WriteString("\n")
+		}
+	}
 	if premise, err := st.Outline.LoadPremise(); err == nil && strings.TrimSpace(premise) != "" {
 		b.WriteString("premise 摘要：")
 		b.WriteString(pipelineCompactText(premise, 900))
 		b.WriteString("\n")
 	}
+	flatOutline := pipelineWorldTickFlatOutline(st)
+	pipelineWriteFirstArcWorldTickBrief(&b, st, flatOutline)
 	if chars, err := st.Characters.Load(); err == nil && len(chars) > 0 {
-		var names []string
+		firstMentions := zeroCharacterFirstMentions(flatOutline, chars)
+		b.WriteString("角色与最早可见边界（角色卡描述是作者资料，不代表角色开局已知）：\n")
 		for _, c := range chars {
-			if strings.TrimSpace(c.Name) != "" {
-				names = append(names, c.Name)
+			name := strings.TrimSpace(c.Name)
+			if name == "" {
+				continue
 			}
-		}
-		if len(names) > 0 {
-			b.WriteString("可用角色：")
-			b.WriteString(strings.Join(names, "、"))
+			first := firstMentions[name]
+			boundary := "当前大纲未安排可见；不得让信息进入主角视野"
+			if first > 0 {
+				boundary = fmt.Sprintf("最早第%d章可见", first)
+			}
+			fmt.Fprintf(&b, "- %s｜%s｜%s", name, zeroFirstNonEmpty(strings.TrimSpace(c.Role), "未标角色"), boundary)
+			if baseline := strings.TrimSpace(zeroOpeningCharacterFact(c)); baseline != "" {
+				fmt.Fprintf(&b, "｜当下基线：%s", pipelineCompactText(baseline, 220))
+			}
 			b.WriteString("\n")
 		}
 	}
@@ -1778,6 +1886,73 @@ func pipelineWorldTickCanonBrief(outputDir string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func pipelineWorldTickForbiddenTopics(outputDir string) []string {
+	st := store.NewStore(outputDir)
+	premise, _ := st.Outline.LoadPremise()
+	source := premise
+	if snap, err := st.UserRules.Load(); err == nil && snap != nil {
+		source += "\n" + snap.Preferences
+	}
+	markers := []string{
+		"古代", "官场", "官署", "旧案", "黑市", "导师", "诡异", "恐怖", "惊悚", "灵异", "超自然",
+		"规则怪谈", "鬼城", "鬼怪", "冥府", "末世", "克苏鲁", "邪神", "收容", "死亡", "失踪", "异化", "附身", "传送",
+	}
+	var out []string
+	for _, marker := range markers {
+		if zeroSourceExplicitlyForbids(source, marker) {
+			out = append(out, marker)
+		}
+	}
+	return out
+}
+
+func pipelineWorldTickFlatOutline(st *store.Store) []domain.OutlineEntry {
+	outline, _ := zeroAuthoritativeOutline(st)
+	return outline
+}
+
+func pipelineWriteFirstArcWorldTickBrief(b *strings.Builder, st *store.Store, flat []domain.OutlineEntry) {
+	if b == nil || st == nil {
+		return
+	}
+	if layered, err := st.Outline.LoadLayeredOutline(); err == nil && len(layered) > 0 {
+		chapterCursor := 1
+		for _, volume := range layered {
+			for _, arc := range volume.Arcs {
+				if len(arc.Chapters) > 0 {
+					fmt.Fprintf(b, "当前首弧：V%dA%d《%s》；弧目标：%s\n", volume.Index, arc.Index, strings.TrimSpace(arc.Title), pipelineCompactText(arc.Goal, 500))
+					b.WriteString("首弧章节边界（world_tick 必须围绕此弧的现实因果，不得抢跑后续项目）：\n")
+					for i, entry := range arc.Chapters {
+						fmt.Fprintf(b, "- 第%d章《%s》：%s；钩子：%s\n",
+							chapterCursor+i,
+							strings.TrimSpace(entry.Title),
+							pipelineCompactText(entry.CoreEvent, 260),
+							pipelineCompactText(entry.Hook, 160),
+						)
+					}
+					return
+				}
+				chapterCursor += arc.ChapterSpan()
+			}
+		}
+	}
+	if len(flat) == 0 {
+		return
+	}
+	b.WriteString("开篇章节边界：\n")
+	for i, entry := range flat {
+		if i >= 12 {
+			break
+		}
+		fmt.Fprintf(b, "- 第%d章《%s》：%s；钩子：%s\n",
+			entry.Chapter,
+			strings.TrimSpace(entry.Title),
+			pipelineCompactText(entry.CoreEvent, 260),
+			pipelineCompactText(entry.Hook, 160),
+		)
+	}
 }
 
 func nonEmptyPipelineStrings(values []string) []string {

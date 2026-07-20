@@ -16,6 +16,7 @@ type PipelineExecutionMode string
 
 const (
 	PipelineExecutionFoundation PipelineExecutionMode = "foundation"
+	PipelineExecutionWorldTick  PipelineExecutionMode = "world_tick"
 	PipelineExecutionOutlineAll PipelineExecutionMode = "outline_all"
 	PipelineExecutionPreplan    PipelineExecutionMode = "preplan"
 	PipelineExecutionProjectAll PipelineExecutionMode = "project_all"

@@ -40,6 +40,87 @@ func zeroIsCountySpendProject(project zeroInitProject) bool {
 	return strings.TrimSpace(project.Name) == "只许把钱花在青山县"
 }
 
+func zeroIsHorrorProject(project zeroInitProject) bool {
+	// Only current author-controlled premise/rules may select the horror profile.
+	// book_world is generated output and may be a stale asset from an older run;
+	// feeding it back here makes a polluted template self-perpetuating. Match by
+	// clause so prohibitions such as “不是鬼城，不写规则怪谈” stay negative.
+	parts := []string{project.Name, project.Premise}
+	for _, rule := range project.WorldRules {
+		parts = append(parts, rule.Category, rule.Rule, rule.Boundary)
+	}
+	anchors := []string{
+		"鬼城", "规则怪谈", "恐怖小说", "惊悚小说", "灵异小说", "克苏鲁小说",
+		"邪神降临", "收容物", "闹鬼", "亡灵世界", "冥府", "鬼怪世界",
+	}
+	for _, part := range parts {
+		for _, clause := range strings.FieldsFunc(part, func(r rune) bool {
+			return strings.ContainsRune("。；！？!?，,\n", r)
+		}) {
+			for _, anchor := range anchors {
+				if zeroClauseHasAffirmedAnchor(clause, anchor) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func zeroClauseHasAffirmedAnchor(clause, anchor string) bool {
+	remaining := clause
+	for {
+		idx := strings.Index(remaining, anchor)
+		if idx < 0 {
+			return false
+		}
+		prefixRunes := []rune(remaining[:idx])
+		if len(prefixRunes) > 12 {
+			prefixRunes = prefixRunes[len(prefixRunes)-12:]
+		}
+		nearPrefix := string(prefixRunes)
+		suffixRunes := []rune(remaining[idx+len(anchor):])
+		if len(suffixRunes) > 12 {
+			suffixRunes = suffixRunes[:12]
+		}
+		nearSuffix := string(suffixRunes)
+		prefixNegated := zeroContainsAny(nearPrefix,
+			"不写", "不是", "并非", "没有", "不含", "不涉及", "不要", "不得", "不能", "不可", "禁止", "严禁", "避免", "拒绝", "排除", "远离", "取消", "废弃", "删除", "弃用", "不采用", "未采用",
+		) || strings.HasSuffix(strings.TrimSpace(nearPrefix), "非") || strings.HasSuffix(strings.TrimSpace(nearPrefix), "无")
+		suffixNegated := zeroContainsAny(nearSuffix,
+			"已取消", "被取消", "已废弃", "已删除", "已弃用", "不再使用", "仅作反例", "只是禁用词",
+		)
+		if !prefixNegated && !suffixNegated {
+			return true
+		}
+		remaining = remaining[idx+len(anchor):]
+	}
+}
+
+func zeroAssetOpeningPressureName(project zeroInitProject) string {
+	if zeroIsHorrorProject(project) {
+		return zeroOpeningPressureName(project)
+	}
+	if title := strings.TrimSpace(project.FirstChapter.Title); title != "" {
+		return title + "中的现实压力"
+	}
+	if zeroIsSecondAlgorithmProject(project) {
+		return "第一章岗位、资源与选择压力"
+	}
+	return "第一章目标、资源与执行压力"
+}
+
+func zeroFirstActiveNonProtagonistName(project zeroInitProject) string {
+	for _, c := range project.Characters {
+		if !zeroIsPrimaryProtagonist(project, c) && zeroFirstChapterCharacterActive(project, c) {
+			if name := strings.TrimSpace(c.Name); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func zeroFirstChapterCharacterActive(project zeroInitProject, c domain.Character) bool {
 	if zeroIsPrimaryProtagonist(project, c) {
 		return true
@@ -73,14 +154,13 @@ func zeroInitDynamics(project zeroInitProject) zeroInitCharacterDynamicsDoc {
 
 func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.CharacterSimulationState {
 	role := zeroFirstNonEmpty(c.Role, "关键角色")
-	desc := zeroFirstNonEmpty(c.Description, "角色卡未写明细节，第一章必须用行动补证。")
-	arc := zeroFirstNonEmpty(c.Arc, "从静态设定进入可追踪的行动变化。")
-	actionBias := zeroActionBias(c)
+	arc := zeroOpeningArcBaseline(c)
+	actionBias := zeroOpeningActionBias(c)
 	second := zeroIsSecondAlgorithmProject(project)
 	firstChapterActive := zeroFirstChapterCharacterActive(project, c)
 	// 主角是关系枢纽，应对每个关键配角都有契约；非主角对主角有契约。
 	// 旧逻辑只给主角找单个 FirstCast 对手，第一章大纲没点名匹配时主角契约为空。
-	counterparts := zeroCounterpartsForCharacter(project, c)
+	counterparts := zeroCurrentCounterparts(project, c)
 	relationshipForces := []string{"当前章的主要牵引来自现场规则、资源压力和可见证据。"}
 	if second {
 		relationshipForces = []string{"当前章的主要牵引来自职场处境、岗位资源、关系边界和可见证据。"}
@@ -201,14 +281,17 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 		PlausibleMistakes:  plausibleMistakes,
 		CorrectionTriggers: correctionTriggers,
 		KnowledgeLedger: domain.CharacterKnowledgeLedger{
-			KnownFacts:         []string{fmt.Sprintf("自己是%s；角色卡基础描述：%s", role, desc)},
-			UnknownFacts:       unknownFacts,
-			Suspicions:         []string{"现场异常或关系压力不会无代价解除。"},
-			FalseBeliefs:       []string{"以为只靠旧经验就能处理第一章问题。"},
-			EvidenceSeen:       evidenceSeen,
-			Confidence:         "zero_chapter_baseline",
-			SourceChapter:      0,
-			ForbiddenKnowledge: []string{"未在角色卡、大纲、世界规则或 RAG 召回中出现的谜底与后台设定。"},
+			KnownFacts:    []string{zeroOpeningCharacterFact(c)},
+			UnknownFacts:  unknownFacts,
+			Suspicions:    []string{"现场异常或关系压力不会无代价解除。"},
+			FalseBeliefs:  []string{"以为只靠旧经验就能处理第一章问题。"},
+			EvidenceSeen:  evidenceSeen,
+			Confidence:    "zero_chapter_baseline",
+			SourceChapter: 0,
+			ForbiddenKnowledge: []string{
+				"未在角色卡、大纲、世界规则或 RAG 召回中出现的谜底与后台设定。",
+				"中后期角色弧、尚未发生的关系进展、秘密机制及未来秘密归属不属于零章知识。",
+			},
 		},
 		DecisionFrame: domain.CharacterDecisionFrame{
 			AvailableOptions:        []string{"观察并核验证据", "与关键关系对象交换信息", "暂时拒绝高风险承诺"},
@@ -232,7 +315,7 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 			RelationshipEffect:   zeroRelationshipEffectLine(second),
 		},
 		ArcAxis: domain.CharacterArcAxis{
-			Want:             zeroFirstNonEmpty(c.Arc, "拿到眼前问题的控制权。"),
+			Want:             zeroFirstNonEmpty(zeroCurrentGoal(project, c, role), "拿到眼前问题的控制权。"),
 			Need:             "学会用行动和证据承担选择后果，而不是停留在人设标签。",
 			WoundOrGhost:     "角色卡中的创伤、执念或责任必须通过具体反应出现。",
 			CoreLie:          "以为旧经验足以解释第一章的新压力。",
@@ -243,6 +326,74 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 			RegressionSignal: "用漂亮判断、沉默或逃避替代真实选择。",
 		},
 	}
+}
+
+func zeroCurrentCounterparts(project zeroInitProject, c domain.Character) []string {
+	if !zeroFirstChapterCharacterActive(project, c) {
+		return nil
+	}
+	var out []string
+	for _, name := range zeroCounterpartsForCharacter(project, c) {
+		for _, other := range project.Characters {
+			if zeroCharacterNameIs(other, name) && zeroFirstChapterCharacterActive(project, other) {
+				out = append(out, strings.TrimSpace(other.Name))
+				break
+			}
+		}
+	}
+	return out
+}
+
+func zeroOpeningCharacterDescription(c domain.Character) string {
+	desc := strings.TrimSpace(c.Description)
+	if desc == "" {
+		return ""
+	}
+	if idx := strings.IndexAny(desc, "。；！？\n"); idx >= 0 {
+		desc = desc[:idx]
+	}
+	for _, marker := range []string{
+		"早期", "前期", "中期", "后期", "终局", "最终", "未来", "逐步", "后来",
+		"确认关系时", "之后成为", "将成为", "转任", "升任", "绑定只能", "绑定系统", "系统秘密",
+		"推理系统存在", "发现系统", "知道系统", "不知系统", "唯一知情", "任务限制", "惩罚触发",
+	} {
+		if idx := strings.Index(desc, marker); idx >= 0 {
+			desc = desc[:idx]
+		}
+	}
+	return strings.Trim(strings.TrimSpace(desc), "，,；;：:")
+}
+
+func zeroOpeningArcBaseline(c domain.Character) string {
+	role := zeroFirstNonEmpty(strings.TrimSpace(c.Role), "当前身份")
+	if traits := strings.TrimSpace(strings.Join(c.Traits, "、")); traits != "" {
+		return fmt.Sprintf("开局只验证%s以%s应对眼前压力；完整角色弧不载入零章工作记忆。", role, traits)
+	}
+	return fmt.Sprintf("开局只验证%s如何应对眼前压力；完整角色弧不载入零章工作记忆。", role)
+}
+
+func zeroOpeningActionBias(c domain.Character) string {
+	parts := append([]string{}, c.Traits...)
+	if baseline := zeroOpeningCharacterDescription(c); baseline != "" {
+		parts = append(parts, baseline)
+	}
+	if len(parts) == 0 {
+		return "先观察、再试探、最后用可见证据做选择。"
+	}
+	src := strings.Join(parts, "；")
+	if len([]rune(src)) > 80 {
+		src = string([]rune(src)[:80])
+	}
+	return "由当下角色基线推出：" + src + "；行动时先保留边界，再换取新信息。"
+}
+
+func zeroOpeningCharacterFact(c domain.Character) string {
+	name := zeroFirstNonEmpty(strings.TrimSpace(c.Name), "该角色")
+	desc := zeroOpeningCharacterDescription(c)
+	if desc == "" {
+		return fmt.Sprintf("自己名为%s；故事开始前其他事实必须由正文、角色当下证据或台账确认。", name)
+	}
+	return fmt.Sprintf("自己名为%s；故事开始前可确认的角色资料：%s。", name, desc)
 }
 
 func zeroCurrentGoal(project zeroInitProject, c domain.Character, role string) string {
@@ -296,7 +447,7 @@ func zeroRelationshipEffectLine(second bool) string {
 func zeroInitVoiceLogic(project zeroInitProject, c domain.Character) domain.CharacterVoiceLogic {
 	return domain.CharacterVoiceLogic{
 		Character:          c.Name,
-		PersonalitySource:  zeroFirstNonEmpty(strings.Join(c.Traits, "、"), c.Description, c.Role),
+		PersonalitySource:  zeroFirstNonEmpty(strings.Join(c.Traits, "、"), zeroOpeningCharacterDescription(c), c.Role),
 		SpeechPrinciple:    zeroSpeechPrinciple(project, c),
 		SceneObjective:     zeroSceneObjective(project, c),
 		HiddenSubtext:      zeroHiddenSubtext(project, c),
@@ -374,6 +525,9 @@ func zeroSceneObjective(project zeroInitProject, c domain.Character) string {
 
 func zeroSpeechPrinciple(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role + " " + strings.Join(c.Traits, " ")
+	if !zeroFirstChapterCharacterActive(project, c) {
+		return fmt.Sprintf("%s首次入场前只保留由%s与当下性格推出的个人声口；不预写与主角的熟稔、暧昧、默契或共同秘密。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前身份"))
+	}
 	if zeroIsCountySpendProject(project) {
 		switch {
 		case zeroCharacterNameIs(c, "林澈"):
@@ -433,7 +587,7 @@ func zeroHiddenSubtext(project zeroInitProject, c domain.Character) string {
 		case zeroCharacterNameIs(c, "林澈"):
 			return "他怕父母因自己失业被人看低，也怕来得太容易的钱最后让家里替他收拾残局。"
 		case zeroCharacterNameIs(c, "沈知遥"):
-			return "她对林澈的异常来路已经起疑，却更在意他会不会拿普通商户试错；关心要藏在追问和补位里。"
+			return "她先把林澈当成需要接受现场核验的项目发起人；此刻只根据走线、票据、商户收益和可见选择判断风险，不替未知资金来源下结论。"
 		case zeroCharacterNameIs(c, "贺骁"):
 			return "他担心林澈失业后憋出事，嘴上越损，越说明这趟忙他已经打算帮到底。"
 		case zeroCharacterNameIs(c, "周曼"):
@@ -472,12 +626,15 @@ func zeroHiddenSubtext(project zeroInitProject, c domain.Character) string {
 
 func zeroRelationshipStance(project zeroInitProject, c domain.Character) string {
 	roleText := c.Role
+	if !zeroFirstChapterCharacterActive(project, c) {
+		return fmt.Sprintf("%s尚未进入第一章关系现场；零章不预设其已与主角相识、互信、亏欠或形成协作，首次联系后再按可见行动建账。", zeroFirstNonEmpty(c.Name, "该角色"))
+	}
 	if zeroIsCountySpendProject(project) {
 		switch {
 		case zeroCharacterNameIs(c, "林澈"):
 			return "对家人先报喜不报忧，对朋友肯开口但不白占便宜；面对沈知遥既服她的专业，也会用嘴贫缓解被看穿的紧张。"
 		case zeroCharacterNameIs(c, "沈知遥"):
-			return "对外强势守规则，对林澈会主动靠近和护短，但每一次柔软都建立在他没有拿别人冒险的前提上。"
+			return "对外先守公开边界，对林澈保持专业审视；只有他用可审计结果证明没有拿商户冒险后，关系才允许从纠错推进到有限认可。"
 		case zeroCharacterNameIs(c, "贺骁"):
 			return "兄弟之间可以互损，钱、车和时间却算清楚；帮忙来自多年交情，不替林澈解释秘密。"
 		case zeroCharacterNameIs(c, "叶南栀"):
@@ -562,24 +719,36 @@ func zeroDictionAndRhythm(project zeroInitProject, c domain.Character) string {
 
 func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.CharacterSimulationState) []domain.DialogueSceneBlueprint {
 	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
-	counterpart := zeroFirstNonEmpty(zeroFirstNonProtagonistName(project.Characters), zeroOpeningPressureName(project), "第一位施压者")
+	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), zeroAssetOpeningPressureName(project), "第一位施压者")
 	for _, state := range states {
 		if state.Character != "" && state.Character != protagonist {
 			counterpart = state.Character
 			break
 		}
 	}
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章核心压力")
 	if zeroIsSecondAlgorithmProject(project) {
 		return zeroSecondAlgorithmDialogueSceneBlueprints(protagonist, counterpart, scene, pressure)
 	}
+	modeReason := "第一章需要让角色在未完全理解规则前围绕风险、任务或交易进行试探；若当前章是告白、审问、闲聊或汇报，正式计划必须改选对应模式。"
+	emotionalTemperature := "开局压住恐惧和尴尬，随后因对方催促、误读或隐瞒升温；不写成全程冷静。"
+	identityGrounding := fmt.Sprintf("通过称谓、外貌/衣着、职位/门牌/凭证、旧债或权力差说明%s是谁，以及他为什么能对%s施压。", counterpart, protagonist)
+	beatDensity := "高压和恐怖场景使用短动作拍但不能每句一拍；亲密/告白场留空，汇报/制度场用物件或文件换挡。"
+	exitBeat := "用具体现场变化退出：对方留下未完成动作、物件状态改变、门口方向变化、账单迟滞或关系冷场；不要用突然一声响、菜单选项或抽象金句收尾。"
+	if !zeroIsHorrorProject(project) {
+		modeReason = "第一章需要让角色围绕目标、责任、价格、执行条件或合作边界进行真实协商；若当前场景功能不同，正式计划必须据此改选对白模式。"
+		emotionalTemperature = "开局压住难堪、怀疑或不服气，随后因催促、误读、观望或责任分歧升温；不写成全程冷静。"
+		identityGrounding = fmt.Sprintf("通过称谓、外貌/衣着、职责、现场位置、既有关系或可见凭证说明%s是谁，以及他为什么能影响%s的选择。", counterpart, protagonist)
+		beatDensity = "高压协商使用短动作拍但不能每句一拍；关系缓和处留出呼吸，流程信息用现场物件、他人反应或结果变化换挡。"
+		exitBeat = "用具体现场变化退出：物料或位置改变、有人加入/离开、付款或交接成立、关系姿态变化；不用菜单选项或抽象金句收尾。"
+	}
 	return []domain.DialogueSceneBlueprint{{
 		SceneID:              "opening-dialogue-engine",
 		DialogueMode:         "pressure_negotiation",
-		ModeReason:           "第一章需要让角色在未完全理解规则前围绕风险、任务或交易进行试探；若当前章是告白、审问、闲聊或汇报，正式计划必须改选对应模式。",
+		ModeReason:           modeReason,
 		ScenePressure:        fmt.Sprintf("核心压力来自“%s”，同时叠加时间、资源、身份和信息差。", pressure),
-		EmotionalTemperature: "开局压住恐惧和尴尬，随后因对方催促、误读或隐瞒升温；不写成全程冷静。",
+		EmotionalTemperature: emotionalTemperature,
 		RelationshipFrame:    fmt.Sprintf("%s和%s存在信息不对称、短期互相需要或权力差，不能像两个设定讲解员。", protagonist, counterpart),
 		Medium:               "face_to_face；若正式章节走电话/消息/纸条/门缝/传话，动作拍必须换成媒介拍：已读不回、打字又删掉、纸面折痕、门后脚步。",
 		POVRole:              "participant",
@@ -615,7 +784,7 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 		POVState:                    fmt.Sprintf("%s先有半拍迟滞、误判、身体反应或自我安慰，不能一上来就理解完整规则。", protagonist),
 		InnerQuestion:               "贴近主视角写一个具体困惑，例如自己为什么在这里、这句话指向谁、这笔账买的是什么；第三人称项目只写短念头，不切换全知解释。",
 		MemoryBridge:                "只补读者理解这场对白所需的身份、前一幕、工作/生活处境和关系压力；禁止一次性灌完整背景、履历或世界观。",
-		IdentityGrounding:           fmt.Sprintf("通过称谓、外貌/衣着、职位/门牌/凭证、旧债或权力差说明%s是谁，以及他为什么能对%s施压。", counterpart, protagonist),
+		IdentityGrounding:           identityGrounding,
 		DialogueObjective:           "用对白落成本章任务、交易、威胁、求助或规则第一次露面，并迫使主角下一步行动发生变化。",
 		InterlocutorAgenda:          fmt.Sprintf("%s不是等待被剧情收走的人，他此刻有自己的事、压力和隐瞒，开口是为了转移风险、索取帮助、完成职责或保住资源。", counterpart),
 		ProtagonistResponseStrategy: fmt.Sprintf("%s按当前信息量先核验称呼、费用、证据或对方意图；允许误听、按错、停顿、绕开姓名，不写成想明白后再行动。", protagonist),
@@ -660,12 +829,12 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 		DirectnessPolicy:     "任务、时间、价格、危险可以局部直说；恐惧、羞耻、索取、背叛和真实意图优先用潜台词、动作和误读呈现。",
 		SubtextSource:        "潜台词来自关系债、资源压力、信息差、旧伤、防御机制、身份不平等或文化潜规则。",
 		EscalationPattern:    "优先使用 yes-but / no-and / 三次试探 / 让步换代价；不同模式可改成审问递进、互怼升级、暧昧回避或沉默压迫。",
-		BeatDensity:          "高压和恐怖场景使用短动作拍但不能每句一拍；亲密/告白场留空，汇报/制度场用物件或文件换挡。",
+		BeatDensity:          beatDensity,
 		SilencePolicy:        "至少安排一次无人接话、答非所问、物件不回应或刻意停顿，让潜台词承担信息。",
 		InfoReleasePolicy:    "信息可以被打断、误读、半句露出或事后才明白；禁止一问一答把规则讲完。",
 		ExpositionBudget:     "背景信息只允许夹在对白后的短记忆/身份桥里，每次服务当前一句台词；一段最多解决一个问题。",
 		SubtextAndPowerShift: "从对方掌握称呼/任务/时间压力，推进到主角发现一处漏洞或代价；主角可以暂时保住边界，但不能无成本全赢。",
-		ExitBeat:             "用具体现场变化退出：对方留下未完成动作、物件状态改变、门口方向变化、账单迟滞或关系冷场；不要用突然一声响、菜单选项或抽象金句收尾。",
+		ExitBeat:             exitBeat,
 		DoNotUse: []string{
 			"照抄示例里的现实单位、职务或穿越解释",
 			"先整段说明设定再让人物说话",
@@ -855,9 +1024,9 @@ func zeroInitReturnPlan(project zeroInitProject) map[string]domain.CharacterRetu
 	second := zeroIsSecondAlgorithmProject(project)
 	for _, c := range project.Characters {
 		firstMention := project.FirstMentions[c.Name]
-		priority := zeroReturnPriority(c, firstMention)
+		priority := zeroReturnPriority(project, c, firstMention)
 		suggestedChapter := firstMention
-		if suggestedChapter == 0 && (priority == "required" || priority == "near_future") {
+		if suggestedChapter == 0 && zeroIsPrimaryProtagonist(project, c) {
 			suggestedChapter = 1
 		}
 		withInfo := "回归时必须携带新信息、资源压力、关系账或未兑现承诺之一。"
@@ -869,7 +1038,7 @@ func zeroInitReturnPlan(project zeroInitProject) map[string]domain.CharacterRetu
 		out[c.Name] = domain.CharacterReturnPlan{
 			ReturnPriority:     priority,
 			SuggestedChapter:   suggestedChapter,
-			DueReason:          zeroReturnDueReason(c, firstMention),
+			DueReason:          zeroReturnDueReason(project, c, firstMention),
 			WithNewInformation: withInfo,
 			UpgradePotential:   upgrade,
 			RetireReason:       "若只是气氛/捧场/凑数，场景结束即退场，不进入长期台账。",
@@ -953,7 +1122,7 @@ func zeroCharacterArcTests(project zeroInitProject, states []domain.CharacterSim
 		coreLie := zeroFirstNonEmpty(state.ArcAxis.CoreLie, firstString(state.Misbeliefs), "以为旧经验足以解释第一章新压力。")
 		out = append(out, domain.CharacterArcTest{
 			Character:        c.Name,
-			Want:             zeroFirstNonEmpty(state.ArcAxis.Want, state.CurrentGoal, c.Arc, "先解决眼前压力。"),
+			Want:             zeroFirstNonEmpty(state.ArcAxis.Want, state.CurrentGoal, "先解决眼前压力。"),
 			CoreLie:          coreLie,
 			Need:             zeroFirstNonEmpty(state.ArcAxis.Need, "承认新世界需要新的证据和代价。"),
 			Truth:            "真正有效的选择必须同时改变信息、关系或资源状态，不能只在脑内想明白。",
@@ -986,6 +1155,7 @@ func zeroReaderRewardPlan(project zeroInitProject) domain.ReaderRewardPlan {
 		limit = 1
 	}
 	second := zeroIsSecondAlgorithmProject(project)
+	horror := zeroIsHorrorProject(project)
 	for i := 0; i < limit; i++ {
 		entry := project.Outline[i]
 		reward := zeroFirstNonEmpty(entry.CoreEvent, entry.Title, fmt.Sprintf("第%d章推进一个可见状态变化", i+1))
@@ -997,6 +1167,10 @@ func zeroReaderRewardPlan(project zeroInitProject) domain.ReaderRewardPlan {
 		if i == 0 {
 			reward = "第一章给出一个小胜：主角靠错误后的修正拿到暂缓、证据、收据、门牌变化或下一步权限。"
 			cost = "小胜不是免费，必须留下资源、关系、安全感、债务或审核尾巴。"
+			if !horror {
+				reward = "第一章给出一个小胜：主角靠一次不完美但有效的行动完成可核验结果、守住边界或拿到下一步执行入口。"
+				cost = "小胜不是免费，必须留下时间、资源、关系、返工、公开评价或下一步责任。"
+			}
 			if second {
 				reward = "第一章给出一个小胜：许闻溪在被低估和被替代的场面里，靠一次不漂亮但有效的应对保住自己的判断权或下一步入口。"
 				cost = "小胜不是免费，必须留下被误解、被记名、关系变冷、岗位风险或家庭照护时间被挤压的尾巴。"
@@ -1020,6 +1194,19 @@ func zeroReaderRewardPlan(project zeroInitProject) domain.ReaderRewardPlan {
 			ForbiddenRewardPatterns: []string{"主角全程完美正确", "上司突然欣赏", "男主直接救场", "把女性困境写成口号", "用一段总结代替现场行动"},
 		}
 	}
+	if !horror {
+		return domain.ReaderRewardPlan{
+			ChapterWindow:        "1-5",
+			FirstChapterSmallWin: "第一章不能只写受气或规则说明，必须让主角用一次现场行动换到真实结果、有限认可或下一步执行入口。",
+			NewDebtOrCost:        "任何资源、协助、认可或暂缓都要留下时间、返工、责任、关系或机会成本。",
+			PayoffVisibility:     "奖励必须落在真实付款、交付、位置/物料变化、参与者态度、关系姿态或下一步可执行目标上。",
+			TrafficRisk:          "只有受阻没有小胜会压抑；只有热闹没有结果与成本会显得悬浮。",
+			RewardLadder:         ladder,
+			ForbiddenRewardPatterns: []string{
+				"主角全程正确", "围观者无条件服气", "只用金额替代结果", "免费资源随叫随到", "用总结替代现场行动",
+			},
+		}
+	}
 	return domain.ReaderRewardPlan{
 		ChapterWindow:           "1-5",
 		FirstChapterSmallWin:    "第一章不能只把主角推入危机，必须让他在犯错后用一次行动换到可见证据、暂缓或下一步权限。",
@@ -1033,8 +1220,7 @@ func zeroReaderRewardPlan(project zeroInitProject) domain.ReaderRewardPlan {
 
 func zeroEvidenceReturnChains(project zeroInitProject, states []domain.CharacterSimulationState) []domain.EvidenceReturnChain {
 	protagonist := zeroProtagonist(project.Characters).Name
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
-	second := zeroIsSecondAlgorithmProject(project)
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	var out []domain.EvidenceReturnChain
 	seen := map[string]bool{}
 	add := func(name, event, timing string, resolve int) {
@@ -1045,10 +1231,10 @@ func zeroEvidenceReturnChains(project zeroInitProject, states []domain.Character
 		out = append(out, domain.EvidenceReturnChain{
 			OffscreenCharacter:  name,
 			Event:               event,
-			Evidence:            zeroEvidenceReturnMedium(second),
-			ProtagonistAccess:   zeroProtagonistAccessRule(second),
+			Evidence:            zeroEvidenceReturnMedium(project),
+			ProtagonistAccess:   zeroProtagonistAccessRule(project),
 			ReturnTiming:        timing,
-			DistortionOrMisread: zeroEvidenceDistortion(second),
+			DistortionOrMisread: zeroEvidenceDistortion(project),
 			ChapterToResolve:    resolve,
 		})
 		seen[name] = true
@@ -1064,9 +1250,9 @@ func zeroEvidenceReturnChains(project zeroInitProject, states []domain.Character
 		if firstMention <= 0 || firstMention > 5 {
 			continue
 		}
-		event := fmt.Sprintf("按第%d章首次牵引提前保留后台经历；第一章若未展示，也不能在后续凭空随叫随到。", firstMention)
-		if c.Description != "" {
-			event = "按角色卡后台推进：" + c.Description
+		event := fmt.Sprintf("按第%d章首次牵引保留当下生活、日程与资源基线；第一章不预装其后期身份、秘密或未来关系，也不能在后续凭空随叫随到。", firstMention)
+		if baseline := zeroOpeningCharacterDescription(c); baseline != "" {
+			event = fmt.Sprintf("按第%d章首次牵引保留当下基线：%s；完整角色弧和后期信息不进入零章工作记忆。", firstMention, baseline)
 		}
 		add(c.Name, event, fmt.Sprintf("第%d章或首次出场前以可见证据回收。", firstMention), firstMention)
 	}
@@ -1074,46 +1260,55 @@ func zeroEvidenceReturnChains(project zeroInitProject, states []domain.Character
 		out = append(out, domain.EvidenceReturnChain{
 			OffscreenCharacter:  "第一章现场外角色/后台压力源",
 			Event:               zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章后台压力继续推进"),
-			Evidence:            zeroFallbackEvidenceMedium(second),
-			ProtagonistAccess:   zeroProtagonistAccessRule(second),
+			Evidence:            zeroFallbackEvidenceMedium(project),
+			ProtagonistAccess:   zeroProtagonistAccessRule(project),
 			ReturnTiming:        "第2章或下一次回到" + scene + "时",
-			DistortionOrMisread: zeroEvidenceDistortion(second),
+			DistortionOrMisread: zeroEvidenceDistortion(project),
 			ChapterToResolve:    2,
 		})
 	}
 	return out
 }
 
-func zeroEvidenceReturnMedium(second bool) string {
-	if second {
+func zeroEvidenceReturnMedium(project zeroInitProject) string {
+	if zeroIsSecondAlgorithmProject(project) {
 		return "后续通过企业微信/短信、会后确认单、工单状态、排班变动、客户反馈、同事转述或现场小物回到主角视角。"
+	}
+	if !zeroIsHorrorProject(project) {
+		return "后续通过电话/消息、付款或交付记录、现场状态变化、参与者转述、公开反馈或可复核物件回到主角视角。"
 	}
 	return "后续通过通信、账单、位置变化、证物、目击者或现场残留传回主角。"
 }
 
-func zeroFallbackEvidenceMedium(second bool) string {
-	if second {
+func zeroFallbackEvidenceMedium(project zeroInitProject) string {
+	if zeroIsSecondAlgorithmProject(project) {
 		return "以会议记录、岗位沟通材料、客户一句反馈、同事表情、后台状态变化或一条迟到的消息回到主角视角。"
+	}
+	if !zeroIsHorrorProject(project) {
+		return "以付款/交付记录、群聊片段、顾客或商户反馈、现场物料变化、位置状态或一条迟到的消息回到主角视角。"
 	}
 	return "以账单、门牌、消息、收据、脚印、监控盲区或他人半句证词回到主角视角。"
 }
 
-func zeroProtagonistAccessRule(second bool) string {
-	if second {
+func zeroProtagonistAccessRule(project zeroInitProject) string {
+	if zeroIsSecondAlgorithmProject(project) {
 		return "主角必须通过亲历、消息、文件、同事转述或客户现场反馈获得，不能默认知道后台安排。"
+	}
+	if !zeroIsHorrorProject(project) {
+		return "主角必须通过亲历、通信、账目/记录、参与者转述或现场结果获得，不能默认知道离屏安排。"
 	}
 	return "主角必须通过通信/亲见/证据传回/能力授权获得，不能默认知道。"
 }
 
-func zeroEvidenceDistortion(second bool) string {
-	if second {
+func zeroEvidenceDistortion(project zeroInitProject) string {
+	if zeroIsSecondAlgorithmProject(project) {
 		return "传回时可能被话术包装、截图截断、善意隐瞒、权力关系过滤或被主角先误读。"
 	}
 	return "传回时可能被延迟、遮挡、误读或被角色出于自保隐瞒一部分。"
 }
 
 func zeroEndingContract(project zeroInitProject) domain.EndingConsequenceContract {
-	anchor := zeroFirstNonEmpty(project.FirstChapter.Hook, zeroFirstScene(project.FirstChapter), project.FirstChapter.CoreEvent, "第一章可见证据")
+	anchor := zeroFirstNonEmpty(project.FirstChapter.Hook, zeroFirstSceneForProject(project), project.FirstChapter.CoreEvent, "第一章可见证据")
 	if zeroIsSecondAlgorithmProject(project) {
 		return domain.EndingConsequenceContract{
 			EndingMode:      "具体职场后果落地，不用抽象金句收章。",
@@ -1127,6 +1322,18 @@ func zeroEndingContract(project zeroInitProject) domain.EndingConsequenceContrac
 				"上级立刻服气",
 				"把职场困境总结成口号",
 				"主角冷静全知地想明白后停章",
+			},
+		}
+	}
+	if !zeroIsHorrorProject(project) {
+		return domain.EndingConsequenceContract{
+			EndingMode:      "具体现场后果落地，不用抽象金句或标准菜单收章。",
+			ConcreteAnchor:  anchor,
+			Consequence:     "章末必须改变一个可回填状态：真实付款/交付、位置或物料、责任边界、参与者态度、关系或下一步执行目标至少其一。",
+			NextChapterPull: "下一章直接消费该后果：结果能否复制、谁会加入或阻拦、谁需要承担新增责任。",
+			WhyNotUI:        "如果出现系统界面、表格或条款，它必须先作用于人物选择和现场结果，不能把按钮或提示文字本身当剧情。",
+			ForbiddenEndings: []string{
+				"附加选项式 UI 菜单", "突然一个声音作为万能钩子", "金句加问号", "只报金额不写受益与结果", "主角总结完道理后停章",
 			},
 		}
 	}
@@ -1169,7 +1376,7 @@ func zeroDormantCharacterPolicy(project zeroInitProject, states []domain.Charact
 			Status:            status,
 			Location:          "角色卡默认生活/工作地点；若未设定，首次正式引入前补全。",
 			NoChangeReason:    "第一章没有通信、目击、证据或交通路径把其拉入主角视角。",
-			TriggerCondition:  zeroFirstNonEmpty(zeroReturnDueReason(c, firstMention), "当大纲、配角线或证据回收需要时再引入。"),
+			TriggerCondition:  zeroFirstNonEmpty(zeroReturnDueReason(project, c, firstMention), "当大纲、配角线或证据回收需要时再引入。"),
 			KnowledgeBoundary: "主角不知道该角色后台经历，除非正文提供通信或证据。",
 			NextCheck:         fmt.Sprintf("第%d章前后或该角色首次被提及时检查", zeroFirstNonZero(firstMention, 3)),
 		})
@@ -1193,7 +1400,7 @@ func zeroDormantCharacterPolicy(project zeroInitProject, states []domain.Charact
 }
 
 func zeroRealitySupportPlan(project zeroInitProject) []domain.RealitySupportPlan {
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	if zeroIsSecondAlgorithmProject(project) {
 		return []domain.RealitySupportPlan{
 			{
@@ -1231,6 +1438,34 @@ func zeroRealitySupportPlan(project zeroInitProject) []domain.RealitySupportPlan
 					"把母亲线当工具催泪",
 					"无成本赶场或随叫随到",
 				},
+			},
+		}
+	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.RealitySupportPlan{
+			{
+				Domain:             "地方经营/现场执行",
+				SourceRef:          "meta/web_reference_brief.md、RAG 或当轮 web_search；具体规则仍以本书 foundation 为准",
+				UsableDetail:       "营业时段、摊位/场地动线、价格公示、付款、物料交付、顾客等待和安全责任。",
+				TransformedAs:      "角色用站位、付款、搬运、等待、返工、顾客去留和明确答复完成协商。",
+				ChapterUse:         scene,
+				ForbiddenDirectUse: []string{"行业教程式旁白", "真实敏感单位直接搬用", "用手续清单替代人物冲突"},
+			},
+			{
+				Domain:             "支付/交易/结果核验",
+				SourceRef:          "world_rules + meta/web_reference_brief.md；必要时补当轮检索",
+				UsableDetail:       "支付状态、收款对象、用途说明、取消/退款、交付凭证和受益者可见结果。",
+				TransformedAs:      "先确认对象、用途、价格、责任和退出边界，再通过真实付款或交付改变现场。",
+				ChapterUse:         "第一章资源使用与结果兑现",
+				ForbiddenDirectUse: []string{"无脑花钱解决冲突", "只报金额不写结果", "标准 UI 选项充当章末钩子"},
+			},
+			{
+				Domain:             "交通/地方距离/人员日程",
+				SourceRef:          "book_world.routes + 稳定现实常识；必要时检索同类地区通勤和物流耗时",
+				UsableDetail:       "步行、驾车、装卸、营业收摊、堵车和个人本职工作造成的现实耗时。",
+				TransformedAs:      "配角不能随叫随到；运输、到场和返程都要产生时间与机会成本。",
+				ChapterUse:         "offscreen_character_stage.meeting_constraint",
+				ForbiddenDirectUse: []string{"跨地点无耗时见面", "配角放下本职工作瞬间救场", "物流与安装一句话完成"},
 			},
 		}
 	}
@@ -1541,7 +1776,8 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 		if c.Name == "" || c.Name == protagonist.Name {
 			continue
 		}
-		relType := zeroRelationshipType(c, second)
+		firstChapterActive := zeroFirstChapterCharacterActive(project, c)
+		relType := zeroRelationshipType(project, c, second)
 		emotionalWant := "想从对方那里得到安全感、确认、资源、解释权、赦免或控制感；正式章节需按关系细化。"
 		fear := "害怕被拖累、被抛弃、被看穿、被背叛、被债务绑定或失去主导权。"
 		trustDebt := "信任从低位开始，任何帮助都要留下债务、亏欠、承诺或边界。"
@@ -1552,20 +1788,35 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 			trustDebt = "信任从低位开始，任何帮助都要留下亏欠、承诺、边界、机会成本或情绪余波。"
 			conflictTrigger = zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "AI提效和岗位变化第一次施压")
 		}
+		currentBond := zeroRelationshipBond(relType, second)
+		intimacyStage := zeroIntimacyStage(relType)
+		romancePotential := zeroRomancePotential(relType)
+		nextBeat := "下一次推进必须改变信任、亏欠、亲密、嫉妒、保护欲或权力位置之一。"
+		if !firstChapterActive {
+			relType = "未建立/待首次互动"
+			currentBond = "尚未相识、联系或共同经历；零章不预设互信、亏欠、默契、暧昧或敌意。"
+			emotionalWant = "首次互动前不预写向对方索取的情感位置；只保留各自生活线的现实目标。"
+			fear = "首次互动前只保留角色自身的现实顾虑，不把未来关系结果倒灌为当下情绪。"
+			trustDebt = "none；首次可见互动后再根据行动建账。"
+			conflictTrigger = "首次联系、见面或共同结果尚未发生。"
+			intimacyStage = "未相识/未建立关系"
+			romancePotential = "none；零章不加载未来关系方向。"
+			nextBeat = "等首次互动发生后，再依据可见选择建立关系类型、信任与边界。"
+		}
 		out = append(out, domain.RelationshipEmotionArc{
 			Pair:                         []string{protagonist.Name, c.Name},
 			RelationshipType:             relType,
-			CurrentBond:                  zeroRelationshipBond(relType, second),
+			CurrentBond:                  currentBond,
 			EmotionalWant:                emotionalWant,
 			Fear:                         fear,
 			PowerBalance:                 "信息、资源、情绪需求和规则权限不对等。",
-			IntimacyStage:                zeroIntimacyStage(relType),
+			IntimacyStage:                intimacyStage,
 			TrustDebt:                    trustDebt,
 			ConflictTrigger:              conflictTrigger,
 			AttachmentOrLoveLanguage:     "以行动照顾、风险隔离、资源支持或边界尊重表达情感；不要只靠告白式台词。",
 			Boundary:                     "没有通信、证据或共同经历时，关系不能突然亲密或全信。",
-			RomancePotential:             zeroRomancePotential(c),
-			NextEmotionalBeat:            "下一次推进必须改变信任、亏欠、亲密、嫉妒、保护欲或权力位置之一。",
+			RomancePotential:             romancePotential,
+			NextEmotionalBeat:            nextBeat,
 			ProtagonistKnowledgeBoundary: "主角只能知道正文中亲见、通信或证据传回的关系信息。",
 		})
 	}
@@ -1590,19 +1841,20 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 	return out
 }
 
-func zeroRelationshipType(c domain.Character, second bool) string {
-	text := c.Role + " " + c.Description
+func zeroRelationshipType(project zeroInitProject, c domain.Character, second bool) string {
+	role := strings.TrimSpace(c.Role)
+	text := strings.Join([]string{role, zeroOpeningCharacterDescription(c)}, " ")
 	switch {
-	case strings.Contains(text, "妹") || strings.Contains(text, "兄") || strings.Contains(text, "姐") || strings.Contains(text, "父") || strings.Contains(text, "母") || strings.Contains(text, "亲"):
+	case zeroContainsAny(role, "父亲", "母亲", "哥哥", "弟弟", "姐姐", "妹妹", "兄长", "家人", "亲属"):
 		return "亲情"
-	case strings.Contains(text, "恋") || strings.Contains(text, "暧昧") || strings.Contains(text, "女主") || strings.Contains(text, "男主") || strings.Contains(text, "伴侣"):
+	case zeroHighConfidenceRomanceRole(role) || zeroDirectedRomanceEvidence(project, c):
 		return "恋爱/暧昧潜势"
 	case strings.Contains(text, "反派") || strings.Contains(text, "敌") || strings.Contains(text, "压迫"):
 		if second {
 			return "职场对抗/价值冲突"
 		}
 		return "敌对/债务"
-	case strings.Contains(text, "朋友") || strings.Contains(text, "搭档") || strings.Contains(text, "后勤") || strings.Contains(text, "合作"):
+	case zeroContainsAny(text, "朋友", "搭档", "后勤", "合作", "主角团", "伙伴", "盟友", "发小", "室友", "闺蜜", "同事"):
 		return "合作/友谊"
 	default:
 		if second {
@@ -1610,6 +1862,52 @@ func zeroRelationshipType(c domain.Character, second bool) string {
 		}
 		return "社会关系/潜在债务"
 	}
+}
+
+func zeroHighConfidenceRomanceRole(role string) bool {
+	for _, part := range strings.FieldsFunc(role, func(r rune) bool {
+		return r == '/' || r == '／' || r == '|' || r == '｜' || r == '、' || r == '，' || r == ','
+	}) {
+		switch strings.TrimSpace(part) {
+		case "男主", "女主", "恋爱对象", "感情对象", "伴侣":
+			return true
+		}
+	}
+	return false
+}
+
+func zeroDirectedRomanceEvidence(project zeroInitProject, c domain.Character) bool {
+	primary := strings.TrimSpace(zeroProtagonist(project.Characters).Name)
+	if primary == "" {
+		return false
+	}
+	text := zeroOpeningCharacterDescription(c)
+	for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune("。；！？!?\n", r)
+	}) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || !strings.Contains(clause, primary) || !zeroContainsAny(clause, "恋爱", "感情", "暧昧", "伴侣", "相爱") {
+			continue
+		}
+		if zeroContainsAny(clause, "不是", "并非", "不与", "不会与", "不能成为", "不承担", "无暧昧", "不是感情") {
+			continue
+		}
+		if zeroContainsAny(clause,
+			"与"+primary, "和"+primary, primary+"的恋爱", primary+"的感情", primary+"的暧昧", primary+"的伴侣",
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func zeroContainsAny(text string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if candidate != "" && strings.Contains(text, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func zeroRelationshipBond(relType string, second bool) string {
@@ -1642,9 +1940,8 @@ func zeroIntimacyStage(relType string) string {
 	return "低信任试探"
 }
 
-func zeroRomancePotential(c domain.Character) string {
-	text := c.Role + " " + c.Description + " " + c.Arc
-	if strings.Contains(text, "恋") || strings.Contains(text, "暧昧") || strings.Contains(text, "女主") || strings.Contains(text, "男主") || strings.Contains(text, "伴侣") {
+func zeroRomancePotential(relationshipType string) string {
+	if relationshipType == "恋爱/暧昧潜势" {
 		return "有恋爱/暧昧潜势：吸引必须来自价值冲突、共同风险、边界尊重和互相看见，不靠强行发糖。"
 	}
 	return "none；当前关系不以恋爱驱动，若后续出现吸引必须重新建模亲密阶段、阻碍和边界。"
@@ -1657,17 +1954,23 @@ func zeroVisualDesign(project zeroInitProject, states []domain.CharacterSimulati
 		if c.Name == "" {
 			continue
 		}
+		statusWear := "第一章或首次出场时要有与处境相关的灰、汗、雨、皱、破损或疲惫痕迹。"
+		changeRule := "外观随资源、权力、工作强度、亲密关系和生活阶段改变；不能每次出场都像静态设定图。"
+		if zeroIsHorrorProject(project) {
+			statusWear = "第一章或首次出场时要有与处境相关的灰、汗、雨、皱、破损、疲惫或异常痕迹。"
+			changeRule = "外观随资源、权力、伤势、亲密关系和世界污染改变；不能每次出场都像静态设定图。"
+		}
 		out = append(out, domain.CharacterVisualDesign{
 			Character:       c.Name,
 			Silhouette:      zeroVisualSilhouette(c),
 			FaceAndHair:     zeroVisualFaceHair(c),
 			ClothingStyle:   zeroVisualClothing(c),
-			ColorPalette:    zeroVisualPalette(c),
+			ColorPalette:    zeroVisualPalette(project, c),
 			BodyLanguage:    zeroVisualBodyLanguage(c),
-			SignatureObject: zeroVisualObjectForProject(c, second),
+			SignatureObject: zeroVisualObjectForProject(project, c, second),
 			FirstImpression: zeroFirstNonEmpty(c.Role, "能被读者一眼区分的角色"),
-			StatusWear:      "第一章或首次出场时要有与处境相关的灰、汗、雨、皱、破损、疲惫或异常痕迹。",
-			ChangeRule:      "外观随资源、权力、伤势、亲密关系和世界污染改变；不能每次出场都像静态设定图。",
+			StatusWear:      statusWear,
+			ChangeRule:      changeRule,
 			SceneUse:        "首次入场至少一个视觉细节必须推动识别、情绪、关系或规则判断。",
 			DoNotUse:        []string{"空泛帅/美/普通", "真实品牌堆砌", "与世界背景不合的服装", "所有角色同一黑衣冷脸"},
 		})
@@ -1691,16 +1994,25 @@ func zeroVisualDesign(project zeroInitProject, states []domain.CharacterSimulati
 	return out
 }
 
-func zeroVisualObjectForProject(c domain.Character, second bool) string {
+func zeroVisualObjectForProject(project zeroInitProject, c domain.Character, second bool) string {
 	if second {
 		switch {
 		case zeroIsProtagonist(c):
 			return "便签本、手机、讲稿批注、旧帆布包或能承载核验习惯和疲惫感的物件。"
-		case strings.Contains(c.Role, "反派") || strings.Contains(c.Role, "压迫") || strings.Contains(c.Description, "上级"):
+		case strings.Contains(c.Role, "反派") || strings.Contains(c.Role, "压迫") || strings.Contains(c.Role, "上级"):
 			return "平板、会议激光笔、签字笔、整齐文件夹或过度干净的工牌。"
 		default:
 			return "与职业、家庭照护或城市生活压力绑定的小物件，不能只做装饰。"
 		}
+	}
+	if !zeroIsHorrorProject(project) {
+		if zeroIsProtagonist(c) {
+			return "手机、票据、钥匙、便签或与当前行动习惯绑定的日常物件。"
+		}
+		if strings.Contains(c.Role, "反派") {
+			return "账本、名片、车钥匙、印章或体现既有渠道与控制欲的工作物件。"
+		}
+		return "与职业、生活责任或首次入场任务绑定的小物件，不能只做装饰。"
 	}
 	return zeroVisualObject(c)
 }
@@ -1739,7 +2051,13 @@ func zeroVisualClothing(c domain.Character) string {
 	return "衣服要显示职业、阶层、资源和当下处境；首次出场前可结合网络资料细化现实穿搭。"
 }
 
-func zeroVisualPalette(c domain.Character) string {
+func zeroVisualPalette(project zeroInitProject, c domain.Character) string {
+	if !zeroIsHorrorProject(project) {
+		if strings.Contains(c.Role, "反派") {
+			return "整洁克制的深色与一处过分讲究的亮点，体现其资源位置和控制欲。"
+		}
+		return "低饱和生活色加一处职业或性格标志色，随资源与生活阶段变化。"
+	}
 	if strings.Contains(c.Role, "反派") {
 		return "冷白、灰黑、暗金或病态红点缀；避免全员黑灰。"
 	}
@@ -1770,12 +2088,12 @@ func zeroVisualObject(c domain.Character) string {
 }
 
 func zeroSecondAlgorithmWorldBackgroundPlan(project zeroInitProject) zeroWorldBackgroundPlan {
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	city := zeroFirstNonEmpty(zeroKnownCityName(project), "澄港")
 	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "许闻溪")
-	counterpart := zeroFirstNonEmpty(zeroFirstNonProtagonistName(project.Characters), "开局对手")
+	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), "开局对手")
 	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章职业压力")
-	openingPressure := zeroOpeningPressureName(project)
+	openingPressure := zeroAssetOpeningPressureName(project)
 	lifeNode := "桥点职业转型工作室"
 	if project.BookWorld != nil {
 		for _, place := range project.BookWorld.Places {
@@ -1952,16 +2270,201 @@ func zeroSecondAlgorithmWorldBackgroundPlan(project zeroInitProject) zeroWorldBa
 	}
 }
 
+func zeroGroundedWorldBackgroundPlan(project zeroInitProject) zeroWorldBackgroundPlan {
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	city := zeroFirstNonEmpty(zeroKnownCityName(project), "开局区域")
+	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
+	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), "开局关系对象")
+	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章现实压力")
+	rules := zeroWorldRuleTexts(project.WorldRules, 3)
+	ruleText := firstString(rules)
+	if ruleText == "" {
+		ruleText = "人物的资源、权限和行动都必须留下可见成本与结果。"
+	}
+	lifeNode := "第一章相邻生活节点"
+	if project.BookWorld != nil {
+		for _, place := range project.BookWorld.Places {
+			if strings.TrimSpace(place.Name) != "" && strings.TrimSpace(place.Name) != strings.TrimSpace(scene) {
+				lifeNode = strings.TrimSpace(place.Name)
+				break
+			}
+		}
+	}
+	return zeroWorldBackgroundPlan{
+		Version:     1,
+		Scope:       "reusable_world_background_prewrite",
+		Project:     project.Name,
+		Chapter:     1,
+		GeneratedAt: project.GeneratedAt,
+		UsagePolicy: "所有新正文写作前必须把本计划转入 plan_chapter.causal_simulation：背景要由空间、时间、公开规则、地方习惯、关系网络、资源控制、群体反应、核心机制边界和叙事信息差共同推出；只保留会改变人物选择与结果的细节。",
+		ResearchBasis: []string{
+			"现实场景因果：地点、距离、营业/工作时段和执行成本必须能相互校验",
+			"利益相关者叙事：每个参与者都有自己的目标、风险和退出条件",
+			"信息差写法：读者好奇必须由可见证据和后续回收路径承载",
+			"限制型能力写法：边界、成本和失败模式比口头说明更重要",
+			"关系推进写法：认可、信任和帮助必须来自共同经历与真实选择",
+		},
+		Layers: domain.WorldBackgroundLayersPlan{
+			PhysicalSpace:       fmt.Sprintf("%s/%s 是第一章行动空间；正式计划要明确入口、出口、摊位/桌面/工位、车辆或人流动线、可见范围和角色距离，让空间直接限制谁能行动、谁能作证。", city, scene),
+			TimeLayer:           "第一章必须固定到具体故事时段和现实窗口；营业、交付、交通、家人作息、物料准备或截止时间会改变选择，不能用模糊的‘很快’抹平成本。",
+			SocialInstitution:   "显规则来自 world_rules、book_world、价格、安全、责任、付款、审批或服务边界；正文只展示角色此刻能接触的接口，用一次决定和结果说明规则。",
+			CulturalNorm:        "潜规则来自熟人社会、面子、口碑、先来后到、怕担责和对外来做法的怀疑；这些压力要通过称呼、站位、犹豫、围观与实际选择呈现。",
+			RelationshipNetwork: fmt.Sprintf("%s 与 %s 之间先存在目标、职责、信息和风险的差异；没有同场证据、通信或共同结果时，不能直接升级成信任、默契或亲密。", protagonist, counterpart),
+			EconomicResource:    "结构性权力来自可用资金、场地、物料、车辆、人手、时间、渠道和公开信用；每项资源都要有控制者、准入条件、使用成本和退出后果。",
+			ConflictTension:     fmt.Sprintf("%s 必须落实为人物目标与现实阻力的碰撞，而不是背景说明；至少一方要因选择承担时间、金钱、关系或名誉成本。", pressure),
+			SocialMood:          "群体情绪通过排队、群聊、短视频、熟人转述、商户观望、顾客离开或围观者改口扩散；传闻只能推动行为，不能替代事实核验。",
+			CosmologyMetaRule:   fmt.Sprintf("本书核心机制当前以“%s”为铁律样本；任何资金、能力、流程或技术都必须有适用范围、成本、证据和失败模式。", ruleText),
+			NarrativeMeta:       "读者、主角、配角和离屏势力的信息量必须分层；主角只能依据亲见、通信、账目、现场结果和被允许传回的证据行动。",
+			EventActivation:     "第一章事件由时间窗口、资源缺口、关系阻力和信息差共同激活；删掉其中一层若仍可原样发生，正式计划必须补足真实因果。",
+		},
+		InformationLedger: []domain.InformationAsymmetryRecord{
+			{
+				Subject:           pressure,
+				ReaderKnows:       []string{"第一章会出现一个可见问题和有限解决窗口，但完整机制不能一次讲完。"},
+				ProtagonistKnows:  []string{"只能确认自己亲眼看到、收到、支付、复核或从可信对象处听到的事实。"},
+				CharacterKnows:    []string{fmt.Sprintf("%s 只掌握自己职责、利益和现场观察范围内的信息。", counterpart)},
+				CharacterMistakes: []string{"角色可能把熟人承诺、围观热度、口头同意或旧经验误当成已经落地的结果。"},
+				CharacterPretends: []string{"利益相关者可能淡化自己的成本、夸大把握或把拒绝包装成程序问题。"},
+				HiddenFromReader:  []string{"完整资源来源、后续限制、其他参与者的真实底线和尚未发生的关系变化。"},
+				RevealCondition:   "只能通过付款、交付、现场状态变化、通信记录、后续复核或角色付出代价后的新权限逐步揭示。",
+				TensionFunction:   "防止人物突然全知，让读者持续判断哪句话可信、哪个结果已经成立、下一步会由谁付成本。",
+			},
+			{
+				Subject:           "地方口碑与参与者观望",
+				ReaderKnows:       []string{"周围人会根据可见结果而非作者结论改变立场。"},
+				ProtagonistKnows:  []string{"主角只能接触现场反馈、熟人消息、公开记录和有限转述。"},
+				CharacterKnows:    []string{"商户、顾客、家人、执行者和规则协作方各自掌握不同片段。"},
+				CharacterMistakes: []string{"有人会把一次热闹当长期收益，也有人会因旧经验错过真实机会。"},
+				CharacterPretends: []string{"观望者可能嘴上不在意，实际已在计算是否加入、退出或阻拦。"},
+				HiddenFromReader:  []string{"谁会率先改变立场、谁仍在等待失败、谁准备把结果据为己有。"},
+				RevealCondition:   "当传闻改变排队、付款、申请、供应、站队或公开表态时再进入正文。",
+				TensionFunction:   "让地方社会随结果变化，而不是只在主角身边提供静态背景。",
+			},
+		},
+		HiddenRules: []domain.HiddenRulePressure{
+			{
+				Domain:        "资源使用/现场责任/结果确认",
+				VisibleRule:   "表面上是价格、付款、位置、交付、安全和退出条件。",
+				HiddenRule:    "真正决定合作的是谁承担失败、谁保留选择权、谁能证明结果；口头热情不等于正式确认。",
+				CulturalNorm:  "熟人面子、怕担责和不愿先吃亏会让角色回避明确表态。",
+				WhoBenefits:   "掌握场地、资源、信息或既有渠道的人",
+				WhoPays:       protagonist + "、实际执行者与直接受影响的人",
+				ViolationCost: "浪费时间和物料、失去顾客或机会、关系降温、口碑受损、被要求返工或退出。",
+				SceneEvidence: "报价、收款、物料、位置线、排队变化、交接动作、顾客去留和当事人的明确答复。",
+			},
+			{
+				Domain:        "熟人社会/相邻生活节点",
+				VisibleRule:   "家人、商户、伙伴和协作方仍按各自日常安排运转。",
+				HiddenRule:    "谁掌握时间、车辆、人手、口碑和消息渠道，谁就能决定行动能否在窗口内落地。",
+				CulturalNorm:  "帮助通常附带人情、责任和可追问的结果，不是无条件待命。",
+				WhoBenefits:   "有稳定关系、执行能力和可信记录的人",
+				WhoPays:       "准备不足、承诺含糊、无法证明结果或要求别人无偿补位的人",
+				ViolationCost: "延迟、失约、额外费用、顾客流失、熟人不再帮忙或现场秩序恶化。",
+				SceneEvidence: fmt.Sprintf("%s 的营业/工作状态、电话答复、到场时间、物料和人员安排。", lifeNode),
+			},
+		},
+		SocialMoodRumors: []domain.SocialMoodRumor{{
+			Group:             "现场商户/顾客/熟人/围观者",
+			Mood:              "好奇、怀疑和想跟进的冲动并存，立场随可见结果改变。",
+			Rumor:             "有人认为只是临时热闹，有人开始打听加入条件，也有人等待现场出错。",
+			Source:            "现场目击、群聊、短视频、熟人转述、商户之间的半句打听。",
+			SpreadPath:        "同场人群、商户群、亲友群、地方账号和相邻生活节点。",
+			Reliability:       "半真半假；只能作为行为压力，不能直接成为角色判断依据。",
+			BehaviorEffect:    "有人提前离开、继续观望、申请加入、抬高条件、改口支持或把问题转给规则协作方。",
+			ProtagonistAccess: "主角只能看到现场变化和传回手机的片段，不能自动知道所有人的真实动机。",
+		}},
+		RitualCalendar: []domain.RitualCalendarWindow{{
+			Time:                "第一章开场窗口",
+			CalendarType:        "营业/交付/家庭/交通/确认截止窗口",
+			RitualOrDeadline:    zeroFirstNonEmpty(project.FirstChapter.Hook, pressure),
+			SocialMeaning:       "普通日常被迫进入一次公开选择时刻，谁先行动、谁先观望都会留下可见记录。",
+			PracticalConstraint: "窗口内场地、人手、物料、支付、交通和沟通机会都有限。",
+			EmotionalCharge:     "难堪、责任、怕失约、怕吃亏和想证明自己的冲动会放大误判。",
+			MissedCost:          "错过窗口会失去客流、交付机会、证据、信任或下一步协作资格。",
+			SceneUse:            scene,
+		}},
+		StructuralResources: []domain.StructuralResourcePressure{
+			{
+				Resource:                  "可核验资金/场地/物料/执行时间",
+				Controller:                "出资方、场地方、供应方、执行者与规则协作方",
+				ScarcityReason:            "钱并不能自动换来合格位置、及时交付、真实收益和他人信任。",
+				AccessRule:                "必须满足用途、价格、责任、交付、结果和退出边界，并留下可复核证据。",
+				BlackMarketOrInformalPath: "熟人介绍、临时借用、议价、换班、顺路运输或先小范围试用。",
+				PriceOrCost:               "时间、沟通、返工、机会成本、人情和公开失败风险。",
+				PowerEffect:               "能把资源按时转成现场结果的人，才获得下一步话语权。",
+				ChapterPressure:           "主角必须在有限窗口内完成一个真实、可复核、不会把成本甩给旁人的行动。",
+			},
+			{
+				Resource:                  "地方口碑/顾客注意/协作信任",
+				Controller:                "顾客、商户、家人、伙伴和地方传播节点",
+				ScarcityReason:            "第一次结果尚未建立，所有人都在等待证据。",
+				AccessRule:                "只能靠现场改善、真实付款、守约、承担问题和清楚边界逐步获得。",
+				BlackMarketOrInformalPath: "熟人转述、现场试用、小范围口碑和可信对象的有限背书。",
+				PriceOrCost:               "被公开观察、接受质疑、让出部分控制权并承担失败后的返工。",
+				PowerEffect:               "口碑决定谁愿意留下、加入、合作或继续提供资源。",
+				ChapterPressure:           "热闹、围观和口头夸赞都不能替代实际结果。",
+			},
+		},
+		CosmologyChecks: []domain.CosmologyRuleCheck{{
+			Layer:              "核心机制/现实因果/规则边界",
+			Rule:               ruleText,
+			Cost:               "每次使用资金、能力、权限或关键资源都必须留下时间、关系、结果或机会成本。",
+			Boundary:           "角色未获得明确资源、权限、证据或他人同意前，不能绕过现实执行条件。",
+			ExceptionCondition: "none；例外只能由后续正文触发、支付代价、审核通过并回填台账。",
+			Evidence:           "world_rules.json、world_foundation、book_world 和本章可见行动结果。",
+			FailureMode:        "若只有口头规则而没有成本、失败和结果，核心机制会变成无条件解法。",
+		}},
+		ConflictWeb: []domain.ConflictWebNode{
+			{
+				Parties:        []string{protagonist, "第一章现实阻力"},
+				ConflictType:   "资源使用/结果兑现/公开评价",
+				OpenGoal:       protagonist + " 想完成第一项可复核行动并拿到下一步主动权。",
+				HiddenAgenda:   "阻力方希望保住既有利益、避免担责，或等主角失败后再决定立场。",
+				ResourceStake:  "资金、物料、位置、人手、时间、口碑和第一章现场证据。",
+				InformationGap: "主角只知道局部条件，其他人各自隐瞒底线，读者只能跟随可见结果判断。",
+				TimePressure:   "第一章现实窗口内必须做出有限选择并承担后果。",
+				CurrentBalance: "旧秩序仍占优势，主角暂时只有一次小规模证明机会。",
+				Destabilizer:   pressure,
+				NextEscalation: "下一步由本章真实结果引来更多申请、质疑、协作条件或更明确的责任边界。",
+			},
+			{
+				Parties:        []string{protagonist, counterpart},
+				ConflictType:   "专业判断/关系试探/边界协商",
+				OpenGoal:       "一方要把事情做成，另一方要确认风险不会被转嫁。",
+				HiddenAgenda:   "认可、怀疑、善意和自保同时存在，任何帮助都要有触发条件。",
+				ResourceStake:  "现场证据、规则解释权、信任、时间和后续协作资格。",
+				InformationGap: "双方掌握的证据和职责不同，不能用默契跳过说明与选择。",
+				TimePressure:   "问题必须在现场窗口内得到阶段答复。",
+				CurrentBalance: "双方仍处于低信任、按事实说话的试探阶段。",
+				Destabilizer:   "一次可见结果或一次守边界的选择会改变双方判断。",
+				NextEscalation: "关系只能沿专业纠错、结果认可和有限协作逐级变化。",
+			},
+		},
+		TensionMatrix: domain.NarrativeTensionMatrix{
+			StabilityTurbulence:     "原有日常被第一章现实机会与限制打破；主角先承受难堪、风险或资源不足，再通过行动改变局部状态。",
+			ExplicitHiddenRules:     "显规则是用途、价格、位置、责任和结果，潜规则是谁愿意先承担风险、谁只想等现成好处。",
+			InformationGap:          "读者跟随主角只看见局部；参与者、规则协作方和围观群体各自掌握不同信息。",
+			TimePressurePreparation: "倒计时发生在角色准备不足、资源有限和关系未稳时，不能提前准备成完美通关。",
+			WhyEventNow:             "第一章是新推演线的 canonical start；必须在此刻用一个小而真实的结果启动人物、关系和长期行动引擎。",
+			ReaderQuestion:          "下一章读者应追问：这次结果能否复制、谁会加入或阻拦、主角为下一步还要付什么。",
+			POVBoundary:             "正文不越过主角可见证据；离屏线只通过消息、记录、现场结果、目击或后续台账传回。",
+		},
+	}
+}
+
 func zeroInitWorldBackgroundPlan(project zeroInitProject) zeroWorldBackgroundPlan {
 	if zeroIsSecondAlgorithmProject(project) {
 		return zeroSecondAlgorithmWorldBackgroundPlan(project)
 	}
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	if !zeroIsHorrorProject(project) {
+		return zeroGroundedWorldBackgroundPlan(project)
+	}
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	city := zeroFirstNonEmpty(zeroKnownCityName(project), "开局城市")
 	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
-	counterpart := zeroFirstNonEmpty(zeroFirstNonProtagonistName(project.Characters), "开局压力源")
+	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), "开局压力源")
 	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章规则压力")
-	openingPressure := zeroOpeningPressureName(project)
+	openingPressure := zeroAssetOpeningPressureName(project)
 	rules := zeroWorldRuleTexts(project.WorldRules, 3)
 	ruleText := firstString(rules)
 	if ruleText == "" {
@@ -2160,8 +2663,21 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 	}
 	emotionTarget := "紧张、警惕、被迫选择后的追问感。"
 	hookGoal := "让读者想知道这个选择/物件/规则后果下一章会怎样继续收费。"
-	sceneAnchors := []string{zeroFirstNonEmpty(zeroFirstScene(first), "第一章主场景"), "可复核的纸面/物件/空间证据", "关系或资源交换动作"}
+	sceneAnchors := []string{zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"), "可复核的纸面/物件/空间证据", "关系或资源交换动作"}
 	chapterFunction := "整本书入口：证明人物系统、世界规则和连载发动机，而不是只触发怪事。"
+	if !zeroIsHorrorProject(project) {
+		goal = "建立主角初始处境、第一项可核验行动和一条能持续推进的现实目标。"
+		emotionArc = "从难堪、怀疑或资源不足，到主动承担一次选择，再由可见结果换来有限认可和新责任。"
+		requiredBeats = []string{
+			"证明主角为什么必须现在行动",
+			"让现实阻力迫使主角作出不可回避的选择",
+			"让付款/交付、参与者态度、关系或资源状态发生可回填变化",
+		}
+		emotionTarget = "难堪、不服、试探和做成第一件事后的短暂松气；小胜必须带着下一步责任。"
+		hookGoal = "让读者想知道这次结果能否复制、谁会加入或阻拦、下一步要由谁承担成本。"
+		sceneAnchors = []string{zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"), "真实付款/交付/物料/位置等可复核证据", "参与者选择与关系变化"}
+		chapterFunction = "整本书入口：证明主角行动、现实阻力、可见结果与关系推进能形成长期连载发动机。"
+	}
 	if zeroIsSecondAlgorithmProject(project) {
 		goal = "建立许闻溪的初始处境、AI提效带来的职业压力、第一条可追踪成长行动目标。"
 		conflict = zeroFirstNonEmpty(first.CoreEvent, "许闻溪的职业目标与组织/关系压力第一次相撞。")
@@ -2178,7 +2694,7 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 		}
 		emotionTarget = "克制、委屈、被低估后的不服气，以及第一次拿回主动权后的余震。"
 		hookGoal = "让读者想知道许闻溪争取来的入口会付出什么，谁会靠近她，谁会开始防她。"
-		sceneAnchors = []string{zeroFirstNonEmpty(zeroFirstScene(first), "第一章主场景"), "讲稿/消息/会议记录/客户反馈等可复核证据", "关系、岗位或家庭时间的具体变化"}
+		sceneAnchors = []string{zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"), "讲稿/消息/会议记录/客户反馈等可复核证据", "关系、岗位或家庭时间的具体变化"}
 		chapterFunction = "整本书入口：证明许闻溪的处境、成长发动机和AI改变职业的现实压力，而不是只写工作流程。"
 	}
 	return domain.ChapterPlan{
@@ -2203,7 +2719,7 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 			ProjectPromise:  projectPromise,
 			ChapterFunction: chapterFunction,
 			ContextSources: []string{
-				"premise", "current_chapter_outline", "characters", "world_rules", "book_world",
+				"premise", "current_chapter_outline", "characters", "world_rules", "book_world", "meta/user_rules.json",
 				"simulation_restart_policy", "world_foundation", "character_dossiers",
 				"meta/story_time_contract.json", "meta/story_calendar.json",
 				"meta/initial_character_dynamics", "relationship_state.initial", "meta/initial_resource_ledger",
@@ -2269,6 +2785,23 @@ func zeroLongformOpeningDesign(project zeroInitProject, first domain.OutlineEntr
 			RetentionRisks:    []string{"开局像工作汇报", "角色说话过于规范", "女性困境被写成口号", "男主过早解决问题"},
 		}
 	}
+	if !zeroIsHorrorProject(project) {
+		protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
+		return domain.LongformOpeningDesign{
+			TargetReader:     "想看普通人在现实约束里把一件具体事情做成，并由结果持续打开人物、关系和事业空间的读者。",
+			OpeningHook:      zeroFirstNonEmpty(first.Hook, first.CoreEvent, first.Title),
+			SerialEngine:     "现实目标、执行条件、资源缺口、参与者利益和公开结果互相推动；每章完成一个可核验变化，同时产生下一步责任。",
+			ReaderRewardLoop: []string{"看见具体难题与现实阻力", "角色判断不全但开始行动", "付款、交付、位置或关系出现可见变化", "结果带来新参与者、新责任或下一步机会"},
+			LongRangePromises: []domain.LongRangePromise{{
+				Promise:          fmt.Sprintf("%s会从只能处理眼前难题，成长为能稳定组织资源、承担后果并让成果持续的人。", protagonist),
+				FirstChapterSeed: zeroFirstNonEmpty(first.Hook, first.CoreEvent),
+				PayoffHorizon:    "首个小弧兑现一次可复核的小成果，后续通过规模、协作和责任升级长线目标。",
+			}},
+			RevealBudget:      []string{"第一章只交代当前行动必需的身份、用途、价格、责任与阻力", "未亲见、未通信、未形成记录的信息不进入主角视角"},
+			FirstChapterProof: []string{"主角有必须处理的现实目标", "至少一次不完美但有效的行动改变现场", "成果与成本都能被参与者和读者复核"},
+			RetentionRisks:    []string{"开局只讲设定或经营方法", "配角无条件配合", "金额替代真实结果", "章末只做总结不产生下一步责任"},
+		}
+	}
 	return domain.LongformOpeningDesign{
 		TargetReader:     "需要强入口、可持续规则压力和人物选择代价的类型文读者。",
 		OpeningHook:      zeroFirstNonEmpty(first.Hook, first.CoreEvent, first.Title),
@@ -2289,6 +2822,9 @@ func zeroChapterInformationGaps(project zeroInitProject) []string {
 	if zeroIsSecondAlgorithmProject(project) {
 		return []string{"AI提效项目真实取舍", "许闻溪会不会被边缘化", "梁渡站在哪一边", "同事各自隐忍或自保的原因", "章末后果背后的下一步代价"}
 	}
+	if !zeroIsHorrorProject(project) {
+		return []string{"当前目标的完整执行条件", "各参与者尚未说出的现实顾虑", "资源和责任最终由谁承担", "本章结果能否持续或复制", "下一步机会附带的具体成本"}
+	}
 	return []string{"世界规则完整机制", "对方真实意图", "章末钩子答案", "未授权后台秘密"}
 }
 
@@ -2299,6 +2835,14 @@ func zeroChapterCausalBeat(project zeroInitProject) domain.CausalSimulationBeat 
 			CharacterChoice: "许闻溪先按最低证据标准稳住现场，再决定是否把真实问题说出来。",
 			WorldResponse:   "公司流程、上级态度、同事反应或客户反馈给出可见后果。",
 			StoryResult:     "许闻溪得到下一步入口，同时付出关系、时间、名声或安全感成本。",
+		}
+	}
+	if !zeroIsHorrorProject(project) {
+		return domain.CausalSimulationBeat{
+			Cause:           zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title, "第一章出现一个必须处理的现实目标与执行阻力。"),
+			CharacterChoice: "主角先核对用途、价格、责任和可执行条件，再做一次不完美但能落地的选择。",
+			WorldResponse:   "参与者、现场秩序、付款/交付记录或公开反馈给出可见反应。",
+			StoryResult:     "主角完成一个可复核变化，同时承担时间、返工、关系、资源或下一步责任。",
 		}
 	}
 	return domain.CausalSimulationBeat{
@@ -2313,12 +2857,18 @@ func zeroChapterDecisionPoints(project zeroInitProject) []string {
 	if zeroIsSecondAlgorithmProject(project) {
 		return []string{"是否接下被包装成机会的额外工作", "是否在公开场合说出真实问题", "是否接受梁渡的质询", "是否替同事或客户多往前走一步", "是否把家庭照护压力继续藏起来"}
 	}
+	if !zeroIsHorrorProject(project) {
+		return []string{"是否先做一项可核验的小行动", "是否接受当前价格、责任与交付边界", "是否向参与者公开尚未解决的风险", "是否为结果承担返工、时间或关系成本", "是否把本章成果转成下一步明确任务"}
+	}
 	return []string{"是否相信新信息", "是否交换资源/承诺", "是否暴露私人边界", "是否承担章末代价"}
 }
 
 func zeroChapterOutcomeShift(project zeroInitProject) []string {
 	if zeroIsSecondAlgorithmProject(project) {
 		return []string{"许闻溪的目标更具体", "至少一条岗位/关系/客户反馈/家庭照护状态变化", "章末后果从工作细节变成下一章压力"}
+	}
+	if !zeroIsHorrorProject(project) {
+		return []string{"主角的下一步目标与责任更具体", "至少一项付款/交付/位置/资源/关系状态发生可复核变化", "本章成果带来下一位参与者、下一项任务或新的现实成本"}
 	}
 	return []string{"主角目标更具体", "至少一条关系/资源/知识状态变化", "伏笔种子从装饰变成下一章压力"}
 }
@@ -2353,6 +2903,38 @@ func zeroWritingNorms(project zeroInitProject) []domain.WritingNormApplication {
 				ChapterApplication: "读取项目 web_reference_brief 或当轮 web_search 证据，把AI工具、岗位调整、会议材料、群聊、通勤和照护成本转成角色能看见或听见的现场细节。",
 				ProofTargets:       []string{"external_reference_plan", "trend_language_plan", "grounding_details"},
 				FailureRisk:        "网页摘要化、热词硬贴、职场细节无来源导致 AI 味和出戏感。",
+			},
+		}
+	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.WritingNormApplication{
+			{
+				Source:             "writing_engine/user_rules",
+				RuleFocus:          []string{"章节契约先定义写什么", "字数和禁用项服从项目规则", "第一章必须证明长期行动引擎"},
+				ChapterApplication: "把主角目标、主动阻力、不可回避的选择和现场结果落成 scene_anchors 与 causal_beats；手续只保留会改变责任、关系或结果的节点。",
+				ProofTargets:       []string{"开场现实压力", "一次主动选择", "可见结果与 outcome_shift"},
+				FailureRisk:        "只写流程、金额或旁人吹捧，主角没有真实选择，结果也无法核验。",
+			},
+			{
+				Source:             "anti_ai_tone/human_feel_craft/writing_techniques_digest",
+				RuleFocus:          []string{"少抽象概括", "具体物件和现场反应承担新信息", "对白有目的和潜台词", "章尾不用金句问号"},
+				ChapterApplication: "用付款、物料、位置、人流、动作失误、商户/顾客反应承载压力；连续判断或对白后必须切回可见行动。",
+				ProofTargets:       []string{"scene_anchors", "voice_logic.dialogue_functions", "environment_state"},
+				FailureRisk:        "解释段、整齐清单、汇报腔和同声同气的对白制造明显模板感。",
+			},
+			{
+				Source:             "dialogue_writing",
+				RuleFocus:          []string{"先选 dialogue_mode", "每个角色都有 objective_tactics", "权力和信息差会变化", "沉默、误读、反制和情绪泄露可见"},
+				ChapterApplication: "关键对白先明确谁要什么、谁承担风险、什么证据会改变立场，再决定对白/动作/物件/沉默谁先入场。",
+				ProofTargets:       []string{"dialogue_scene_blueprints", "voice_logic", "character_stage_records"},
+				FailureRisk:        "所有角色像同一个项目经理，对话变成政策、教程或审核记录。",
+			},
+			{
+				Source:             "web_reference_guidelines",
+				RuleFocus:          []string{"网络资料只做现实支架", "经营和地方生活细节需可追溯", "热梗必须有角色载体与预算"},
+				ChapterApplication: "把营业、支付、运输、安装、顾客等待、地方传播和角色职业细节转成现场动作与选择成本，不搬运网页摘要。",
+				ProofTargets:       []string{"external_reference_plan", "trend_language_plan", "grounding_details"},
+				FailureRisk:        "行业教程、热词硬贴、交通与交付无耗时，导致悬浮和 AI 味。",
 			},
 		}
 	}
@@ -2404,6 +2986,21 @@ func zeroAntiAIPlan(project zeroInitProject) domain.AntiAIExecutionPlan {
 			ReviewChecks:         []string{"是否有整齐三连/清单感", "是否用物件和动作承载压力", "删掉说话人后角色声口是否仍成立", "章尾是否具体而非金句", "男主是否过早救场"},
 		}
 	}
+	if !zeroIsHorrorProject(project) {
+		return domain.AntiAIExecutionPlan{
+			RiskSignals: []string{"第一章像项目汇报或教程", "角色口吻变成作者总结", "金额与流程解释过整齐", "连续对话每句都推进信息", "章末抽象金句或问号"},
+			CounterMoves: []string{
+				"把压力拆进付款、物料、位置、人流、手机消息、顾客去留和角色手上动作",
+				"让角色先误判、犹豫或承担一次损失，再通过可见行动修正",
+				"经营信息只露出会改变当下选择的一小段，不写成行业说明",
+				"章末落到真实结果、责任变化、参与者态度或下一步执行条件",
+			},
+			SentenceRhythmPolicy: "长短句按难堪、催促、执行和结果反馈换挡；抽象判断后必须回到动作、物件、声音、对白或选择后果。",
+			ObjectResponseBudget: "屏幕/票据/物料/现场标识回应默认不超过4次，至少一次延迟、遮挡或被人物行动打断。",
+			DialogueFunctionPlan: "对白只承担试探、议价、拒绝、让步、提醒、撑腰和关系温度；禁止人物突然讲懂整套经营方法。",
+			ReviewChecks:         []string{"是否有整齐三连/清单感", "是否用现场动作承载压力", "删掉说话人后角色声口是否仍成立", "章尾是否具体而非金句", "结果是否真实可核验"},
+		}
+	}
 	return domain.AntiAIExecutionPlan{
 		RiskSignals: []string{"第一章规则解释过整齐", "主角风控口吻变成作者总结", "纸面条款像完整 ToS", "章末抽象金句或问号"},
 		CounterMoves: []string{
@@ -2432,6 +3029,18 @@ func zeroExternalReferencePlan(project zeroInitProject) []domain.ExternalReferen
 			DoNotUse:             []string{"无来源热词串", "过时AI恐慌梗", "平台政策/价格等未核实事实", "破坏女性成长线的段子化处理"},
 		}}
 	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.ExternalReferencePlan{{
+			QueryOrNeed:          "第一章需要地方经营、支付、场地、运输、顾客行为、角色职业或本地传播现实支架时，正式计划必须引用项目 web_reference_brief 的 retrieved_at，或记录当轮 web_search 证据。",
+			SourceType:           "project_web_reference_brief",
+			SourceRefs:           []string{"reference_pack.references.web_reference_guidelines", "meta/web_reference_brief.md", "selected_memory.rag_recall(若命中相关资料)"},
+			RetrievedAt:          "正式计划读取 meta/web_reference_brief.md 后填写具体日期；若简报缺失则先检索并记录当轮日期",
+			FreshnessRequirement: "平台、价格和地方经营规则优先使用最新资料；稳定生活与运输常识可使用近一年资料。",
+			UsableDetails:        []string{"营业/收摊与排队节奏", "支付、退款、价格和交付凭证", "运输、安装与本职工作耗时", "地方群聊、短视频和熟人转述"},
+			TransformationRule:   "转成角色能看见、听见、操作和为之付费的动作、物件、声音、队列或误判，不把网页摘要搬进旁白。",
+			DoNotUse:             []string{"无来源热梗串", "过时梗硬贴", "平台政策/价格等未核实事实", "把经营写成教程或新闻稿"},
+		}}
+	}
 	return []domain.ExternalReferencePlan{{
 		QueryOrNeed:          "第一章需要当代生活、平台、物业、支付、角色职业/资源、城市交通或热梗现实支架时，正式计划必须引用项目 web_reference_brief 的 retrieved_at，或记录当轮 web_search 证据。",
 		SourceType:           "project_web_reference_brief",
@@ -2453,6 +3062,16 @@ func zeroTrendLanguagePlan(project zeroInitProject) []domain.TrendLanguagePlan {
 			SceneFunction:    "只做时代纹理、尴尬感、误判或关系摩擦，不解释AI趋势",
 			UsageBudget:      "第一章默认0-1处，最多2处半截反应；禁止热词串",
 			ForbiddenUsage:   "主角关键判断、章末钩子、作者旁白、男主评价和成长金句里不用热梗",
+		}}
+	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.TrendLanguagePlan{{
+			Item:             "none-or-project-brief-item",
+			SourceContext:    "项目 web_reference_brief 的具体条目或正式写作时的最新网络检索结果",
+			CharacterCarrier: "默认由顾客、商户、朋友、群聊、短视频评论或配角半句反应承载，不由旁白承载",
+			SceneFunction:    "只做时代纹理、笑点、误判或关系摩擦，不解释经营机制",
+			UsageBudget:      "第一章默认0-1处，最多2处半截反应；禁止梗串",
+			ForbiddenUsage:   "主角关键判断、系统保密信息、章末钩子、作者旁白和总结金句里不用热梗",
 		}}
 	}
 	return []domain.TrendLanguagePlan{{
@@ -2487,7 +3106,7 @@ func zeroReaderEntertainmentPlan(project zeroInitProject) domain.ReaderEntertain
 }
 
 func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan {
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	if zeroIsSecondAlgorithmProject(project) {
 		return []domain.GroundingDetailPlan{
 			{
@@ -2501,6 +3120,22 @@ func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan 
 				SourceRef:     "web_reference_guidelines",
 				TransformedAs: "没接到的电话、复诊提醒、通勤时间、保温杯、包里折起的单子或母亲一句轻描淡写的话",
 				SceneAnchor:   "许闻溪能摸到、听见或临时压下去的生活细节",
+			},
+		}
+	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.GroundingDetailPlan{
+			{
+				Detail:        "付款、物料、位置、安装和顾客等待先像真实经营现场，再承担剧情压力。",
+				SourceRef:     "web_reference_guidelines",
+				TransformedAs: "收款提示、价牌、线材/桌面、车辆装卸、排队去留、商户手上动作和明确交接",
+				SceneAnchor:   scene,
+			},
+			{
+				Detail:        "县城生活与熟人传播只做人物选择的现实成本，不抢主线解释。",
+				SourceRef:     "web_reference_guidelines",
+				TransformedAs: "亲友群消息、熟人半句打听、摊主观望、顾客改口、收摊时间和往返交通",
+				SceneAnchor:   "主角能亲见、听见、收到或复核的生活细节",
 			},
 		}
 	}
@@ -2521,28 +3156,59 @@ func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan 
 }
 
 func zeroOffscreenStage(project zeroInitProject, states []domain.CharacterSimulationState) []domain.CharacterStageRecord {
-	scene := zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	second := zeroIsSecondAlgorithmProject(project)
+	horror := zeroIsHorrorProject(project)
 	var records []domain.CharacterStageRecord
-	for i, state := range states {
+	for _, state := range states {
 		if strings.TrimSpace(state.Character) == "" {
 			continue
 		}
+		firstChapterActive := false
+		firstMention := project.FirstMentions[strings.TrimSpace(state.Character)]
+		for _, c := range project.Characters {
+			if zeroCharacterNameIs(c, state.Character) {
+				firstChapterActive = zeroFirstChapterCharacterActive(project, c)
+				break
+			}
+		}
+		location := scene
 		status := "存活/状态待第一章正文确认"
 		environment := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章规则/关系/资源压力现场")
 		deathState := "未死亡/未确认；若死亡、失踪或异化，必须安排传回主角路径"
 		notice := "通过正文可见行动、通信、账单、目击者或后续台账传回主角"
+		if !horror {
+			status = "生活/工作状态待第一章正文确认"
+			environment = zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章现实行动/关系/资源压力现场")
+			deathState = "无极端状态；若发生缺席、换班、工作变化、关系降温或资源损失，必须安排传回主角路径"
+			notice = "通过正文可见行动、电话/消息、付款或交付记录、现场结果、目击者或后续台账传回主角"
+		}
 		if second {
 			status = "工作/生活状态待第一章正文确认"
 			environment = zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章AI提效/岗位/关系压力现场")
 			deathState = "无极端状态；若发生离职、调岗、缺席、关系降温或家庭照护变化，必须安排传回主角路径"
 			notice = "通过正文可见行动、消息、会议记录、工单、客户反馈、目击者或后续台账传回主角"
 		}
+		transport := "按开局地点原地行动；跨地点需 book_world 路线"
+		travelTime := "未发生跨地点移动时为0；若正文移动，必须补现实耗时"
+		meetingConstraint := "主角未通信/未见证/无证据时不能知道该角色线；非主角不能随叫随到"
+		timelineConsistency := "与第一章主线同步；若正文未展示，后续回归必须承接此处压力和误判。"
+		if !firstChapterActive {
+			location = "离屏/未定；未进入第一章现场"
+			if firstMention > 1 {
+				location = fmt.Sprintf("离屏/未定；第%d章首次入场前不得占用第一章现场", firstMention)
+			}
+			environment = "第一章同时段的个人生活、工作、日程与资源环境；不共享主角现场信息"
+			transport = "未前往第一章现场；首次入场前若跨地点，必须另补路线与现实耗时"
+			travelTime = "离屏阶段待定；不得用零耗时把角色送入第一章现场"
+			meetingConstraint = "本章未相识/未联系/未同场；只有首次出场边界到达且正文建立渠道后才能接触主角"
+			timelineConsistency = "与第一章处在同一时间轴但保持离屏；后续首次入场只承接个人基线，不得倒灌第一章现场知识。"
+		}
 		records = append(records, domain.CharacterStageRecord{
 			Chapter:             1,
 			Character:           state.Character,
 			Time:                "第一章开场至章末",
-			Location:            scene,
+			Location:            location,
 			Status:              status,
 			Environment:         environment,
 			CurrentAction:       zeroFirstNonEmpty(state.LikelyAction, "按当前信息试探并保护自身边界"),
@@ -2550,15 +3216,15 @@ func zeroOffscreenStage(project zeroInitProject, states []domain.CharacterSimula
 			Decision:            "只基于可见证据做有限选择，不提前掌握完整机制。",
 			MistakeOrMisbelief:  zeroFirstNonEmpty(strings.Join(state.PlausibleMistakes, "；"), "可能把异常误判成普通流程。"),
 			KnowledgeBoundary:   zeroFirstNonEmpty(strings.Join(state.KnowledgeLedger.ForbiddenKnowledge, "；"), "不能知道未公开后台谜底。"),
-			VisibleInChapter:    i == 0,
+			VisibleInChapter:    firstChapterActive,
 			Evidence:            "zero-init 初始角色动态与第一章大纲",
-			Transport:           "按开局地点原地行动；跨地点需 book_world 路线",
-			TravelTime:          "未发生跨地点移动时为0；若正文移动，必须补现实耗时",
-			MeetingConstraint:   "主角未通信/未见证/无证据时不能知道该角色线；非主角不能随叫随到",
+			Transport:           transport,
+			TravelTime:          travelTime,
+			MeetingConstraint:   meetingConstraint,
 			PersonalityDelta:    "第一章压力会测试其行动倾向，变化需在 commit 后回填",
 			DeathState:          deathState,
 			ProtagonistNotice:   notice,
-			TimelineConsistency: "与第一章主线同步；若正文未展示，后续回归必须承接此处压力和误判。",
+			TimelineConsistency: timelineConsistency,
 			NextPotential:       "携带本章未解决的压力、误判或资源缺口回归。",
 			Tags:                []string{"zero_init", "character_stage", state.Character},
 		})
@@ -2614,15 +3280,24 @@ func zeroReviewRefinement() domain.ReviewRefinementLoop {
 func zeroEnvironmentState(project zeroInitProject) []domain.EnvironmentSignal {
 	if zeroIsSecondAlgorithmProject(project) {
 		return []domain.EnvironmentSignal{{
-			Place:              zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景"),
+			Place:              zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"),
 			VisibleState:       "有可见工作物、空间边界、消息提示、材料版本或人群反应变化。",
 			InformationCarried: "承载AI提效压力、岗位话语权、关系边界或资源短缺。",
 			PressureApplied:    "迫使角色核验证据、拒绝/接受承诺，或承担一个可见职业/关系成本。",
 			ExpectedChange:     "章末同一地点/材料/消息/关系姿态改变，成为下一章可承接证据。",
 		}}
 	}
+	if !zeroIsHorrorProject(project) {
+		return []domain.EnvironmentSignal{{
+			Place:              zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"),
+			VisibleState:       "价格、票据、物料、位置、排队、交接、人员动作或消息记录中至少一项可见且会变化。",
+			InformationCarried: "承载当前目标的用途、执行条件、责任边界、参与者顾虑与资源缺口。",
+			PressureApplied:    "迫使角色在有限时间和资源下作出一次可执行选择，并明确谁承担成本。",
+			ExpectedChange:     "章末同一地点的付款、交付、物料、位置、人员态度或下一步安排发生可复核变化。",
+		}}
+	}
 	return []domain.EnvironmentSignal{{
-		Place:              zeroFirstNonEmpty(zeroFirstScene(project.FirstChapter), "第一章主场景"),
+		Place:              zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"),
 		VisibleState:       "有可见异常、纸面/物件/空间边界或秩序变化。",
 		InformationCarried: "承载世界规则第一次露面、关系压力或资源短缺。",
 		PressureApplied:    "迫使角色核验证据、拒绝/接受交换，或承担一个可见代价。",

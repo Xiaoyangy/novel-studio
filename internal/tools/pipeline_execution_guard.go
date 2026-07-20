@@ -57,7 +57,7 @@ func guardPipelinePlanningExecution(st *store.Store, chapter int, tool string) e
 			errs.ErrToolPrecondition,
 		)
 	}
-	if lock.Mode == domain.PipelineExecutionFoundation || lock.Mode == domain.PipelineExecutionOutlineAll {
+	if lock.Mode == domain.PipelineExecutionFoundation || lock.Mode == domain.PipelineExecutionWorldTick || lock.Mode == domain.PipelineExecutionOutlineAll {
 		return fmt.Errorf(
 			"%s execution lock 正在准备全书基础（owner=%s）；%s 试图提前规划第 %d 章，已拒绝: %w",
 			lock.Mode,
@@ -119,6 +119,15 @@ func guardPipelineGlobalPlanningExecution(st *store.Store, tool string) error {
 				errs.ErrToolPrecondition,
 			)
 		}
+	case domain.PipelineExecutionWorldTick:
+		if tool == "save_world_tick" {
+			return nil
+		}
+		return fmt.Errorf(
+			"world_tick execution lock 只允许 save_world_tick；%s 不得修改 user rules、foundation、progress、摘要或正文: %w",
+			tool,
+			errs.ErrToolPrecondition,
+		)
 	case domain.PipelineExecutionOutlineAll:
 		if tool == "save_foundation" {
 			return nil
@@ -184,7 +193,7 @@ func guardPipelineProseExecution(st *store.Store, chapter int, tool string) erro
 	if err := requireCurrentPipelineExecutionProcess(lock, tool); err != nil {
 		return err
 	}
-	if lock.Mode == domain.PipelineExecutionFoundation || lock.Mode == domain.PipelineExecutionOutlineAll {
+	if lock.Mode == domain.PipelineExecutionFoundation || lock.Mode == domain.PipelineExecutionWorldTick || lock.Mode == domain.PipelineExecutionOutlineAll {
 		return fmt.Errorf(
 			"%s execution lock 正在准备第 %d 章之前的全书基础（owner=%s）；%s 试图改写第 %d 章正文，已拒绝。基础阶段不得生成、编辑、合并或提交任何正文: %w",
 			lock.Mode,

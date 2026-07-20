@@ -146,6 +146,15 @@ projected state delta。
 - `project_all_grounded` 主角只对 `protagonist_projection.chosen_decision` 做服务端精确绑定；options 和 reason 仍由模型按最终决定时点的可用选项与可见证据编写，再经知识边界、新奇事实和因果锚点校验，防止已失败或后见动作被固化成当前选项。任何显式提交的残缺 projection 都在落盘前原子拒绝，不再覆盖可恢复 partial；若所有有界会话仍不能收口，错误会同时报告剩余 gaps、agent error 与 host-finalize error。
 - `blocking=true` 的 hold-baseline/rewrite-only 角色合同改由宿主在模型会话前按 8 名一批确定性物化，不消耗模型轮次，也不生成 grounded 决定或自动 finalize。Project-All generation identity 同时纳入 Simulator/Planner 实际可见的工具 description、schema 与逐角色 authority policy 摘要；选项语义、必填字段、权限规则或工具合同变化会正式生成新 generation，不会静默续用旧 partial。grounded 角色的 `location` 必须是 32 字以内、无句子标点的空间锚点，`decision/action` 不得复制 `current_goal`，`decision_reason` 与其余投影必须由至少两个当前因果锚点支持并禁止后见信息；模型可见政策与服务端校验现在保持同一合同。
 
+### 2026-07-17 零号资产与生产合同硬化
+
+- 生产顺序固定为“冻结全书章纲 → 当前弧全章推演与承载力校验 → seal 当前弧 → 按章 render → 按章 exact-body review”；不得先推演全书再回头渲染，也不得边规划边写正文。当前弧全部 chapter plan 必须足以自然承载正文，封板后才开放该弧第一章渲染，弧内逐章验收完毕后才进入下一弧。
+- 当前青山县生产配置仅允许 Reviewer 使用 DeepSeek；Coordinator、Architect、World Simulator、Planner、Writer、Drafter、Editor 等生产角色统一使用 `gpt-5.6-sol`、`ultra` effort，且不配置模型回退。审核模型不能接管规划或正文生成，生产模型失败也不能静默降级到其他 provider/model。
+- `meta/user_rules.json` 是用户创作契约的只读输入：内部 world-tick、zero-init 和恢复流程只能消费并绑定其摘要，不能调用 `save_user_rules` 覆盖用户规则；该文件变化会使旧 zero-init readiness 失效并要求重新生成相应资产。
+- 正文长度只有一个权威来源：`user_rules` 中的每章 `2000–3300` 中文字。zero-init pacing、弧规划 manifest、chapter capacity、render 验收和 arc completion 重放必须一致使用该区间；任何模板默认值、旧配置或模型自行建议都不能改成 `3000–5000` 等第二套合同。
+- 零号资产按项目题材与冻结章纲生成，不再让通用恐怖模板污染现实经营题材；关系分类要求成对、定向且无否定的明确证据，角色只能在全书章纲规定的首登场章及以后进入 world tick。人物 dossier、known facts、forbidden knowledge 和首章上下文只保留当时可知事实，未来弧职责、系统秘密、后续关系与作者说明不能提前写入角色记忆或 RAG。
+- 朱雀等外部检测仍只接受用户按正文 SHA 主动报告的可选抽查，未知结果不阻塞自动生产；系统、助手和 pipeline 均不调用、提交或操作朱雀，也不会把人工抽查变成逐章等待点。
+
 ## 快速开始
 
 ### 安装

@@ -12,12 +12,14 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 	buildversion "github.com/chenhongyang/novel-studio/internal/version"
 )
 
 func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitReadiness {
 	required := []string{
 		"premise.md", "outline.json", "characters.json", "world_rules.json", "book_world.json", "book_world.md",
+		"meta/user_rules.json",
 		"meta/simulation_restart_policy.json", "meta/simulation_restart_policy.md",
 		"meta/world_foundation.json", "meta/world_foundation.md", "meta/zero_chapter_context_manifest.json", "meta/initial_character_dynamics.json", "meta/initial_resource_ledger.json",
 		"relationship_state.initial.json", "foreshadow_ledger.initial.json", "meta/initial_review_lessons.md",
@@ -83,6 +85,12 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	// Task 051：initial_character_dynamics 必须覆盖 主角∪FirstCast∪core/important 全员（阻塞）。
 	issues = append(issues, zeroCheckDynamicsCoverage(dir)...)
 	issues = append(issues, zeroCheckStoryTimeContract(dir)...)
+	if _, err := tools.ValidateZeroInitUserRules(dir); err != nil {
+		issues = append(issues, fmt.Sprintf("user_rules 写前合同无效：%v", err))
+	}
+	issues = append(issues, zeroCheckPacingWordContract(dir)...)
+	issues = append(issues, zeroCheckReturnPlanAlignment(dir)...)
+	issues = append(issues, zeroCheckForbiddenTopicContamination(dir)...)
 	// Task 053：模板同质与声口细字段缺失（warning，不阻塞——特化由 Architect 做）。
 	// Task 054：core/important 角色 psych 缺失（warning，保持 psych 可选口径）。
 	warnings = append(warnings, zeroCheckTemplateHomogeneity(dir)...)
@@ -101,6 +109,165 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		Path:             filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"),
 	}
 	return readiness
+}
+
+func zeroCheckPacingWordContract(dir string) []string {
+	st := store.NewStore(dir)
+	snap, err := st.UserRules.Load()
+	if err != nil {
+		return []string{"meta/user_rules.json 读取失败，无法校验唯一字数口径"}
+	}
+	if snap == nil || snap.Structured.ChapterWords == nil {
+		return nil
+	}
+	contract, err := st.Methodology.LoadPacingContract()
+	if err != nil {
+		return []string{"meta/pacing_contract.json 读取失败，无法校验唯一字数口径"}
+	}
+	if contract == nil {
+		return nil
+	}
+	want := snap.Structured.ChapterWords
+	if contract.ChapterWordMin != want.Min || contract.ChapterWordMax != want.Max {
+		return []string{fmt.Sprintf(
+			"pacing_contract 字数=%d-%d 与 user_rules.chapter_words=%d-%d 冲突；user_rules 必须是唯一字数口径",
+			contract.ChapterWordMin, contract.ChapterWordMax, want.Min, want.Max,
+		)}
+	}
+	return nil
+}
+
+func zeroCheckReturnPlanAlignment(dir string) []string {
+	st := store.NewStore(dir)
+	chars, err := st.Characters.Load()
+	if err != nil || len(chars) == 0 {
+		return nil
+	}
+	outline, _ := zeroAuthoritativeOutline(st)
+	project := zeroInitProject{
+		Characters:    chars,
+		Outline:       outline,
+		FirstMentions: zeroCharacterFirstMentions(outline, chars),
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "meta", "character_return_plan.json"))
+	if err != nil {
+		return nil // required/missing reports absence
+	}
+	var actual map[string]domain.CharacterReturnPlan
+	if err := json.Unmarshal(data, &actual); err != nil {
+		return []string{"meta/character_return_plan.json 不是有效 JSON"}
+	}
+	var issues []string
+	for _, c := range chars {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			continue
+		}
+		first := project.FirstMentions[name]
+		wantChapter := first
+		if wantChapter == 0 && zeroIsPrimaryProtagonist(project, c) {
+			wantChapter = 1
+		}
+		wantPriority := zeroReturnPriority(project, c, first)
+		got, ok := actual[name]
+		if !ok {
+			issues = append(issues, fmt.Sprintf("character_return_plan 缺少角色 %s", name))
+			continue
+		}
+		if got.SuggestedChapter != wantChapter || got.ReturnPriority != wantPriority {
+			issues = append(issues, fmt.Sprintf(
+				"character_return_plan[%s] 与当前大纲首次实际使用不一致：chapter=%d priority=%s，期望 chapter=%d priority=%s",
+				name, got.SuggestedChapter, got.ReturnPriority, wantChapter, wantPriority,
+			))
+		}
+	}
+	return issues
+}
+
+func zeroAuthoritativeOutline(st *store.Store) ([]domain.OutlineEntry, error) {
+	if st == nil {
+		return nil, fmt.Errorf("outline store is nil")
+	}
+	if layered, err := st.Outline.LoadLayeredOutline(); err == nil && len(layered) > 0 {
+		if flat := domain.FlattenOutline(layered); len(flat) > 0 {
+			return flat, nil
+		}
+	}
+	return st.Outline.LoadOutline()
+}
+
+func zeroCheckForbiddenTopicContamination(dir string) []string {
+	st := store.NewStore(dir)
+	premise, _ := st.Outline.LoadPremise()
+	source := premise
+	if snap, err := st.UserRules.Load(); err == nil && snap != nil {
+		source += "\n" + snap.Preferences
+	}
+	markers := []string{"古代", "官署", "旧案", "黑市", "导师", "诡异", "恐怖", "末世", "克系", "邪神", "收容", "灵异", "死亡", "失踪", "异化", "附身", "传送"}
+	var forbidden []string
+	for _, marker := range markers {
+		if zeroSourceExplicitlyForbids(source, marker) {
+			forbidden = append(forbidden, marker)
+		}
+	}
+	if len(forbidden) == 0 {
+		return nil
+	}
+	files := []string{
+		"meta/world_foundation.json",
+		"meta/world_background_plan.json",
+		"meta/prewrite_storycraft_plan.json",
+		"drafts/01.zero_init.plan.json",
+	}
+	var issues []string
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		for _, marker := range forbidden {
+			if zeroHasPositiveTopicUse(text, marker) {
+				issues = append(issues, fmt.Sprintf("%s 主动注入了用户明确排除的题材元素 %q", rel, marker))
+			}
+		}
+	}
+	return issues
+}
+
+func zeroSourceExplicitlyForbids(text, marker string) bool {
+	for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune("。；!?！？\n", r)
+	}) {
+		if strings.Contains(clause, marker) && zeroContainsAny(clause, "不写", "不要", "避免", "严禁", "禁止", "不得", "排除", "非本书题材") {
+			return true
+		}
+	}
+	return false
+}
+
+func zeroHasPositiveTopicUse(text, marker string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		idx := strings.Index(line, marker)
+		for idx >= 0 {
+			prefix := line[:idx]
+			if !zeroContainsAny(strings.ToLower(prefix), "forbidden", "do_not_use", "boundary") &&
+				!zeroContainsAny(prefix, "不写", "不要", "避免", "严禁", "禁止", "不得", "不能", "不制造", "无") {
+				return true
+			}
+			next := idx + len(marker)
+			if next >= len(line) {
+				break
+			}
+			rest := line[next:]
+			rel := strings.Index(rest, marker)
+			if rel < 0 {
+				break
+			}
+			idx = next + rel
+		}
+	}
+	return false
 }
 
 func zeroStoryTimeEvidence(dir string) zeroInitStoryTimeEvidence {
@@ -640,7 +807,18 @@ func zeroEndingContractReady(contract domain.EndingConsequenceContract) bool {
 }
 
 func writeZeroInitReadiness(dir string, readiness zeroInitReadiness, _ bool) error {
-	if err := writeZeroJSON(filepath.Join(dir, "meta", "first_chapter_generation_readiness.json"), readiness, true); err != nil {
+	dependencies, err := tools.CaptureZeroInitFoundationDependencies(dir)
+	if err != nil && readiness.Ready {
+		return fmt.Errorf("capture zero-init foundation dependencies: %w", err)
+	}
+	receipt := struct {
+		zeroInitReadiness
+		FoundationDependencies map[string]string `json:"foundation_dependencies,omitempty"`
+	}{
+		zeroInitReadiness:      readiness,
+		FoundationDependencies: dependencies,
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "first_chapter_generation_readiness.json"), receipt, true); err != nil {
 		return err
 	}
 	return writeZeroText(filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"), renderZeroReadiness(readiness), true)
@@ -781,14 +959,13 @@ func zeroInitialCharacters(project zeroInitProject) []domain.Character {
 }
 
 func zeroFirstChapterCast(first domain.OutlineEntry, chars []domain.Character) map[string]bool {
-	haystack := zeroOutlineEntryText(first)
 	out := map[string]bool{}
 	for _, c := range chars {
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
 			continue
 		}
-		if strings.Contains(haystack, name) {
+		if zeroOutlineEntryUsesCharacter(first, c) {
 			out[name] = true
 		}
 	}
@@ -798,13 +975,12 @@ func zeroFirstChapterCast(first domain.OutlineEntry, chars []domain.Character) m
 func zeroCharacterFirstMentions(outline []domain.OutlineEntry, chars []domain.Character) map[string]int {
 	out := map[string]int{}
 	for i, entry := range outline {
-		text := zeroOutlineEntryText(entry)
 		for _, c := range chars {
 			name := strings.TrimSpace(c.Name)
 			if name == "" || out[name] != 0 {
 				continue
 			}
-			if strings.Contains(text, name) {
+			if zeroOutlineEntryUsesCharacter(entry, c) {
 				ch := entry.Chapter
 				if ch <= 0 {
 					ch = i + 1
@@ -813,12 +989,40 @@ func zeroCharacterFirstMentions(outline []domain.OutlineEntry, chars []domain.Ch
 			}
 		}
 	}
-	for _, c := range chars {
-		if zeroIsProtagonist(c) && out[c.Name] == 0 {
-			out[c.Name] = 1
-		}
+	primary := strings.TrimSpace(zeroProtagonist(chars).Name)
+	if primary != "" && out[primary] == 0 {
+		out[primary] = 1
 	}
 	return out
+}
+
+func zeroOutlineEntryUsesCharacter(entry domain.OutlineEntry, c domain.Character) bool {
+	names := append([]string{strings.TrimSpace(c.Name)}, c.Aliases...)
+	texts := append([]string{entry.Title, entry.CoreEvent, entry.Hook}, entry.Scenes...)
+	for _, text := range texts {
+		for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
+			return strings.ContainsRune("。；！？!?\n", r)
+		}) {
+			matched := false
+			for _, name := range names {
+				name = strings.TrimSpace(name)
+				if name != "" && strings.Contains(clause, name) {
+					matched = true
+					break
+				}
+			}
+			if !matched || zeroFutureAuthorOnlyClause(clause) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func zeroFutureAuthorOnlyClause(clause string) bool {
+	return zeroContainsAny(clause, "后续", "将来", "日后", "未来", "下一章") &&
+		zeroContainsAny(clause, "入场", "登场", "出场", "回归", "承接", "消费", "交给", "铺垫", "安排")
 }
 
 func zeroOutlineEntryText(entry domain.OutlineEntry) string {
@@ -892,6 +1096,15 @@ func zeroCounterpartsForCharacter(project zeroInitProject, c domain.Character) [
 }
 
 func zeroOpeningPressureName(project zeroInitProject) string {
+	if !zeroIsHorrorProject(project) {
+		if title := strings.TrimSpace(project.FirstChapter.Title); title != "" {
+			return title + "中的现实压力"
+		}
+		if zeroIsSecondAlgorithmProject(project) {
+			return "第一章岗位、资源与选择压力"
+		}
+		return "第一章目标、资源与执行压力"
+	}
 	text := zeroOutlineEntryText(project.FirstChapter)
 	switch {
 	case strings.Contains(text, "夜租") || strings.Contains(text, "欠费"):
@@ -905,24 +1118,27 @@ func zeroOpeningPressureName(project zeroInitProject) string {
 	}
 }
 
-func zeroReturnPriority(c domain.Character, firstMention int) string {
-	if zeroIsProtagonist(c) || firstMention == 1 {
+func zeroReturnPriority(project zeroInitProject, c domain.Character, firstMention int) string {
+	if zeroIsPrimaryProtagonist(project, c) || firstMention == 1 {
 		return "required"
 	}
 	if firstMention > 1 && firstMention <= 8 {
 		return "near_future"
 	}
 	if firstMention > 8 {
-		return "optional"
+		return "planned_later"
 	}
 	if strings.EqualFold(c.Tier, "decorative") || strings.Contains(c.Role, "捧场") || strings.Contains(c.Role, "凑数") {
 		return "dormant"
 	}
+	if c.Tier == "core" || c.Tier == "important" || c.Tier == "" {
+		return "background_active"
+	}
 	return "optional"
 }
 
-func zeroReturnDueReason(c domain.Character, firstMention int) string {
-	if zeroIsProtagonist(c) {
+func zeroReturnDueReason(project zeroInitProject, c domain.Character, firstMention int) string {
+	if zeroIsPrimaryProtagonist(project, c) {
 		return "主角必须进入第一章动态推演；其选择负责驱动本章规则压力。"
 	}
 	if firstMention == 1 {
@@ -1018,6 +1234,23 @@ func zeroFirstScene(entry domain.OutlineEntry) string {
 		if strings.TrimSpace(s) != "" {
 			return strings.TrimSpace(s)
 		}
+	}
+	return ""
+}
+
+func zeroFirstSceneForProject(project zeroInitProject) string {
+	entryText := zeroOutlineEntryText(project.FirstChapter)
+	if project.BookWorld != nil {
+		for _, place := range project.BookWorld.Places {
+			name := strings.TrimSpace(place.Name)
+			if name != "" && strings.Contains(entryText, name) {
+				return name
+			}
+		}
+	}
+	scene := zeroFirstScene(project.FirstChapter)
+	if len([]rune(scene)) <= 40 && !strings.ContainsAny(scene, "。；！？\n") {
+		return scene
 	}
 	return ""
 }
