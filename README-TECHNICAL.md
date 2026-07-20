@@ -36,6 +36,7 @@ novel-studio 是一个开源、自托管、local-first 的 AI 小说生产系统
 |---|---|
 | 单世界全角色推演 | 每个角色依据自己的目标、压力、知识、关系和资源作决定；离屏角色不会围着主角静止等待 |
 | 主视角投影 | 完整世界决定留在模拟层，正文只接收主角可见事实、必要结果与人物声口 |
+| 读者优先渲染 | 三采样按合成分选稿，以确定性读者体验分（现场具体、对白活、节奏起伏、主视角在场、章末前推力）为先，反 AI 腔真实感为辅；读者体验分不进硬门禁，只驱动选稿与看板 |
 | 规划与渲染分离 | 全书章纲先冻结；此后每次只对当前一弧完成 `preplan → project-all → seal`，再按章 `promote → render → exact-body review`，弧内全章验收后才进入下一弧 |
 | 长篇记忆 | 项目事实、写法资料、对标素材和审核校准分通道路由，支持 BM25、embedding、本地向量与 Qdrant |
 | 质量闭环 | 机械规则、本地整章 AIGC、独立 DeepSeek 裸正文审核、Editor 和 hard consistency 共同决定候选正文能否最终验收与交付 |
@@ -508,6 +509,17 @@ exact frozen render context + render_packet v11
 - project-all 会为当前弧每章封存完整 prose-facing `novel_context(profile=draft)` 与 render capacity；promote 只把该弧下一份精确 payload 发布到 `meta/planning/current_render_context.json`，render 不再现场重建上下文；
 - 正文生成前会复核 arc/generation、bundle、promotion、plan digest/checkpoint、世界模拟 checkpoint、正史章节 SHA，以及 `meta/user_rules.json`、`meta/writing_assets.json`、`meta/style_rules.json` 和 Drafter 模型/prompt 的阶段专属摘要。Editor/Reviewer 的变化不会作废已封存弧规划；若 candidate commit 已经落盘，崩溃恢复只按当时消费的冻结快照补本章 exact-body review/receipt，不因之后 live 文件变化重写正文；
 - render-only 连续触发结构性失败后立即停止，不会在渲染锁内偷偷回退到 Planner 或 World Simulator。
+
+### 三采样选稿与读者体验分
+
+正文是给读者看的，不是给检测器过的。选稿层因此以可读性为先，反 AI 腔只作护栏（`internal/writer/sampler`、`internal/editor/rules`）：
+
+- 普通 Writer/Drafter 会话对 `draft_chapter` 做三采样（`candidateCount=3`）；sealed render 路径（`NewRender`）刻意只发一次 provider 调用（`renderCandidateCount=1`），不走投机采样与 pairwise。
+- 每个候选算两个确定性分：`RoughnessScore`（反模板真实感，越高越不像平滑 AI 文）与 `ReaderExperienceScore ∈ [0,1]`（读者体验，越高越好读）。后者由五项加权构成——现场具体度、对白活性、句长变异系数（节奏起伏）、主视角在场、章末前推力，再对文字墙、碎句网格和“验收录像”式流程报告扣分。
+- 确定性初筛按合成分 `SelectionScore = 0.6·ReaderExperienceScore + 0.4·(RoughnessScore/1.5)` 排序、淘汰最差；剩余 top2 若配置了 `reviewer` 裁判（异族防同族自偏）走换位两轮一致的 pairwise 终选，不一致或未配置则保持确定性首选。旧版只按 `RoughnessScore` 选稿，会系统性地选出“最粗糙但最难读”的一稿——这是本次修正的核心。
+- 读者体验分**刻意不进硬门禁**：字数、禁用词、本地 whole-text AIGC、DeepSeek 裸正文判定与 consistency 仍是硬拦截，读者体验分只驱动选稿与可视化，不与正确性门禁抢优先级。达标只是及格，好读才是目标。
+- 该分落盘于 `ChapterAIVoiceMetrics.reader_experience_score`、`SamplingCandidate.readability_score` / `selection_score`，并在 `draft_chapter` 响应、章级审核报告与看板同时展示，为写作循环提供一个正向靶子。
+- 选稿语义变化会 bump `sampler.ProtocolDigest`（当前 v4）；该指纹绑定进 sealed render receipt，回归测试锁定其稳定性。
 
 ### 慢章诊断
 
