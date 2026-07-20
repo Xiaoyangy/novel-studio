@@ -1697,6 +1697,7 @@ def quality_payload(run: Path) -> dict:
             "freshness": freshness,
             "metrics": {
                 "ai_voice_score": metrics.get("ai_voice_score"),
+                "reader_experience_score": metrics.get("reader_experience_score"),
                 "revision_round": metrics.get("revision_round"),
                 "protagonist_waver": metrics.get("protagonist_waver"),
                 "dialogue_ratio": metrics.get("dialogue_ratio"),

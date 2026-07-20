@@ -90,8 +90,8 @@ func TestRenderSamplerUsesExactlyOneBaseCallAndNoPairwiseJudge(t *testing.T) {
 	}
 }
 
-func TestSamplerProtocolDigestV3IsStable(t *testing.T) {
-	const want = "1f4fb223d259fb4526ea47156efed5c740f99cf84b04643743b80b8c3a04466e"
+func TestSamplerProtocolDigestV4IsStable(t *testing.T) {
+	const want = "7fbe27e23fa7c4825103ced2f7449e7486fba98222ad47b87ae0499d82c9c08c"
 	if got := ProtocolDigest(); got != want {
 		t.Fatalf("ProtocolDigest()=%q want=%q", got, want)
 	}

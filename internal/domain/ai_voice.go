@@ -76,26 +76,30 @@ type AIVoiceScorePoint struct {
 
 // ChapterAIVoiceMetrics 是章节级反 AI 腔指标。
 type ChapterAIVoiceMetrics struct {
-	Chapter                          int                 `json:"chapter"`
-	FigurativeCount                  int                 `json:"figurative_count"`
-	FigurativeDensity                float64             `json:"figurative_density"`
-	DialogueChars                    int                 `json:"dialogue_chars"`
-	SupportingDialogue               int                 `json:"supporting_dialogue_chars"`
-	DialogueRatio                    float64             `json:"dialogue_ratio"`
-	SupportingDialogueTurns          int                 `json:"supporting_dialogue_turns,omitempty"`
-	SupportingDialogueParagraphs     int                 `json:"supporting_dialogue_paragraphs,omitempty"`
-	SupportingDialogueParagraphRatio float64             `json:"supporting_dialogue_paragraph_ratio,omitempty"`
-	ParagraphCount                   int                 `json:"paragraph_count"`
-	SentenceCount                    int                 `json:"sentence_count"`
-	AIVoiceScore                     float64             `json:"ai_voice_score"`
-	ChapterFunction                  string              `json:"chapter_function"`
-	AphorismHits                     []AphorismHit       `json:"aphorism_hits,omitempty"`
-	ProtagonistWaver                 bool                `json:"protagonist_waver"`
-	EndingHookUsed                   bool                `json:"ending_hook_used"`
-	RevisionRound                    int                 `json:"revision_round"`
-	BeforeAfterDiff                  string              `json:"before_after_diff,omitempty"`
-	AIVoiceScoreHistory              []AIVoiceScorePoint `json:"ai_voice_score_history,omitempty"`
-	GeneratedAt                      string              `json:"generated_at,omitempty"`
+	Chapter                          int     `json:"chapter"`
+	FigurativeCount                  int     `json:"figurative_count"`
+	FigurativeDensity                float64 `json:"figurative_density"`
+	DialogueChars                    int     `json:"dialogue_chars"`
+	SupportingDialogue               int     `json:"supporting_dialogue_chars"`
+	DialogueRatio                    float64 `json:"dialogue_ratio"`
+	SupportingDialogueTurns          int     `json:"supporting_dialogue_turns,omitempty"`
+	SupportingDialogueParagraphs     int     `json:"supporting_dialogue_paragraphs,omitempty"`
+	SupportingDialogueParagraphRatio float64 `json:"supporting_dialogue_paragraph_ratio,omitempty"`
+	ParagraphCount                   int     `json:"paragraph_count"`
+	SentenceCount                    int     `json:"sentence_count"`
+	AIVoiceScore                     float64 `json:"ai_voice_score"`
+	// ReaderExperienceScore 是 AIVoiceScore 的正向对偶：越高表示读者越可能读下去
+	// （现场具体、对白活、节奏有起伏、主视角在场、章末有前推力）。它不参与硬门禁，
+	// 只驱动三采样选稿和看板可视化，让流程为读者而非只为检测器优化。
+	ReaderExperienceScore float64             `json:"reader_experience_score"`
+	ChapterFunction       string              `json:"chapter_function"`
+	AphorismHits          []AphorismHit       `json:"aphorism_hits,omitempty"`
+	ProtagonistWaver      bool                `json:"protagonist_waver"`
+	EndingHookUsed        bool                `json:"ending_hook_used"`
+	RevisionRound         int                 `json:"revision_round"`
+	BeforeAfterDiff       string              `json:"before_after_diff,omitempty"`
+	AIVoiceScoreHistory   []AIVoiceScorePoint `json:"ai_voice_score_history,omitempty"`
+	GeneratedAt           string              `json:"generated_at,omitempty"`
 }
 
 // AIVoiceAnalysis 是规则引擎输出给 Editor 的红旗 JSON。
@@ -111,9 +115,13 @@ type AIVoiceAnalysis struct {
 
 // SamplingCandidate 记录 Writer 三采样单个候选的确定性评分。
 type SamplingCandidate struct {
-	Index             int     `json:"index"`
-	ContentHash       string  `json:"content_hash"`
-	RoughnessScore    float64 `json:"roughness_score"`
+	Index          int     `json:"index"`
+	ContentHash    string  `json:"content_hash"`
+	RoughnessScore float64 `json:"roughness_score"`
+	// ReadabilityScore 是读者体验分（越高越好读）；SelectionScore 是它与 roughness
+	// 的合成，是三采样最终排序依据——让选稿以读者可读性为主、反检测真实感为辅。
+	ReadabilityScore  float64 `json:"readability_score"`
+	SelectionScore    float64 `json:"selection_score"`
 	FigurativeDensity float64 `json:"figurative_density"`
 	DialogueRatio     float64 `json:"dialogue_ratio"`
 	AphorismHitCount  int     `json:"aphorism_hit_count"`

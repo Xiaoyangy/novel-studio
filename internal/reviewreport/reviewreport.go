@@ -471,7 +471,7 @@ func renderAIVoice(b *strings.Builder, analysis *domain.AIVoiceAnalysis) {
 	}
 	metrics := analysis.Metrics
 	fmt.Fprintf(b, "- 结论：%s\n", emptyDash(analysis.Label))
-	fmt.Fprintf(b, "- AI 腔风险分：%.4f\n", metrics.AIVoiceScore)
+	fmt.Fprintf(b, "- AI 腔风险分：%.4f（越低越好）｜读者体验分：%.4f（越高越好读）\n", metrics.AIVoiceScore, metrics.ReaderExperienceScore)
 	fmt.Fprintf(b, "- 对话占比：%.2f%%；比喻密度：%.2f/千字\n", metrics.DialogueRatio*100, metrics.FigurativeDensity)
 	if len(analysis.RedFlags) > 0 {
 		b.WriteString("- 红旗：\n")

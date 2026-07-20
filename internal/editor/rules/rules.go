@@ -104,6 +104,7 @@ func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMet
 		GeneratedAt:                      time.Now().Format(time.RFC3339),
 	}
 	metrics.AIVoiceScore = round4(clamp(aiVoiceScore(metrics, history)+textPatternRisk(patternFlags), 0, 1))
+	metrics.ReaderExperienceScore = ReaderExperienceScore(bodyText, metrics)
 	metrics.AIVoiceScoreHistory = append(metrics.AIVoiceScoreHistory, domain.AIVoiceScorePoint{
 		Round:  metrics.RevisionRound,
 		Source: "rules",
@@ -153,10 +154,13 @@ func CandidateFromText(index, chapter int, text string) domain.SamplingCandidate
 	analysis := AnalyzeChapter(chapter, text, nil)
 	sum := sha256.Sum256([]byte(text))
 	roughness := round4(clamp(RoughnessScore(analysis.Metrics)-redFlagRoughnessPenalty(analysis.RedFlags), 0, 1.5))
+	readability := analysis.Metrics.ReaderExperienceScore
 	return domain.SamplingCandidate{
 		Index:             index,
 		ContentHash:       hex.EncodeToString(sum[:8]),
 		RoughnessScore:    roughness,
+		ReadabilityScore:  readability,
+		SelectionScore:    SelectionScore(readability, roughness),
 		FigurativeDensity: analysis.Metrics.FigurativeDensity,
 		DialogueRatio:     analysis.Metrics.DialogueRatio,
 		AphorismHitCount:  len(analysis.Metrics.AphorismHits),

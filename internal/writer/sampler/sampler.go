@@ -31,18 +31,21 @@ func ProtocolDigest() string {
 		PairwiseRuneLimit    int    `json:"pairwise_rune_limit"`
 		PairwiseInstruction  string `json:"pairwise_instruction"`
 	}{
-		Version:              "writer-sampler-protocol.v3",
+		Version:              "writer-sampler-protocol.v4",
 		CandidateCount:       candidateCount,
 		PairwiseRounds:       2,
 		RenderCandidateCount: renderCandidateCount,
 		RenderPairwiseRounds: 0,
 		PairwiseRuneLimit:    1800,
-		PairwiseInstruction:  "更像人类作者、AI腔更少、叙事更扎实；只回答A或B；换位两轮一致才裁定",
+		PairwiseInstruction:  "读者视角选更好读的一稿（现场具体、人物活、读得顺、章末有前推力），同样好读再偏向AI腔更少；只回答A或B；换位两轮一致才裁定",
 	})
 	return digest
 }
 
-// Model wraps the Writer model and chooses the roughest draft_chapter candidate.
+// Model wraps the Writer model and chooses the most reader-facing draft_chapter
+// candidate: it ranks by a blended selection score that leads with readability
+// (concrete scene, live dialogue, varied rhythm, present POV, forward pull) and
+// keeps anti-template authenticity as the secondary factor.
 type Model struct {
 	// Judge pairwise 终选裁判（Task 067）：reviewer 角色模型，异族裁判防同族自偏。
 	// nil = 纯确定性评分（现状行为，老配置零影响）。
@@ -157,8 +160,13 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 	if len(candidates) == 0 {
 		return nil, errors.New("writer sampler did not receive a draft_chapter candidate")
 	}
-	// 确定性初筛：按粗糙度排序，淘汰最差；剩余 top2 走 pairwise 终选（Task 067）。
+	// 确定性初筛：按合成选稿分排序（读者可读性为主、反检测真实感为辅），淘汰最差；
+	// 剩余 top2 走 pairwise 终选。旧版只按 roughness 排序，会选出"最粗糙但最难读"
+	// 的一稿——正文是给读者看的，选稿必须先服务可读性。
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score.SelectionScore != candidates[j].score.SelectionScore {
+			return candidates[i].score.SelectionScore > candidates[j].score.SelectionScore
+		}
 		return candidates[i].score.RoughnessScore > candidates[j].score.RoughnessScore
 	})
 	best := candidates[0]
@@ -329,7 +337,7 @@ func pairwiseJudge(ctx context.Context, judge agentcore.ChatModel, a, b string) 
 }
 
 func pairwiseOnce(ctx context.Context, judge agentcore.ChatModel, slotA, slotB string) (int, bool) {
-	prompt := "你是小说终审。对比两段候选正文，选更像人类作者、AI 腔更少、叙事更扎实的一段。只回答一个字母：A 或 B。\n\n【A】\n" +
+	prompt := "你是小说终审，站在读者角度选稿。对比两段候选正文，选更好读、更想让人翻到下一段的一段：现场是否具体可感、人物是否活、能否一口气读顺、章末是否有真实前推力；在同样好读的前提下，再偏向更像人类作者、AI 腔更少的一段。只回答一个字母：A 或 B。\n\n【A】\n" +
 		truncateRunes(slotA, 1800) + "\n\n【B】\n" + truncateRunes(slotB, 1800)
 	resp, err := judge.Generate(ctx, []agentcore.Message{agentcore.UserMsg(prompt)}, nil)
 	if err != nil || resp == nil {
