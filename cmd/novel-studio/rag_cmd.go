@@ -915,7 +915,7 @@ func mergePendingRAGState(st *store.Store, state *domain.RAGIndexState, pending 
 	}
 	state.Chunks = merged
 	state.ChunkHashes = rebuildRAGChunkHashList(merged)
-	state.SanitizedDigest = ragIndexSanitizationDigest(state)
+	state.SanitizedDigest = ragIndexSanitizationDigest(st, state)
 	state.SchemaVersion = domain.CurrentRAGIndexSchemaVersion
 	state.UpdatedAt = time.Now().Format(time.RFC3339)
 }
@@ -1841,7 +1841,7 @@ func sanitizeRAGIndexState(st *store.Store, state *domain.RAGIndexState) int {
 	if state == nil {
 		return 0
 	}
-	if digest := ragIndexSanitizationDigest(state); digest != "" && state.SanitizedDigest == digest {
+	if digest := ragIndexSanitizationDigest(st, state); digest != "" && state.SanitizedDigest == digest {
 		return 0
 	}
 	filtered := state.Chunks[:0]
@@ -1855,21 +1855,23 @@ func sanitizeRAGIndexState(st *store.Store, state *domain.RAGIndexState) int {
 	}
 	state.Chunks = filtered
 	state.ChunkHashes = rebuildLocalRAGChunkHashes(filtered)
-	state.SanitizedDigest = ragIndexSanitizationDigest(state)
+	state.SanitizedDigest = ragIndexSanitizationDigest(st, state)
 	if removed > 0 {
 		state.UpdatedAt = time.Now().Format(time.RFC3339)
 	}
 	return removed
 }
 
-const ragSanitizationPolicyVersion = "project-contamination-v1"
+const ragSanitizationPolicyVersion = "project-contamination-v2-user-rules-bound"
 
-func ragIndexSanitizationDigest(state *domain.RAGIndexState) string {
+func ragIndexSanitizationDigest(st *store.Store, state *domain.RAGIndexState) string {
 	if state == nil || len(state.ChunkHashes) == 0 {
 		return ""
 	}
 	hasher := sha256.New()
 	_, _ = hasher.Write([]byte(ragSanitizationPolicyVersion))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(toolspkg.ProjectContaminationPolicyDigest(st)))
 	for _, hash := range state.ChunkHashes {
 		hash = strings.TrimSpace(hash)
 		if hash == "" {
@@ -1892,7 +1894,7 @@ func ragChunkHasProjectContamination(st *store.Store, chunk domain.RAGChunk) boo
 		}
 	}
 	text := strings.Join([]string{chunk.SourcePath, chunk.Text, chunk.Summary, chunk.Context, strings.Join(chunk.Keywords, " "), metadata}, "\n")
-	return len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, text)) > 0
+	return len(toolspkg.ProjectContaminationViolations(st, text)) > 0
 }
 
 func resetRAGTrace(outputDir string) {
@@ -1960,7 +1962,7 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 		return len(chapters), nil
 	}
 	state.ChunkHashes = rebuildLocalRAGChunkHashes(state.Chunks)
-	state.SanitizedDigest = ragIndexSanitizationDigest(state)
+	state.SanitizedDigest = ragIndexSanitizationDigest(st, state)
 	state.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := st.RAG.SaveIndexState(*state); err != nil {
 		return 0, err

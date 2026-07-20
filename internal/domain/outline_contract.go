@@ -412,7 +412,7 @@ func outlineCoreEventRepairFeedback(value string) string {
 		"field=core_event parser_signals={meaningful_runes:%d, minimum:%d, punctuation_and_spaces_count:false, placeholder_fragment:%s}; "+
 			"repair: replace only this chapter's core_event with one complete sentence that has at least %d meaningful letters/digits, contains a concrete actor + specific obstacle + chosen visible action + observable state change, and removes the reported placeholder fragment; "+
 			"fill every bracket with actual story facts and do not submit the bracket labels: [actor] because [specific obstacle] cannot [immediate goal], chooses [visible action], changing [ledger/relationship/resource/timeline] from [before] to [after]; "+
-			"passing example: 林澈因供货商临时涨价无法按期开市，改用备用名单重排摊位，使开市时间恢复并留下新核销记录",
+			"passing example: 摊主因供货商临时涨价无法按期开市，改用备用名单重排摊位，使开市时间恢复并留下新核销记录",
 		meaningfulRunes,
 		outlineCoreEventMinMeaningfulRunes,
 		placeholderSignal,

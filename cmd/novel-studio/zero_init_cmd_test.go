@@ -332,50 +332,30 @@ func TestZeroInitCountySpendVoicesSeparateLeadsAndFriends(t *testing.T) {
 	}
 }
 
-func TestCountySpendCompatibilityProfileIsExactProjectOnly(t *testing.T) {
-	lookalike := zeroInitProject{
-		Name:    "县城消费系统",
-		Premise: "主角绑定一百万系统，在青山县夜市帮助商户。",
+func TestZeroInitCharacterAssetsDoNotBranchOnProjectIdentity(t *testing.T) {
+	project := zeroInitProject{
+		Name:    "项目甲",
+		Premise: "一位普通人在现实压力中重新建立目标。",
 		FirstChapter: domain.OutlineEntry{
-			Title: "县城第一夜", CoreEvent: "夜市完成第一笔消费。",
-		},
-	}
-	if zeroIsCountySpendProject(lookalike) {
-		t.Fatal("semantic lookalike inherited another book's project-owned character profile")
-	}
-	lookalike.Name = "只许把钱花在青山县"
-	if !zeroIsCountySpendProject(lookalike) {
-		t.Fatal("exact project key did not enable its compatibility profile")
-	}
-}
-
-func TestSecondAlgorithmCompatibilityProfileIsExactProjectOnly(t *testing.T) {
-	lookalike := zeroInitProject{
-		Name:    "澄光余晖",
-		Premise: "另一座城市也有一家名为澄光的公司，但人物与故事均无关。",
-		FirstChapter: domain.OutlineEntry{
-			Title: "新同事", CoreEvent: "林青第一次参加澄光的部门例会。",
+			Title: "第一天", CoreEvent: "主角在公开场合面对一次必须回应的资源冲突。",
 		},
 		Characters: []domain.Character{
-			{Name: "林青", Role: "主角", Tier: "core", Traits: []string{"谨慎"}},
-			{Name: "周野", Role: "男主", Tier: "core", Traits: []string{"直接"}},
+			{Name: "甲", Role: "主角", Tier: "core", Traits: []string{"谨慎"}},
+			{Name: "乙", Role: "搭档", Tier: "core", Traits: []string{"直接"}},
 		},
+		FirstCast: map[string]bool{"甲": true, "乙": true},
 	}
-	if zeroIsSecondAlgorithmProject(lookalike) {
-		t.Fatal("a different project containing 澄光 inherited the second-algorithm profile")
+	first, err := json.Marshal(zeroInitDynamics(project))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, character := range lookalike.Characters {
-		principle := zeroSpeechPrinciple(lookalike, character)
-		for _, foreignName := range []string{"许闻溪", "梁渡", "程棠", "傅行简", "夏岚"} {
-			if strings.Contains(principle, foreignName) {
-				t.Fatalf("ordinary project speech principle contains foreign name %q: %s", foreignName, principle)
-			}
-		}
+	project.Name = "完全不同的项目名"
+	second, err := json.Marshal(zeroInitDynamics(project))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	lookalike.Name = "她的第二算法"
-	if !zeroIsSecondAlgorithmProject(lookalike) {
-		t.Fatal("exact project identity did not enable the second-algorithm profile")
+	if string(first) != string(second) {
+		t.Fatalf("character assets must be derived from outline and character cards, not project identity:\nfirst=%s\nsecond=%s", first, second)
 	}
 }
 
@@ -509,7 +489,7 @@ func TestZeroInitPipelineBuildsCleanProjectRAG(t *testing.T) {
 	}
 }
 
-func TestZeroInitSecondAlgorithmArtifactsStayWorkplaceBounded(t *testing.T) {
+func TestZeroInitArtifactsStayBoundedToCurrentInputs(t *testing.T) {
 	dir := seedSecondAlgorithmProject(t)
 
 	if err := zeroInitPipeline(cliOptions{}, []string{"--dir", dir, "--rebuild-rag=false"}); err != nil {
@@ -529,7 +509,6 @@ func TestZeroInitSecondAlgorithmArtifactsStayWorkplaceBounded(t *testing.T) {
 	}
 	forbidden := []string{
 		"江烬", "江禾", "白骨财神", "鬼城", "欠费单", "门牌", "黑卡", "阴司", "冥钞",
-		"债务", "关系债", "账单", "死亡/失踪", "异化", "收费",
 	}
 	var combined strings.Builder
 	for _, rel := range files {

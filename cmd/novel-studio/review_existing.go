@@ -79,22 +79,24 @@ type editorReviewCacheArtifact struct {
 }
 
 type editorReviewBranchResult struct {
-	Review        string
-	CacheArtifact *editorReviewCacheArtifact
-	CacheHit      bool
-	CacheLoadErr  error
-	Err           error
-	Elapsed       time.Duration
-	ModelCalls    int
+	Review         string
+	CacheArtifact  *editorReviewCacheArtifact
+	CacheHit       bool
+	CachePersisted bool
+	CacheLoadErr   error
+	Err            error
+	Elapsed        time.Duration
+	ModelCalls     int
 }
 
 type deepseekAIJudgeBranchResult struct {
-	Artifact     *deepseekAIJudgeArtifact
-	CacheHit     bool
-	CacheLoadErr error
-	Err          error
-	Elapsed      time.Duration
-	ModelCalls   int
+	Artifact       *deepseekAIJudgeArtifact
+	CacheHit       bool
+	CachePersisted bool
+	CacheLoadErr   error
+	Err            error
+	Elapsed        time.Duration
+	ModelCalls     int
 }
 
 func parseReviewFlags(argv []string) (reviewFlags, []string, error) {
@@ -355,12 +357,12 @@ func reviewExistingPipelineAtOutputWithPolicy(
 		// this serial section. Persist a successful branch even if its peer failed,
 		// so a retry only calls the missing model.
 		var cacheSaveErrors []string
-		if editorBranch.Err == nil && !editorBranch.CacheHit {
+		if editorBranch.Err == nil && !editorBranch.CacheHit && !editorBranch.CachePersisted {
 			if err := saveEditorReviewCache(eng.Dir(), editorBranch.CacheArtifact); err != nil {
 				cacheSaveErrors = append(cacheSaveErrors, "Editor: "+err.Error())
 			}
 		}
-		if deepseekBranch.Err == nil && !deepseekBranch.CacheHit {
+		if deepseekBranch.Err == nil && !deepseekBranch.CacheHit && !deepseekBranch.CachePersisted {
 			if err := saveDeepSeekAIJudgeCache(eng.Dir(), deepseekBranch.Artifact); err != nil {
 				cacheSaveErrors = append(cacheSaveErrors, "DeepSeek: "+err.Error())
 			}
@@ -610,10 +612,35 @@ func loadOrGenerateEditorReview(
 			CacheHit:      true,
 		})
 	}
+	key := reviewExistingCacheKey(policy)
+	release, lockErr := acquireReviewCacheKeyLock(projectDir, editorReviewCacheBranch, key, budget)
+	if lockErr != nil {
+		return finish(editorReviewBranchResult{CacheLoadErr: loadErr, Err: lockErr})
+	}
+	defer func() { _ = release() }()
+
+	// The winner may have populated the cache while this invocation waited.
+	// Always re-read under the key lock before spending another model call.
+	lockedCached, lockedLoadErr := loadEditorReviewCache(projectDir, policy)
+	if lockedLoadErr == nil && lockedCached != nil {
+		return finish(editorReviewBranchResult{
+			Review:        lockedCached.Markdown,
+			CacheArtifact: lockedCached,
+			CacheHit:      true,
+			CacheLoadErr:  loadErr,
+		})
+	}
+	if lockedLoadErr != nil {
+		loadErr = lockedLoadErr
+	}
+	remainingBudget, budgetErr := remainingReviewCacheBudget(started, budget)
+	if budgetErr != nil {
+		return finish(editorReviewBranchResult{CacheLoadErr: loadErr, Err: budgetErr})
+	}
 
 	review, err := callEditorOnChapter(
 		model, premise, userRules, chapterReviewContext,
-		chapter, chapterBody, analysis, budget,
+		chapter, chapterBody, analysis, remainingBudget,
 	)
 	if err != nil {
 		return finish(editorReviewBranchResult{CacheLoadErr: loadErr, Err: err, ModelCalls: 1})
@@ -625,11 +652,21 @@ func loadOrGenerateEditorReview(
 		CachePolicy: policy,
 		Markdown:    review,
 	}
+	if err := saveEditorReviewCache(projectDir, artifact); err != nil {
+		return finish(editorReviewBranchResult{
+			Review:        review,
+			CacheArtifact: artifact,
+			CacheLoadErr:  loadErr,
+			Err:           fmt.Errorf("持久化 Editor 精确正文缓存: %w", err),
+			ModelCalls:    1,
+		})
+	}
 	return finish(editorReviewBranchResult{
-		Review:        review,
-		CacheArtifact: artifact,
-		CacheLoadErr:  loadErr,
-		ModelCalls:    1,
+		Review:         review,
+		CacheArtifact:  artifact,
+		CachePersisted: true,
+		CacheLoadErr:   loadErr,
+		ModelCalls:     1,
 	})
 }
 
@@ -765,7 +802,7 @@ func saveMechanicalGateForExistingChapter(st *store.Store, chapter int, body str
 		structured = snap.Structured
 	}
 	violations = append(violations, rules.Check(body, wordCount, structured)...)
-	violations = append(violations, toolspkg.SecondAlgorithmProjectContaminationViolations(st, body)...)
+	violations = append(violations, toolspkg.ProjectContaminationViolations(st, body)...)
 	if gatePercent := reviewExistingAIGCGatePercent(report); gatePercent >= deepseekAIJudgePassExclusive {
 		severity := rules.SeverityWarning
 		if gatePercent >= 35 {

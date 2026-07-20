@@ -1400,17 +1400,18 @@ func TestPlanningFallbackPrefersPendingRewriteTarget(t *testing.T) {
 	}
 }
 
-func TestPlanDetailsRejectsSecondAlgorithmCrossProjectContamination(t *testing.T) {
+func TestPlanDetailsRejectsConfiguredProjectContamination(t *testing.T) {
 	st := newPhaseTestStore(t)
-	if err := st.Characters.Save([]domain.Character{{Name: "许闻溪", Role: "主角", Tier: "core"}}); err != nil {
+	if err := st.Characters.Save([]domain.Character{{Name: "顾晴", Role: "主角", Tier: "core"}}); err != nil {
 		t.Fatalf("SaveCharacters: %v", err)
 	}
+	saveTestProjectContaminationTerms(t, st, "外部项目专名")
 	structure, _ := json.Marshal(map[string]any{
 		"chapter":  1,
 		"title":    "测试章",
-		"goal":     "许闻溪核对发布会资料。",
-		"conflict": "许闻溪必须在时间压力下保留证据。",
-		"hook":     "许闻溪发现确认单仍待签。",
+		"goal":     "顾晴核对发布会资料。",
+		"conflict": "顾晴必须在时间压力下保留证据。",
+		"hook":     "顾晴发现确认单仍待签。",
 	})
 	if _, err := NewPlanStructureTool(st).Execute(context.Background(), structure); err != nil {
 		t.Fatalf("plan_structure: %v", err)
@@ -1418,16 +1419,16 @@ func TestPlanDetailsRejectsSecondAlgorithmCrossProjectContamination(t *testing.T
 	args, _ := json.Marshal(map[string]any{
 		"chapter": 1,
 		"causal_simulation": map[string]any{
-			"chapter_function": "江烬收到欠费单，进入鬼城规则。",
+			"chapter_function": "顾晴误把外部项目专名写进记录。",
 		},
 	})
 	_, err := NewPlanDetailsTool(st).Execute(context.Background(), args)
-	if err == nil || !strings.Contains(err.Error(), "跨项目污染") {
-		t.Fatalf("expected cross-project contamination rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "user_rules.forbidden_phrases") {
+		t.Fatalf("expected configured project contamination rejection, got %v", err)
 	}
 	partial, _ := st.Drafts.LoadChapterPlanPartial(1)
 	raw, _ := json.Marshal(partial)
-	if strings.Contains(string(raw), "江烬") || strings.Contains(string(raw), "欠费单") {
+	if strings.Contains(string(raw), "外部项目专名") {
 		t.Fatalf("contaminated details must not persist: %s", raw)
 	}
 }

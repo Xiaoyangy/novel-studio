@@ -428,6 +428,13 @@ func BuildCoordinatorWithOptions(
 		return models.ForRoleWithFailover(role, reportFailover)
 	}
 	executionBounds := currentAgentExecutionBounds(store)
+	if executionBounds.Render {
+		// The provider-independent model wrapper below primes the exact frozen
+		// context. A sealed Drafter has exactly one legal action: write one whole
+		// body. Capability-level narrowing prevents a non-Codex provider from
+		// spending the one-shot permit on a read/check/edit control response.
+		drafterTools = serverPrimedRenderTools(drafterTools)
+	}
 	architectModel := roleModel("architect")
 	writerModel := writersampler.New(roleModel("writer"))
 	drafterBaseModel := roleModel("drafter")
@@ -447,15 +454,28 @@ func BuildCoordinatorWithOptions(
 		)
 	}
 	drafterModel := writersampler.New(drafterBaseModel)
+	if executionBounds.Render {
+		drafterModel = writersampler.NewRender(drafterBaseModel)
+	}
 	// Task 067：三采样 pairwise 终选用 reviewer 角色（异族裁判；未配置回落 editor）。
 	writerModel.Judge = roleModel("reviewer")
 	drafterModel.Judge = drafterJudgeModel
 	var drafterRuntimeModel agentcore.ChatModel = drafterModel
+	var finalizerRuntimeModel agentcore.ChatModel = drafterModel
 	if executionBounds.Render {
+		// Prime every provider call from the exact render-locked context before
+		// the Drafter can directly request draft_chapter. This is independent of
+		// whether the model chooses to call novel_context itself.
+		drafterRuntimeModel = withRenderContextPriming(drafterRuntimeModel, store, contextTool)
 		// Bound the complete sampler/control/prose/one-repair invocation, not only
 		// each nested base-model request.
 		drafterRuntimeModel = withModelCallTimeout(
 			drafterRuntimeModel, "drafter_total", executionBounds.DrafterCallTimeout,
+		)
+		// draft_finalizer has no whole-body generation tools and continues to use
+		// its compact existing-draft context without the large priming payload.
+		finalizerRuntimeModel = withModelCallTimeout(
+			finalizerRuntimeModel, "draft_finalizer_total", executionBounds.DrafterCallTimeout,
 		)
 	}
 	editorModel := roleModel("editor")
@@ -640,7 +660,7 @@ func BuildCoordinatorWithOptions(
 		Name:               "drafter",
 		Description:        "正文渲染者：基于已定稿的章节计划写出正文、自审并提交",
 		Model:              drafterRuntimeModel,
-		SystemPrompt:       bundle.Prompts.Drafter,
+		SystemPrompt:       renderDrafterSystemPrompt(bundle.Prompts.Drafter, executionBounds.Render),
 		Tools:              drafterTools,
 		MaxTurns:           drafterMaxTurns,
 		MaxRetries:         drafterMaxRetries,
@@ -659,13 +679,13 @@ func BuildCoordinatorWithOptions(
 	draftFinalizer := subagent.Config{
 		Name:        "draft_finalizer",
 		Description: "草稿验收者：恢复已有且晚于当前 plan 的草稿，只做局部修复、检查和提交，不重新生成整章",
-		Model:       drafterRuntimeModel,
+		Model:       finalizerRuntimeModel,
 		SystemPrompt: bundle.Prompts.Drafter + "\n\n你处于草稿恢复验收阶段。必须先读取 source=draft。" +
 			"工具集中没有 draft_chapter；只在发现明确硬伤时用 edit_chapter 做最小替换，然后 check_consistency 并 commit_chapter。",
 		Tools:              draftFinalizerTools,
 		MaxTurns:           finalizerMaxTurns,
 		MaxRetries:         drafterMaxRetries,
-		ThinkingLevel:      resolvedRoleThinking(drafterRuntimeModel, cfg, "drafter"),
+		ThinkingLevel:      resolvedRoleThinking(finalizerRuntimeModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
@@ -736,6 +756,7 @@ func BuildCoordinatorWithOptions(
 			writerExpandedChapterGate(store),
 			writerZeroInitGate(store),
 			expandArcWorldTickGate(store),
+			pipelineRenderProsePermitGate(store),
 		)),
 	)
 	// Coordinator 推理强度：无条件应用解析结果。未配置时为空（不发 thinking，用 provider
@@ -822,6 +843,17 @@ func frozenRenderTools(candidates []agentcore.Tool) []agentcore.Tool {
 		default:
 			out = append(out, tool)
 		}
+	}
+	return out
+}
+
+func serverPrimedRenderTools(candidates []agentcore.Tool) []agentcore.Tool {
+	out := make([]agentcore.Tool, 0, 1)
+	for _, tool := range candidates {
+		if tool == nil || tool.Name() != "draft_chapter" {
+			continue
+		}
+		out = append(out, tool)
 	}
 	return out
 }
@@ -944,6 +976,49 @@ func pipelineRenderAgentGate(st *store.Store) agentcore.ToolGate {
 					lock.TargetChapter,
 					args.Agent,
 					chapter,
+				),
+			}, nil
+		}
+		return nil, nil
+	}
+}
+
+// pipelineRenderProsePermitGate is deliberately the final combined gate. All
+// routing/business gates must approve before checking the one-shot reservation.
+// The provider-side priming wrapper performs the atomic consume after context
+// priming succeeds and immediately before the first downstream Generate.
+func pipelineRenderProsePermitGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if req.Call.Name != "subagent" || st == nil {
+			return nil, nil
+		}
+		lock, err := st.Runtime.LoadPipelineExecution()
+		if err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "无法验证 render prose permit execution lock：" + err.Error()}, nil
+		}
+		if lock == nil || lock.Mode != domain.PipelineExecutionRender {
+			return nil, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "无法解析 render prose permit 的 subagent 参数"}, nil
+		}
+		if args.Agent != "drafter" {
+			return nil, nil
+		}
+		chapter := chapterFromTask(args.Task)
+		if chapter != lock.TargetChapter {
+			return &agentcore.GateDecision{Allowed: false, Reason: "render Drafter 章节与 execution lock 不一致"}, nil
+		}
+		if err := st.Runtime.ValidatePipelineRenderProsePermit(chapter); err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason: fmt.Sprintf(
+					"render Drafter 缺少当前 sealed dispatch reservation 的一次性 prose permit，已在任何 Drafter provider 调用前拒绝：%v",
+					err,
 				),
 			}, nil
 		}

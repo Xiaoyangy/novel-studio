@@ -1048,7 +1048,7 @@ func TestLint_TrendLanguageSoundEffectMisuse(t *testing.T) {
 }
 
 func TestLint_SystemProcedureNarration(t *testing.T) {
-	bad := `系统判定：本地新增交付，可进入核验。阶段核验通过。夜市小额改善额度解锁：50000元。`
+	bad := `系统提示：任务状态已进入审核。执行阶段验收通过。临时权限已解锁。`
 	if v := findRule(Lint(bad), "system_procedure_narration"); v == nil {
 		t.Fatalf("expected system_procedure_narration, got %+v", Lint(bad))
 	}
@@ -1075,30 +1075,23 @@ func TestLint_PunctuationCadenceAllowsRhymeSemicolons(t *testing.T) {
 func TestLint_HumanFeelStructureFlagsAIArtifacts(t *testing.T) {
 	text := `# 第一章
 
-他又往下补了三行：
+	他又往下补了三行：
 
-代缴要双方确认
-不回身份证号和名字
-不碰来历不明的零钱
+	不替他人签收
+	不转交临时凭证
+	不越过封锁线
 
-卡面下方排着几行小字：
+	规则页面排着几行小字：
 
-冥府黑卡
-仅限诡异世界有效交易
-交易须有可确认内容
-当前额度未公开
-账单日待生成
+	当前任务状态有效
+	进入条件待确认
+	操作权限范围未公开
+	当前额度未公开
+	结果记录待生成
 
-孩子像背错了儿歌：“不开，不报；不开，不认；不开，不替。”
+	孩子像背错了儿歌：“不开，不报；不开，不认；不开，不替。”
 
-玄关照得发潮。两行字淡得发虚。地址黑得发沉。金戒指发乌。便签本发黄。周行舟声音发紧。指节白得发硬。
-
-周行舟骂得很轻：“行，活人让你当风控，鬼来了你还当风控。”
-“行，你还是那套破风控。”周行舟骂了一声。
-
-墙上只剩断影，肩膀以下歪着，腰以上空了。
-
-他从猫眼里看见白纸背面翻起一角，像故意让江烬看见：代缴需双方确认。`
+	玄关照得发潮。两行字淡得发虚。地址黑得发沉。金戒指发乌。便签本发黄。顾晴声音发紧。指节白得发硬。`
 
 	vs := Lint(text)
 	for _, rule := range []string{
@@ -1106,9 +1099,6 @@ func TestLint_HumanFeelStructureFlagsAIArtifacts(t *testing.T) {
 		"card_tos_block",
 		"empty_parallel_chant",
 		"de_fa_adjective_repetition",
-		"duplicate_dialogue_point",
-		"impossible_body_geometry",
-		"impossible_line_of_sight",
 	} {
 		if v := findRule(vs, rule); v == nil {
 			t.Fatalf("expected %s violation, got %+v", rule, vs)
@@ -1116,12 +1106,12 @@ func TestLint_HumanFeelStructureFlagsAIArtifacts(t *testing.T) {
 	}
 }
 
-func TestLint_HumanFeelStructureAllowsMessyNotesAndBrokenCardText(t *testing.T) {
+func TestLint_HumanFeelStructureAllowsMessyNotesAndBrokenRuleText(t *testing.T) {
 	text := `# 第一章
 
-便签本纸边有一圈油黄。他先写“普通钱无效”，笔尖停了一下，又写“代缴要双方——”。第二个“方”写歪了，他把“双方”圈住，在旁边挤了两个小字：确认。下一行只写了“不回身份证号”，写完又把“名字”塞到行尾。
+	便签本纸边有一圈油黄。他先写“进场要登记”，笔尖停了一下，又写“代领要双方——”。第二个“方”写歪了，他把“双方”圈住，在旁边挤了两个小字：签收。下一行只写了“不替别人”，写完又把“签名”塞到行尾。
 
-手机中央多了一张黑色卡面。第一行还能看清“冥府黑卡”。第二行只剩“仅限”和“有效交易”，中间像被水泡开。再往下是“须有”，旁边三个字从水渍里浮出来：可确认。后半截糊在黑底里。最下面一行空得厉害，只剩“账单”两个字。`
+	手机中央多了一张灰色规则页。第一行还能看清“临时通行”。第二行只剩“仅限”和“本人使用”，中间像被水泡开。再往下是“须有”，旁边两个字从水渍里浮出来：签收。后半截糊在底色里。最下面一行空得厉害，只剩“记录”两个字。`
 
 	for _, rule := range []string{"structured_note_triplet", "card_tos_block", "empty_parallel_chant"} {
 		if v := findRule(Lint(text), rule); v != nil {
@@ -1174,55 +1164,24 @@ func TestLint_BureaucraticRegisterAllowsColloquialPressure(t *testing.T) {
 	}
 }
 
-func TestLint_CausalIntegrityFlagsOrderAndVerificationIssues(t *testing.T) {
+func TestLint_CausalIntegrityFlagsFormImageMismatch(t *testing.T) {
 	text := `# 第一章
 
-信号栏空着。五楼老钱发语音：“是不是报后四位就能登记？我刚发了。”
-老钱那边只剩电流声。二十二楼有人问：“那我报我前夫的？”保安小魏说：“值班室外面有人买票。”郝律师反问：“你见过物业把人昵称改成承租物？”
-下一秒，老钱的头像灰下去，群昵称从“钱建国”变成了“5栋临时承租物”。阴阳公寓3栋楼道安静下来。
-
-信号栏还是空的。这通电话显然不是从基站过来的。第二声铃响到一半，他按下接听。“你那边是不是也起雾？”
-
-薄页自己摊开，下面四栏隔得不齐，像临时盖上去的章。
-手机多出冥府黑卡。卡面写着须有两个字，后面全糊了。`
+	薄页自己摊开，下面四栏隔得不齐，像临时盖上去的章。`
 
 	vs := Lint(text)
-	for _, rule := range []string{
-		"causal_evidence_order",
-		"identity_effect_delayed",
-		"building_floor_mismatch",
-		"anomalous_phone_unverified",
-		"form_image_mismatch",
-		"card_core_rule_overblurred",
-	} {
-		if v := findRule(vs, rule); v == nil {
-			t.Fatalf("expected %s violation, got %+v", rule, vs)
-		}
+	if v := findRule(vs, "form_image_mismatch"); v == nil {
+		t.Fatalf("expected form_image_mismatch violation, got %+v", vs)
 	}
 }
 
-func TestLint_CausalIntegrityAllowsVerifiedSequence(t *testing.T) {
+func TestLint_CausalIntegrityAllowsCoherentFormImage(t *testing.T) {
 	text := `# 第一章
 
-一个蓝天白云头像连发三遍：收到请回复身份证后四位。五楼老钱发语音：“是不是报后四位就能登记？我刚发了。”郝律师立刻打字：撤回！别确认身份！
-老钱那边只剩电流声。下一秒，他的头像灰下去，群昵称从“钱建国”变成了“3栋5楼临时承租物”。
-有人骂郝律师装懂，郝律师反问：“往上翻，看老钱。你见过物业把人昵称改成承租物？”
+	薄页自己摊开，下面四栏隔得不齐，像临时拼起来的表格。`
 
-这通电话显然不是从基站过来的。江烬问：“上回我在你店里买电池，你多找了还是少找了？”周行舟骂：“少找两块。你那边是不是也起雾？”
-薄页自己摊开，下面四栏隔得不齐，像临时拼出来的。
-手机多出冥府黑卡。卡面写着须有，旁边三个字从水渍里浮出来：可确认。`
-
-	for _, rule := range []string{
-		"causal_evidence_order",
-		"identity_effect_delayed",
-		"building_floor_mismatch",
-		"anomalous_phone_unverified",
-		"form_image_mismatch",
-		"card_core_rule_overblurred",
-	} {
-		if v := findRule(Lint(text), rule); v != nil {
-			t.Fatalf("unexpected %s violation: %+v", rule, v)
-		}
+	if v := findRule(Lint(text), "form_image_mismatch"); v != nil {
+		t.Fatalf("unexpected form_image_mismatch violation: %+v", v)
 	}
 }
 

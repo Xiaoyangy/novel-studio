@@ -66,6 +66,37 @@ func TestSamplerUsesSingleCandidateForRewrite(t *testing.T) {
 	}
 }
 
+func TestRenderSamplerUsesExactlyOneBaseCallAndNoPairwiseJudge(t *testing.T) {
+	base := &fakeModel{responses: []*agentcore.LLMResponse{
+		draftResponse("render", 1, "冻结渲染正文。"),
+	}}
+	judge := &scriptedJudge{answers: []string{"A"}}
+	model := NewRender(base)
+	model.Judge = judge
+	resp, err := model.Generate(context.Background(), []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("next_step: 请调用 draft_chapter 写章节草稿正文")}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.calls != renderCandidateCount {
+		t.Fatalf("render base calls=%d want=%d", base.calls, renderCandidateCount)
+	}
+	if judge.calls != 0 {
+		t.Fatalf("render pairwise judge calls=%d want=0", judge.calls)
+	}
+	if _, _, ok := findDraftCall(resp.Message); !ok {
+		t.Fatal("render sampler lost the sole draft response")
+	}
+}
+
+func TestSamplerProtocolDigestV3IsStable(t *testing.T) {
+	const want = "1f4fb223d259fb4526ea47156efed5c740f99cf84b04643743b80b8c3a04466e"
+	if got := ProtocolDigest(); got != want {
+		t.Fatalf("ProtocolDigest()=%q want=%q", got, want)
+	}
+}
+
 func (m *fakeModel) GenerateStream(context.Context, []agentcore.Message, []agentcore.ToolSpec, ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
 	panic("not used")
 }

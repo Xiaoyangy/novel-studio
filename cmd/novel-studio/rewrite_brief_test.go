@@ -299,15 +299,15 @@ func TestBuildRevisionPlanDowngradesAcceptedWarningOnlyGate(t *testing.T) {
 func TestPreserveAnchorsKeepsRuleRhyme(t *testing.T) {
 	original := `# 第1章
 
-孩子像背错了儿歌：“门开门开，名字来；名字来了，账也来。妈妈不开，小宝不开；1701开过，1702不开，1703半开，1704快开。门认名，名认账；账认门，门认人。不开，不报；不开，不认；不开，不替。这屋不开，那屋不开，叔叔不开，1704不开。”
+孩子像背错了儿歌：“风吹河岸，船等潮来；灯照旧路，人等信来。姐姐不走，妹妹不走；前门半掩，后门不开。潮声记路，旧桥记人；人认约定，约定认心。不忘，不躲；不骗，不替。”
 
-玻璃杯碎了。许曼哭腔很低：“别念了。”`
+玻璃杯碎了。旁边的人低声说：“别念了。”`
 
 	anchors := preserveAnchors(original)
 	if len(anchors) == 0 {
 		t.Fatal("expected rule rhyme anchor")
 	}
-	if !strings.Contains(anchors[0], "门开门开") || !strings.Contains(anchors[0], "1704快开") {
+	if !strings.Contains(anchors[0], "风吹河岸") || !strings.Contains(anchors[0], "约定认心") {
 		t.Fatalf("unexpected anchors: %#v", anchors)
 	}
 }
@@ -559,18 +559,25 @@ func TestValidateRewritePreflightBlocksTrendAndSystemVoiceRegressions(t *testing
 	}
 }
 
-func TestValidateRewritePreflightBlocksSecondAlgorithmDeprecatedEngine(t *testing.T) {
+func TestValidateRewritePreflightBlocksConfiguredDeprecatedEngineTerms(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
-	if err := st.Outline.SavePremise("《她的第二算法》女性职场成长文，主角许闻溪。"); err != nil {
-		t.Fatalf("SavePremise: %v", err)
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Version: rules.SnapshotVersion,
+		Status:  rules.StatusReady,
+		Structured: rules.Structured{
+			ForbiddenPhrases: []string{"过期流程术语", "外部项目角色"},
+		},
+		Sources: []string{"test"},
+	}); err != nil {
+		t.Fatalf("Save user rules: %v", err)
 	}
-	err := validateRewritePreflight(st, 1, "许闻溪看见日志窗口还开着，工作群里跳出会后纪要。")
+	err := validateRewritePreflight(st, 1, "当前角色把过期流程术语交给外部项目角色处理。")
 	if err == nil {
 		t.Fatal("expected deprecated story engine preflight failure")
 	}
 	got := err.Error()
-	for _, want := range []string{"deprecated_story_engine", "日志", "纪要"} {
+	for _, want := range []string{"project_contamination", "过期流程术语", "外部项目角色"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected %q in error, got %s", want, got)
 		}

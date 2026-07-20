@@ -567,7 +567,10 @@ func TestRoute_PipelineRenderFirstDraftStopsBeforeAllGatesAndFinalizer(t *testin
 		t.Fatalf("pipeline render must dispatch the exact first Drafter: %+v", got)
 	}
 	for _, want := range []string{
+		"Host 会在首个真实 provider 调用前",
 		"novel_context(chapter=5, profile=draft)",
+		"工具集中没有 novel_context",
+		"首个响应直接只调用一次",
 		"draft_chapter(chapter=5, mode=write)",
 		"written=true 后立即结束",
 		"禁止 read_chapter、check_consistency、edit_chapter、commit_chapter",

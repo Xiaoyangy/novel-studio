@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/assets"
@@ -372,7 +373,7 @@ func deriveResourceLedgerRecommendations(chapter int, summary *domain.ChapterSum
 }
 
 func looksLikeResourceState(text string) bool {
-	for _, term := range []string{"持有物", "资产", "权限", "账户", "黑卡", "欠费单", "收据", "债权", "产权", "凭证", "名额", "资格", "押金", "租约", "账单"} {
+	for _, term := range []string{"持有物", "资产", "权限", "账户", "资金", "余额", "收据", "债权", "产权", "凭证", "名额", "资格", "押金", "租约", "账单", "库存", "额度"} {
 		if strings.Contains(text, term) {
 			return true
 		}
@@ -493,17 +494,68 @@ func worldRuleHits(corpus string, rule domain.WorldRule) []string {
 	if corpus == "" {
 		return nil
 	}
+	return sharedWorldRuleTerms(strings.Join([]string{rule.Category, rule.Rule, rule.Boundary}, "\n"), corpus, 5)
+}
+
+func sharedWorldRuleTerms(ruleText, corpus string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	stop := map[string]struct{}{
+		"世界": {}, "规则": {}, "角色": {}, "本章": {}, "正文": {}, "故事": {},
+		"必须": {}, "不得": {}, "不能": {}, "可以": {}, "需要": {}, "没有": {},
+		"如果": {}, "任何": {}, "所有": {}, "只能": {}, "已经": {}, "当前": {},
+	}
 	var hits []string
-	for _, term := range []string{
-		"冥雾", "夜租", "冥钞", "普通现金", "契约", "交易", "确认", "冥府黑卡", "黑卡",
-		"账单", "审计", "收租鬼", "阴阳公寓", "名字", "影子", "人格资产", "欠费单",
-		"规则", "产权", "债权", "镇厄局", "红伞医院", "午夜便利店", "鬼市",
-	} {
-		if strings.Contains(rule.Category+rule.Rule+rule.Boundary, term) && strings.Contains(corpus, term) {
-			hits = append(hits, term)
+	seen := map[string]struct{}{}
+	add := func(term string) bool {
+		term = strings.TrimSpace(term)
+		if len([]rune(term)) < 2 || !strings.Contains(corpus, term) {
+			return false
 		}
-		if len(hits) >= 5 {
-			break
+		if _, blocked := stop[term]; blocked {
+			return false
+		}
+		if _, ok := seen[term]; ok {
+			return false
+		}
+		for _, existing := range hits {
+			if strings.Contains(existing, term) {
+				return false
+			}
+		}
+		seen[term] = struct{}{}
+		hits = append(hits, term)
+		return len(hits) >= limit
+	}
+	segments := strings.FieldsFunc(ruleText, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	for _, segment := range segments {
+		runes := []rune(segment)
+		if len(runes) < 2 {
+			continue
+		}
+		allASCII := true
+		for _, r := range runes {
+			if r > unicode.MaxASCII {
+				allASCII = false
+				break
+			}
+		}
+		if allASCII {
+			if len(runes) >= 3 && add(segment) {
+				return hits
+			}
+			continue
+		}
+		maxWidth := min(6, len(runes))
+		for width := maxWidth; width >= 2; width-- {
+			for start := 0; start+width <= len(runes); start++ {
+				if add(string(runes[start : start+width])) {
+					return hits
+				}
+			}
 		}
 	}
 	return hits
@@ -1281,17 +1333,6 @@ func pipelineAutoRepairBookWorldStructure(outputDir string) (bool, error) {
 			changed = true
 		}
 	}
-	for i := range world.Factions {
-		aliases := pipelineDerivedFactionAliases(world.Factions[i])
-		if len(aliases) == 0 {
-			continue
-		}
-		before := len(world.Factions[i].Aliases)
-		world.Factions[i].Aliases = pipelineMergeUniqueStrings(world.Factions[i].Aliases, aliases...)
-		if len(world.Factions[i].Aliases) != before {
-			changed = true
-		}
-	}
 	if !changed {
 		return false, nil
 	}
@@ -1330,7 +1371,6 @@ func pipelineDefaultFactionForDanglingRelation(target, source string, rel domain
 	return domain.WorldFaction{
 		ID:        target,
 		Name:      name,
-		Aliases:   pipelineAliasesForFactionID(target),
 		Goal:      goal,
 		Resources: []string{"现场反馈", "执行压力", "一线信息"},
 		Relations: []domain.FactionRelation{{
@@ -1351,69 +1391,7 @@ func pipelineDefaultFactionForDanglingRelation(target, source string, rel domain
 }
 
 func pipelineDisplayNameForFactionID(id string) string {
-	switch strings.TrimSpace(id) {
-	case "store_ops":
-		return "门店运营组"
-	default:
-		return strings.ReplaceAll(strings.TrimSpace(id), "_", " ")
-	}
-}
-
-func pipelineAliasesForFactionID(id string) []string {
-	switch strings.TrimSpace(id) {
-	case "store_ops":
-		return []string{"门店运营组", "社区商圈门店", "门店运营组一线"}
-	default:
-		return nil
-	}
-}
-
-func pipelineDerivedFactionAliases(faction domain.WorldFaction) []string {
-	id := strings.TrimSpace(faction.ID)
-	name := strings.TrimSpace(faction.Name)
-	switch id {
-	case "bridgepoint":
-		return []string{"桥点工作室"}
-	case "operations_center":
-		return []string{"内容运营组", "运营中心"}
-	case "ai_efficiency_team":
-		return []string{"自动排班系统", "AI排班试点", "溪流助手", "AI提效项目组"}
-	case "local_brands":
-		return []string{"本地亲子品牌", "本地品牌联盟"}
-	case "chengguang_life":
-		return []string{"澄光生活供应商系统"}
-	case "family_qiu":
-		return []string{"旧百货同事群", "许家生活圈"}
-	case "store_ops":
-		return []string{"门店运营组", "社区商圈门店", "自动排班系统"}
-	}
-	if strings.Contains(name, "桥点") && !strings.Contains(name, "工作室") {
-		return []string{"桥点工作室"}
-	}
-	return nil
-}
-
-func pipelineMergeUniqueStrings(base []string, values ...string) []string {
-	out := append([]string(nil), base...)
-	seen := map[string]struct{}{}
-	for _, item := range out {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			seen[item] = struct{}{}
-		}
-	}
-	for _, item := range values {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		if _, ok := seen[item]; ok {
-			continue
-		}
-		seen[item] = struct{}{}
-		out = append(out, item)
-	}
-	return out
+	return strings.ReplaceAll(strings.TrimSpace(id), "_", " ")
 }
 
 func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
@@ -1561,8 +1539,8 @@ func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (strin
 	b.WriteString("修复规则：\n")
 	b.WriteString("1. book_world.factions 的每个 relation.target 必须指向已存在 faction 的 id/name/aliases；不得悬空。\n")
 	b.WriteString("2. 每个 faction 必须保留或补齐 clock（segments/progress/consequence/pace）。新增 faction 时必须给 clock。\n")
-	b.WriteString("3. 后续 save_world_tick 可能使用的组织简称、系统名、群聊名或空间简称必须进入对应 faction.aliases；重点覆盖：桥点工作室、内容运营组、门店运营组、自动排班系统、本地亲子品牌、供应商系统、旧百货同事群。\n")
-	b.WriteString("4. 保留当前 book_world 的事实、名称、目标、地点、路线和既有进度钟，只做必要结构修复；如果 relation.target 是缺失势力（如 store_ops），优先新增对应势力，而不是删除关系。\n")
+	b.WriteString("3. 从当前 book_world.factions 的 id/name/aliases 与当前 outline 实际使用的称呼逐项核对：outline 中已出现的组织简称、系统名、群聊名或空间简称必须补进对应 faction.aliases；不得添加当前资产里没有的示例专名。\n")
+	b.WriteString("4. 保留当前 book_world 的事实、名称、目标、地点、路线和既有进度钟，只做必要结构修复；如果 relation.target 指向缺失势力，优先按该 target 的原值新增势力，而不是删除关系。\n")
 	b.WriteString("5. 保存后不得继续生成正文或 zero-init；等待宿主做 architect-check。\n")
 	if cause != nil {
 		b.WriteString("\n[当前 readiness 错误]\n")
@@ -1890,20 +1868,22 @@ func pipelineWorldTickCanonBrief(outputDir string) string {
 
 func pipelineWorldTickForbiddenTopics(outputDir string) []string {
 	st := store.NewStore(outputDir)
-	premise, _ := st.Outline.LoadPremise()
-	source := premise
-	if snap, err := st.UserRules.Load(); err == nil && snap != nil {
-		source += "\n" + snap.Preferences
-	}
-	markers := []string{
-		"古代", "官场", "官署", "旧案", "黑市", "导师", "诡异", "恐怖", "惊悚", "灵异", "超自然",
-		"规则怪谈", "鬼城", "鬼怪", "冥府", "末世", "克苏鲁", "邪神", "收容", "死亡", "失踪", "异化", "附身", "传送",
+	snap, err := st.UserRules.Load()
+	if err != nil || snap == nil {
+		return nil
 	}
 	var out []string
-	for _, marker := range markers {
-		if zeroSourceExplicitlyForbids(source, marker) {
-			out = append(out, marker)
+	seen := map[string]struct{}{}
+	for _, raw := range snap.Structured.ForbiddenPhrases {
+		term := strings.TrimSpace(raw)
+		if term == "" {
+			continue
 		}
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		seen[term] = struct{}{}
+		out = append(out, term)
 	}
 	return out
 }
@@ -2423,6 +2403,23 @@ func pipelineWriteConfigured(
 	cfg bootstrap.Config,
 	bundle assets.Bundle,
 ) error {
+	if flags.RenderOnly {
+		writeStore := store.NewStore(cfg.OutputDir)
+		frozen, _, err := loadAndVerifyPipelineFrozenPlan(cfg.OutputDir)
+		if err != nil {
+			return fmt.Errorf("render-only zero-LLM gate load frozen plan: %w", err)
+		}
+		if frozen.ProjectionBinding == "sealed_v2" {
+			if _, err := requirePipelineSealedRenderPreflight(writeStore, frozen, false); err != nil {
+				return fmt.Errorf("render-only zero-LLM typed preflight: %w", err)
+			}
+			// The candidate/live render lease is already bound at this entrypoint,
+			// so the shared plan guard must select the exact sealed RAG receipt.
+			if err := tools.ValidateCurrentChapterRenderPlanForExecution(writeStore, frozen.Chapter); err != nil {
+				return fmt.Errorf("render-only zero-LLM sealed plan gate: %w", err)
+			}
+		}
+	}
 	timingInvocationID := newPipelineTimingInvocationID(time.Now())
 	if flags.RenderOnly {
 		// A sealed prose pass is reproducible only when every Coordinator,
@@ -2548,14 +2545,23 @@ func pipelineWriteConfigured(
 				flags.StopAfterCommit, run, maxWriteRuns,
 			)
 		}
-		hostTurnErr := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                    prompt,
-			StopAfterChapter:          flags.WriteTo,
-			StopAfterRewriteCommit:    flags.StopAfterCommit,
-			StopOnRenderReplanChapter: stopOnRenderReplan,
-			SkipQueueReplay:           true,
-			DisableLiveRAG:            flags.RenderOnly,
-		})
+		hostTurnErr := runPipelineHostTurnWithDispatchBudget(
+			flags.RenderOnly,
+			cfg.OutputDir,
+			timingInvocationID,
+			flags.StopAfterCommit,
+			run,
+			func() error {
+				return headless.Run(cfg, bundle, headless.Options{
+					Prompt:                    prompt,
+					StopAfterChapter:          flags.WriteTo,
+					StopAfterRewriteCommit:    flags.StopAfterCommit,
+					StopOnRenderReplanChapter: stopOnRenderReplan,
+					SkipQueueReplay:           true,
+					DisableLiveRAG:            flags.RenderOnly,
+				})
+			},
+		)
 		if flags.RenderOnly {
 			status := "ok"
 			if hostTurnErr != nil {
@@ -2621,6 +2627,132 @@ func pipelineWriteConfigured(
 		)
 	}
 	return fmt.Errorf("write 阶段自愈续跑 %d 次后仍未达标（详见 logs/headless.log）", maxWriteRuns)
+}
+
+type pipelineRenderHostTurnDispatchHooks struct {
+	Needed  func(*store.Store, int) (bool, int64, error)
+	Reserve func(string, string, int) (*pipelineRenderDispatchReservation, bool, error)
+	Arm     func(string, *pipelineRenderDispatchReservation) error
+	Finish  func(string, int, int64, *pipelineRenderDispatchReservation, error) error
+	Clear   func(string, string) error
+}
+
+func runPipelineHostTurnWithDispatchBudget(
+	renderOnly bool,
+	outputDir string,
+	invocationID string,
+	chapter int,
+	hostTurn int,
+	hostRun func() error,
+) error {
+	return runPipelineHostTurnWithDispatchBudgetUsing(
+		renderOnly,
+		outputDir,
+		invocationID,
+		chapter,
+		hostTurn,
+		hostRun,
+		pipelineRenderHostTurnDispatchHooks{
+			Needed:  pipelineWholeBodyDispatchNeeded,
+			Reserve: reservePipelineWholeBodyDispatch,
+			Arm: func(outputDir string, reservation *pipelineRenderDispatchReservation) error {
+				if reservation == nil {
+					return fmt.Errorf("render prose permit requires a dispatch reservation")
+				}
+				return store.NewStore(outputDir).Runtime.ArmPipelineRenderProsePermit(
+					reservation.AuthorizationDigest,
+					reservation.Attempt,
+				)
+			},
+			Finish: finishPipelineWholeBodyDispatchFromCandidate,
+			Clear: func(outputDir, authorization string) error {
+				return store.NewStore(outputDir).Runtime.ClearPipelineRenderProsePermit(authorization)
+			},
+		},
+	)
+}
+
+// runPipelineHostTurnWithDispatchBudgetUsing is the last render-only boundary
+// before Host may reach Drafter. Classification happens for every Host turn,
+// but only a whole-body realization reserves a persistent slot. Once Host has
+// been called, its reservation is finished on both success and failure; a
+// finish failure is joined with (and never replaces) the Host error.
+func runPipelineHostTurnWithDispatchBudgetUsing(
+	renderOnly bool,
+	outputDir string,
+	invocationID string,
+	chapter int,
+	hostTurn int,
+	hostRun func() error,
+	hooks pipelineRenderHostTurnDispatchHooks,
+) error {
+	if hostRun == nil {
+		return fmt.Errorf("pipeline Host turn runner is nil")
+	}
+	if !renderOnly {
+		return hostRun()
+	}
+	if hooks.Needed == nil || hooks.Reserve == nil || hooks.Arm == nil || hooks.Finish == nil || hooks.Clear == nil {
+		return fmt.Errorf("render-only Host turn dispatch budget hooks are incomplete")
+	}
+	// A prior process may have crashed after arming but before entering Drafter.
+	// Every Host turn starts from an explicitly empty capability slot; the fresh
+	// reservation below is the only path that can arm it again.
+	if err := hooks.Clear(outputDir, ""); err != nil {
+		return fmt.Errorf("clear stale render prose permit before Host turn %d: %w", hostTurn, err)
+	}
+	wholeBodyNeeded, baselineBodyCheckpointSeq, err := hooks.Needed(
+		store.NewStore(outputDir),
+		chapter,
+	)
+	if err != nil {
+		return fmt.Errorf("classify render-only Host turn %d dispatch: %w", hostTurn, err)
+	}
+	var reservation *pipelineRenderDispatchReservation
+	if wholeBodyNeeded {
+		reservation, _, err = hooks.Reserve(outputDir, invocationID, hostTurn)
+		if err != nil {
+			// This return is deliberately before hostRun: an exhausted persistent
+			// budget must never reach Drafter/provider dispatch.
+			return fmt.Errorf("reserve render-only Host turn %d whole-body dispatch: %w", hostTurn, err)
+		}
+		if reservation == nil {
+			return fmt.Errorf("reserve render-only Host turn %d whole-body dispatch returned nil", hostTurn)
+		}
+		if err := hooks.Arm(outputDir, reservation); err != nil {
+			armErr := fmt.Errorf("arm render-only Host turn %d prose permit: %w", hostTurn, err)
+			finishErr := hooks.Finish(
+				outputDir,
+				chapter,
+				baselineBodyCheckpointSeq,
+				reservation,
+				armErr,
+			)
+			clearErr := hooks.Clear(outputDir, reservation.AuthorizationDigest)
+			return errors.Join(armErr, finishErr, clearErr)
+		}
+	}
+	hostErr := hostRun()
+	var finishErr error
+	authorization := ""
+	if reservation != nil {
+		authorization = reservation.AuthorizationDigest
+		finishErr = hooks.Finish(
+			outputDir,
+			chapter,
+			baselineBodyCheckpointSeq,
+			reservation,
+			hostErr,
+		)
+		if finishErr != nil {
+			finishErr = fmt.Errorf("finish render-only Host turn %d whole-body dispatch: %w", hostTurn, finishErr)
+		}
+	}
+	clearErr := hooks.Clear(outputDir, authorization)
+	if clearErr != nil {
+		clearErr = fmt.Errorf("clear render prose permit after Host turn %d: %w", hostTurn, clearErr)
+	}
+	return errors.Join(hostErr, finishErr, clearErr)
 }
 
 type pipelineMechanicalSealedFinalizeFunc func(

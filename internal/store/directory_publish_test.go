@@ -184,6 +184,106 @@ func TestDirectoryPublishRecoverAllRestoresLiveMissingStartupState(t *testing.T)
 	}
 }
 
+func TestDirectoryPublishReceiptEvidenceAllowsKnownLiveRuntimeDrift(t *testing.T) {
+	fixture := newDirectoryPublishFixture(t, "receipt-evidence-runtime-drift")
+	publisher := NewDirectoryPublishStore(fixture.transactions)
+	receipt, err := publisher.PublishDirectory(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteDirectoryPublishFile(
+		t,
+		filepath.Join(fixture.live, "meta", "runtime", "pipeline_execution.json"),
+		[]byte(`{"owner":"restarted-owner"}`),
+	)
+	if _, err := publisher.LoadDirectoryPublishState(fixture.request.TransactionID); err == nil {
+		t.Fatal("strict directory state unexpectedly ignored live runtime root drift")
+	}
+	evidence, err := publisher.LoadDirectoryPublishReceiptEvidence(fixture.request.TransactionID)
+	if err != nil {
+		t.Fatalf("immutable receipt evidence was coupled to mutable live root: %v", err)
+	}
+	if evidence == nil || evidence.ReceiptDigest != receipt.ReceiptDigest ||
+		evidence.IntentDigest != receipt.IntentDigest {
+		t.Fatalf("immutable receipt evidence drifted: %+v", evidence)
+	}
+}
+
+func TestDirectoryPublishReceiptEvidenceRejectsIntentAndReceiptDigestTamper(t *testing.T) {
+	t.Run("receipt", func(t *testing.T) {
+		fixture := newDirectoryPublishFixture(t, "receipt-evidence-tampered-receipt")
+		publisher := NewDirectoryPublishStore(fixture.transactions)
+		if _, err := publisher.PublishDirectory(fixture.request); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(
+			publisher.transactionDir(fixture.request.TransactionID),
+			directoryPublishReceiptName,
+		)
+		var receipt DirectoryPublishReceipt
+		raw, err := os.ReadFile(path)
+		if err != nil || json.Unmarshal(raw, &receipt) != nil {
+			t.Fatalf("read receipt: %v", err)
+		}
+		receipt.ReceiptDigest = "sha256:" + strings.Repeat("0", 64)
+		raw, err = json.MarshalIndent(receipt, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := publisher.LoadDirectoryPublishReceiptEvidence(fixture.request.TransactionID); err == nil {
+			t.Fatal("tampered receipt digest was accepted")
+		}
+	})
+
+	t.Run("intent", func(t *testing.T) {
+		fixture := newDirectoryPublishFixture(t, "receipt-evidence-tampered-intent")
+		publisher := NewDirectoryPublishStore(fixture.transactions)
+		if _, err := publisher.PublishDirectory(fixture.request); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(
+			publisher.transactionDir(fixture.request.TransactionID),
+			directoryPublishIntentName,
+		)
+		var intent DirectoryPublishIntent
+		raw, err := os.ReadFile(path)
+		if err != nil || json.Unmarshal(raw, &intent) != nil {
+			t.Fatalf("read intent: %v", err)
+		}
+		intent.IntentDigest = "sha256:" + strings.Repeat("0", 64)
+		raw, err = json.MarshalIndent(intent, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := publisher.LoadDirectoryPublishReceiptEvidence(fixture.request.TransactionID); err == nil {
+			t.Fatal("tampered intent digest was accepted")
+		}
+	})
+}
+
+func TestDirectoryPublishReceiptEvidenceRejectsMissingFinalizeAfterIntentRemoval(t *testing.T) {
+	fixture := newDirectoryPublishFixture(t, "receipt-evidence-missing-finalize")
+	publisher := NewDirectoryPublishStore(fixture.transactions)
+	if _, err := publisher.PublishDirectory(fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(
+		publisher.transactionDir(fixture.request.TransactionID),
+		directoryPublishIntentName,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.LoadDirectoryPublishReceiptEvidence(fixture.request.TransactionID); err == nil {
+		t.Fatal("receipt without intent or finalize evidence was accepted")
+	}
+}
+
 func TestDirectoryPublishConcurrentIdempotentPublish(t *testing.T) {
 	fixture := newDirectoryPublishFixture(t, "concurrent")
 	publisher := NewDirectoryPublishStore(fixture.transactions)

@@ -1657,7 +1657,7 @@ func simulationUnknownClaimMatchAt(candidate, unknown string) int {
 		return at
 	}
 	// A later clause may insert another learned predicate between the subject
-	// and location ("林澈回青山县且在夜市").  Preserve the same subject+place
+	// and location ("角色甲回到县城且在夜市"). Preserve the same subject+place
 	// match instead of letting that conjunction hide the contradiction.
 	for _, pivot := range []string{"回", "在", "要", "有", "是"} {
 		if at := strings.Index(unknown, pivot); at >= len("林") {

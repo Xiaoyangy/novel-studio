@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -197,17 +198,45 @@ func loadOrGenerateDeepSeekAIJudge(
 		cached.ModelSelection = selection
 		return finish(deepseekAIJudgeBranchResult{Artifact: cached, CacheHit: true})
 	}
-	artifact, err := runDeepSeekAIJudge(model, selection, chapter, chapterBody, budget)
+	key := reviewExistingCacheKey(policy)
+	release, lockErr := acquireReviewCacheKeyLock(projectDir, deepseekAIJudgeCacheBranch, key, budget)
+	if lockErr != nil {
+		return finish(deepseekAIJudgeBranchResult{CacheLoadErr: loadErr, Err: lockErr})
+	}
+	defer func() { _ = release() }()
+
+	lockedCached, lockedLoadErr := loadDeepSeekAIJudgeCache(projectDir, policy)
+	if lockedLoadErr == nil && lockedCached != nil {
+		lockedCached.ReviewerExplicit = selection.Explicit
+		lockedCached.ModelSelection = selection
+		return finish(deepseekAIJudgeBranchResult{Artifact: lockedCached, CacheHit: true, CacheLoadErr: loadErr})
+	}
+	if lockedLoadErr != nil {
+		loadErr = lockedLoadErr
+	}
+	remainingBudget, budgetErr := remainingReviewCacheBudget(started, budget)
+	if budgetErr != nil {
+		return finish(deepseekAIJudgeBranchResult{CacheLoadErr: loadErr, Err: budgetErr})
+	}
+	artifact, err := runDeepSeekAIJudge(model, selection, chapter, chapterBody, remainingBudget)
 	modelCalls := 1
 	if artifact != nil && artifact.AttemptCount > 0 {
 		modelCalls = artifact.AttemptCount
 	}
-	return finish(deepseekAIJudgeBranchResult{
+	result := deepseekAIJudgeBranchResult{
 		Artifact:     artifact,
 		CacheLoadErr: loadErr,
 		Err:          err,
 		ModelCalls:   modelCalls,
-	})
+	}
+	if err == nil {
+		if saveErr := saveDeepSeekAIJudgeCache(projectDir, artifact); saveErr != nil {
+			result.Err = fmt.Errorf("持久化 DeepSeek 精确正文缓存: %w", saveErr)
+		} else {
+			result.CachePersisted = true
+		}
+	}
+	return finish(result)
 }
 
 func loadDeepSeekAIJudgeCache(projectDir string, expected reviewExistingCachePolicy) (*deepseekAIJudgeArtifact, error) {
@@ -737,7 +766,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		}
 		out := make([]string, 0, len(values))
 		for _, value := range values {
-			if len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, value)) > 0 {
+			if len(toolspkg.ProjectContaminationViolations(st, value)) > 0 {
 				removedProject++
 				continue
 			}
@@ -794,7 +823,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		artifact.Summary = "AI 痕迹结论保留；与用户系统人格硬设定冲突的风格建议已从后续写作输入中移除。"
 	}
 	if strings.TrimSpace(artifact.RawResponse) != "" {
-		if len(toolspkg.SecondAlgorithmProjectContaminationViolations(st, artifact.RawResponse)) > 0 {
+		if len(toolspkg.ProjectContaminationViolations(st, artifact.RawResponse)) > 0 {
 			removedProject++
 			artifact.RawResponse = ""
 		} else if companionSystem && domain.SystemCompanionFeedbackContradicts(artifact.RawResponse) {
@@ -816,7 +845,7 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 			fmt.Sprintf("已移除 DeepSeek 输出中 %d 条与本书禁用旧引擎冲突的建议。", removedProject),
 		)
 		artifact.RAGRules = appendUnique(artifact.RAGRules,
-			"项目门禁：禁止把旧版硬核取证术语当作专业隐喻；用职场后果、岗位合并、项目权限、同事求助和会后约谈替代。",
+			"项目门禁：修改建议只能使用当前项目 user_rules、章节大纲与已冻结契约中的人物、世界和冲突证据，不得引入历史项目术语或情节模板。",
 		)
 		artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
 			"只围绕当前项目的人物欲望、现场物件和已发生后果重渲染，不引入其他作品的职业、术语或冲突模板。",
@@ -893,84 +922,6 @@ func sanitizeDeepSeekAIJudgeForProject(st *store.Store, artifact *deepseekAIJudg
 		artifact.RAGRules = appendUnique(artifact.RAGRules,
 			"配角关系功能规则：朋友和闺蜜的台词优先改变主角关系位置或现场气氛，不重复金额、流程和审核口径，也不靠无关闲聊与随机事故伪装生活感。",
 		)
-		evidenceText := strings.Join(artifact.Evidence, "\n")
-		if strings.Contains(evidenceText, "时间线索串") || strings.Contains(evidenceText, "均匀推进节奏") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"保留开场约定和傍晚营业的必要时间锚点，删除中间连续报时；两趟运输的现实耗时由现货批次、午饭和第二趟到场后的工作状态承载，不按上午、十一点、五点逐站报时。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"时间非报站规则：复杂项目必须符合现实耗时，但正文只保留会影响选择的时限；中间时间用已完成的工作状态自然跨越，禁止整章按钟点报站。",
-			)
-		}
-		if strings.Contains(evidenceText, "进度汇报") || strings.Contains(evidenceText, "其余四处没再照一个样子摆") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘A如何、B如何、C如何’式成果汇总；回到现场后只跟主角眼前一个已经改变的状态，整体完成由一个可见总结果证明，其余差异不再逐项复述。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"群像压缩非清单规则：压缩同类对象不等于把每个人的结果塞进一个排比长句；只留一个连续视点和最终总结果，其他模拟事实继续保存在 plan。",
-			)
-		}
-		if strings.Contains(evidenceText, "三人行动无缝衔接") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"多人开场删去一位角色的推进台词：让一个人主导交锋，另一人只用到场、看时间或上车改变节奏；主角先消化上一句，再进入行动。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"多人开场去接力规则：同一目标下只保留一个主导发言者，其他角色用可见选择改变场面，不按角色顺序各说一句再集体出发。",
-			)
-		}
-		if strings.Contains(evidenceText, "一人一把") || strings.Contains(evidenceText, "接力链") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"开篇同一目标只保留一个主导发言者；其他人的配合用会改变空间或结果的行动承载，不再让参与者按顺序各接一句。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"开篇去接力规则：同一轮现场调整只留一人的关键原话，其余角色以选择和结果改变局面，禁止三人依次接话完成同一目标。",
-			)
-		}
-		if strings.Contains(evidenceText, "这个空子别钻") || strings.Contains(evidenceText, "像导师或编辑在改稿") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉系统对主角的泛化训话；忙中漏看不等于故意钻空子，系统只指出眼前漏掉的人、物或后果，不换成数据面板或客服话。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"误判不等于钻空子：只有主角明知规则仍故意规避时，系统才能用‘钻空子’评价；忙中疏漏要直接指出漏掉的人或东西。",
-			)
-		}
-		if strings.Contains(evidenceText, "这个“好”却比") || strings.Contains(evidenceText, "话不算甜，却让他") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘一句话比所有解释都重’‘话不甜却让他踏实’这类情感标注；只保留会改变关系位置的选择或动作，做完就转场，不再解释它有多重。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"关系动作不再标注重量：‘一句话比所有解释都重’‘话不甜却让他踏实’等句子直接删除，保留收纸、少开玩笑或改口的结果。",
-			)
-		}
-		if strings.Contains(evidenceText, "梁广财观察") && strings.Contains(evidenceText, "亲戚群") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"章末熟人圈反转只保留一名亲眼见证者和群里一条明确改口；其余消息与围观反应不必同时交付，但要让外界态度已改变的结果在本章成立。",
-			)
-		}
-		if strings.Contains(evidenceText, "五个摊主逐一表态") || strings.Contains(evidenceText, "预设的关卡对话") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"多对象授权只完整写一个真正改变主角说法的拒绝者；其他人的加入合成一段结果，只保留一两个差异物件，不逐家解释同意理由。",
-			)
-		}
-		if strings.Contains(evidenceText, "后面的决定快了许多") || strings.Contains(evidenceText, "无人为了同一理由答应") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉概括群像差异的开场判断，不补第二轮对话；直接让剩余摊位的两个差异物件和腾出的空角落在同一段，随后进入下一场。",
-			)
-		}
-		if strings.Contains(evidenceText, "便宜不等于省事") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"删掉‘便宜不等于省事’这类教训句，不换成另一句道理；让主角停止追劝并转身处理已经成立的选择，行动本身就是认知变化。",
-			)
-			artifact.RAGRules = appendUnique(artifact.RAGRules,
-				"不等式金句规则：‘X不等于Y’若只负责总结人物刚学到的道理，整句删除；认知变化由紧接着的改口、放弃或行动承担。",
-			)
-		}
-		retainedRevisionText := strings.Join(artifact.RevisionPlan, "\n")
-		if strings.Contains(retainedRevisionText, "你俩昨天才认识") || strings.Contains(retainedRevisionText, "任务场景落地为个人情感体验") {
-			artifact.RevisionPlan = appendUnique(artifact.RevisionPlan,
-				"关系角色点破核心同盟的默契后，先写主角对这段关系的新注意与对方是否介意的判断，再让对方用一句或一个选择接住；不要立刻回到任务流程。",
-			)
-		}
 	}
 	if removedRelationshipAdvice > 0 {
 		artifact.ProjectGuardWarnings = append(artifact.ProjectGuardWarnings,
@@ -1062,130 +1013,71 @@ func deepSeekProjectProtectsLeadAlliance(st *store.Store) bool {
 }
 
 func deepSeekLeadConflictAdvice(text string) bool {
-	for _, marker := range []string{
-		"产生短暂分歧", "二人产生分歧", "两人产生分歧", "男女主产生分歧",
-		"二人发生争执", "两人发生争执", "男女主争执", "制造误会", "产生误会", "短暂冷战",
-		"关系裂痕", "出现裂痕", "感情冲突", "内部矛盾",
-		"不同意见，导致短暂僵持", "提出不同意见", "短暂僵持", "才和解", "第三人调停",
-		"偷偷用手机查询林澈", "暗中查询林澈", "试探贺骁", "关系猜疑", "人物关系猜疑",
-		"未完全相信", "对林澈产生猜疑", "调查林澈",
-		"怕我坑你", "怕我坑你？", "先以‘怎么，怕我坑你？’", "先以“怎么，怕我坑你？”",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
+	// This guard is intentionally semantic. Older code accumulated exact lines
+	// from one manuscript (including character names), which both leaked story
+	// data into production and missed the same bad instruction after paraphrase.
+	conflict := containsAnyDeepSeekPhrase(text, []string{
+		"分歧", "争执", "误会", "冷战", "裂痕", "感情冲突", "内部矛盾",
+		"僵持", "和解", "调停", "猜疑", "不信任", "未完全相信", "怀疑",
+	})
+	covertInvestigation := containsAnyDeepSeekPhrase(text, []string{"偷偷", "暗中", "背着"}) &&
+		containsAnyDeepSeekPhrase(text, []string{"查询", "调查", "试探", "核查"})
+	return conflict || covertInvestigation
 }
 
+var deepSeekCraftQuotaRe = regexp.MustCompile(`(?:每(?:隔)?\s*\d*\s*(?:字|段|轮|次|处|章)|至少|必须|务必|一律|逐一|每个|每位|所有)[^。！？\n]{0,32}(?:插入|加入|增加|安排|设置|保留|出现|给出|说|动作|反应|细节|对话|场景)`)
+var deepSeekCraftCadenceRe = regexp.MustCompile(`每[^。！？\n]{0,24}就(?:插入|引入|加入|增加|安排|设置|出现)`)
+
 func deepSeekCraftAdviceRecreatesConveyor(text string) bool {
-	for _, marker := range []string{
-		"非功能性细节", "无情节任务", "每个次要角色", "每位次要角色", "每个配角", "每位配角",
-		"微表情", "掌心微汗", "胸口松快", "手指一顿", "指尖一顿", "半秒停顿", "随手抹一下",
-		"身体的直接反应", "身体微反应", "身体反应", "身体动作打断", "加一句内心腹诽", "补一个细微动作",
-		"插入环境声音", "环境声打断", "感官杂讯", "感官噪声", "手机屏幕反光", "踢到石子", "脚边踢",
-		"找零钱", "翻遍口袋", "扳手滑脱", "工具不顺手", "围观居民插嘴", "围观者插嘴", "真实交互瑕疵",
-		"计划外的‘毛边’", "计划外的\"毛边\"", "指尖发凉", "心跳加速", "干咳一声", "筷子在碗里拨",
-		"心跳漏拍", "生理惊吓", "突发干扰", "意外碰翻", "加入一次抢白", "同时出声", "两人同时开口",
-		"隔着过道插嘴", "来不及回应", "迫使沈知遥代为接话", "放慢半步", "肢体细节暗示", "半截腹诽",
-		"诉求被暂时搁置", "至少安排一处",
-		"反复核对的细节", "凑近看清", "输入后又删掉半句", "更碎、带手势", "被打断的口语",
-		"其他摊主插嘴", "抬手挡一下", "再补后半句", "哪怕半秒", "应至少设置一次", "孩子哭闹",
-		"插入一两个摊主的插话", "摊主间的低声嘀咕", "真实现场的七嘴八舌", "转为问答式", "通过对话切分或现场打断",
-		"摊主问‘拆要我们自己拆吗", "摊主问“拆要我们自己拆吗", "有人抢先写名字", "有人拽林澈袖子",
-		"视角在不同角色上停留不均", "制造自然错落",
-		"无关者打岔", "离题插话", "对该提示的抵触、延误或误用", "毛利估算", "两分钟内递不出餐",
-		"不服气或面子挂不住", "旁人（如", "私下对母亲周曼的耳语", "可补一句", "可加一句",
-		"抛出一个她无法当场回答的新问题", "后续建立管理制度",
-		"与主线无直接关联", "与主线无关的日常", "提及天气、身体状态", "相互推卸小事",
-		"每三个行动段", "插入纯观察", "环境渲染或回忆片段", "插入一段对", "过往回忆（例如",
-		"增加一个小意外", "风将牌吹歪", "提前占位引发口角", "早饭还没吃", "简短拌嘴",
-		"必须设置至少一个", "必须设置至少一处", "至少设置一个意外", "至少设置一处意外",
-		"完全相反的要求", "迫使林澈陷入两难", "金钱分歧上真实的摩擦", "次要角色的有限视角",
-		"嘀咕一句", "每段对话须检视", "带有无关任务的私人目的", "植入一层潜台词",
-		"回忆起过往类似情境", "突发小意外", "短暂混乱", "旧事梗", "合伙搞砸", "合夥搞砸",
-		"拌嘴", "每完成一个小目标就引入", "微小的代价", "关系的新裂痕",
-		"个人感受或记忆", "曾在类似", "回忆曾", "带刺的话", "自觉失言",
-		"每段至少插入", "至少一个非语言反应", "无意识摆弄", "动作停顿",
-		"闪回", "厌烦感", "极短暂的停顿动作", "指节轻叩", "视线扫过票据袋",
-		"快速估算剩余材料", "至少有一个摊主或路人", "信息对白必须伴随干扰",
-		"必须插入一个打断因素", "听者提问偏题",
-		"贺骁的意外出声", "手机屏幕转向自己", "未完全相信的眼神",
-		"无对话的沉默、动作打断或话题偏移", "通过具体行为、回忆或对话",
-		"与任务无关的意外事件", "孩子突然哭闹", "找不见", "无目的闲聊", "每3000字",
-		"每500字", "过往某次失败", "误判或错觉", "听错摊主报价", "看错沈知遥表情",
-		"微小但可察觉", "不可统一的个性化难题", "暴露一项自身弱点", "与主线目的相悖",
-		"空箱在晚高峰时被人意外踢翻", "水果滚出", "刻薄观察式内心点评",
-		"他踢的是纸箱", "疼的是面子",
-		"增加一次沟通误解", "沟通误解", "误解“往里收”", "差点碰倒", "介入解围",
-		"反思配合方式", "同意后又", "临时反悔", "额外让步", "承诺免费清洁",
-		"掺入抢白和迟疑", "抢白和迟疑", "聋了？收", "指令的跳跃感", "短暂困惑",
-		"至少安排一次因误解", "每千字", "感性评判", "体力值浮动", "关系进展提示",
-		"走开两步又转身", "犹豫片刻后走开", "自言自语再发问",
-		"这个人不问废话", "贺骁的笑总卡在点上",
-		"结尾拒绝直接收束", "某个摊主的不满", "系统的延迟提示",
-		"增写冷饮老板与林澈的具体对话", "各个摊主的动机通过话语", "至少两个独立对话场景",
-		"平行对比让读者", "摸到口袋里的介绍折页犹豫片刻", "指着油脚印问",
-		"半截子话", "擦手的动作中犹豫半秒",
-		"增加一轮失败", "再增加一轮失败", "需要反复调试", "反复调试的障碍",
-		"马上处理的新麻烦", "需马上处理的新麻烦", "另一处部件连带松动", "工具滑脱",
-		"极短的沉默", "物品接触", "票据袋角捏皱", "自然延迟半秒", "动作外化",
-		"有对话冲突的个体", "取2-3个有摩擦", "取 2-3 个有摩擦",
-		"与某位摊主的临时质疑嫁接", "边吃边回应", "增加主视角的选择压力",
-		"观察加一笔", "利用这个微小动作", "多推了半寸", "自己追加一句",
-		"半句掐断的吐槽", "话不说完的节奏", "必须在下一次出场时延续或变更状态",
-		"必须保证至少一家给出", "让该条件参与后续场面",
-		"无用尝试", "卡住过道更严重", "由贺骁纠正", "半开玩笑的话拖延一拍",
-		"像一排突然睁开的眼睛", "之类通感", "至少在两个时间过渡处",
-		"感官触觉或情绪变化作为切换信号", "务必保留至少一个'未解决'",
-		"务必保留至少一个“未解决”", "提出-响应-完毕", "真实生活的粘滞感",
-		"向林澈低声点出瓶颈", "做出两个手势", "挥手划通道", "指向贺骁",
-		"快速估算客流密度", "闪过前期拉人不易的回忆", "握住他的手腕一秒",
-		"来回翻册子的动作", "插入赵启明", "再缓缓开口", "先看一眼沈知遥",
-		"市井评书", "四十七笔顺当", "偏在四十九笔", "别把账本活成账簿",
-		"点出其幸运/巧合成分", "旁人的嘀咕", "杜绝让角色以对白宣布‘下一步’",
-		"杜绝让角色以对白宣布“下一步”", "将计划内化为个人欲望",
-		"反应慢半拍", "桌脚被卡住又调整", "打破集体响应的完美同步",
-		"将系统提示的出现时机推后", "忙碌中忽略提示", "事后才在脑中回响",
-		"一条岔开话题", "质疑的语音", "群聊的真实杂音", "被旁边顾客擦身", "让半步",
-		"加入一层气味或温度感知", "打断连续动作的快速切换", "低声快速确认",
-		"插一句他与沈知遥", "无直接任务功用", "与主线无关的小动作",
-		"最小化抗拒", "延迟执行或微调动作", "避免用【】直接输出",
-		"执行上的小反复", "搬桌子前先被桌脚绊了一下", "被某位摊主先打断一次",
-		"不同时间点呈现", "延迟到下一章", "下一章开头", "无意中看到",
-		"数钱时手指停了一下", "下意识看了一眼沈知遥站的位置",
-		"改为纯数据反馈", "当前状态：", "只能以状态报告", "数据更新、错误日志",
-		"拥有与主角不同的隐藏动机", "摊主暗中较劲", "拍照另有目的", "功能冗余或延迟",
-		"拆散到不同场景或时间点",
-		"余额改变用触感或心跳外化", "暗处摊棚的私人记忆", "顺势理了理取餐口的筷子或纸袋",
-		"那点兴奋像被冰桶里的水浇了一下", "肩膀终于能从耳朵旁边放下来",
-		"将她的号召转化为两人共同看向的镜头", "展望宜用疑问或不确定的观察替代",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
+	if deepSeekCraftQuotaRe.MatchString(text) || deepSeekCraftCadenceRe.MatchString(text) {
+		return true
 	}
-	return false
+	additiveDirective := containsAnyDeepSeekPhrase(text, []string{
+		"插入", "加入", "增加", "增写", "补", "安排", "设置", "制造", "改为", "转为", "替换", "替代", "让", "把", "给", "强化", "通过",
+		"在开头", "在结尾", "先用", "再让", "系统弹出",
+	})
+	if !additiveDirective {
+		return false
+	}
+	// Additive advice is only admissible when it names the causal effect it is
+	// meant to repair. This is the same contract already stated in the judge
+	// prompt and is stable across manuscripts. Deletion/compression advice is
+	// not an additive humanizer and therefore is outside this guard.
+	causalEffect := containsAnyDeepSeekPhrase(text, []string{
+		"改变判断", "改变选择", "改变关系位置", "改变场景后果", "造成现场后果", "形成可验证后果", "兑现既有因果",
+	})
+	if !causalEffect {
+		return true
+	}
+	// Reject advice whose proposed change is justified only as synthetic
+	// imperfection. The categories are manuscript-independent; no character,
+	// location, prop or previously observed sentence is embedded here.
+	artificialNoise := containsAnyDeepSeekPhrase(text, []string{
+		"非功能", "无情节", "无任务", "与主线无关", "无目的", "随机", "毛边", "枝节",
+		"杂音", "噪声", "打岔", "偏题", "七嘴八舌", "真实感", "生活感", "自然错落",
+	})
+	manufacturedFriction := containsAnyDeepSeekPhrase(text, []string{
+		"误解", "误判", "错觉", "失败", "意外", "混乱", "反悔", "裂痕", "争执", "僵持",
+		"两难", "滑脱", "卡住", "打断", "迟疑", "停顿", "拖延", "慢半拍", "未解决",
+		"疑问", "不确定", "犹豫",
+	})
+	cosmeticHumanizer := containsAnyDeepSeekPhrase(text, []string{
+		"微表情", "身体反应", "生理", "感官", "回忆", "闪回", "腹诽", "手势", "视线",
+		"心跳", "指尖", "掌心", "物件接触", "通感", "动作外化", "环境声音", "环境声",
+	})
+	return artificialNoise || manufacturedFriction || cosmeticHumanizer
 }
 
 func deepSeekForbiddenAIReason(text string) bool {
-	for _, marker := range []string{
-		"典型的'问题-解决-新问题'", "典型的“问题-解决-新问题”", "问题-解决-新问题闭环",
-		"遭遇-解决-新问题", "典型系统文框架", "NPC 登场", "NPC登场",
-		"缺乏现实场景中常见的短暂迟滞或沟通偏差", "角色均按最优路径行动",
-		"缺乏短暂迟疑或操作失误", "指令落地零延迟", "缺少个体摩擦",
-		"与常见系统文结构高度一致", "行为后立即结算奖励", "行为-反馈-奖励",
-		"正确行为→即时反馈", "常见系统文的任务结算", "系统文常见的任务反馈",
-		"系统提示使用【】符号", "系统提示的格式", "减少游戏界面感", "避免用【】直接输出",
-		"缺少真实协作中的停顿、误解或冗余动作", "未出现任何配合上的迟滞或越界",
-		"缺乏现实场景的随机性", "缺乏枝节",
-		"缺少真实现场的七嘴八舌", "缺乏现场交互，接近信息交付块",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
+	// A reason is invalid when it treats genre/UI conventions or the absence of
+	// deliberately injected friction as AI evidence. Match concepts instead of
+	// memorizing sentences returned by a particular provider run.
+	genreStereotype := containsAnyDeepSeekPhrase(text, []string{"典型", "常见", "高度一致"}) &&
+		containsAnyDeepSeekPhrase(text, []string{"框架", "系统文", "NPC", "任务反馈", "界面", "格式", "问题-解决", "遭遇-解决"})
+	fakeFriction := containsAnyDeepSeekPhrase(text, []string{"缺乏", "缺少", "未出现", "零延迟", "最优路径"}) &&
+		containsAnyDeepSeekPhrase(text, []string{"迟", "误解", "偏差", "失误", "摩擦", "随机", "枝节", "七嘴八舌", "冗余", "交互"})
+	rewardStereotype := containsAnyDeepSeekPhrase(text, []string{"行为-反馈-奖励", "正确行为→即时反馈", "立即结算奖励"})
+	return genreStereotype || fakeFriction || rewardStereotype
 }
 
 func containsAnyDeepSeekPhrase(text string, phrases []string) bool {

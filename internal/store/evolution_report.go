@@ -241,7 +241,7 @@ func buildEvolutionPatterns(
 				Severity:       "watch",
 				Chapters:       metricChapters(metricsWindow),
 				Evidence:       []string{fmt.Sprintf("近窗配角对话占比平均 %.3f，低于 0.30", dialogueAvg)},
-				Diagnosis:      "配角对话偏低，容易让江烬解释过多、章节像规则说明。",
+				Diagnosis:      "配角对话偏低，容易让主角解释过多、章节像规则说明。",
 				RecommendedFix: "下一章要求至少一个配角用行动/短句贡献信息、阻力或误判纠正。",
 			})
 		}

@@ -292,7 +292,7 @@ func isProjectContaminatedRAGChunk(st *store.Store, chunk domain.RAGChunk) bool 
 		return false
 	}
 	text := strings.Join([]string{chunk.Text, chunk.Summary, chunk.Context, strings.Join(chunk.Keywords, " ")}, "\n")
-	return len(SecondAlgorithmProjectContaminationViolations(st, text)) > 0
+	return len(ProjectContaminationViolations(st, text)) > 0
 }
 
 func chunkSourcePaths(chunks []domain.RAGChunk) map[string]struct{} {

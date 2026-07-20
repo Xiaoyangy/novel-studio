@@ -155,7 +155,11 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		if err != nil {
 			return nil, fmt.Errorf("render 注入 sealed 短篇动态字数合同失败: %w", err)
 		}
-		return t.attachSealedRerenderFeedback(raw, lock.TargetChapter, lock.PlanDigest)
+		raw, err = t.attachSealedRerenderFeedback(raw, lock.TargetChapter, lock.PlanDigest)
+		if err != nil {
+			return nil, err
+		}
+		return applyProseRenderCompatibilityOverlay(raw)
 	}
 
 	requestedChapter := a.Chapter

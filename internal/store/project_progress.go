@@ -362,7 +362,7 @@ func protagonistPlannedResult(outline domain.OutlineEntry) string {
 	switch {
 	case containsAny(text, []string{"买下", "取得", "包下", "成立", "获得", "成交", "经营权", "牌照"}):
 		return "把本章胜利沉淀为资产、权限或组织能力"
-	case containsAny(text, []string{"救醒", "救", "江禾", "学生", "伤员"}):
+	case containsAny(text, []string{"救醒", "救援", "营救", "学生", "伤员", "患者", "被困者"}):
 		return "推进救援线，同时制造新的账单或担保压力"
 	case containsAny(text, []string{"背叛", "清退", "反杀", "清算"}):
 		return "处理背叛并形成可复用的规则样本"
@@ -388,11 +388,11 @@ func promiseSignalsForEntry(e domain.ChapterProgressEntry) []string {
 			signals = append(signals, label)
 		}
 	}
-	add("恐怖凭证", []string{"欠费单", "价签", "病历", "同意书", "保单", "收据", "门牌", "账本", "小票", "挂号", "探视牌", "血印", "合同", "牌照", "欠条", "名片", "钥匙"})
+	add("权利凭证", []string{"欠费单", "价签", "病历", "同意书", "保单", "收据", "门牌", "账本", "小票", "挂号", "探视牌", "合同", "牌照", "欠条", "名片", "钥匙", "票据", "回执"})
 	add("错误代价", []string{"失败", "吞", "割", "削", "伤", "抵押", "扣", "损", "死亡", "反噬", "越权", "伪造", "旧债", "亏空"})
 	add("交易条款", []string{"条款", "确认", "交易", "购买", "支付", "债权", "产权", "租", "担保", "清算", "合同", "权限", "权"})
 	add("资产沉淀", []string{"取得", "获得", "成为", "建立", "入账", "确认权", "经营", "资产", "客户", "观察位"})
-	add("账单升级", []string{"审计", "账单", "黑伞", "阴司银行", "催债", "旧债", "白骨财神", "抽查"})
+	add("追责升级", []string{"审计", "账单", "催债", "旧债", "抽查", "追责", "问责", "核查", "复核"})
 	if len(e.RelationshipChanges) > 0 {
 		signals = append(signals, "关系推进")
 	}
@@ -894,8 +894,7 @@ func likelySameResourceName(a, b string) bool {
 }
 
 func foreshadowPriority(f domain.ForeshadowEntry, age int) string {
-	text := f.ID + f.Description
-	if age >= 12 || containsAny(text, []string{"黑卡", "江禾", "白骨", "阴司", "医院", "江父", "审计"}) {
+	if age >= 12 {
 		return "high"
 	}
 	if age >= 6 || f.Status == "advanced" {
@@ -933,9 +932,9 @@ func foreshadowPayoffType(f domain.ForeshadowEntry) string {
 		return "资产"
 	case containsAny(text, []string{"反杀", "背叛", "伪造", "清算"}):
 		return "反杀"
-	case containsAny(text, []string{"江禾", "江父", "温梨", "周行舟"}):
+	case containsAny(text, []string{"亲人", "父亲", "母亲", "兄长", "姐姐", "妹妹", "弟弟", "朋友", "同伴", "恋人", "关系", "情感", "承诺", "信任"}):
 		return "情感/关系"
-	case containsAny(text, []string{"白骨", "黑伞", "阴司", "商会"}):
+	case containsAny(text, []string{"反派", "敌手", "对手", "追杀", "威胁", "组织", "势力"}):
 		return "反派升级"
 	default:
 		return "解谜"

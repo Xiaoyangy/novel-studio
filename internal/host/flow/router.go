@@ -441,7 +441,7 @@ func pipelineRenderFirstDraftInstruction(chapter int) *Instruction {
 	return &Instruction{
 		Agent: "drafter",
 		Task: fmt.Sprintf(
-			"冻结 render 第 %d 章首稿：只调用一次 novel_context(chapter=%d, profile=draft)，随后只调用一次 draft_chapter(chapter=%d, mode=write) 写入完整正文。draft_chapter 返回 written=true 后立即结束本次 Drafter 子任务；禁止 read_chapter、check_consistency、edit_chapter、commit_chapter、draft_chapter_part、merge_chapter_parts、再次生成或派 draft_finalizer。即使工具返回字数、AIGC 或其他门禁提示，也禁止在本会话修补。控制权必须先交还外层 pipeline，由其依次核验当前精确草稿哈希、因果绑定与 hard-fact/title/word 静态门，并完成该精确哈希的 DeepSeek provider judge；只有这些门禁完成后，后续 Host turn 才可恢复验收或提交",
+			"冻结 render 第 %d 章首稿：Host 会在首个真实 provider 调用前等价完成本章唯一一次 novel_context(chapter=%d, profile=draft)，校验 exact render_packet v11 与 anti_ai_render_contract，并通过 server-owned envelope 预注入；Drafter 工具集中没有 novel_context，禁止请求或尝试再次调用。首个响应直接只调用一次 draft_chapter(chapter=%d, mode=write) 写入完整正文。draft_chapter 返回 written=true 后立即结束本次 Drafter 子任务；禁止 read_chapter、check_consistency、edit_chapter、commit_chapter、draft_chapter_part、merge_chapter_parts、再次生成或派 draft_finalizer。即使工具返回字数、AIGC 或其他门禁提示，也禁止在本会话修补。控制权必须先交还外层 pipeline，由其依次核验当前精确草稿哈希、因果绑定与 hard-fact/title/word 静态门，并完成该精确哈希的 DeepSeek provider judge；只有这些门禁完成后，后续 Host turn 才可恢复验收或提交",
 			chapter, chapter, chapter,
 		),
 		Reason:  "pipeline render 首次正文落盘必须在 exact-hash/static/provider 门禁前立即暂停",

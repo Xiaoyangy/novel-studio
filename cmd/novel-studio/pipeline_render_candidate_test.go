@@ -212,6 +212,24 @@ func TestPreparePipelineRenderCandidateDoesNotRecoverDurablyRejectedDraft(t *tes
 	if got, _ := store.NewStore(fresh.OutputDir).Drafts.LoadDraft(1); strings.TrimSpace(got) != "" {
 		t.Fatalf("durably rejected candidate was incorrectly recovered: %q", got)
 	}
+
+	// Recovery must also fail closed when the sibling ledger exists but cannot
+	// be authenticated. Treating a decode/read error as "no rejection" would
+	// recreate the same resurrection bug through a corrupted control plane.
+	if err := retirePipelineRenderCandidate(fresh.ContainerDir, "stale"); err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath, err := pipelineRenderConvergenceLedgerPath(live, candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledgerPath, []byte("{\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := preparePipelineRenderCandidate(live, frozen); err == nil || recovered != nil ||
+		!strings.Contains(err.Error(), "load exact render convergence rejection") {
+		t.Fatalf("malformed durable rejection ledger did not fail closed: candidate=%+v err=%v", recovered, err)
+	}
 }
 
 func TestPreparePipelineRenderCandidateReplaysDraftOntoCurrentLiveRoot(t *testing.T) {
@@ -378,6 +396,16 @@ func TestBindCurrentRenderExecutionToCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reservation, reused, err := reservePipelineWholeBodyDispatch(candidate.OutputDir, "stale-before-recovery", 1)
+	if err != nil || reused || reservation == nil {
+		t.Fatalf("reserve stale recovery permit: reservation=%+v reused=%v err=%v", reservation, reused, err)
+	}
+	if err := store.NewStore(candidate.OutputDir).Runtime.ArmPipelineRenderProsePermit(
+		reservation.AuthorizationDigest,
+		reservation.Attempt,
+	); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.NewStore(candidate.OutputDir).Runtime.ReleasePipelineExecution(owner); err != nil {
 		t.Fatal(err)
 	}
@@ -389,6 +417,12 @@ func TestBindCurrentRenderExecutionToCandidate(t *testing.T) {
 		bound.Mode != domain.PipelineExecutionRender || bound.TargetChapter != frozen.Chapter ||
 		bound.PlanDigest != frozen.PlanDigest {
 		t.Fatalf("candidate render lock not rebound exactly: lock=%+v err=%v", bound, err)
+	}
+	if err := store.NewStore(candidate.OutputDir).Runtime.ConsumePipelineRenderProsePermit(frozen.Chapter); err == nil {
+		t.Fatal("stale pre-recovery permit survived mandatory candidate bind")
+	}
+	if _, err := os.Stat(filepath.Join(candidate.OutputDir, "meta", "runtime", "render_prose_permit.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale permit remains publishable after recovery bind: %v", err)
 	}
 }
 
@@ -485,6 +519,27 @@ func TestRecoverAllDirectoryPublishesRestoresLiveArchivedRenderCandidate(t *test
 	if state == nil || state.Phase != store.DirectoryPublishLiveArchived {
 		t.Fatalf("simulated crash state=%+v, want live_archived", state)
 	}
+	watchdog, err := newPipelineWatchdog(pipelineWatchdogConfig{
+		OutputDir: live, InvocationID: "render-live-archived-recovery", Stage: "render",
+		HeartbeatInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watchdog.Start(); err != nil {
+		t.Fatal(err)
+	}
+	releaseWatchdog, err := bindCurrentPipelineWatchdog(watchdog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		releaseWatchdog()
+		_ = watchdog.Stop()
+	})
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("stable watchdog control root recreated live before recovery: %v", err)
+	}
 	if candidate.TransactionRoot != pipelineRenderTransactionRoot(live) {
 		t.Fatalf("startup recovery root=%s want=%s", candidate.TransactionRoot, pipelineRenderTransactionRoot(live))
 	}
@@ -555,13 +610,13 @@ func pipelineRenderCandidateTestFrozen() *pipelineFrozenPlan {
 	return &pipelineFrozenPlan{
 		Version:                "pipeline-planning.v1",
 		Chapter:                1,
-		PlanDigest:             "sha256:plan-v1",
+		PlanDigest:             "sha256:" + strings.Repeat("1", 64),
 		PlanCheckpointSeq:      1,
 		PlanningGenerationID:   "pg2_render_candidate_test",
 		ProjectionBinding:      "sealed_v2",
-		ProjectedBundleDigest:  "sha256:bundle-v1",
-		PromotionReceiptDigest: "sha256:promotion-v1",
-		PipelineRunInputDigest: "sha256:render-input-v1",
+		ProjectedBundleDigest:  "sha256:" + strings.Repeat("2", 64),
+		PromotionReceiptDigest: "sha256:" + strings.Repeat("3", 64),
+		PipelineRunInputDigest: "sha256:" + strings.Repeat("4", 64),
 	}
 }
 

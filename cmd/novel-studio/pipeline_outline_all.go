@@ -463,11 +463,16 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		return fmt.Errorf("outline-all bind expected live directory root: %w", err)
 	}
 	publisher := store.NewDirectoryPublishStore(pipelineOutlineAllPublishRoot(cfg.OutputDir))
-	publishReceipt, err := publisher.PublishDirectory(store.PublishDirectoryRequest{
-		TransactionID:    attemptID,
-		LiveDir:          cfg.OutputDir,
-		CandidateDir:     candidateDir,
-		ExpectedLiveRoot: expectedLiveRoot,
+	var publishReceipt *store.DirectoryPublishReceipt
+	err = withPipelineWatchdogPaused(func() error {
+		var publishErr error
+		publishReceipt, publishErr = publisher.PublishDirectory(store.PublishDirectoryRequest{
+			TransactionID:    attemptID,
+			LiveDir:          cfg.OutputDir,
+			CandidateDir:     candidateDir,
+			ExpectedLiveRoot: expectedLiveRoot,
+		})
+		return publishErr
 	})
 	if err != nil {
 		return fmt.Errorf("outline-all publish candidate: %w", err)

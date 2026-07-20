@@ -268,30 +268,28 @@ func TestDraftChapterWrite(t *testing.T) {
 	}
 }
 
-func TestDraftChapterRejectsSecondAlgorithmDeprecatedEngine(t *testing.T) {
+func TestDraftChapterRejectsMultipleConfiguredProjectContaminationTerms(t *testing.T) {
 	dir := t.TempDir()
 	store := store.NewStore(dir)
 	if err := store.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := store.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
-		t.Fatalf("SavePremise: %v", err)
-	}
 	if err := store.Progress.Init("test", 10); err != nil {
 		t.Fatalf("InitProgress: %v", err)
 	}
+	saveTestProjectContaminationTerms(t, store, "外部项目专名", "过期流程术语")
 
 	tool := NewDraftChapterTool(store)
 	args, _ := json.Marshal(map[string]any{
 		"chapter": 1,
-		"content": "许闻溪站在后台，梁渡说日志窗口还在，原始包稍后走合规邮件。",
+		"content": "顾晴站在后台，发现外部项目专名仍沿用过期流程术语。",
 		"mode":    "write",
 	})
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
-		t.Fatal("expected deprecated engine contamination error")
+		t.Fatal("expected configured project contamination error")
 	}
-	for _, want := range []string{"旧版硬核取证引擎词", "日志窗口", "原始包", "合规邮件"} {
+	for _, want := range []string{"user_rules.forbidden_phrases", "外部项目专名", "过期流程术语"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected error to contain %q, got %v", want, err)
 		}

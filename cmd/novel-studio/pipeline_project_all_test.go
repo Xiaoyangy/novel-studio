@@ -1509,6 +1509,13 @@ func TestProjectAllV2ThreeChapterSealBeforeSequentialRealization(t *testing.T) {
 				"chapter": chapter,
 				"policy":  "只渲染可见行动，不暴露幕后状态",
 			},
+			"working_memory": map[string]any{
+				"render_packet": map[string]any{
+					"version":                 11,
+					"chapter":                 chapter,
+					"anti_ai_render_contract": projectAllCmdTestProspectiveAntiAIContract(),
+				},
+			},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -2065,6 +2072,13 @@ func projectAllCmdTestInstallCoarseManifests(
 func projectAllCmdTestInstallThreeChapterCLIProjection(
 	t *testing.T,
 ) (cliOptions, *store.Store, pipelineProjectAllIdentity) {
+	return projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(t, nil)
+}
+
+func projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(
+	t *testing.T,
+	mutate func(chapter int, artifacts *agents.ProjectedChapterArtifacts),
+) (cliOptions, *store.Store, pipelineProjectAllIdentity) {
 	t.Helper()
 	runRoot := t.TempDir()
 	configPath := filepath.Join(runRoot, "config.json")
@@ -2211,6 +2225,9 @@ func projectAllCmdTestInstallThreeChapterCLIProjection(
 	}
 	for chapter := 1; chapter <= 3; chapter++ {
 		artifacts, outline := projectAllCmdTestArtifacts(t, identity.Generation.GenerationID, chapter)
+		if mutate != nil {
+			mutate(chapter, artifacts)
+		}
 		priorBundles, err := projected.LoadProjectedChapterBundles(identity.Generation.GenerationID)
 		if err != nil {
 			t.Fatalf("load prior CLI fixture bundles for chapter %d: %v", chapter, err)
@@ -2526,6 +2543,13 @@ func projectAllCmdTestArtifacts(
 		"_context_profile":         "draft",
 		"chapter_plan":             plan,
 		"chapter_world_simulation": simulation,
+		"working_memory": map[string]any{
+			"render_packet": map[string]any{
+				"version":                 11,
+				"chapter":                 chapter,
+				"anti_ai_render_contract": projectAllCmdTestProspectiveAntiAIContract(),
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2540,6 +2564,18 @@ func projectAllCmdTestArtifacts(
 			CoreEvent: "主角完成小额验证并获得证据",
 			Hook:      plan.Hook,
 		}
+}
+
+func projectAllCmdTestProspectiveAntiAIContract() map[string]any {
+	return map[string]any{
+		"risk_signals":           []string{"流程台账和对白传送带"},
+		"counter_moves":          []string{"先让刺激改变判断，再形成选择与后果"},
+		"sentence_rhythm_policy": "句段随观察、犹疑、冲突与余波自然换挡。",
+		"object_response_budget": "物件只在改变判断或选择时回应。",
+		"dialogue_function_plan": "对白只承担冲突或关系位移。",
+		"review_checks":          []string{"没有逐项播报流程。"},
+		"usage_policy":           "首稿前执行；章级优先。",
+	}
 }
 
 func projectAllCmdTestBindPlanningContext(

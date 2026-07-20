@@ -787,10 +787,7 @@ func zeroInitRAGSources(outputDir string) []string {
 }
 
 func zeroInitManifest(project zeroInitProject) map[string]any {
-	crowdRoleRule := "捧场/凑数角色默认不命名、不入关键人物台账、不承担关键解谜、救场或反杀；一旦携带新信息、做关键选择、建立债务或后续要回归，必须升级为关键角色并补齐动态字段。"
-	if zeroIsSecondAlgorithmProject(project) {
-		crowdRoleRule = "捧场/凑数角色默认不命名、不入关键人物台账、不承担关键判断、救场或替女主发声；一旦携带新信息、做关键选择、建立亏欠/承诺或后续要回归，必须升级为关键角色并补齐动态字段。"
-	}
+	crowdRoleRule := "捧场/凑数角色默认不命名、不入关键人物台账，不承担关键信息、判断、选择、救场或替主角完成决策；一旦携带新信息、做关键选择、建立债务/承诺或后续要回归，必须升级为关键角色并补齐动态字段。"
 	return map[string]any{
 		"version":                        1,
 		"scope":                          "zero_chapter_prewrite",
@@ -822,9 +819,6 @@ func zeroInitManifest(project zeroInitProject) map[string]any {
 
 func zeroInitSimulationRestartPolicy(project zeroInitProject) domain.SimulationRestartPolicy {
 	legacyUse := "旧数据只用于抽取题材基调、世界候选、人物原型、爽点/雷点和写法经验；旧章节中发生过的事件、资源变化、人物经历、关键状态和关系进展默认不进入新 canon。"
-	if zeroIsSecondAlgorithmProject(project) {
-		legacyUse = "旧数据只用于抽取题材基调、人物原型、成长爽点/雷点和写法经验；旧章节中发生过的事件、资源变化、人物经历、关系进展、离职/调岗等状态默认不进入新 canon。"
-	}
 	return domain.SimulationRestartPolicy{
 		Version:              1,
 		Project:              project.Name,
@@ -928,8 +922,6 @@ func zeroInitRestartChapterPlan(st *store.Store, project *zeroInitProject) (int,
 }
 
 func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
-	second := zeroIsSecondAlgorithmProject(project)
-	horror := zeroIsHorrorProject(project)
 	cityName := zeroFirstNonEmpty(zeroKnownCityName(project), "开局城市")
 	openingName := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	openingDescription := "第一章用于证明人物目标会遇到真实阻力、并通过行动形成可见结果的现场；章末必须记录地点状态变化。"
@@ -943,34 +935,6 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 		"地点、物件和参与者反应必须承担信息、压力或状态变化，不能只做氛围背景。",
 		"所有角色在正文引入后都要绑定当前位置、行动目标和可用交通；跨地点见面必须服从路线与耗时。",
 		"新地点、新势力、路线变化、角色缺席/转移、资源与关系变化都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
-	}
-	if horror {
-		openingDescription = "第一章用于证明世界规则会真实施压的现场；章末必须记录地点状态变化。"
-		nearbyDescription = "开局现场周边可被正文触碰的现实生活节点，如便利店、物业、小超市、医院、车站或同楼层住户；只在剧情需要时命名细化。"
-		routeRisk = "除非角色已获得快速移动、附身或规则授权能力，否则移动时间应接近现实世界，不允许配角随叫随到。"
-		lifeRouteRisk = "路线状态会随章节推进改变；关闭、污染、被占用或新增规则都要回填 book_world/timeline。"
-		openingGoal = "在第一章通过可见规则、物件或空间边界迫使主角做选择。"
-		openingResources = []string{"现场压力", "规则反馈", "信息差"}
-		mapNotes = []string{
-			"第一章只展示会改变选择的规则和环境证据，不提前解释全书谜底。",
-			"地点/物件必须承担信息、压力或状态变化，不能只做氛围背景。",
-			"所有角色在正文引入后都要绑定当前位置、行动目标和可用交通；跨地点见面必须服从路线与耗时。",
-			"新地点、新势力、路线封锁、角色死亡/失踪/转移都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
-		}
-	}
-	if second {
-		openingDescription = "第一章用于证明AI提效和岗位变化会真实施压的现场；章末必须记录地点、材料、关系或状态变化。"
-		nearbyDescription = "开局现场周边可被正文触碰的现实生活节点，如培训课、社区商户、医院、地铁站、家中电话或下班路；只在剧情需要时命名细化。"
-		routeRisk = "除非角色有明确时间安排和交通路径，否则移动时间应接近现实世界，不允许配角随叫随到。"
-		lifeRouteRisk = "路线状态会随章节推进改变；会议延迟、培训名额、客户反馈、通勤或照护安排变化都要回填 book_world/timeline。"
-		openingGoal = "在第一章通过会议、材料、消息、客户反馈或空间边界迫使许闻溪做选择。"
-		openingResources = []string{"现场压力", "组织反馈", "信息差"}
-		mapNotes = []string{
-			"第一章只展示会改变选择的职场/生活证据，不提前解释完整行业背景。",
-			"地点、材料、消息和人群反应必须承担信息、压力或状态变化，不能只做氛围背景。",
-			"所有角色在正文引入后都要绑定当前位置、行动目标和可用时间；跨地点见面必须服从路线与耗时。",
-			"新地点、新势力、会议结果、岗位状态、关系降温/靠近、客户反馈或家庭照护变化都应在 commit 或审核后同步回填 book_world、timeline、character_stage 或 resource_ledger。",
-		}
 	}
 	places := []domain.WorldPlace{
 		{
@@ -1074,8 +1038,6 @@ func zeroKnownCityName(project zeroInitProject) string {
 
 func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
-	second := zeroIsSecondAlgorithmProject(project)
-	horror := zeroIsHorrorProject(project)
 	laws := make([]domain.WorldIronLaw, 0, len(project.WorldRules)+5)
 	for i, rule := range project.WorldRules {
 		name := zeroFirstNonEmpty(rule.Category, fmt.Sprintf("world-rule-%02d", i+1))
@@ -1091,16 +1053,6 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 	knowledgeBoundary := "没有通信、证据、目击者、记录、台账传回或明确权限时，主角不能知道配角经历。"
 	travelBoundary := "角色必须有明确交通路径、工具、时间安排或线上沟通渠道，不得随叫随到或无成本赶场。"
 	resourceRule := "资金、物料、场地、车辆、人手、权限、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。"
-	if horror {
-		knowledgeBoundary = "没有通信、证据、目击者、账单、台账传回或明确能力时，主角不能知道配角经历。"
-		travelBoundary = "除非角色获得快速移动、附身、传送凭证或规则授权，不得瞬移、随叫随到或无成本赶场。"
-		resourceRule = "资产、欠条、能力、交通凭证、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。"
-	}
-	if second {
-		knowledgeBoundary = "没有通信、证据、目击者、会议记录、工单/消息传回或明确权限时，主角不能知道配角经历。"
-		travelBoundary = "除非角色有明确交通路径、时间安排或线上沟通渠道，不得瞬移、随叫随到或无成本赶场。"
-		resourceRule = "岗位权限、发言机会、客户反馈、培训名额、排班时间、通信能力和关键证据必须先入账或标记 pending，正文才能当事实使用。"
-	}
 	laws = append(laws,
 		domain.WorldIronLaw{
 			ID:        "foundation-knowledge-boundary",
@@ -1147,12 +1099,6 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 	if project.BookWorld != nil {
 		for _, place := range project.BookWorld.Places {
 			updatePolicy := "地点状态、营业/工作条件、人员缺席或转移、资产与交通变化必须回填 book_world/timeline/character_stage。"
-			if horror {
-				updatePolicy = "地点状态、规则封锁、死亡/失踪、资产确权或交通变化必须回填 book_world/timeline/character_stage。"
-			}
-			if second {
-				updatePolicy = "地点状态、会议结果、岗位入口、客户反馈、关系姿态、家庭照护或交通变化必须回填 book_world/timeline/character_stage。"
-			}
 			baselines = append(baselines, domain.LocationBaseline{
 				ID:            place.ID,
 				Name:          place.Name,
@@ -1182,12 +1128,6 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 		},
 	}
 	knowledgePolicy := "主角视角不是世界全知视角；RAG 可召回世界后台和配角档案，但正文只能通过通信、证据、目击、记录、现场结果或明确权限把信息传给主角。"
-	if horror {
-		knowledgePolicy = "主角视角不是世界全知视角；RAG 可召回世界后台和配角档案，但正文只能通过通信、证据、目击、账单或能力把信息传给主角。"
-	}
-	if second {
-		knowledgePolicy = "主角视角不是世界全知视角；RAG 可召回组织后台和配角档案，但正文只能通过通信、证据、目击、会议记录、工单、客户反馈或明确权限把信息传给主角。"
-	}
 	return domain.WorldFoundation{
 		Version: 1,
 		Project: project.Name,
@@ -1210,12 +1150,6 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 func zeroRuleChangeConditions(project zeroInitProject, laws []domain.WorldIronLaw) []domain.RuleChangeCondition {
 	var out []domain.RuleChangeCondition
 	allowedBy := []string{"明确资源或权限", "交易/交付凭证", "合同或责任确认", "章节事件后果", "审阅通过后的状态回填"}
-	if zeroIsHorrorProject(project) {
-		allowedBy = []string{"明确能力", "交易凭证", "账单/合同确认", "章节事件后果", "审阅通过后的状态回填"}
-	}
-	if zeroIsSecondAlgorithmProject(project) {
-		allowedBy = []string{"明确权限", "项目凭证", "会议记录或合同确认", "章节事件后果", "审阅通过后的状态回填"}
-	}
 	for _, law := range laws {
 		out = append(out, domain.RuleChangeCondition{
 			RuleID:        law.ID,
@@ -1230,7 +1164,6 @@ func zeroRuleChangeConditions(project zeroInitProject, laws []domain.WorldIronLa
 func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossier {
 	var out []domain.CharacterDossier
 	protagonist := zeroProtagonist(project.Characters)
-	second := zeroIsSecondAlgorithmProject(project)
 	for _, c := range project.Characters {
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
@@ -1259,31 +1192,17 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 		}
 		relationships := []domain.CharacterRelationNote{}
 		if counterpart != "" {
-			debtOrTrust := "未新增正文债务或信任"
-			if second {
-				debtOrTrust = "未新增正文亏欠、承诺或信任"
-			}
 			relationships = append(relationships, domain.CharacterRelationNote{
 				Other:              counterpart,
 				HowMet:             "零章根据角色卡/大纲推导，正式正文若建立新关系必须补相识场景。",
 				CurrentTie:         "试探/未结盟基线",
-				DebtOrTrust:        debtOrTrust,
+				DebtOrTrust:        "未新增正文债务、承诺或信任",
 				KnownToProtagonist: isProtagonist,
 			})
 		}
-		channels := []string{"同场对话", "电话/消息(若现实条件允许)", "付款/交付记录、现场结果或目击者传回"}
-		failureModes := []string{"无信号", "消息被截断", "角色受本职工作限制", "交通耗时", "信息未传回"}
+		channels := []string{"同场对话", "电话/消息(若世界规则允许)", "记录/凭证、现场结果或目击者传回"}
+		failureModes := []string{"无信号", "规则或环境干扰", "角色受自身职责限制", "交通耗时", "信息未传回"}
 		status := "生活/工作状态待正文确认"
-		if zeroIsHorrorProject(project) {
-			channels = []string{"同场对话", "电话/消息(若世界阶段允许)", "物件/账单/目击者传回"}
-			failureModes = []string{"无信号", "规则干扰", "角色被困", "交通耗时", "信息未传回"}
-			status = "存活/状态待正文确认"
-		}
-		if second {
-			channels = []string{"同场对话", "电话/消息(若世界阶段允许)", "会议记录/工单/客户反馈/目击者传回"}
-			failureModes = []string{"无信号", "话术过滤", "角色自保", "交通耗时", "信息未传回"}
-			status = "工作/生活状态待正文确认"
-		}
 		preStoryRelationship := "零章只登记当下个人基线；尚未发生的新相识必须在正文中建立后再入账。"
 		if !firstChapterActive {
 			preStoryRelationship = "与主角未相识/未建立可用关系；首次联系或见面前不得预设互信、亏欠、承诺或协作。"

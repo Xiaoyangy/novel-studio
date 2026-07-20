@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/llm"
 )
@@ -164,6 +165,13 @@ func (m *CodexModel) Info() llm.ModelInfo {
 
 func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	reasoning := m.resolveReasoning(opts)
+	directRender, err := authenticatedDirectRenderProse(messages, tools)
+	if err != nil {
+		return nil, err
+	}
+	if directRender != nil {
+		return m.generateDirectRenderProse(ctx, messages, directRender, reasoning)
+	}
 	// 无工具 = 纯文本补全（规则归一化、摘要、审阅等）：不套 action/tool_call/final schema，
 	// 直接把模型输出当消息文本返回——否则调用方拿到的是被 schema 包裹的内容，解析会失败
 	// （"规则归一化失败：返回非合法 JSON" 即此）。
@@ -201,6 +209,317 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 	}
 	msg.Usage = m.estimateUsage(prompt, raw)
 	return &agentcore.LLMResponse{Message: msg}, nil
+}
+
+type directRenderProseAuthorization struct {
+	Chapter      int
+	WordContract proseWordContract
+}
+
+// authenticatedDirectRenderProse recognizes only the server-owned frozen
+// render envelope appended by renderContextPrimedModel. Once a message claims
+// that protocol, ambiguity must fail closed: falling back to the ordinary
+// placeholder+prose+repair path would let one durable permit fan out into
+// multiple whole-body provider calls.
+func authenticatedDirectRenderProse(
+	messages []agentcore.Message,
+	tools []agentcore.ToolSpec,
+) (*directRenderProseAuthorization, error) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	serverOwnedIndex := -1
+	for i := range messages {
+		if messages[i].Metadata == nil || messages[i].Metadata["server_owned"] != true {
+			continue
+		}
+		if serverOwnedIndex >= 0 {
+			return nil, fmt.Errorf("authenticated render prose contains multiple server-owned messages")
+		}
+		serverOwnedIndex = i
+	}
+	if serverOwnedIndex < 0 {
+		return nil, nil
+	}
+	if serverOwnedIndex != len(messages)-1 {
+		return nil, fmt.Errorf("server-owned render prose envelope must be the final message")
+	}
+	last := messages[len(messages)-1]
+	// User-authored JSON that resembles the envelope must not activate a
+	// privileged path. Only the in-memory server_owned metadata on the final
+	// wrapper-appended user message establishes this trust boundary.
+	if last.GetRole() != agentcore.RoleUser {
+		return nil, fmt.Errorf("server-owned render prose envelope must be the final user message")
+	}
+	payload, identity, recognized, err := aigc.ParseProseRenderPrimingEnvelope(last.TextContent())
+	if err != nil || !recognized {
+		if err == nil {
+			err = fmt.Errorf("server-owned final message does not contain the render priming protocol")
+		}
+		return nil, fmt.Errorf("authenticated render prose envelope is invalid: %w", err)
+	}
+	if err := validateDirectRenderEnvelopeMetadata(last, identity); err != nil {
+		return nil, err
+	}
+	wordContract, err := validateDirectRenderPayloadIdentity(payload, identity.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	seenTools := make(map[string]struct{}, len(tools))
+	draftCount := 0
+	var draftTool *agentcore.ToolSpec
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			return nil, fmt.Errorf("authenticated render prose tool set contains an unnamed tool")
+		}
+		if _, exists := seenTools[name]; exists {
+			return nil, fmt.Errorf("authenticated render prose tool set contains duplicate %q", name)
+		}
+		seenTools[name] = struct{}{}
+		if name == "novel_context" {
+			return nil, fmt.Errorf("authenticated render prose tool set must not expose novel_context after server priming")
+		}
+		if name == "draft_chapter" {
+			draftCount++
+			copy := tool
+			draftTool = &copy
+			continue
+		}
+		return nil, fmt.Errorf("authenticated render prose tool set is ambiguous: unexpected %q", name)
+	}
+	if draftCount != 1 {
+		return nil, fmt.Errorf("authenticated render prose requires exactly one draft_chapter tool, got %d", draftCount)
+	}
+	if err := validateDirectRenderDraftToolSchema(draftTool); err != nil {
+		return nil, err
+	}
+	return &directRenderProseAuthorization{Chapter: identity.Chapter, WordContract: wordContract}, nil
+}
+
+func validateDirectRenderEnvelopeMetadata(message agentcore.Message, identity aigc.ProseRenderPrimingIdentity) error {
+	if message.GetRole() != agentcore.RoleUser || message.Metadata == nil || message.Metadata["server_owned"] != true ||
+		message.Metadata["protocol_version"] != identity.ProtocolVersion ||
+		message.Metadata["chapter"] != identity.Chapter ||
+		message.Metadata["plan_digest"] != identity.PlanDigest ||
+		message.Metadata["payload_sha256"] != identity.PayloadSHA256 {
+		return fmt.Errorf("render prose priming envelope is not bound to exact server-owned metadata")
+	}
+	return nil
+}
+
+func validateDirectRenderPayloadIdentity(payload json.RawMessage, chapter int) (proseWordContract, error) {
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return proseWordContract{}, fmt.Errorf("decode authenticated render prose payload: %w", err)
+	}
+	if root["_context_profile"] != "draft" {
+		return proseWordContract{}, fmt.Errorf("authenticated render prose payload is not draft profile")
+	}
+	packet, _, err := aigc.FindUniqueProseRenderPacket(root)
+	if err != nil {
+		return proseWordContract{}, fmt.Errorf("authenticated render prose payload: %w", err)
+	}
+	if err := aigc.ValidateProseRenderPacketV11(packet, chapter); err != nil {
+		return proseWordContract{}, fmt.Errorf("authenticated render prose packet: %w", err)
+	}
+	contract, err := typedDirectRenderWordContract(root, packet)
+	if err != nil {
+		return proseWordContract{}, err
+	}
+	return contract, nil
+}
+
+func typedDirectRenderWordContract(root, packet map[string]any) (proseWordContract, error) {
+	if raw, present := packet["word_budget"]; present {
+		budget, ok := raw.(map[string]any)
+		if !ok {
+			return proseWordContract{}, fmt.Errorf("authenticated render_packet.word_budget must be an object")
+		}
+		minWords, minOK := exactDirectRenderInt(budget["hard_min"])
+		maxWords, maxOK := exactDirectRenderInt(budget["hard_max"])
+		if !minOK || !maxOK || minWords <= 0 || maxWords < minWords {
+			return proseWordContract{}, fmt.Errorf("authenticated render_packet.word_budget hard range is invalid")
+		}
+		contract := proseWordContract{Min: minWords, Max: maxWords}
+		targetMin, targetMinOK := exactDirectRenderInt(budget["submission_target_min"])
+		targetMax, targetMaxOK := exactDirectRenderInt(budget["submission_target_max"])
+		if targetMinOK != targetMaxOK {
+			return proseWordContract{}, fmt.Errorf("authenticated render_packet.word_budget target range is incomplete")
+		}
+		if targetMinOK {
+			if targetMin < minWords || targetMax < targetMin || targetMax > maxWords {
+				return proseWordContract{}, fmt.Errorf("authenticated render_packet.word_budget target range is invalid")
+			}
+			contract.TargetMin = targetMin
+			contract.TargetMax = targetMax
+		}
+		return contract, nil
+	}
+
+	var found *proseWordContract
+	containers := []map[string]any{root}
+	for _, sectionName := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
+		if section, ok := root[sectionName].(map[string]any); ok {
+			containers = append(containers, section)
+		}
+	}
+	for _, container := range containers {
+		userRules, present := container["user_rules"]
+		if !present {
+			continue
+		}
+		rules, ok := userRules.(map[string]any)
+		if !ok {
+			return proseWordContract{}, fmt.Errorf("authenticated frozen user_rules must be an object")
+		}
+		structured, ok := rules["structured"].(map[string]any)
+		if !ok {
+			return proseWordContract{}, fmt.Errorf("authenticated frozen user_rules.structured is missing")
+		}
+		chapterWords, ok := structured["chapter_words"].(map[string]any)
+		if !ok {
+			return proseWordContract{}, fmt.Errorf("authenticated frozen user_rules.structured.chapter_words is missing")
+		}
+		minWords, minOK := exactDirectRenderInt(chapterWords["min"])
+		maxWords, maxOK := exactDirectRenderInt(chapterWords["max"])
+		if !minOK || !maxOK || minWords <= 0 || maxWords < minWords {
+			return proseWordContract{}, fmt.Errorf("authenticated frozen user_rules chapter_words is invalid")
+		}
+		candidate := proseWordContract{Min: minWords, Max: maxWords}
+		if found != nil && *found != candidate {
+			return proseWordContract{}, fmt.Errorf("authenticated frozen user_rules chapter_words is ambiguous")
+		}
+		copy := candidate
+		found = &copy
+	}
+	if found == nil {
+		return proseWordContract{}, fmt.Errorf("authenticated direct render is missing a typed word contract")
+	}
+	return *found, nil
+}
+
+func exactDirectRenderInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int64:
+		converted := int(number)
+		return converted, int64(converted) == number
+	case float64:
+		converted := int(number)
+		return converted, float64(converted) == number
+	case json.Number:
+		parsed, err := number.Int64()
+		converted := int(parsed)
+		return converted, err == nil && int64(converted) == parsed
+	default:
+		return 0, false
+	}
+}
+
+func validateDirectRenderDraftToolSchema(tool *agentcore.ToolSpec) error {
+	if tool == nil || strings.TrimSpace(tool.Name) != "draft_chapter" {
+		return fmt.Errorf("authenticated render prose draft_chapter schema is missing")
+	}
+	parameters, ok := tool.Parameters.(map[string]any)
+	if !ok || parameters["type"] != "object" {
+		return fmt.Errorf("authenticated render prose draft_chapter schema must be an object")
+	}
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("authenticated render prose draft_chapter properties are missing")
+	}
+	for name, wantType := range map[string]string{"chapter": "integer", "content": "string", "mode": "string"} {
+		property, ok := properties[name].(map[string]any)
+		if !ok || property["type"] != wantType {
+			return fmt.Errorf("authenticated render prose draft_chapter.%s schema is invalid", name)
+		}
+	}
+	required := make(map[string]bool)
+	switch values := parameters["required"].(type) {
+	case []string:
+		for _, value := range values {
+			required[value] = true
+		}
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				required[text] = true
+			}
+		}
+	}
+	for _, name := range []string{"chapter", "content", "mode"} {
+		if !required[name] {
+			return fmt.Errorf("authenticated render prose draft_chapter.%s must be required", name)
+		}
+	}
+	mode := properties["mode"].(map[string]any)
+	writeAllowed := false
+	switch values := mode["enum"].(type) {
+	case []string:
+		for _, value := range values {
+			writeAllowed = writeAllowed || value == "write"
+		}
+	case []any:
+		for _, value := range values {
+			writeAllowed = writeAllowed || value == "write"
+		}
+	}
+	if !writeAllowed {
+		return fmt.Errorf("authenticated render prose draft_chapter.mode does not allow write")
+	}
+	return nil
+}
+
+// generateDirectRenderProse is the sealed/server-primed fast path: exactly one
+// isolated prose provider call, no placeholder call, cache shortcut, pairwise
+// judge, or word-count repair under the same durable authorization.
+func (m *CodexModel) generateDirectRenderProse(
+	ctx context.Context,
+	messages []agentcore.Message,
+	authorization *directRenderProseAuthorization,
+	reasoning string,
+) (*agentcore.LLMResponse, error) {
+	if authorization == nil || authorization.Chapter <= 0 {
+		return nil, fmt.Errorf("authenticated direct render authorization is invalid")
+	}
+	prompt := buildProsePromptWithContract(messages, &authorization.WordContract)
+	prose, err := m.runCodexProse(ctx, prompt, reasoning)
+	if err != nil {
+		return nil, fmt.Errorf("authenticated direct render prose failed: %w", err)
+	}
+	prose = strings.TrimSpace(stripCodeFence(prose))
+	if prose == "" {
+		return nil, fmt.Errorf("authenticated direct render prose returned an empty body")
+	}
+	wordContract := authorization.WordContract
+	if wordContract.configured() && !wordContract.accepts(utf8.RuneCountInString(prose)) {
+		return nil, fmt.Errorf(
+			"authenticated direct render prose returned %d runes outside %d-%d; repair is forbidden under the same dispatch authorization",
+			utf8.RuneCountInString(prose), wordContract.Min, wordContract.Max,
+		)
+	}
+	args, err := json.Marshal(map[string]any{
+		"chapter": authorization.Chapter,
+		"mode":    "write",
+		"content": prose,
+	})
+	if err != nil {
+		return nil, err
+	}
+	call := agentcore.ToolCall{
+		ID:   nextCodexToolCallID("draft_chapter"),
+		Name: "draft_chapter",
+		Args: args,
+	}
+	message := agentcore.Message{
+		Role:       agentcore.RoleAssistant,
+		Content:    []agentcore.ContentBlock{agentcore.ToolCallBlock(call)},
+		StopReason: agentcore.StopReasonToolUse,
+		Usage:      m.estimateUsage(prompt, prose),
+	}
+	return &agentcore.LLMResponse{Message: message}, nil
 }
 
 // proseToolContentField 列出"参数里含长篇正文"的工具及其正文字段名。
@@ -342,6 +661,14 @@ func saveCachedProse(prompt, model, reasoning, prose string) error {
 // 完整推演、旧稿、章节合同和代理执行手册都留在外层；它们若再进入
 // prose 上下文，模型很容易把正文写成逐项交付的计划清单。
 func buildProsePrompt(messages []agentcore.Message) string {
+	return buildProsePromptWithContract(messages, nil)
+}
+
+// buildProsePromptWithContract keeps the ordinary regex-compatible behavior
+// when override is nil. The authenticated direct path supplies the typed
+// contract extracted from the unique sealed packet, so unrelated message text
+// cannot replace the provider-facing hard range.
+func buildProsePromptWithContract(messages []agentcore.Message, override *proseWordContract) string {
 	var dialog strings.Builder
 	pinned := make(map[string]any)
 	hasSurfaceAllocationContract := false
@@ -351,18 +678,21 @@ func buildProsePrompt(messages []agentcore.Message) string {
 			continue
 		}
 		text := ""
+		var selected map[string]any
+		selectedOK := false
 		if role == agentcore.RoleTool {
-			if selected, ok := selectProseToolContext(msg.TextContent()); ok {
-				if proseContextHasSurfaceAllocationContract(selected) {
-					hasSurfaceAllocationContract = true
-				}
-				applyProseRenderCompatibilityContracts(selected)
-				priority, supplemental := splitProseContextPriority(selected)
-				mergeProsePriorityContext(pinned, priority)
-				text = marshalProseSupplementalWithin(supplemental, codexProsePerMessageRuneBudget)
-			} else {
-				text = compactProseMessageText(msg, msg.TextContent())
+			selected, selectedOK = selectProseToolContext(msg.TextContent())
+		} else if primed, _, recognized, parseErr := aigc.ParseProseRenderPrimingEnvelope(msg.TextContent()); recognized && parseErr == nil {
+			selected, selectedOK = selectProseToolContext(string(primed))
+		}
+		if selectedOK {
+			if proseContextHasSurfaceAllocationContract(selected) {
+				hasSurfaceAllocationContract = true
 			}
+			aigc.ApplyProseRenderCompatibilityContracts(selected)
+			priority, supplemental := splitProseContextPriority(selected)
+			mergeProsePriorityContext(pinned, priority)
+			text = marshalProseSupplementalWithin(supplemental, codexProsePerMessageRuneBudget)
 		} else {
 			text = compactProseMessageText(msg, msg.TextContent())
 		}
@@ -402,7 +732,13 @@ render_packet.visible_characters 是唯一可在现场行动、发言或发消�
 ## 冻结事实的页面分配优先级
 sealed_rerender_feedback.surface_allocation_contract 只覆盖正文的表面篇幅分配，不覆盖或改写 render_packet、frozen plan 的事实、时刻、因果、知识边界和章末结果。合同指定为离屏台账的批量事实仍由冻结 plan 锁定；正文允许合并或离屏，不得为证明完整性把台账逐行逐值转写。凡正文显写的事实仍必须与冻结合同一致。`
 	}
-	if contract := inferProseWordContract(messages); contract.configured() {
+	contract := proseWordContract{}
+	if override != nil {
+		contract = *override
+	} else {
+		contract = inferProseWordContract(messages)
+	}
+	if contract.configured() {
 		suffix += contract.prompt()
 	}
 	prefix := buildProsePinnedPrefix(pinned, suffix)
@@ -428,75 +764,6 @@ func proseContextHasSurfaceAllocationContract(selected map[string]any) bool {
 		}
 	}
 	return false
-}
-
-// applyProseRenderCompatibilityContracts upgrades only the private context
-// assembled for the independent prose call. Older sealed v11 bundles remain
-// byte-for-byte immutable, while the renderer still receives the prospective
-// anti-AI contract before its first token instead of learning it from a failed
-// detector pass. Existing chapter-specific contracts always win.
-func applyProseRenderCompatibilityContracts(selected map[string]any) {
-	containers := []map[string]any{selected}
-	for _, sectionName := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
-		if section, ok := selected[sectionName].(map[string]any); ok {
-			containers = append(containers, section)
-		}
-	}
-	for _, container := range containers {
-		packet, ok := container["render_packet"].(map[string]any)
-		if !ok || prosePacketVersion(packet) != 11 {
-			continue
-		}
-		contract, hasContract := packet["anti_ai_render_contract"].(map[string]any)
-		if !hasContract || len(contract) == 0 {
-			contract = defaultProseRenderCompatibilityContract()
-			packet["anti_ai_render_contract"] = contract
-		}
-		if safeguards, ok := packet["event_timing_safeguards"].(map[string]any); !ok || len(safeguards) == 0 {
-			packet["event_timing_safeguards"] = map[string]any{
-				"object_response_budget": contract["object_response_budget"],
-				"dialogue_function_plan": contract["dialogue_function_plan"],
-			}
-		}
-	}
-}
-
-func defaultProseRenderCompatibilityContract() map[string]any {
-	return map[string]any{
-		"risk_signals": []string{
-			"证据、规则或流程按计划顺序逐项播报成台账",
-			"人物轮流补齐信息形成对白传送带",
-			"相邻段落只更换对象却重复说明或验证功能",
-			"用密集微动作、动作标签、零散心理句或界面提示代替人物因果",
-		},
-		"counter_moves": []string{
-			"刺激先改变POV的注意、判断或误判，再落成选择与可见后果",
-			"同一人物因果现场内合并硬事实，不改变选择的信息压缩或离屏",
-			"删掉无需开口的人和只解释规则的话轮，让回应改变选择、权力或关系",
-			"主视角过薄时，让独有误判、克制或旧经验真实改变后续做法并留下余波",
-		},
-		"sentence_rhythm_policy": "句段随观察、犹疑、冲突、决断和余波自然换挡，不按固定间隔机械轮换。",
-		"object_response_budget": "物件、屏幕和消息只在改变判断、选择、关系或安全后果时回应，不用等距弹窗反复解释。",
-		"dialogue_function_plan": "对白只承担眼前冲突或关系位移，不让人物轮流补齐背景和规则。",
-		"review_checks": []string{
-			"相邻段落没有只换名词却重复同一功能",
-			"核心信息经人物判断、选择和后果落地，而非旁白或对白复述",
-			"没有用微动作、动作标签或界面提示代替主观因果",
-			"不改变选择与后果的流程已压缩或离屏",
-		},
-		"usage_policy": "首稿前执行；章级优先。",
-	}
-}
-
-func prosePacketVersion(packet map[string]any) int {
-	switch version := packet["version"].(type) {
-	case float64:
-		return int(version)
-	case int:
-		return version
-	default:
-		return 0
-	}
 }
 
 var proseContextKeys = []string{

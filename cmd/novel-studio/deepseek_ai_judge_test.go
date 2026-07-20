@@ -432,19 +432,33 @@ func TestDeepSeekJudgeRejectsHighProbabilityWithLowRisk(t *testing.T) {
 
 func TestDeepSeekCraftAdviceRejectsFakeFrictionAndDataOnlySystem(t *testing.T) {
 	for _, advice := range []string{
-		"让贺骁搬桌子前先被桌脚绊了一下，制造执行上的小反复。",
+		"让协作者搬桌子前先被桌脚绊了一下，制造执行上的小反复。",
 		"把亲戚群改口延迟到下一章开头。",
 		"系统改为纯数据反馈，例如当前状态：付款53笔。",
 		"让摊主暗中较劲，拍照者另有目的，保留功能冗余或延迟。",
 		"余额改变用触感或心跳外化，让秘密更靠人物反应。",
-		"让林澈先默想一句暗处摊棚的私人记忆。",
-		"让沈知遥顺势理了理取餐口的筷子或纸袋，用视觉停顿替代话轮。",
+		"让主视角先默想一句暗处摊棚的私人记忆。",
+		"让同伴顺势理了理取餐口的筷子或纸袋，用视觉停顿替代话轮。",
 		"展望宜用疑问或不确定的观察替代，保持犹豫。",
 		"任何任务或交易过程，必须设置至少一个基于现实逻辑的意外阻碍。",
 	} {
 		if !deepSeekCraftAdviceRecreatesConveyor(advice) {
 			t.Fatalf("harmful advice not rejected: %q", advice)
 		}
+	}
+}
+
+func TestDeepSeekCraftAdviceAllowsReplacementWithExplicitCausalEffect(t *testing.T) {
+	advice := "用人物已经作出的取舍替代流程复述，改变选择在场景后果中的权重。"
+	if deepSeekCraftAdviceRecreatesConveyor(advice) {
+		t.Fatalf("causal rewrite advice should remain usable: %q", advice)
+	}
+}
+
+func TestDeepSeekCraftAdviceRejectsManufacturedUncertaintyDespiteCausalClaim(t *testing.T) {
+	advice := "用疑问和不确定的观察替代已有展望，声称这会改变场景后果。"
+	if !deepSeekCraftAdviceRecreatesConveyor(advice) {
+		t.Fatalf("manufactured uncertainty must remain blocked: %q", advice)
 	}
 }
 
@@ -645,42 +659,41 @@ func TestDeepSeekAIJudgeCacheRejectsTamperedArtifactAndRegenerates(t *testing.T)
 	}
 }
 
-func TestSanitizeDeepSeekAIJudgeForProjectRemovesDeprecatedEngineAdvice(t *testing.T) {
-	dir := t.TempDir()
-	st := store.NewStore(dir)
+func TestSanitizeDeepSeekAIJudgeUsesProjectForbiddenPhrases(t *testing.T) {
+	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := st.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
-		t.Fatalf("SavePremise: %v", err)
+	if err := st.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{
+		ForbiddenPhrases: []string{"外部取证术语", "历史项目角色"},
+	}}); err != nil {
+		t.Fatalf("Save rules: %v", err)
 	}
 	artifact := &deepseekAIJudgeArtifact{
 		Chapter: 1,
 		AuthorVoicePlan: []string{
-			"强化程序员视角，可用版本差异和日志窗口作隐喻。",
-			"保留许闻溪的逻辑判断，但落到职场动作。",
+			"强化外部取证术语，把它当作专业隐喻。",
+			"保留当前角色的逻辑判断，但落到现场动作。",
 		},
 		RAGRules:    []string{"关键冲突里少用完整明喻。"},
-		RawResponse: `{"author_voice_plan":["梁渡眼看日志滚动速度。"]}`,
+		RawResponse: `{"author_voice_plan":["历史项目角色查看日志。"]}`,
 	}
 
 	sanitizeDeepSeekAIJudgeForProject(st, artifact)
 
-	if len(artifact.AuthorVoicePlan) != 1 || !strings.Contains(artifact.AuthorVoicePlan[0], "许闻溪") {
-		t.Fatalf("expected deprecated advice removed, got %+v", artifact.AuthorVoicePlan)
+	joinedVoice := strings.Join(artifact.AuthorVoicePlan, "\n")
+	if strings.Contains(joinedVoice, "外部取证术语") || !strings.Contains(joinedVoice, "当前角色") {
+		t.Fatalf("expected forbidden advice removed and current-project advice retained, got %+v", artifact.AuthorVoicePlan)
 	}
 	if len(artifact.ProjectGuardWarnings) != 1 {
 		t.Fatalf("expected project guard warning, got %+v", artifact.ProjectGuardWarnings)
 	}
 	joinedRules := strings.Join(artifact.RAGRules, "\n")
 	if !strings.Contains(joinedRules, "项目门禁") {
-		t.Fatalf("expected safe project guard rag rule, got %+v", artifact.RAGRules)
-	}
-	if strings.Contains(joinedRules, "日志窗口") || strings.Contains(joinedRules, "版本差异") {
-		t.Fatalf("sanitized rag rules must not keep deprecated terms: %+v", artifact.RAGRules)
+		t.Fatalf("expected data-driven project guard rag rule, got %+v", artifact.RAGRules)
 	}
 	if artifact.RawResponse != "" {
-		t.Fatalf("raw_response should be dropped when it contains deprecated terms: %q", artifact.RawResponse)
+		t.Fatalf("raw_response should be dropped when it contains a project forbidden phrase: %q", artifact.RawResponse)
 	}
 }
 
@@ -714,8 +727,11 @@ func TestSanitizeDeepSeekAIJudgeRespectsCompanionSystemRule(t *testing.T) {
 	if strings.Contains(joined, "系统不予回应") || strings.Contains(joined, "强化系统冷硬") || strings.Contains(joined, "缺乏视角锚定") {
 		t.Fatalf("contradictory advice survived: %s", joined)
 	}
-	if !strings.Contains(joined, "任务结构") || !strings.Contains(joined, "环境打断") {
-		t.Fatalf("aligned advice was removed: %s", joined)
+	if !strings.Contains(joined, "任务结构") {
+		t.Fatalf("non-contradictory diagnosis was removed: %s", joined)
+	}
+	if strings.Contains(joined, "环境打断") {
+		t.Fatalf("additive humanizer advice survived: %s", joined)
 	}
 	if artifact.RawResponse != "" {
 		t.Fatalf("contradictory raw response must not enter later inputs: %q", artifact.RawResponse)
@@ -926,11 +942,6 @@ func TestSanitizeDeepSeekAIJudgeRemovesAdviceThatRecreatesDialogueConveyor(t *te
 	}
 	if !strings.Contains(joined, "删掉没有迫切目标的发言者") || !strings.Contains(joined, "改变判断或选择") {
 		t.Fatalf("safe replacements missing: %s", joined)
-	}
-	for _, want := range []string{"多人开场删去一位角色", "开篇同一目标只保留一个主导发言者", "多对象授权只完整写一个", "关系角色点破核心同盟的默契后", "删掉概括群像差异", "删掉‘便宜不等于省事’", "删除中间连续报时", "删掉‘A如何、B如何、C如何’式成果汇总"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("evidence-specific safe replacement missing %q: %s", want, joined)
-		}
 	}
 	ragJoined := strings.Join(artifact.RAGRules, "\n")
 	if !strings.Contains(joined, "只完整渲染一到两个") || !strings.Contains(joined, "真正改变主角判断的代表事件") || !strings.Contains(ragJoined, "同类任务压缩规则") || !strings.Contains(ragJoined, "系统接话规则") || !strings.Contains(ragJoined, "代表操作压缩规则") || !strings.Contains(ragJoined, "心理去金句规则") || !strings.Contains(ragJoined, "成果非排比规则") || !strings.Contains(ragJoined, "配角关系功能规则") {

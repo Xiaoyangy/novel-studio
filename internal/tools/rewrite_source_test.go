@@ -167,22 +167,23 @@ func TestRewriteBriefRefinementRedactsNegativeProjectContamination(t *testing.T)
 	if err := st.Progress.Init("test", 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Characters.Save([]domain.Character{{Name: "许闻溪", Role: "主角"}}); err != nil {
+	if err := st.Characters.Save([]domain.Character{{Name: "顾晴", Role: "主角"}}); err != nil {
 		t.Fatal(err)
 	}
+	saveTestProjectContaminationTerms(t, st, "外部项目专名", "过期流程术语")
 	prepareRewriteSourceTest(t, st,
-		"第一章\n\n许闻溪收起手机。",
-		"# brief\n\n## 必须修正\n\n- 删除旧稿中的审计盒和鬼城案例，回到女性职场成长\n")
-	plan := domain.ChapterPlan{Chapter: 1, Goal: "许闻溪回到女性职场成长"}
+		"第一章\n\n顾晴收起手机。",
+		"# brief\n\n## 必须修正\n\n- 删除旧稿中的过期流程术语和外部项目专名，回到当前人物线\n")
+	plan := domain.ChapterPlan{Chapter: 1, Goal: "顾晴回到当前人物线"}
 	plan.CausalSimulation.ReviewRefinement.LocalizedTargets = []string{
-		"删除审计盒和鬼城案例，回到女性职场成长",
+		"删除过期流程术语和外部项目专名，回到当前人物线",
 	}
 	normalizeRewriteBriefRefinement(st, &plan)
 	joined := strings.Join(plan.CausalSimulation.ReviewRefinement.LocalizedTargets, "\n")
-	if containsSecondAlgorithmContaminationTerm(joined) {
+	if containsProjectContaminationTerm(projectContaminationTerms(st), joined) {
 		t.Fatalf("negative diagnosis reintroduced forbidden project terms: %s", joined)
 	}
-	if !strings.Contains(joined, "[旧版取证引擎元素]") || !strings.Contains(joined, "[跨项目旧设定]") {
+	if strings.Count(joined, "[项目禁用元素]") < 2 {
 		t.Fatalf("redacted diagnosis lost its actionable categories: %s", joined)
 	}
 	if err := validateProjectContaminationFinal(st, "chapter plan", plan); err != nil {

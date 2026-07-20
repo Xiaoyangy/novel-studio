@@ -9,7 +9,7 @@ import "fmt"
 // WeaveEvent 事件池中的一个事件。
 type WeaveEvent struct {
 	ID           string   `json:"id"`     // "ev-001"
-	Thread       string   `json:"thread"` // 所属线索：主线/父债线/红伞医院线…
+	Thread       string   `json:"thread"` // 所属线索：主线/家庭线/事业线…
 	Summary      string   `json:"summary"`
 	Participants []string `json:"participants,omitempty"`
 	Prereq       []string `json:"prereq,omitempty"`      // 前置事件 id

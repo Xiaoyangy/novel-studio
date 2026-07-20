@@ -328,7 +328,7 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 	case "structured_note_triplet":
 		return "便签和备忘录不要三条工整并列；改成划掉、补字、写半截和现场犹豫。"
 	case "card_tos_block":
-		return "黑卡/系统提示不要完整列 ToS；改成残字、糊字、空白账单位和读不全的凸字。"
+		return "规则载体或系统提示不要完整列服务条款；只保留当前 plan 要求读者看见的少量信息，其余通过遮挡、打断、人物误读或后果呈现。"
 	case "empty_parallel_chant":
 		return "童谣只保留有内容的规则链；空对仗三连改成孩子卡壳、背岔或数字错位。"
 	case "de_fa_adjective_repetition":
@@ -344,13 +344,13 @@ func mechanicalRewriteBriefSuggestion(rule string) string {
 	case "identity_effect_delayed":
 		return "报身份、报名字或确认后的规则后果要紧贴演示，不要在因果之间插入闲聊和新支线。"
 	case "building_floor_mismatch":
-		return "楼栋、楼层、门牌号要统一；3栋5楼不能写成5栋承租物，除非剧情明确换楼栋。"
+		return "楼栋、楼层、门牌号要与当前场景资产统一；不得把楼层号误写成楼栋号，除非剧情明确换了地点。"
 	case "anomalous_phone_unverified":
 		return "异常来电不是正常渠道时，主角必须先核验身份，再相信对面声音。"
 	case "form_image_mismatch":
 		return "票据栏位和印章的比喻要贴合形状；栏位不写成像章，改成拼出来、贴歪或格线不齐。"
 	case "card_core_rule_overblurred":
-		return "黑卡可以残缺，但核心可玩规则不能全糊掉；保留“可确认”等少量可读信息。"
+		return "规则载体可以残缺，但当前 plan 要求驱动选择的核心条件不能全糊掉；保留少量足以让人物行动的可读信息。"
 	default:
 		return ""
 	}

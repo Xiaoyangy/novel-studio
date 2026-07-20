@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -160,6 +161,146 @@ func TestPipelineRenderAgentGateAllowsOnlyTargetDrafter(t *testing.T) {
 			t.Fatalf("args=%s allowed=%v decision=%+v", tc.args, gotAllowed, decision)
 		}
 	}
+}
+
+func TestPipelineRenderProsePermitGateBlocksMisdirectedDrafterButNotFinalizer(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionRender, TargetChapter: 6,
+		PlanDigest: "sha256:frozen", Owner: "render-permit-routing-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gate := pipelineRenderProsePermitGate(st)
+	drafter, err := gate(context.Background(), agentcore.GateRequest{Call: agentcore.ToolCall{
+		Name: "subagent", Args: json.RawMessage(`{"agent":"drafter","task":"渲染第6章"}`),
+	}})
+	if err != nil || drafter == nil || drafter.Allowed {
+		t.Fatalf("zero-reservation Drafter crossed provider boundary: decision=%+v err=%v", drafter, err)
+	}
+	finalizer, err := gate(context.Background(), agentcore.GateRequest{Call: agentcore.ToolCall{
+		Name: "subagent", Args: json.RawMessage(`{"agent":"draft_finalizer","task":"验收第6章"}`),
+	}})
+	if err != nil || finalizer != nil && !finalizer.Allowed {
+		t.Fatalf("draft_finalizer incorrectly required prose permit: decision=%+v err=%v", finalizer, err)
+	}
+}
+
+func TestPipelineRenderProsePermitConsumesOnlyAfterAllOtherGatesApprove(t *testing.T) {
+	st, ledgerPath := renderAgentPermitFixture(t)
+	request := agentcore.GateRequest{Call: agentcore.ToolCall{
+		Name: "subagent", Args: json.RawMessage(`{"agent":"drafter","task":"渲染第1章"}`),
+	}}
+	reject := func(context.Context, agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		return &agentcore.GateDecision{Allowed: false, Reason: "later business gate rejected"}, nil
+	}
+	decision, err := combineToolGates(
+		pipelineRenderAgentGate(st),
+		reject,
+		pipelineRenderProsePermitGate(st),
+	)(context.Background(), request)
+	if err != nil || decision == nil || decision.Allowed {
+		t.Fatalf("later gate did not reject: decision=%+v err=%v", decision, err)
+	}
+	ledger := loadRenderAgentPermitLedger(t, ledgerPath)
+	if got := ledger.Reservations[0].Status; got != "permit_armed" {
+		t.Fatalf("rejected downstream gate consumed provider dispatch: status=%q", got)
+	}
+	decision, err = pipelineRenderProsePermitGate(st)(context.Background(), request)
+	if err != nil || decision != nil && !decision.Allowed {
+		t.Fatalf("approved Drafter did not validate permit: decision=%+v err=%v", decision, err)
+	}
+	ledger = loadRenderAgentPermitLedger(t, ledgerPath)
+	if got := ledger.Reservations[0].Status; got != "permit_armed" {
+		t.Fatalf("Coordinator gate consumed provider evidence before priming: status=%q", got)
+	}
+	if err := st.Runtime.ConsumePipelineRenderProsePermit(1); err != nil {
+		t.Fatalf("provider-side consume failed: %v", err)
+	}
+	ledger = loadRenderAgentPermitLedger(t, ledgerPath)
+	if got := ledger.Reservations[0].Status; got != "provider_dispatched" {
+		t.Fatalf("provider boundary did not mark dispatch: status=%q", got)
+	}
+	decision, err = pipelineRenderProsePermitGate(st)(context.Background(), request)
+	if err != nil || decision == nil || decision.Allowed {
+		t.Fatalf("single permit authorized more than one Drafter: decision=%+v err=%v", decision, err)
+	}
+}
+
+func renderAgentPermitFixture(t *testing.T) (*store.Store, string) {
+	t.Helper()
+	base := t.TempDir()
+	live := filepath.Join(base, "output")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	candidateID := "render-ch0001-agent-permit"
+	candidate := filepath.Join(base, ".render-candidates", candidateID, "output")
+	st := store.NewStore(candidate)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	digest := func(ch string) string { return "sha256:" + strings.Repeat(ch, 64) }
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionRender, TargetChapter: 1,
+		PlanDigest: digest("a"), Owner: "render-agent-permit-owner",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifestRaw, _ := json.Marshal(map[string]any{
+		"version": "pipeline-render-candidate.v2", "candidate_id": candidateID,
+		"generation_id": "pg2_agent_permit", "chapter": 1,
+		"plan_digest": digest("a"), "plan_checkpoint_seq": 1,
+		"projected_bundle_digest": digest("c"), "promotion_receipt_digest": digest("d"),
+		"source_output_dir": live,
+	})
+	manifestPath := filepath.Join(candidate, "meta", "planning", "render_candidate.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	authorization := digest("b")
+	ledger := domain.PipelineRenderDispatchLedger{
+		Version: domain.PipelineRenderDispatchLedgerVersion, CandidateID: candidateID,
+		GenerationID: "pg2_agent_permit", Chapter: 1, PlanDigest: digest("a"),
+		PlanCheckpointSeq: 1, ProjectedBundleDigest: digest("c"), PromotionReceiptDigest: digest("d"),
+		Limit: domain.PipelineRenderWholeBodyDispatchLimit, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Reservations: []domain.PipelineRenderDispatchReservation{{
+			AuthorizationDigest: authorization, Attempt: 1, Status: "reserved",
+			ReservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}},
+	}
+	ledgerPath := filepath.Join(base, ".render-candidates", "convergence", candidateID, "dispatch_budget.json")
+	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.MarshalIndent(ledger, "", "  ")
+	if err := os.WriteFile(ledgerPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.ArmPipelineRenderProsePermit(authorization, 1); err != nil {
+		t.Fatal(err)
+	}
+	return st, ledgerPath
+}
+
+func loadRenderAgentPermitLedger(t *testing.T, path string) domain.PipelineRenderDispatchLedger {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ledger domain.PipelineRenderDispatchLedger
+	if err := json.Unmarshal(raw, &ledger); err != nil {
+		t.Fatal(err)
+	}
+	return ledger
 }
 
 func TestPipelineRenderDrafterStopsOnlyAfterExactSuccessfulWholeDraft(t *testing.T) {

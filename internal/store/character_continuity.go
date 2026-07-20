@@ -491,7 +491,7 @@ func characterRelationshipContracts(name string, relationships []domain.Relation
 		if containsAnyKeyword(r.Relation, []string{"承诺", "约定", "答应", "保证"}) {
 			contract.Promise = relation
 		}
-		if containsAnyKeyword(r.Relation, []string{"秘密", "隐瞒", "身份", "黑卡", "旧账"}) {
+		if containsAnyKeyword(r.Relation, []string{"秘密", "隐瞒", "身份", "密钥", "暗号", "旧账"}) {
 			contract.SharedSecret = relation
 		}
 		if containsAnyKeyword(r.Relation, []string{"欺骗", "骗", "背叛", "出卖", "试探", "隐瞒"}) {

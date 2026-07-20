@@ -599,27 +599,28 @@ func TestValidateDraftWorldVisibilityRejectsOffscreenNamedCharacter(t *testing.T
 	}
 }
 
-func TestDraftChapterRejectsSecondAlgorithmCrossProjectContamination(t *testing.T) {
+func TestDraftChapterRejectsConfiguredProjectContamination(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := s.Progress.Init("她的第二算法", 10); err != nil {
+	if err := s.Progress.Init("当前项目", 10); err != nil {
 		t.Fatalf("Progress.Init: %v", err)
 	}
-	if err := s.Characters.Save([]domain.Character{{Name: "许闻溪", Role: "主角", Tier: "core"}}); err != nil {
+	if err := s.Characters.Save([]domain.Character{{Name: "顾晴", Role: "主角", Tier: "core"}}); err != nil {
 		t.Fatalf("SaveCharacters: %v", err)
 	}
+	saveTestProjectContaminationTerms(t, s, "外部项目专名")
 
 	tool := NewDraftChapterTool(s)
 	args, _ := json.Marshal(map[string]any{
 		"chapter": 1,
-		"content": "第一章\n\n江烬收到欠费单，鬼城的门牌亮了一下。",
+		"content": "第一章\n\n顾晴误把外部项目专名写进记录。",
 		"mode":    "write",
 	})
 	_, err := tool.Execute(context.Background(), args)
-	if err == nil || !strings.Contains(err.Error(), "跨项目污染") {
-		t.Fatalf("expected cross-project contamination rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "user_rules.forbidden_phrases") {
+		t.Fatalf("expected configured project contamination rejection, got %v", err)
 	}
 	if draft, _ := s.Drafts.LoadDraft(1); draft != "" {
 		t.Fatalf("contaminated draft must not persist: %s", draft)

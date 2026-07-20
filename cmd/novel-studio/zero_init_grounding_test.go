@@ -34,7 +34,7 @@ func TestZeroRelationshipTypeUsesPairEvidenceAndNegation(t *testing.T) {
 		"周曼":  "亲情",
 	}
 	for _, c := range characters[1:] {
-		got := zeroRelationshipType(project, c, false)
+		got := zeroRelationshipType(project, c)
 		if got != tests[c.Name] {
 			t.Errorf("%s relationship=%q, want %q", c.Name, got, tests[c.Name])
 		}
@@ -217,53 +217,67 @@ func TestZeroCountyDelayedCharactersStayOffscreenAndUnacquainted(t *testing.T) {
 	}
 }
 
-func TestZeroCountyNeutralTemplatesIgnoreNegationAndStaleBookWorld(t *testing.T) {
-	project := countyDelayedZeroInitTestProject()
-	project.Premise = "现实县城经营故事，不是鬼城，不写规则怪谈，也不涉及灵异小说。"
-	project.BookWorld = &domain.BookWorld{Name: "鬼城", Summary: "旧零号资产残留：规则怪谈与闹鬼。", Places: []domain.WorldPlace{{Name: "河畔夜市"}}}
-	project.WorldRules = append(project.WorldRules, domain.WorldRule{Category: "题材边界", Rule: "禁止恐怖小说和惊悚小说模板", Boundary: "不要闹鬼"})
-	for _, premise := range []string{
-		"现实县城经营故事，不是鬼城，不写规则怪谈，也不涉及灵异小说。",
-		"旧版鬼城已取消，当前只写普通县城的经营与生活。",
-	} {
-		probe := project
-		probe.Premise = premise
-		if zeroIsHorrorProject(probe) {
-			t.Fatalf("negated premise or stale BookWorld selected horror profile: %s", premise)
+func TestZeroTemplatesDeriveFromCurrentAssetsNotPremiseLabels(t *testing.T) {
+	base := zeroInitProject{
+		Name:       "通用测试项目",
+		Premise:    "两名档案员必须在闭馆前找回一份遗失记录。",
+		Characters: []domain.Character{{Name: "甲", Role: "主角"}, {Name: "乙", Role: "搭档"}},
+		FirstCast:  map[string]bool{"甲": true, "乙": true},
+		FirstChapter: domain.OutlineEntry{
+			Chapter:   1,
+			Title:     "闭馆前",
+			CoreEvent: "甲与乙核对失踪档案的最后流转记录。",
+			Hook:      "借阅登记出现一条互相矛盾的时间。",
+			Scenes:    []string{"市民档案馆阅览室"},
+		},
+		Outline: []domain.OutlineEntry{{
+			Chapter:   1,
+			Title:     "闭馆前",
+			CoreEvent: "甲与乙核对失踪档案的最后流转记录。",
+			Hook:      "借阅登记出现一条互相矛盾的时间。",
+			Scenes:    []string{"市民档案馆阅览室"},
+		}},
+		WorldRules: []domain.WorldRule{{
+			Category: "查阅边界",
+			Rule:     "角色只能读取自己获准接触的档案。",
+			Boundary: "越权信息不得进入角色知识。",
+		}},
+		BookWorld: &domain.BookWorld{
+			Name:   "当代城市",
+			Places: []domain.WorldPlace{{Name: "市民档案馆阅览室"}, {Name: "馆外台阶"}},
+		},
+	}
+	labeled := base
+	labeled.Premise = "这是一部恐怖小说和规则怪谈，但所有角色、场景、规则与章节事件保持不变。"
+
+	collect := func(project zeroInitProject) []any {
+		first := project.FirstChapter
+		return []any{
+			zeroLongformOpeningDesign(project, first),
+			zeroChapterInformationGaps(project),
+			zeroChapterCausalBeat(project),
+			zeroChapterDecisionPoints(project),
+			zeroChapterOutcomeShift(project),
+			zeroEnvironmentState(project),
+			zeroAssetOpeningPressureName(project),
+			zeroInitWorldBackgroundPlan(project),
 		}
 	}
-
-	first := project.FirstChapter
-	neutral := []any{
-		zeroLongformOpeningDesign(project, first),
-		zeroChapterInformationGaps(project),
-		zeroChapterCausalBeat(project),
-		zeroChapterDecisionPoints(project),
-		zeroChapterOutcomeShift(project),
-		zeroEnvironmentState(project),
-		zeroAssetOpeningPressureName(project),
-	}
-	raw, err := json.Marshal(neutral)
+	baseline, err := json.Marshal(collect(base))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(raw)
-	for _, leaked := range []string{"世界规则完整机制", "规则第一次露面", "异常/压力", "利用规则", "规则会即时反馈", "死亡", "失踪", "异化"} {
-		if strings.Contains(text, leaked) {
-			t.Errorf("neutral county template retained horror/rule-generic phrase %q: %s", leaked, text)
-		}
+	withLabel, err := json.Marshal(collect(labeled))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{"真实", "付款", "交付", "责任"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("neutral county template missing grounded anchor %q: %s", want, text)
-		}
+	if string(baseline) != string(withLabel) {
+		t.Fatalf("premise label selected a hidden production template\nbaseline=%s\nlabeled=%s", baseline, withLabel)
 	}
-
-	positive := project
-	positive.Premise = "失业青年误入一座按欠费单运转的鬼城。"
-	positive.WorldRules = nil
-	if !zeroIsHorrorProject(positive) {
-		t.Fatal("affirmed horror premise was not recognized")
+	for _, want := range []string{"失踪档案", "市民档案馆阅览室", "获准接触"} {
+		if !strings.Contains(string(baseline), want) {
+			t.Errorf("current project asset %q did not reach generated plan: %s", want, baseline)
+		}
 	}
 }
 

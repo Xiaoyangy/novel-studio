@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/store"
-	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 const (
@@ -71,14 +70,11 @@ func pipelineUpgradeFrozenRenderInput(
 	if _, committed := pipelineCommittedAfterFrozenBaseline(st, frozen); committed {
 		return nil, fmt.Errorf("render input upgrade is forbidden after chapter commit")
 	}
-	if _, err := validatePipelineSealedRenderBinding(st, frozen, false); err != nil {
-		return nil, fmt.Errorf("render input upgrade sealed binding invalid: %w", err)
+	if _, err := requirePipelineSealedRenderPreflight(st, frozen, false); err != nil {
+		return nil, fmt.Errorf("render input upgrade frozen preflight invalid: %w", err)
 	}
 	if err := validatePipelineFrozenRenderDependencies(st.Dir(), frozen); err != nil {
 		return nil, err
-	}
-	if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, frozen.Chapter); err != nil {
-		return nil, fmt.Errorf("render input upgrade formal plan is not render-fresh: %w", err)
 	}
 
 	previousCandidateID, err := pipelineRenderTransactionID(frozen)

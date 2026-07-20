@@ -213,11 +213,16 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 	}
 	transactionID := "canon-rebase-" + strings.TrimPrefix(sourceRoot, "sha256:")[:24]
 	publisher := store.NewDirectoryPublishStore(pipelineRebaseTransactionRoot(live))
-	publishReceipt, err := publisher.PublishDirectory(store.PublishDirectoryRequest{
-		TransactionID:    transactionID,
-		LiveDir:          live,
-		CandidateDir:     candidate,
-		ExpectedLiveRoot: sourceRoot,
+	var publishReceipt *store.DirectoryPublishReceipt
+	err = withPipelineWatchdogPaused(func() error {
+		var publishErr error
+		publishReceipt, publishErr = publisher.PublishDirectory(store.PublishDirectoryRequest{
+			TransactionID:    transactionID,
+			LiveDir:          live,
+			CandidateDir:     candidate,
+			ExpectedLiveRoot: sourceRoot,
+		})
+		return publishErr
 	})
 	if err != nil {
 		return fmt.Errorf("全书 rebase 发布 chapter-zero 候选: %w", err)
@@ -540,7 +545,12 @@ func recoverPipelineRebasePublishesWithControlHeld(live string) error {
 				id,
 			)
 		}
-		receipt, recoverErr := publisher.RecoverDirectoryPublish(id)
+		var receipt *store.DirectoryPublishReceipt
+		recoverErr := withPipelineWatchdogPaused(func() error {
+			var err error
+			receipt, err = publisher.RecoverDirectoryPublish(id)
+			return err
+		})
 		if recoverErr != nil {
 			return fmt.Errorf("rebase recovery pending directory publish %s: %w", id, recoverErr)
 		}

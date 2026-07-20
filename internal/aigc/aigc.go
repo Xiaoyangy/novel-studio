@@ -1910,7 +1910,7 @@ func legacyHeuristicPercent(stats Stats, perK map[string]float64) float64 {
 	return round2(clamp(score, 0, 100))
 }
 
-// plainChapterTitleRe 匹配正常小说格式的纯文本章节标题首行（无 # 号），如「第一章 欠费单」/
+// plainChapterTitleRe 匹配正常小说格式的纯文本章节标题首行（无 # 号），如「第一章 风起」/
 // 「第 12 章」，用于在 AIGC 分析时剔除标题、只统计正文。
 var plainChapterTitleRe = regexp.MustCompile(`^第[0-9零一二三四五六七八九十百千]+章([ 　].*)?$`)
 

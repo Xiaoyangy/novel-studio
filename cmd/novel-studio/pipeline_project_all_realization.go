@@ -93,6 +93,37 @@ func pipelineSeal(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		source.RAGSnapshotRoot != identity.Source.RAGSnapshotRoot {
 		return fmt.Errorf("seal 锁内 source snapshot identity 漂移")
 	}
+	preflightBundles, err := projected.LoadProjectedChapterBundles(identity.Generation.GenerationID)
+	if err != nil {
+		return fmt.Errorf("seal 锁内读取 projected bundles 预检: %w", err)
+	}
+	preflightInputs := make([]pipelinePreflightInput, 0, len(preflightBundles))
+	for i := range preflightBundles {
+		bundle := preflightBundles[i]
+		preflightInputs = append(preflightInputs, pipelinePreflightInput{
+			Stage:  pipelinePreflightStageSeal,
+			Bundle: bundle,
+			Expected: &pipelinePreflightSealedIdentity{
+				GenerationID:           identity.Generation.GenerationID,
+				Chapter:                bundle.Chapter,
+				BundleDigest:           bundle.BundleDigest,
+				PlanningContextDigest:  bundle.PlanningContextDigest,
+				RenderContextSHA256:    bundle.RenderContextSHA256,
+				ProjectedPreStateRoot:  bundle.ProjectedPreStateRoot,
+				ProjectedPostStateRoot: bundle.ProjectedPostStateRoot,
+			},
+		})
+	}
+	if err := persistAndRequirePipelinePreflight(
+		cfg.OutputDir,
+		compilePipelinePreflightBatch(
+			pipelinePreflightStageSeal,
+			identity.Generation.GenerationID,
+			preflightInputs,
+		),
+	); err != nil {
+		return fmt.Errorf("seal 锁内 typed preflight: %w", err)
+	}
 	var arcManifest *domain.ArcPlanningManifest
 	var seal *domain.SealReceiptV2
 	if building != nil {
@@ -323,6 +354,22 @@ func pipelinePromote(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		sealed,
 	); err != nil {
 		return fmt.Errorf("promote 锁内第 %d 章正史边界失效: %w", chapter, err)
+	}
+	promotePreflight := compilePipelinePreflight(pipelinePreflightInput{
+		Stage:  pipelinePreflightStagePromote,
+		Bundle: *bundle,
+		Expected: &pipelinePreflightSealedIdentity{
+			GenerationID:           sealed.GenerationID,
+			Chapter:                chapter,
+			BundleDigest:           bundle.BundleDigest,
+			PlanningContextDigest:  bundle.PlanningContextDigest,
+			RenderContextSHA256:    bundle.RenderContextSHA256,
+			ProjectedPreStateRoot:  bundle.ProjectedPreStateRoot,
+			ProjectedPostStateRoot: bundle.ProjectedPostStateRoot,
+		},
+	})
+	if err := persistAndRequirePipelinePreflight(cfg.OutputDir, promotePreflight); err != nil {
+		return fmt.Errorf("promote 锁内第 %d 章 typed preflight: %w", chapter, err)
 	}
 	if err := retirePipelinePromotedProseInputs(
 		cfg.OutputDir,

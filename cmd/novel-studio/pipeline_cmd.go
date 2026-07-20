@@ -410,39 +410,73 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			warnStaleZeroInitReadiness(cfg.OutputDir)
 		}
 		stageStarted := time.Now()
-		if err := runPipelineStage(stage, opts, flags, state, stageArgs); err != nil {
-			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "error", err)
-			// 不标记完成 → 下次重跑从这里继续。先落盘（可能 cocreate 已写入 prompt）。
-			_ = savePipelineState(statePath, state)
-			return fmt.Errorf("阶段 %s 失败（修复后重跑 --pipeline 即从此阶段继续）: %w", stage, err)
-		}
-		evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
-		if err != nil {
-			evidence.Status = "invalid"
-			evidence.Message = err.Error()
-			state.ClearDone(stage, evidence)
-			_ = savePipelineState(statePath, state)
-			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "verification_error", err)
-			return fmt.Errorf("阶段 %s 完成证据不足（未标记完成）: %w", stage, err)
-		}
-		evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
-		state.MarkDone(stage, evidence)
-		if stage == "outline-all" && state.Done("architect") {
-			architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state)
-			if verifyErr != nil {
-				return fmt.Errorf("outline-all refreshed architect evidence invalid: %w", verifyErr)
+		watchdogChapter, watchdogPlanDigest := pipelineWatchdogStageIdentity(
+			cfg.OutputDir,
+			stage,
+			flags.Start,
+		)
+		stageErr := withPipelineStageWatchdog(pipelineWatchdogConfig{
+			OutputDir:    cfg.OutputDir,
+			InvocationID: pipelineWatchdogStageInvocationID(state.RunIdentity, timingInvocationID, stage),
+			RunIdentity:  state.RunIdentity,
+			Stage:        stage,
+			Chapter:      watchdogChapter,
+			PlanDigest:   watchdogPlanDigest,
+		}, func() error {
+			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageDispatched); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "watchdog_progress_error", err)
+				return fmt.Errorf("记录阶段 %s watchdog dispatch 失败: %w", stage, err)
 			}
-			state.MarkDone("architect", stampPipelineArtifactDigests(cfg.OutputDir, architectEvidence))
+			if err := runPipelineStage(stage, opts, flags, state, stageArgs); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "error", err)
+				// 不标记完成 → 下次重跑从这里继续。先落盘（可能 cocreate 已写入 prompt）。
+				_ = savePipelineState(statePath, state)
+				return fmt.Errorf("阶段 %s 失败（修复后重跑 --pipeline 即从此阶段继续）: %w", stage, err)
+			}
+			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageExecutionCompleted); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "watchdog_progress_error", err)
+				return fmt.Errorf("记录阶段 %s watchdog execution completion 失败: %w", stage, err)
+			}
+			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+			if err != nil {
+				evidence.Status = "invalid"
+				evidence.Message = err.Error()
+				state.ClearDone(stage, evidence)
+				_ = savePipelineState(statePath, state)
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "verification_error", err)
+				return fmt.Errorf("阶段 %s 完成证据不足（未标记完成）: %w", stage, err)
+			}
+			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageVerified); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "watchdog_progress_error", err)
+				return fmt.Errorf("记录阶段 %s watchdog verification 失败: %w", stage, err)
+			}
+			evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
+			state.MarkDone(stage, evidence)
+			if stage == "outline-all" && state.Done("architect") {
+				architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state)
+				if verifyErr != nil {
+					return fmt.Errorf("outline-all refreshed architect evidence invalid: %w", verifyErr)
+				}
+				state.MarkDone("architect", stampPipelineArtifactDigests(cfg.OutputDir, architectEvidence))
+			}
+			if stage == "render" {
+				renderRecoveryPending = false
+			}
+			if err := savePipelineState(statePath, state); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "checkpoint_error", err)
+				return fmt.Errorf("保存流水线状态失败: %w", err)
+			}
+			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageCheckpointed); err != nil {
+				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "watchdog_progress_error", err)
+				return fmt.Errorf("记录阶段 %s watchdog checkpoint 失败: %w", stage, err)
+			}
+			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "ok", nil)
+			fmt.Fprintf(os.Stderr, "[pipeline] 阶段完成：%s\n", stage)
+			return nil
+		})
+		if stageErr != nil {
+			return stageErr
 		}
-		if stage == "render" {
-			renderRecoveryPending = false
-		}
-		if err := savePipelineState(statePath, state); err != nil {
-			recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "checkpoint_error", err)
-			return fmt.Errorf("保存流水线状态失败: %w", err)
-		}
-		recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "ok", nil)
-		fmt.Fprintf(os.Stderr, "[pipeline] 阶段完成：%s\n", stage)
 	}
 	// render intentionally advances canon and marks the speculative all-book
 	// projection as requiring a rebase. Stage completion is therefore scoped to

@@ -804,19 +804,11 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			return err
 		}
 	}
-	if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, chapter); err != nil {
-		return fmt.Errorf("render 正式计划 freshness 失败: %w", err)
-	}
 	sealedV2 := frozen.ProjectionBinding == "sealed_v2"
 	var preplanReceipt pipelinePreplanReceipt
 	var projectedManifest *domain.StagedChapterPlanManifest
 	var sealedBinding *pipelineSealedRenderBinding
-	if sealedV2 {
-		sealedBinding, err = validatePipelineSealedRenderBinding(st, frozen, postCommitRecovery)
-		if err != nil {
-			return err
-		}
-	} else {
+	if !sealedV2 {
 		if err := readPipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelinePlanningReceiptPath), &preplanReceipt); err != nil {
 			return fmt.Errorf("render 读取 preplan 回执: %w", err)
 		}
@@ -871,6 +863,39 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		if err := validatePipelineFrozenRenderDependencies(cfg.OutputDir, frozen); err != nil {
 			return fmt.Errorf("render 获取执行锁后冻结渲染依赖复核失败: %w", err)
 		}
+	}
+	// Re-read every frozen identity under the render lease. The earlier reads
+	// selected the lock target only; they cannot authorize a model call.
+	lockedFrozen, lockedCP, err := loadAndVerifyPipelineFrozenPlan(cfg.OutputDir)
+	if err != nil {
+		return fmt.Errorf("render 锁内重载冻结计划: %w", err)
+	}
+	if lockedFrozen.Chapter != chapter ||
+		lockedFrozen.PlanDigest != frozen.PlanDigest ||
+		lockedFrozen.ProjectionBinding != frozen.ProjectionBinding {
+		return fmt.Errorf("render 获取执行锁期间 frozen plan identity 漂移")
+	}
+	frozen, cp = lockedFrozen, lockedCP
+	if sealedV2 {
+		sealedBinding, err = requirePipelineSealedRenderPreflight(
+			st,
+			frozen,
+			postCommitRecovery,
+		)
+		if err != nil {
+			return fmt.Errorf("render 第 %d 章锁内 typed preflight: %w", chapter, err)
+		}
+		// During an active prose pass the render lease makes the shared tool
+		// guard select the immutable sealed RAG receipt. Post-commit recovery has
+		// no Writer call and its cursor is already closed, so invoking this guard
+		// there would deliberately fall back to mutable live RAG.
+		if !postCommitRecovery {
+			if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, chapter); err != nil {
+				return fmt.Errorf("render 第 %d 章锁内 sealed plan freshness: %w", chapter, err)
+			}
+		}
+	} else if err := tools.ValidateCurrentChapterRenderPlanForExecution(st, chapter); err != nil {
+		return fmt.Errorf("render 正式计划 freshness 失败: %w", err)
 	}
 
 	var rendered *pipelineRenderedChapterSnapshot
@@ -949,6 +974,15 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-match-receipt-error")
 			return fmt.Errorf("render 第 %d 章保存 actual match 证据失败: %w", chapter, err)
 		}
+		if err := pipelineAdvanceChapterRenderActualMatch(
+			cfg.OutputDir,
+			candidate.OutputDir,
+			frozen,
+			candidateSnapshot.BodySHA256,
+		); err != nil {
+			_ = retirePipelineRenderCandidate(candidate.ContainerDir, "actual-match-transaction-error")
+			return fmt.Errorf("render 第 %d 章封存 actual-match 事务失败: %w", chapter, err)
+		}
 		sealedActualMatch = &actualMatch
 		publishReceipt, err := publishPipelineRenderCandidate(cfg.OutputDir, candidate)
 		if err != nil {
@@ -965,6 +999,14 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		}
 		if rendered.BodySHA256 != candidateSnapshot.BodySHA256 {
 			return fmt.Errorf("render 候选目录发布后正文 hash 漂移")
+		}
+		if err := pipelineAdvanceChapterRenderPublished(
+			cfg.OutputDir,
+			frozen,
+			cp,
+			rendered.BodySHA256,
+		); err != nil {
+			return fmt.Errorf("render 第 %d 章封存目录发布事务失败: %w", chapter, err)
 		}
 		if err := finalizePipelineRenderCandidate(cfg.OutputDir, directoryPublishTransactionID); err != nil {
 			return err
@@ -989,6 +1031,52 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	chapterPath := rendered.ChapterPath
 	bodySHA := rendered.BodySHA256
 	actualCanonRoot := rendered.ActualCanonRoot
+	chapterRenderTransactionEnabled := sealedV2
+	if sealedV2 && postCommitRecovery && strings.TrimSpace(directoryPublishTransactionID) == "" {
+		tracked, err := pipelineChapterRenderBodyTracked(cfg.OutputDir, frozen, bodySHA)
+		if err != nil {
+			return fmt.Errorf("render 第 %d 章检查历史正文事务失败: %w", chapter, err)
+		}
+		if tracked {
+			return fmt.Errorf("render 第 %d 章已有正文事务但缺少 directory publish 证据，禁止拼接不完整链", chapter)
+		}
+		chapterRenderTransactionEnabled = false
+		fmt.Fprintf(
+			os.Stderr,
+			"[pipeline:render] 第 %d 章属于无 directory publish 证据的历史 sealed commit；保持 legacy untracked，不创建半截正文事务\n",
+			chapter,
+		)
+	}
+	if chapterRenderTransactionEnabled {
+		if _, err := pipelineEnsureChapterRenderCommitted(
+			cfg.OutputDir,
+			cfg.OutputDir,
+			frozen,
+			cp,
+			rendered,
+		); err != nil {
+			return fmt.Errorf("render 第 %d 章恢复 exact-body commit 事务失败: %w", chapter, err)
+		}
+	}
+	if chapterRenderTransactionEnabled && !reviewAlreadyAccepted {
+		acceptedByTransaction, err := pipelineChapterRenderFormalAcceptedOnDisk(
+			cfg.OutputDir,
+			frozen,
+			cp,
+			rendered,
+		)
+		if err != nil {
+			return fmt.Errorf("render 第 %d 章恢复 formal-accepted 事务失败: %w", chapter, err)
+		}
+		if acceptedByTransaction {
+			reviewAlreadyAccepted = true
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:render] 第 %d 章 exact-body formal accept 事务已验证；不重复调用 Reviewer\n",
+				chapter,
+			)
+		}
+	}
 	if sealedV2 && !reviewAlreadyAccepted && sealedBinding.Outcome != nil {
 		alreadySaved, acceptanceErr := pipelineChapterAcceptanceAlreadySaved(
 			st,
@@ -1023,6 +1111,17 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 				rendered,
 				sealedBodyEvidenceMatcher,
 			); err != nil {
+				if chapterRenderTransactionEnabled && errors.Is(err, errPipelineSealedActualBodyEvidenceMismatch) {
+					if txnErr := pipelineAdvanceChapterRenderStructuralBlock(
+						cfg.OutputDir,
+						cfg.OutputDir,
+						frozen,
+						cp,
+						rendered,
+					); txnErr != nil {
+						return fmt.Errorf("render 第 %d 章保存 structural-block 事务失败: %w", chapter, txnErr)
+					}
+				}
 				return fmt.Errorf(
 					"render 第 %d 章 deterministic body-evidence preflight 失败（formal review 未调用）: %w",
 					chapter,
@@ -1043,9 +1142,37 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 				)
 			}
 			if sealedV2 {
+				if chapterRenderTransactionEnabled {
+					inspection := inspectCurrentChapterReview(cfg.OutputDir, chapter)
+					if len(inspection.Issues) == 0 &&
+						!pipelineReviewAcceptedForProjection(inspection.Verdict, inspection.Disposition) {
+						if txnErr := pipelineAdvanceChapterRenderFormal(
+							cfg.OutputDir,
+							cfg.OutputDir,
+							frozen,
+							cp,
+							rendered,
+							false,
+						); txnErr != nil {
+							return fmt.Errorf("render 第 %d 章保存 formal-rejected 事务失败: %w", chapter, txnErr)
+						}
+					}
+				}
 				return fmt.Errorf("render 第 %d 章未通过 fresh exact-body accept；sealed generation 保持在本章，禁止提升下一章，必须只重渲染当前冻结计划: %w", chapter, err)
 			}
 			return fmt.Errorf("render 第 %d 章未通过 fresh exact-body accept；下一步只能显式 preplan/plan 后再 render: %w", chapter, err)
+		}
+	}
+	if chapterRenderTransactionEnabled {
+		if err := pipelineAdvanceChapterRenderFormal(
+			cfg.OutputDir,
+			cfg.OutputDir,
+			frozen,
+			cp,
+			rendered,
+			true,
+		); err != nil {
+			return fmt.Errorf("render 第 %d 章封存 formal-accepted 事务失败: %w", chapter, err)
 		}
 	}
 	if sealedV2 && sealedActualMatch == nil {
@@ -1067,7 +1194,30 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 				strings.Join(actualMatch.MismatchReasons, "；"),
 			)
 		}
+		if err := savePipelineSealedActualMatch(cfg.OutputDir, actualMatch); err != nil {
+			return fmt.Errorf("render 第 %d 章保存恢复 actual match 证据失败: %w", chapter, err)
+		}
 		sealedActualMatch = &actualMatch
+	}
+	if chapterRenderTransactionEnabled {
+		if err := pipelineAdvanceChapterRenderActualMatch(
+			cfg.OutputDir,
+			cfg.OutputDir,
+			frozen,
+			bodySHA,
+		); err != nil {
+			return fmt.Errorf("render 第 %d 章封存 actual-matched 事务失败: %w", chapter, err)
+		}
+		if strings.TrimSpace(directoryPublishTransactionID) != "" {
+			if err := pipelineAdvanceChapterRenderPublished(
+				cfg.OutputDir,
+				frozen,
+				cp,
+				bodySHA,
+			); err != nil {
+				return fmt.Errorf("render 第 %d 章恢复目录发布事务失败: %w", chapter, err)
+			}
+		}
 	}
 	progress, err := st.Progress.Load()
 	if err != nil || progress == nil {
@@ -1092,15 +1242,37 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			return outcomeErr
 		}
 		outcomeReceiptDigest = outcome.ReceiptDigest
-		if _, acceptanceErr := savePipelineChapterAcceptance(
+		if chapterRenderTransactionEnabled {
+			if err := pipelineAdvanceChapterRenderOutcome(
+				cfg.OutputDir,
+				frozen,
+				commit,
+				bodySHA,
+				outcome,
+			); err != nil {
+				return fmt.Errorf("render 第 %d 章封存 outcome-accepted 事务失败: %w", chapter, err)
+			}
+		}
+		acceptance, acceptanceErr := savePipelineChapterAcceptance(
 			cfg.OutputDir,
 			st,
 			&sealedBinding.Generation,
 			chapter,
 			bodySHA,
 			outcome,
-		); acceptanceErr != nil {
+		)
+		if acceptanceErr != nil {
 			return fmt.Errorf("render 第 %d 章封存 exact-body 逐章审核回执失败: %w", chapter, acceptanceErr)
+		}
+		if chapterRenderTransactionEnabled {
+			if err := pipelineAdvanceChapterRenderAcceptance(
+				cfg.OutputDir,
+				frozen,
+				bodySHA,
+				acceptance,
+			); err != nil {
+				return fmt.Errorf("render 第 %d 章封存 chapter-accepted 事务失败: %w", chapter, err)
+			}
 		}
 		if chapter == sealedBinding.Generation.LastProjectedChapter {
 			nextAction = "finalize the current arc after verifying every chapter-level acceptance; do not run an arc-level prose review"
@@ -1153,8 +1325,19 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		NextAction:             nextAction,
 		RenderedAt:             time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if _, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelineRenderReceiptPath), receipt); err != nil {
+	renderReceiptDigest, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelineRenderReceiptPath), receipt)
+	if err != nil {
 		return fmt.Errorf("render 保存验收回执: %w", err)
+	}
+	if chapterRenderTransactionEnabled {
+		if err := pipelineAdvanceChapterRenderCompleted(
+			cfg.OutputDir,
+			frozen,
+			bodySHA,
+			renderReceiptDigest,
+		); err != nil {
+			return fmt.Errorf("render 第 %d 章封存 completed 事务失败: %w", chapter, err)
+		}
 	}
 	fmt.Fprintf(os.Stderr, "[pipeline:render] 第 %d 章已按冻结计划渲染并提交\n", chapter)
 	return nil
@@ -2061,6 +2244,15 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 	if currentRoot != receipt.ActualCanonRoot {
 		return evidence, fmt.Errorf("render 后 canon root 已漂移；需从当前 active generation 恢复或重推演")
 	}
+	if frozen.ProjectionBinding == "sealed_v2" {
+		if err := pipelineRecoverChapterRenderCompletionIfTracked(
+			outputDir,
+			frozen,
+			bodySHA,
+		); err != nil {
+			return evidence, fmt.Errorf("render completed 事务恢复失败: %w", err)
+		}
+	}
 	evidence.Artifacts = append(evidence.Artifacts, pipelineRenderReceiptPath, receipt.ChapterPath)
 	evidence.Checkpoints = append(evidence.Checkpoints,
 		fmt.Sprintf("chapter:%d:plan#%d:%s", receipt.Chapter, receipt.PlanCheckpointSeq, receipt.PlanDigest),
@@ -2477,6 +2669,7 @@ func pipelineCanonSnapshotExcluded(rel string, isDir bool) bool {
 	}
 	switch rel {
 	case "meta/pipeline.json",
+		"meta/pipeline_timings.jsonl",
 		// Stable progress identity is already represented above by
 		// GenerationID, BaseChapter and the exact completed chapter bodies.
 		// The file also contains transient StartChapter/flow fields written

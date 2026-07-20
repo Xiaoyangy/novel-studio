@@ -235,14 +235,12 @@ func TestUpsertRAGChunksDropsForbiddenExistingChunks(t *testing.T) {
 	}
 }
 
-func TestUpsertRAGChunksDropsSecondAlgorithmDeprecatedEngineChunks(t *testing.T) {
+func TestUpsertRAGChunksDropsConfiguredProjectContaminationChunks(t *testing.T) {
 	s := store.NewStore(t.TempDir())
 	if err := s.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := s.Outline.SavePremise("《她的第二算法》女性职场成长文，主角许闻溪。"); err != nil {
-		t.Fatalf("SavePremise: %v", err)
-	}
+	saveTestProjectContaminationTerms(t, s, "过期流程术语")
 	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
 		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
 		Chunks: []domain.RAGChunk{
@@ -252,7 +250,7 @@ func TestUpsertRAGChunksDropsSecondAlgorithmDeprecatedEngineChunks(t *testing.T)
 				SourceKind: "chapter_summary_facts",
 				Facet:      "plot",
 				Hash:       "old-engine",
-				Text:       "待签纪要和日志窗口会污染下一章。",
+				Text:       "过期流程术语会污染下一章。",
 			},
 		},
 	}); err != nil {
@@ -264,13 +262,13 @@ func TestUpsertRAGChunksDropsSecondAlgorithmDeprecatedEngineChunks(t *testing.T)
 			SourcePath: "reviews/01_deepseek_ai_judge.json",
 			SourceKind: "review",
 			Facet:      "review",
-			Text:       "后续用会后记录、后台明细和职场压力替代旧取证词。",
+			Text:       "后续只使用当前项目记录。",
 		},
 		{
 			SourcePath: "reviews/old.json",
 			SourceKind: "review",
 			Facet:      "review",
-			Text:       "日志窗口继续作为隐喻。",
+			Text:       "过期流程术语继续作为隐喻。",
 		},
 	}, domain.RAGIndexConfig{})
 	if err != nil {
@@ -282,8 +280,8 @@ func TestUpsertRAGChunksDropsSecondAlgorithmDeprecatedEngineChunks(t *testing.T)
 		t.Fatalf("LoadIndexState: %v", err)
 	}
 	for _, chunk := range state.Chunks {
-		if SecondAlgorithmProjectContaminationViolations(s, chunk.Text) != nil {
-			t.Fatalf("deprecated engine chunk was kept: %+v", chunk)
+		if ProjectContaminationViolations(s, chunk.Text) != nil {
+			t.Fatalf("configured contamination chunk was kept: %+v", chunk)
 		}
 	}
 	if len(state.Chunks) != 1 {

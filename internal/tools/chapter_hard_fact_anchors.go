@@ -43,11 +43,11 @@ const draftHardFactNumberPattern = `(?:[0-9０-９][0-9０-９,，]*(?:万|亿)?
 
 var (
 	draftHardFactAmountPattern = regexp.MustCompile(`(?:人民币[[:space:]]*)?(` + draftHardFactNumberPattern + `)[[:space:]]*(块钱|元|块)`)
-	// Chinese prose often writes “一百万到账” or “一百万专项经营额度”
+	// Chinese prose often writes “一百万到账” or “一百万专项额度”
 	// without repeating 元. Treat that as money only when the number is bound
 	// directly to an unambiguous monetary cue; a naked “一百万” must not satisfy
 	// an amount anchor.
-	draftHardFactContextAmountPattern = regexp.MustCompile(`(` + draftHardFactNumberPattern + `)[[:space:]]*(?:的[[:space:]]*)?(?:青山县专项经营额度|专项经营额度|经营专项额度|经营专用额度|专项额度|经营额度|可用额度|授信额度|到账|入账)`)
+	draftHardFactContextAmountPattern = regexp.MustCompile(`(` + draftHardFactNumberPattern + `)[[:space:]]*(?:的[[:space:]]*)?(?:专项经营额度|经营专项额度|经营专用额度|专项额度|经营额度|可用额度|授信额度|到账|入账)`)
 	draftHardFactDistancePattern      = regexp.MustCompile(`(` + draftHardFactNumberPattern + `)[[:space:]]*(公里|千米)`)
 	draftHardFactCountPattern         = regexp.MustCompile(`(第)?(` + draftHardFactNumberPattern + `)[[:space:]]*(?:个)?(张桌子|张桌|桌子|摊位|碗|摊|套|桌)`)
 )

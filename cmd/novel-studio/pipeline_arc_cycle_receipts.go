@@ -339,6 +339,12 @@ func savePipelineChapterAcceptance(
 	if _, err := st.ArcCycle().SaveChapterAcceptanceReceipt(receipt); err != nil {
 		return nil, err
 	}
+	if err := pipelineWatchdogProgressBody(
+		pipelineWatchdogEventRenderChapterAccepted,
+		bodySHA,
+	); err != nil {
+		return nil, fmt.Errorf("record chapter %d acceptance progress: %w", chapter, err)
+	}
 	return &receipt, nil
 }
 

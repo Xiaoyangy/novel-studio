@@ -32,6 +32,15 @@ type pipelineRenderCandidate struct {
 	OutputDir       string
 	TransactionRoot string
 	SourceLiveRoot  string
+	// RecoveredChapterTransactionPhase is set only after the live-root sibling
+	// transaction store and every corresponding candidate artifact have both
+	// validated. committed skips Writer; formal_accepted/actual_matched also skip
+	// formal reviewers.
+	RecoveredChapterTransactionPhase domain.ChapterRenderPhase
+	// RecoveredDurableCommit closes the tiny crash window between the commit
+	// saga's checkpoint and the sibling transaction receipt. The full candidate
+	// tree has already been revalidated, so Writer must not run again.
+	RecoveredDurableCommit bool
 	// RecoveredAcceptedActualMismatch is set only when a retired candidate
 	// already has an exact-body formal accept and the previous failure happened
 	// after review, inside the sealed actual-delta matcher.  The render runner
@@ -113,6 +122,12 @@ func runPipelineSealedActualBodyEvidencePreflight(
 		return fmt.Errorf("sealed actual body-evidence preflight matcher: %w", err)
 	}
 	if actualMatch.ProjectionMatch {
+		if err := pipelineWatchdogProgressBody(
+			pipelineWatchdogEventRenderPreflightPassed,
+			snapshot.BodySHA256,
+		); err != nil {
+			return fmt.Errorf("record sealed actual body-evidence preflight progress: %w", err)
+		}
 		return nil
 	}
 	if err := savePipelineSealedActualMatch(outputDir, actualMatch); err != nil {
@@ -141,7 +156,16 @@ func runPipelineSealedFormalReviewAfterBodyEvidence(
 	if formalReview == nil {
 		return fmt.Errorf("sealed formal review callback is nil")
 	}
-	return formalReview()
+	if err := formalReview(); err != nil {
+		return err
+	}
+	if err := pipelineWatchdogProgressBody(
+		pipelineWatchdogEventRenderFormalReviewed,
+		snapshot.BodySHA256,
+	); err != nil {
+		return fmt.Errorf("record sealed formal review progress: %w", err)
+	}
+	return nil
 }
 
 func pipelineRenderTransactionRoot(outputDir string) string {
@@ -220,7 +244,12 @@ func recoverPipelineRenderPublishesWithControlHeld(outputDir string) error {
 				id,
 			)
 		}
-		receipt, recoverErr := publisher.RecoverDirectoryPublish(id)
+		var receipt *store.DirectoryPublishReceipt
+		recoverErr := withPipelineWatchdogPaused(func() error {
+			var err error
+			receipt, err = publisher.RecoverDirectoryPublish(id)
+			return err
+		})
 		if recoverErr != nil {
 			return fmt.Errorf("render recovery pending directory publish %s: %w", id, recoverErr)
 		}
@@ -509,6 +538,16 @@ func preparePipelineRenderCandidate(
 	}
 	root := pipelineRenderCandidateRoot(liveOutputDir)
 	container := filepath.Join(root, id)
+	if recovered, err := recoverChapterRenderTransactionCandidate(
+		liveOutputDir,
+		frozen,
+		id,
+		container,
+	); err != nil {
+		return nil, err
+	} else if recovered != nil {
+		return recovered, nil
+	}
 	if recovered, err := recoverAcceptedActualMismatchPipelineRenderCandidate(
 		liveOutputDir,
 		frozen,
@@ -525,6 +564,16 @@ func preparePipelineRenderCandidate(
 	// exact-body recovery here can resurrect an earlier pre-review draft from the
 	// same sealed transaction and deterministically repeat the rejected attempt.
 	if recovered, err := recoverSemanticRejectedPipelineRenderCandidate(
+		liveOutputDir,
+		frozen,
+		id,
+		container,
+	); err != nil {
+		return nil, err
+	} else if recovered != nil {
+		return recovered, nil
+	}
+	if recovered, err := recoverDurableChapterRenderCandidate(
 		liveOutputDir,
 		frozen,
 		id,
@@ -1153,10 +1202,16 @@ func recoverReusablePipelineRenderCandidate(
 		if tombstoned {
 			continue
 		}
-		if pipelineRenderCandidateHasDurableBodyRejection(
-			filepath.Join(candidate.container, "output"),
+		durablyRejected, err := pipelineRenderBodyHasDurableConvergenceRejection(
+			liveOutputDir,
 			frozen,
-		) {
+			id,
+			reviewreport.BodySHA256(candidate.body),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("inspect reusable render candidate convergence rejection: %w", err)
+		}
+		if durablyRejected {
 			continue
 		}
 		reusable = append(reusable, candidate)
@@ -1627,14 +1682,21 @@ func loadPipelineRenderedChapterSnapshot(
 	if err != nil {
 		return nil, fmt.Errorf("render 计算提交后 canon root: %w", err)
 	}
-	return &pipelineRenderedChapterSnapshot{
+	snapshot := &pipelineRenderedChapterSnapshot{
 		Store:           st,
 		Commit:          commit,
 		ChapterPath:     chapterPath,
 		Body:            string(body),
 		BodySHA256:      bodySHA,
 		ActualCanonRoot: actualCanonRoot,
-	}, nil
+	}
+	if err := pipelineWatchdogProgressBody(
+		pipelineWatchdogEventRenderBodyCommitted,
+		bodySHA,
+	); err != nil {
+		return nil, fmt.Errorf("record rendered chapter commit progress: %w", err)
+	}
+	return snapshot, nil
 }
 
 // pipelineRenderCandidateHasCurrentExactDeepSeekReviewCache proves that sealed
@@ -1790,6 +1852,12 @@ func tryPipelineRenderReviewFirstFormalRevalidation(
 			frozen.Chapter, strings.Join(inspection.Issues, "；"),
 		)
 	}
+	if err := pipelineWatchdogProgressBody(
+		pipelineWatchdogEventRenderFormalReviewed,
+		snapshot.BodySHA256,
+	); err != nil {
+		return nil, false, fmt.Errorf("record review-first formal review progress: %w", err)
+	}
 	if !pipelineReviewAcceptedForProjection(inspection.Verdict, inspection.Disposition) {
 		if _, ledgerErr := recordPipelineRenderSemanticRejection(
 			liveOutputDir,
@@ -1874,6 +1942,9 @@ func runPipelineSealedRenderCandidate(
 			_ = retirePipelineRenderCandidate(candidate.ContainerDir, reason)
 		}
 	}()
+	if err := pipelineWatchdogProgress(pipelineWatchdogEventRenderCandidatePrepared); err != nil {
+		return nil, nil, fmt.Errorf("record sealed render candidate preparation progress: %w", err)
+	}
 	if err := bindCurrentRenderExecutionToCandidate(cfg.OutputDir, candidate, frozen); err != nil {
 		return nil, nil, err
 	}
@@ -1884,64 +1955,130 @@ func runPipelineSealedRenderCandidate(
 	renderFlags.WriteTo = frozen.Chapter
 	renderFlags.StopAfterCommit = frozen.Chapter
 	renderFlags.RenderOnly = true
-	if snapshot, recovered, recoveryErr := loadPipelineRecoveredActualMismatchSnapshot(
+	var snapshot *pipelineRenderedChapterSnapshot
+	if recoveredSnapshot, formalAccepted, recovered, recoveryErr := loadPipelineRecoveredChapterTransactionSnapshot(
 		candidate,
+		cfg.OutputDir,
 		frozen,
 		planCheckpoint,
 	); recoveryErr != nil {
 		return nil, nil, recoveryErr
 	} else if recovered {
+		snapshot = recoveredSnapshot
+		if formalAccepted {
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:render] 第 %d 章事务已封存 exact-body formal accept；跳过 Writer/Reviewer，继续 deterministic matcher\n",
+				frozen.Chapter,
+			)
+			return candidate, snapshot, nil
+		}
 		fmt.Fprintf(
 			os.Stderr,
-			"[pipeline:render] 第 %d 章 exact-body formal accept 已恢复；跳过 Writer/Reviewer，继续重新执行 sealed actual matcher\n",
+			"[pipeline:render] 第 %d 章事务已封存 exact-body commit；跳过 Writer，继续 deterministic/formal review\n",
 			frozen.Chapter,
 		)
-		return candidate, snapshot, nil
 	}
-	if snapshot, accepted, revalidationErr := tryPipelineRenderReviewFirstFormalRevalidation(
-		opts,
-		renderFlags,
-		cfg.OutputDir,
-		candidateCfg,
-		candidate,
-		frozen,
-		planCheckpoint,
-		matchBody,
-	); revalidationErr != nil {
-		return nil, nil, revalidationErr
-	} else if accepted {
-		return candidate, snapshot, nil
+	if snapshot == nil {
+		if recoveredSnapshot, formalAccepted, recovered, recoveryErr := loadPipelineRecoveredDurableCommitSnapshot(
+			candidate,
+			cfg.OutputDir,
+			frozen,
+			planCheckpoint,
+		); recoveryErr != nil {
+			return nil, nil, recoveryErr
+		} else if recovered {
+			snapshot = recoveredSnapshot
+			if formalAccepted {
+				fmt.Fprintf(
+					os.Stderr,
+					"[pipeline:render] 第 %d 章 durable commit 与 formal accept 已恢复；跳过 Writer/Reviewer\n",
+					frozen.Chapter,
+				)
+				return candidate, snapshot, nil
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:render] 第 %d 章 durable commit 已恢复；跳过 Writer，继续 deterministic/formal review\n",
+				frozen.Chapter,
+			)
+		}
 	}
-	// Frozen preflight may defer an exhausted semantic-only ledger just long
-	// enough to attempt the cache-only revalidation above. This strict check is
-	// the barrier that prevents Writer from running when the cache is absent or
-	// the normalized decision remains a reject.
-	if convergenceErr := requirePipelineRenderConvergenceAvailable(
-		store.NewStore(candidate.OutputDir),
-	); convergenceErr != nil {
-		return nil, nil, convergenceErr
-	}
-	writeErr := pipelineWriteConfigured(opts, renderFlags, state, candidateCfg, bundle)
-	if _, syncErr := syncPipelineRenderConvergence(store.NewStore(candidate.OutputDir)); syncErr != nil {
-		return nil, nil, fmt.Errorf("render 第 %d 章持久化同 plan 收敛账本失败: %w", frozen.Chapter, syncErr)
-	}
-	if convergenceErr := requirePipelineRenderConvergenceAvailable(store.NewStore(candidate.OutputDir)); convergenceErr != nil {
-		return nil, nil, convergenceErr
-	}
-	if writeErr != nil {
-		return nil, nil, fmt.Errorf(
-			"render 第 %d 章候选失败（live canon 未变；render lock 已禁止临时重规划）: %w",
-			frozen.Chapter,
-			writeErr,
+	if snapshot == nil {
+		if recoveredSnapshot, recovered, recoveryErr := loadPipelineRecoveredActualMismatchSnapshot(
+			candidate,
+			frozen,
+			planCheckpoint,
+		); recoveryErr != nil {
+			return nil, nil, recoveryErr
+		} else if recovered {
+			if err := pipelineAdvanceChapterRenderFormal(
+				cfg.OutputDir, candidate.OutputDir, frozen, planCheckpoint, recoveredSnapshot, true,
+			); err != nil {
+				return nil, nil, err
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:render] 第 %d 章 exact-body formal accept 已恢复；跳过 Writer/Reviewer，继续重新执行 sealed actual matcher\n",
+				frozen.Chapter,
+			)
+			return candidate, recoveredSnapshot, nil
+		}
+		if revalidated, accepted, revalidationErr := tryPipelineRenderReviewFirstFormalRevalidation(
+			opts,
+			renderFlags,
+			cfg.OutputDir,
+			candidateCfg,
+			candidate,
+			frozen,
+			planCheckpoint,
+			matchBody,
+		); revalidationErr != nil {
+			return nil, nil, revalidationErr
+		} else if accepted {
+			if err := pipelineAdvanceChapterRenderFormal(
+				cfg.OutputDir, candidate.OutputDir, frozen, planCheckpoint, revalidated, true,
+			); err != nil {
+				return nil, nil, err
+			}
+			return candidate, revalidated, nil
+		}
+		// Frozen preflight may defer an exhausted semantic-only ledger just long
+		// enough to attempt the cache-only revalidation above. This strict check is
+		// the barrier that prevents Writer from running when the cache is absent or
+		// the normalized decision remains a reject.
+		if convergenceErr := requirePipelineRenderConvergenceAvailable(
+			store.NewStore(candidate.OutputDir),
+		); convergenceErr != nil {
+			return nil, nil, convergenceErr
+		}
+		writeErr := pipelineWriteConfigured(opts, renderFlags, state, candidateCfg, bundle)
+		if _, syncErr := syncPipelineRenderConvergence(store.NewStore(candidate.OutputDir)); syncErr != nil {
+			return nil, nil, fmt.Errorf("render 第 %d 章持久化同 plan 收敛账本失败: %w", frozen.Chapter, syncErr)
+		}
+		if convergenceErr := requirePipelineRenderConvergenceAvailable(store.NewStore(candidate.OutputDir)); convergenceErr != nil {
+			return nil, nil, convergenceErr
+		}
+		if writeErr != nil {
+			return nil, nil, fmt.Errorf(
+				"render 第 %d 章候选失败（live canon 未变；render lock 已禁止临时重规划）: %w",
+				frozen.Chapter,
+				writeErr,
+			)
+		}
+		snapshot, err = loadPipelineRenderedChapterSnapshot(
+			candidate.OutputDir,
+			frozen,
+			planCheckpoint,
 		)
-	}
-	snapshot, err := loadPipelineRenderedChapterSnapshot(
-		candidate.OutputDir,
-		frozen,
-		planCheckpoint,
-	)
-	if err != nil {
-		return nil, nil, err
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := pipelineEnsureChapterRenderCommitted(
+			cfg.OutputDir, candidate.OutputDir, frozen, planCheckpoint, snapshot,
+		); err != nil {
+			return nil, nil, err
+		}
 	}
 	reviewArgs := []string{"--from", fmt.Sprint(frozen.Chapter), "--to", fmt.Sprint(frozen.Chapter)}
 	if flags.Budget > 0 {
@@ -1978,6 +2115,19 @@ func runPipelineSealedRenderCandidate(
 		},
 	); err != nil {
 		if errors.Is(err, errPipelineSealedActualBodyEvidenceMismatch) {
+			if txnErr := pipelineAdvanceChapterRenderStructuralBlock(
+				cfg.OutputDir,
+				candidate.OutputDir,
+				frozen,
+				planCheckpoint,
+				snapshot,
+			); txnErr != nil {
+				return nil, nil, fmt.Errorf(
+					"render 第 %d 章保存 structural-block 事务失败: %w",
+					frozen.Chapter,
+					txnErr,
+				)
+			}
 			return nil, nil, fmt.Errorf(
 				"render 第 %d 章候选 deterministic body-evidence preflight 未实现 sealed projected delta（formal review 未调用；live canon 未变）: %w",
 				frozen.Chapter,
@@ -2008,6 +2158,22 @@ func runPipelineSealedRenderCandidate(
 			)
 		}
 		semanticReviewRejected = tombstoned
+		if tombstoned {
+			if txnErr := pipelineAdvanceChapterRenderFormal(
+				cfg.OutputDir,
+				candidate.OutputDir,
+				frozen,
+				planCheckpoint,
+				snapshot,
+				false,
+			); txnErr != nil {
+				return nil, nil, fmt.Errorf(
+					"render 第 %d 章保存 formal-rejected 事务失败: %w",
+					frozen.Chapter,
+					txnErr,
+				)
+			}
+		}
 		if tombstoned {
 			ledger, ledgerErr := recordPipelineRenderSemanticRejection(
 				cfg.OutputDir,
@@ -2040,6 +2206,16 @@ func runPipelineSealedRenderCandidate(
 		planCheckpoint,
 	)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := pipelineAdvanceChapterRenderFormal(
+		cfg.OutputDir,
+		candidate.OutputDir,
+		frozen,
+		planCheckpoint,
+		snapshot,
+		true,
+	); err != nil {
 		return nil, nil, err
 	}
 	return candidate, snapshot, nil
@@ -2084,6 +2260,12 @@ func loadPipelineRecoveredActualMismatchSnapshot(
 			frozen.Chapter,
 			err,
 		)
+	}
+	if err := pipelineWatchdogProgressBody(
+		pipelineWatchdogEventRenderFormalReviewed,
+		snapshot.BodySHA256,
+	); err != nil {
+		return nil, false, fmt.Errorf("record recovered formal review progress: %w", err)
 	}
 	return snapshot, true, nil
 }
@@ -2241,6 +2423,13 @@ func bindCurrentRenderExecutionToCandidate(
 		bound.ProcessID != os.Getpid() {
 		return fmt.Errorf("verify candidate render execution binding: lock=%+v err=%v", bound, err)
 	}
+	// A previous process can crash after consuming/committing prose but before
+	// the Host-turn cleanup runs. Recovery may then skip Host entirely. Clear
+	// any copied/stale one-shot capability at this mandatory pre-recovery bind
+	// boundary so it can neither be consumed nor published into live.
+	if err := store.NewStore(candidate.OutputDir).Runtime.ClearPipelineRenderProsePermit(""); err != nil {
+		return fmt.Errorf("clear stale render prose permit before candidate recovery: %w", err)
+	}
 	return nil
 }
 
@@ -2252,11 +2441,16 @@ func publishPipelineRenderCandidate(
 		return nil, fmt.Errorf("publish sealed render candidate is nil")
 	}
 	publisher := store.NewDirectoryPublishStore(candidate.TransactionRoot)
-	receipt, err := publisher.PublishDirectory(store.PublishDirectoryRequest{
-		TransactionID:    candidate.ID,
-		LiveDir:          liveOutputDir,
-		CandidateDir:     candidate.OutputDir,
-		ExpectedLiveRoot: candidate.SourceLiveRoot,
+	var receipt *store.DirectoryPublishReceipt
+	err := withPipelineWatchdogPaused(func() error {
+		var publishErr error
+		receipt, publishErr = publisher.PublishDirectory(store.PublishDirectoryRequest{
+			TransactionID:    candidate.ID,
+			LiveDir:          liveOutputDir,
+			CandidateDir:     candidate.OutputDir,
+			ExpectedLiveRoot: candidate.SourceLiveRoot,
+		})
+		return publishErr
 	})
 	if err != nil {
 		return nil, fmt.Errorf("publish sealed render candidate: %w", err)
@@ -2267,6 +2461,9 @@ func publishPipelineRenderCandidate(
 		receipt.CandidateRoot != receipt.CommittedLiveRoot ||
 		strings.TrimSpace(receipt.ReceiptDigest) == "" {
 		return nil, fmt.Errorf("sealed render directory publish returned incomplete receipt")
+	}
+	if err := pipelineWatchdogProgress(pipelineWatchdogEventRenderCandidatePublished); err != nil {
+		return nil, fmt.Errorf("record sealed render candidate publish progress: %w", err)
 	}
 	return receipt, nil
 }
@@ -2297,9 +2494,17 @@ func savePipelineSealedActualMatch(
 		return err
 	}
 	raw = append(raw, '\n')
-	return atomicWriteRewriteFile(
+	if err := atomicWriteRewriteFile(
 		filepath.Join(outputDir, "meta", "planning", "sealed_actual_match.json"),
 		raw,
 		0o644,
-	)
+	); err != nil {
+		return err
+	}
+	if match.ProjectionMatch {
+		if err := pipelineWatchdogProgress(pipelineWatchdogEventRenderActualMatched); err != nil {
+			return fmt.Errorf("record sealed actual match progress: %w", err)
+		}
+	}
+	return nil
 }

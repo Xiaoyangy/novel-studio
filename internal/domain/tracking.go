@@ -12,7 +12,7 @@ type StateChange struct {
 	// Task 073（FACTTRACK 语义）：事实有效期区间——区分"合法演化"与"矛盾"。
 	// 同 FactKey 的新记录出现时，旧记录被链上作废（SupersededBy 指向新记录章号）；
 	// "角色从A地到B地"是有序演化，"同章既在A又在B"才是矛盾。全部可选，老数据零影响。
-	FactKey      string `json:"fact_key,omitempty"`      // 同一事实的稳定键，如 character:江烬:location
+	FactKey      string `json:"fact_key,omitempty"`      // 同一事实的稳定键，如 character:protagonist:location
 	ValidFrom    int    `json:"valid_from,omitempty"`    // 生效章号（缺省=Chapter）
 	SupersededBy int    `json:"superseded_by,omitempty"` // 作废本条的后续记录章号（0=仍有效）
 }

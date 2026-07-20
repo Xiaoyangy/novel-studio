@@ -17,21 +17,27 @@ import (
 
 const candidateCount = 3
 
+const renderCandidateCount = 1
+
 // ProtocolDigest binds sealed render receipts to the prose sampling and
 // pairwise-judge protocol. Bump Version whenever selection semantics change.
 func ProtocolDigest() string {
 	digest, _ := domain.DeterministicPlanningHash(struct {
-		Version             string `json:"version"`
-		CandidateCount      int    `json:"candidate_count"`
-		PairwiseRounds      int    `json:"pairwise_rounds"`
-		PairwiseRuneLimit   int    `json:"pairwise_rune_limit"`
-		PairwiseInstruction string `json:"pairwise_instruction"`
+		Version              string `json:"version"`
+		CandidateCount       int    `json:"ordinary_candidate_count"`
+		PairwiseRounds       int    `json:"ordinary_pairwise_rounds"`
+		RenderCandidateCount int    `json:"render_candidate_count"`
+		RenderPairwiseRounds int    `json:"render_pairwise_rounds"`
+		PairwiseRuneLimit    int    `json:"pairwise_rune_limit"`
+		PairwiseInstruction  string `json:"pairwise_instruction"`
 	}{
-		Version:             "writer-sampler-protocol.v2",
-		CandidateCount:      candidateCount,
-		PairwiseRounds:      2,
-		PairwiseRuneLimit:   1800,
-		PairwiseInstruction: "更像人类作者、AI腔更少、叙事更扎实；只回答A或B；换位两轮一致才裁定",
+		Version:              "writer-sampler-protocol.v3",
+		CandidateCount:       candidateCount,
+		PairwiseRounds:       2,
+		RenderCandidateCount: renderCandidateCount,
+		RenderPairwiseRounds: 0,
+		PairwiseRuneLimit:    1800,
+		PairwiseInstruction:  "更像人类作者、AI腔更少、叙事更扎实；只回答A或B；换位两轮一致才裁定",
 	})
 	return digest
 }
@@ -43,10 +49,21 @@ type Model struct {
 	Judge agentcore.ChatModel
 
 	Base agentcore.ChatModel
+
+	// Render makes the sealed prose path one reservation == at most one Base
+	// Generate call. Ordinary Writer/Drafter sessions retain three-candidate
+	// speculative sampling and pairwise selection.
+	Render bool
 }
 
 func New(base agentcore.ChatModel) *Model {
 	return &Model{Base: base}
+}
+
+// NewRender returns the sealed-render sampler. It deliberately bypasses both
+// speculative candidates and the pairwise provider judge.
+func NewRender(base agentcore.ChatModel) *Model {
+	return &Model{Base: base, Render: true}
 }
 
 func (m *Model) SupportsTools() bool {
@@ -93,7 +110,7 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 		score    domain.SamplingCandidate
 	}
 	sampleCount := candidateCount
-	if isRewriteSamplingRequest(messages) {
+	if m.Render || isRewriteSamplingRequest(messages) {
 		sampleCount = 1
 	}
 	type sampleResult struct {
@@ -145,7 +162,7 @@ func (m *Model) sample(ctx context.Context, messages []agentcore.Message, tools 
 		return candidates[i].score.RoughnessScore > candidates[j].score.RoughnessScore
 	})
 	best := candidates[0]
-	if m.Judge != nil && len(candidates) >= 2 {
+	if !m.Render && m.Judge != nil && len(candidates) >= 2 {
 		if winner, decided := pairwiseJudge(ctx, m.Judge, candidates[0].args.Content, candidates[1].args.Content); decided && winner == 1 {
 			best = candidates[1]
 		}

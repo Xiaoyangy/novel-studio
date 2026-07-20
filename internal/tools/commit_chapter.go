@@ -1665,7 +1665,7 @@ func (t *CommitChapterTool) resourcePendingViolations(text string) []rules.Viola
 }
 
 func (t *CommitChapterTool) projectContaminationViolations(text string) []rules.Violation {
-	return SecondAlgorithmProjectContaminationViolations(t.store, text)
+	return ProjectContaminationViolations(t.store, text)
 }
 
 func (t *CommitChapterTool) saveFinalAIVoice(chapter int, content string, previousText string) (domain.AIVoiceAnalysis, error) {

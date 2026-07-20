@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -8,10 +9,86 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestRenderLockedContextInjectsV11CompatibilityBeforeModelWithoutChangingEnvelope(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Drafts.SaveChapterPlan(domain.ChapterPlan{Chapter: 1, Title: "旧版冻结上下文"}); err != nil {
+		t.Fatal(err)
+	}
+	cp, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1),
+		"plan",
+		"drafts/01.plan.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := json.RawMessage(`{
+		"_context_profile":"draft",
+		"working_memory":{"render_packet":{"version":11,"chapter":1,"title":"旧版冻结上下文"}}
+	}`)
+	frozen, err := PublishFrozenDraftRenderContext(st, 1, cp.Digest, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopePath := filepath.Join(st.Dir(), filepath.FromSlash(FrozenDraftRenderContextPath))
+	before, err := os.ReadFile(envelopePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode:          domain.PipelineExecutionRender,
+		TargetChapter: 1,
+		PlanDigest:    cp.Digest,
+		Owner:         "v11-compatibility-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := NewContextTool(st, References{}, "default").Execute(
+		context.Background(),
+		json.RawMessage(`{"chapter":1,"profile":"draft"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var returned map[string]any
+	if err := json.Unmarshal(raw, &returned); err != nil {
+		t.Fatal(err)
+	}
+	packet := returned["working_memory"].(map[string]any)["render_packet"].(map[string]any)
+	contract, ok := packet["anti_ai_render_contract"].(map[string]any)
+	if !ok || contract["compatibility_protocol"] != aigc.ProseRenderCompatibilityProtocolVersion ||
+		contract["usage_policy"] != string(aigc.ProseRenderUsagePolicyV1) {
+		t.Fatalf("render tool response lacks prospective compatibility contract: %#v", packet)
+	}
+	if _, ok := packet["event_timing_safeguards"].(map[string]any); !ok {
+		t.Fatalf("render tool response lacks compatibility timing safeguards: %#v", packet)
+	}
+
+	after, err := os.ReadFile(envelopePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("dynamic compatibility overlay rewrote the frozen envelope")
+	}
+	_, reloaded, err := LoadFrozenDraftRenderContext(st, 1, cp.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.PayloadSHA256 != frozen.PayloadSHA256 {
+		t.Fatalf("dynamic compatibility overlay changed signed payload digest: before=%s after=%s", frozen.PayloadSHA256, reloaded.PayloadSHA256)
+	}
+}
 
 func TestSealedRenderContextAddsOnlyExactRejectedBodyFeedback(t *testing.T) {
 	st := store.NewStore(t.TempDir())
@@ -143,13 +220,16 @@ func TestRenderContextReturnsExactPlanFrozenPayloadAndRejectsLiveProfiles(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got, want any
+	var got, want map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(frozen.Payload, &want); err != nil {
 		t.Fatal(err)
 	}
+	// The sole permitted difference from frozen bytes is the deterministic,
+	// in-memory compatibility overlay also used by every prose provider.
+	aigc.ApplyProseRenderCompatibilityContracts(want)
 	gotJSON, _ := json.Marshal(got)
 	wantJSON, _ := json.Marshal(want)
 	if string(gotJSON) != string(wantJSON) {

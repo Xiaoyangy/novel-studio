@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
 
@@ -1972,7 +1973,7 @@ func defaultProseAntiAIRenderContract() *draftAntiAIRenderContract {
 		ReviewChecks: []string{
 			"复核上述合同已落实。",
 		},
-		UsagePolicy: "首稿前执行；章级优先。",
+		UsagePolicy: string(aigc.ProseRenderUsagePolicyV1),
 	}
 }
 
@@ -1987,7 +1988,7 @@ func proseAntiAIRenderContractFromPacket(contract *draftAntiAIRenderContract) *d
 		ObjectResponseBudget: sanitizeProseTimingText(contract.ObjectResponseBudget),
 		DialogueFunctionPlan: sanitizeProseTimingText(contract.DialogueFunctionPlan),
 		ReviewChecks:         sanitizeProseAntiAIStrings(contract.ReviewChecks, 8),
-		UsagePolicy:          "首稿前执行；章级优先。",
+		UsagePolicy:          string(aigc.ProseRenderUsagePolicyV1),
 	}
 	if len(out.RiskSignals) == 0 && len(out.CounterMoves) == 0 &&
 		out.SentenceRhythmPolicy == "" && out.ObjectResponseBudget == "" &&
@@ -3319,7 +3320,7 @@ func splitOptionalStyleBeats(beats []string, trends []domain.TrendLanguagePlan) 
 func optionalStyleText(text string, trends []domain.TrendLanguagePlan) bool {
 	trimmed := strings.TrimSpace(text)
 	// A style literal embedded in a compound event must not demote the event's
-	// real outcome (for example, "赵航用梗打断；林澈离席"). Only pure style
+	// real outcome (for example, "角色甲用梗打断；角色乙离席"). Only pure style
 	// requirements belong in optional_style_beats.
 	compound := strings.TrimRight(trimmed, "。！？!?；;")
 	if strings.ContainsAny(compound, "；;。") {

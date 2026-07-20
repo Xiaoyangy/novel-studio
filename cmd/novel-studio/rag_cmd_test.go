@@ -12,6 +12,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rag"
+	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
@@ -274,6 +275,15 @@ func TestEnsureDefaultRAGIndexSanitizesExistingVectorStore(t *testing.T) {
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Version: rules.SnapshotVersion,
+		Status:  rules.StatusReady,
+		Structured: rules.Structured{
+			ForbiddenPhrases: []string{"算法审计证据链"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveUserRules: %v", err)
+	}
 	mustWriteRAGTestFile(t, filepath.Join(outputDir, "characters.json"), `[{"name":"许闻溪"}]`)
 	goodChunk := rag.NormalizeChunk(domain.RAGChunk{
 		ID:         "good",
@@ -320,6 +330,68 @@ func TestEnsureDefaultRAGIndexSanitizesExistingVectorStore(t *testing.T) {
 	}
 	if vectorStore == nil || len(vectorStore.Points) != 1 || vectorStore.Points[0].ID != "good" {
 		t.Fatalf("expected only clean vector point, got %+v", vectorStore)
+	}
+}
+
+func TestEnsureDefaultRAGIndexResanitizesWhenProjectForbiddenPhrasesChange(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "output", "novel")
+	st := store.NewStore(outputDir)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	clean := rag.NormalizeChunk(domain.RAGChunk{
+		ID:         "clean",
+		SourcePath: "summaries/01.json",
+		SourceKind: "chapter_summary_facts",
+		Text:       "当前项目人物完成交付。",
+	})
+	contaminated := rag.NormalizeChunk(domain.RAGChunk{
+		ID:         "contaminated",
+		SourcePath: "summaries/02.json",
+		SourceKind: "chapter_summary_facts",
+		Text:       "外部项目专名进入了事实层。",
+	})
+	if err := st.RAG.SaveIndexState(domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Config:        domain.RAGIndexConfig{Collection: "local_keyword"},
+		Chunks:        []domain.RAGChunk{clean, contaminated},
+	}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
+
+	if err := ensureDefaultRAGIndex(outputDir); err != nil {
+		t.Fatalf("initial ensureDefaultRAGIndex: %v", err)
+	}
+	before, err := st.RAG.LoadIndexState()
+	if err != nil {
+		t.Fatalf("LoadIndexState before rule change: %v", err)
+	}
+	if len(before.Chunks) != 2 || before.SanitizedDigest == "" {
+		t.Fatalf("initial sanitation marker not established: %+v", before)
+	}
+
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Version: rules.SnapshotVersion,
+		Status:  rules.StatusReady,
+		Structured: rules.Structured{
+			ForbiddenPhrases: []string{"外部项目专名"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveUserRules: %v", err)
+	}
+	if err := ensureDefaultRAGIndex(outputDir); err != nil {
+		t.Fatalf("ensureDefaultRAGIndex after rule change: %v", err)
+	}
+	after, err := st.RAG.LoadIndexState()
+	if err != nil {
+		t.Fatalf("LoadIndexState after rule change: %v", err)
+	}
+	if len(after.Chunks) != 1 || after.Chunks[0].ID != "clean" {
+		t.Fatalf("updated project boundary did not resanitize index: %+v", after.Chunks)
+	}
+	if after.SanitizedDigest == before.SanitizedDigest {
+		t.Fatal("sanitization digest did not bind changed project forbidden phrases")
 	}
 }
 

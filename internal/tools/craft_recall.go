@@ -218,15 +218,15 @@ func (t *CraftRecallTool) craftCatalogFor(state *domain.RAGIndexState, chunks []
 }
 
 func (t *CraftRecallTool) filterCrossProjectCraftChunks(chunks []domain.RAGChunk) ([]domain.RAGChunk, int) {
-	active, _ := secondAlgorithmContaminationPolicy(t.store)
-	if !active {
+	terms := projectContaminationTerms(t.store)
+	if len(terms) == 0 {
 		return chunks, 0
 	}
 	filtered := make([]domain.RAGChunk, 0, len(chunks))
 	dropped := 0
 	for _, chunk := range chunks {
 		text := chunk.SourcePath + "\n" + chunk.Context + "\n" + chunk.Summary + "\n" + chunk.Text
-		if containsSecondAlgorithmContaminationTerm(text) {
+		if containsProjectContaminationTerm(terms, text) {
 			dropped++
 			continue
 		}

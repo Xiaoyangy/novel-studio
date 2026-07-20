@@ -13,7 +13,7 @@ package domain
 // CodexAbilityTier 能力分级的一级：从量级、晋升、边界、代价四面锁死。
 type CodexAbilityTier struct {
 	Order     int      `json:"order"`              // 层级序号，1 起
-	Name      string   `json:"name"`               // 分级名：如 夜租新客/一阶/筑基/微弱神力
+	Name      string   `json:"name"`               // 分级名：如 入门/一阶/筑基/微弱神力
 	Aliases   []string `json:"aliases,omitempty"`  // 民间叫法/别称
 	Magnitude string   `json:"magnitude"`          // 量级：这一级能做到什么（可对比参照物）
 	Limits    string   `json:"limits"`             // 边界：这一级做不到什么、被什么克制

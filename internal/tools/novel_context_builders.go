@@ -1825,7 +1825,7 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 		case "structured_note_triplet":
 			focus = append(focus, "便签和备忘录不要三条工整并列；改成划掉、补字、挤在行尾、写半截、回看物件后暂不下结论的现场痕迹。")
 		case "card_tos_block":
-			focus = append(focus, "黑卡/系统提示不要完整列 ToS；改成残缺字、糊掉的行、读不全的凸字、空白账单位，让读者自己补规则。")
+			focus = append(focus, "规则载体或系统提示不要完整列服务条款；只保留当前 plan 要求读者看见的少量信息，其余通过遮挡、打断、人物误读或后果呈现。")
 		case "empty_parallel_chant":
 			focus = append(focus, "童谣保留有内容的规则链，删掉空对仗三连；让孩子背岔、卡壳、问妈妈后面是什么，或混入不通顺的数字/童声错位。")
 		case "de_fa_adjective_repetition":
@@ -1841,13 +1841,13 @@ func mechanicalGateRewriteFocus(violations []rules.Violation, report aigc.Report
 		case "identity_effect_delayed":
 			focus = append(focus, "报身份证、报名字、确认身份后的规则后果要紧贴演示；不要在因和果之间插闲聊、吐槽或新支线。")
 		case "building_floor_mismatch":
-			focus = append(focus, "楼栋、楼层、门牌号要统一；3栋5楼不能写成5栋承租物，除非剧情明确换了楼栋。")
+			focus = append(focus, "楼栋、楼层、门牌号要与当前场景资产统一；不得把楼层号误写成楼栋号，除非剧情明确换了地点。")
 		case "anomalous_phone_unverified":
 			focus = append(focus, "异常来电若不是从基站/正常渠道进来，主角先做身份核验，再相信对方声音和信息。")
 		case "form_image_mismatch":
 			focus = append(focus, "票据、栏位、印章、表格的比喻必须贴合形状；栏位不写成像章，改成拼出来、贴歪或格线不齐。")
 		case "card_core_rule_overblurred":
-			focus = append(focus, "黑卡可以残缺、糊字、留白，但核心可玩规则要留一两个可读词，如“可确认”，让读者能拿规则参与推理。")
+			focus = append(focus, "规则载体可以残缺、糊字、留白，但当前 plan 要求驱动选择的核心条件要保留少量可读信息，让人物和读者能据此行动。")
 		case "ending_aphorism_question":
 			focus = append(focus, "章末不要用抽象金句问号收束，改成具体动作、物件变化、新事实或未完成选择。")
 		}

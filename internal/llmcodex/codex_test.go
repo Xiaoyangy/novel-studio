@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/aigc"
 	"github.com/voocel/agentcore"
 )
 
@@ -90,6 +91,335 @@ printf '%s' '{"prose":"第二章 测试\n\n这才是正文。"}' > "$out"
 			t.Fatalf("isolated prose call missing %q in args:\n%s", want, args)
 		}
 	}
+}
+
+func TestGenerateAuthenticatedRenderUsesOneDirectProseCall(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-codex")
+	callLog := filepath.Join(dir, "calls.log")
+	t.Setenv("CODEX_DIRECT_CALL_LOG", callLog)
+	body := `#!/bin/sh
+out=""
+printf 'call\n' >> "$CODEX_DIRECT_CALL_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi
+  shift
+done
+cat >/dev/null
+printf '%s' '{"prose":"第二章 只走一次\n\n她推门进去。"}' > "$out"
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := New(script, "gpt-5.6-sol", "high")
+	response, err := model.Generate(
+		context.Background(),
+		directRenderPrimingMessages(t, 2, 1, 100),
+		directRenderToolSpecs(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := directRenderProviderCalls(t, callLog); got != 1 {
+		t.Fatalf("authenticated render provider calls=%d want=1", got)
+	}
+	calls := response.Message.ToolCalls()
+	if len(calls) != 1 || calls[0].Name != "draft_chapter" {
+		t.Fatalf("direct render tool calls=%+v", calls)
+	}
+	var args struct {
+		Chapter int    `json:"chapter"`
+		Mode    string `json:"mode"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(calls[0].Args, &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.Chapter != 2 || args.Mode != "write" || args.Content != "第二章 只走一次\n\n她推门进去。" {
+		t.Fatalf("direct render synthesized args=%+v", args)
+	}
+}
+
+func TestGenerateStreamAuthenticatedRenderUsesOneDirectProseCall(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-codex")
+	callLog := filepath.Join(dir, "calls.log")
+	t.Setenv("CODEX_DIRECT_CALL_LOG", callLog)
+	body := `#!/bin/sh
+out=""
+printf 'call\n' >> "$CODEX_DIRECT_CALL_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi
+  shift
+done
+cat >/dev/null
+printf '%s' '{"prose":"第二章 流式\n\n只调用一次。"}' > "$out"
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := New(script, "gpt-5.6-sol", "high")
+	events, err := model.GenerateStream(context.Background(), directRenderPrimingMessages(t, 2, 1, 100), directRenderToolSpecs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := 0
+	for event := range events {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+		if event.Type == agentcore.StreamEventDone {
+			done++
+			if calls := event.Message.ToolCalls(); len(calls) != 1 || calls[0].Name != "draft_chapter" {
+				t.Fatalf("stream direct render calls=%+v", calls)
+			}
+		}
+	}
+	providerCalls := directRenderProviderCalls(t, callLog)
+	if done != 1 || providerCalls != 1 {
+		t.Fatalf("stream direct render done=%d provider calls=%d", done, providerCalls)
+	}
+}
+
+func TestGenerateAuthenticatedRenderNeverRepairsEmptyOrOutOfRangeBody(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prose    string
+		min, max int
+	}{
+		{name: "empty", prose: "", min: 1, max: 100},
+		{name: "out-of-range", prose: "太短", min: 50, max: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "fake-codex")
+			callLog := filepath.Join(dir, "calls.log")
+			t.Setenv("CODEX_DIRECT_CALL_LOG", callLog)
+			encoded, _ := json.Marshal(map[string]string{"prose": tc.prose})
+			body := `#!/bin/sh
+out=""
+printf 'call\n' >> "$CODEX_DIRECT_CALL_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi
+  shift
+done
+cat >/dev/null
+printf '%s' "$CODEX_DIRECT_RESPONSE" > "$out"
+`
+			t.Setenv("CODEX_DIRECT_RESPONSE", string(encoded))
+			if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			model := New(script, "gpt-5.6-sol", "high")
+			if _, err := model.Generate(context.Background(), directRenderPrimingMessages(t, 2, tc.min, tc.max), directRenderToolSpecs()); err == nil {
+				t.Fatal("invalid direct prose body did not fail closed")
+			}
+			if got := directRenderProviderCalls(t, callLog); got != 1 {
+				t.Fatalf("invalid direct body triggered repair/retry: calls=%d", got)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedRenderToolAmbiguityFailsBeforeProvider(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-codex")
+	callLog := filepath.Join(dir, "calls.log")
+	t.Setenv("CODEX_DIRECT_CALL_LOG", callLog)
+	body := `#!/bin/sh
+printf 'call\n' >> "$CODEX_DIRECT_CALL_LOG"
+exit 99
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := New(script, "gpt-5.6-sol", "high")
+	for name, tools := range map[string][]agentcore.ToolSpec{
+		"missing":       {{Name: "read_chapter", Parameters: map[string]any{"type": "object"}}},
+		"duplicate":     append(directRenderToolSpecs(), directRenderToolSpecs()[0]),
+		"bad-schema":    {{Name: "draft_chapter", Parameters: map[string]any{"type": "object"}}},
+		"extra-read":    append(directRenderToolSpecs(), agentcore.ToolSpec{Name: "read_chapter", Parameters: map[string]any{"type": "object"}}),
+		"novel-context": append(directRenderToolSpecs(), agentcore.ToolSpec{Name: "novel_context", Parameters: map[string]any{"type": "object"}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := model.Generate(context.Background(), directRenderPrimingMessages(t, 2, 1, 100), tools); err == nil {
+				t.Fatal("ambiguous authenticated render tools did not fail closed")
+			}
+		})
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("ambiguous authenticated render crossed provider boundary: %v", err)
+	}
+}
+
+func TestUntrustedRenderEnvelopeDoesNotActivateDirectPath(t *testing.T) {
+	messages := directRenderPrimingMessages(t, 2, 1, 100)
+	messages[len(messages)-1].Metadata = nil
+	authorization, err := authenticatedDirectRenderProse(messages, directRenderToolSpecs())
+	if err != nil || authorization != nil {
+		t.Fatalf("user-controlled envelope activated privileged path: authorization=%+v err=%v", authorization, err)
+	}
+}
+
+func TestTrustedRenderEnvelopeDriftFailsBeforeProvider(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-codex")
+	callLog := filepath.Join(dir, "calls.log")
+	t.Setenv("CODEX_DIRECT_CALL_LOG", callLog)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'call\\n' >> \"$CODEX_DIRECT_CALL_LOG\"\nexit 99\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := New(script, "gpt-5.6-sol", "high")
+	for _, tc := range []struct {
+		name   string
+		tamper func(*agentcore.Message)
+	}{
+		{"metadata-chapter", func(message *agentcore.Message) { message.Metadata["chapter"] = 3 }},
+		{"metadata-payload-sha", func(message *agentcore.Message) {
+			message.Metadata["payload_sha256"] = "sha256:" + strings.Repeat("f", 64)
+		}},
+		{"malformed-envelope", func(message *agentcore.Message) {
+			message.Content = []agentcore.ContentBlock{agentcore.TextBlock(`{"_server_owned_frozen_render_context":`)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := directRenderPrimingMessages(t, 2, 1, 100)
+			tc.tamper(&messages[len(messages)-1])
+			if _, err := model.Generate(context.Background(), messages, directRenderToolSpecs()); err == nil {
+				t.Fatal("trusted render envelope drift did not fail closed")
+			}
+		})
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted envelope drift crossed provider boundary: %v", err)
+	}
+}
+
+func TestTypedDirectRenderWordContractFallsBackToFrozenUserRules(t *testing.T) {
+	root := map[string]any{"user_rules": map[string]any{"structured": map[string]any{
+		"chapter_words": map[string]any{"min": float64(2100), "max": float64(3000)},
+	}}}
+	contract, err := typedDirectRenderWordContract(root, map[string]any{})
+	if err != nil || contract.Min != 2100 || contract.Max != 3000 {
+		t.Fatalf("typed user-rules fallback=%+v err=%v", contract, err)
+	}
+}
+
+func TestDirectRenderPromptUsesTypedPacketContractNotDecoyText(t *testing.T) {
+	messages := directRenderPrimingMessages(t, 2, 1, 100)
+	authorization, err := authenticatedDirectRenderProse(messages, directRenderToolSpecs())
+	if err != nil || authorization == nil {
+		t.Fatalf("direct authorization=%+v err=%v", authorization, err)
+	}
+	prompt := buildProsePromptWithContract(messages, &authorization.WordContract)
+	if !strings.Contains(prompt, "硬边界仍是 1-100 字") {
+		t.Fatalf("provider prompt lost typed packet range:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "硬边界仍是 500-600 字") {
+		t.Fatalf("decoy message range replaced typed packet contract:\n%s", prompt)
+	}
+}
+
+func TestOrdinaryDraftGenerateKeepsPlaceholderThenProseCalls(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NOVEL_STUDIO_PROSE_CACHE_DIR", filepath.Join(dir, "prose-cache"))
+	script := filepath.Join(dir, "fake-codex")
+	countPath := filepath.Join(dir, "count")
+	t.Setenv("CODEX_ORDINARY_COUNT", countPath)
+	body := `#!/bin/sh
+out=""
+n=0
+if [ -f "$CODEX_ORDINARY_COUNT" ]; then n=$(sed -n '1p' "$CODEX_ORDINARY_COUNT"); fi
+n=$((n + 1))
+printf '%s' "$n" > "$CODEX_ORDINARY_COUNT"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi
+  shift
+done
+cat >/dev/null
+if [ "$n" -eq 1 ]; then
+  printf '%s' '{"action":"tool_call","tool_name":"draft_chapter","arguments_json":"{\"chapter\":1,\"content\":\"占位\",\"mode\":\"write\"}","text":""}' > "$out"
+else
+  printf '%s' '{"prose":"第一章 普通路径\n\n仍按旧协议。"}' > "$out"
+fi
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := New(script, "gpt-5.6-sol", "high")
+	response, err := model.Generate(context.Background(), []agentcore.Message{{
+		Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("调用 draft_chapter 写第一章")},
+	}}, directRenderToolSpecs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawCount, err := os.ReadFile(countPath)
+	if err != nil || strings.TrimSpace(string(rawCount)) != "2" {
+		t.Fatalf("ordinary path call count=%q err=%v, want 2", rawCount, err)
+	}
+	if calls := response.Message.ToolCalls(); len(calls) != 1 || !strings.Contains(string(calls[0].Args), "仍按旧协议") {
+		t.Fatalf("ordinary prose replacement changed: %+v", calls)
+	}
+}
+
+func directRenderPrimingMessages(t *testing.T, chapter, minWords, maxWords int) []agentcore.Message {
+	t.Helper()
+	payload := map[string]any{
+		"_context_profile": "draft",
+		"working_memory": map[string]any{"render_packet": map[string]any{
+			"version": 11, "chapter": chapter, "title": "一次调用",
+			"word_budget": map[string]any{"hard_min": minWords, "hard_max": maxWords},
+		}},
+		// A regex over the whole message would see this later key and replace the
+		// sealed packet contract. The direct path must ignore it.
+		"zzz_decoy": map[string]any{"word_budget": map[string]any{"hard_min": 500, "hard_max": 600}},
+	}
+	aigc.ApplyProseRenderCompatibilityContracts(payload)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, identity, err := aigc.BuildProseRenderPrimingEnvelope(chapter, "sha256:"+strings.Repeat("a", 64), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("直接 draft_chapter")}},
+		{
+			Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock(envelope)},
+			Metadata: map[string]any{
+				"server_owned": true, "protocol_version": identity.ProtocolVersion,
+				"chapter": identity.Chapter, "plan_digest": identity.PlanDigest,
+				"payload_sha256": identity.PayloadSHA256,
+			},
+		},
+	}
+}
+
+func directRenderToolSpecs() []agentcore.ToolSpec {
+	return []agentcore.ToolSpec{
+		{
+			Name: "draft_chapter",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"chapter": map[string]any{"type": "integer"},
+					"content": map[string]any{"type": "string"},
+					"mode":    map[string]any{"type": "string", "enum": []any{"write", "append"}},
+				},
+				"required": []any{"chapter", "content", "mode"},
+			},
+		},
+	}
+}
+
+func directRenderProviderCalls(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(raw), "call\n")
 }
 
 func TestBuildCodexPromptSerializes(t *testing.T) {
@@ -859,6 +1189,48 @@ func TestBuildProsePromptPreservesChapterSpecificAntiAIRenderContract(t *testing
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("chapter-specific anti-AI contract was replaced or dropped: missing %q\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildProsePromptPinsServerPrimedChapterContractFromUserEnvelope(t *testing.T) {
+	payload := json.RawMessage(`{
+		"_context_profile":"draft",
+		"working_memory":{"render_packet":{
+			"version":11,
+			"chapter":10,
+			"title":"首 token 前可见",
+			"anti_ai_render_contract":{
+				"risk_signals":["本章专属：首个 token 前风险"],
+				"counter_moves":["本章专属：先改判断再行动"],
+				"sentence_rhythm_policy":"本章专属首 token 节奏",
+				"object_response_budget":"本章专属首 token 物件预算",
+				"dialogue_function_plan":"本章专属首 token 对白计划",
+				"review_checks":["本章专属首 token 复核"],
+				"usage_policy":"首稿前执行；章级优先。"
+			}
+		}}
+	}`)
+	envelope, _, err := aigc.BuildProseRenderPrimingEnvelope(10, "sha256:plan", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildProsePrompt([]agentcore.Message{
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("直接调用 draft_chapter")}},
+		{Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock(envelope)}},
+	})
+	for _, want := range []string{
+		"正文必保留结构化合同",
+		"本章专属：首个 token 前风险",
+		"本章专属：先改判断再行动",
+		"本章专属首 token 节奏",
+		"本章专属首 token 物件预算",
+		"本章专属首 token 对白计划",
+		"本章专属首 token 复核",
+		"直接调用 draft_chapter",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("server-primed Codex prose prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

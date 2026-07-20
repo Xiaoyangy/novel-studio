@@ -9,17 +9,15 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func TestCraftRecallFiltersSecondAlgorithmCrossProjectChunks(t *testing.T) {
+func TestCraftRecallFiltersConfiguredProjectContaminationChunks(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := st.Characters.Save([]domain.Character{{Name: "许闻溪", Role: "主角", Tier: "core"}}); err != nil {
-		t.Fatalf("SaveCharacters: %v", err)
-	}
+	saveTestProjectContaminationTerms(t, st, "外部项目专名")
 	tool := NewCraftRecallTool(st)
 	chunks := []domain.RAGChunk{
-		{ID: "bad", SourcePath: "deconstruction-library/ghost.md", Hash: "bad", Text: "江烬收到欠费单。"},
+		{ID: "bad", SourcePath: "deconstruction-library/other.md", Hash: "bad", Text: "外部项目专名进入了召回。"},
 		{ID: "ok", SourcePath: "assets/references/dialogue.md", Hash: "ok", Text: "对白要有潜台词和动作拍。"},
 	}
 	filtered, dropped := tool.filterCrossProjectCraftChunks(chunks)

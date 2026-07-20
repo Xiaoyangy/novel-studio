@@ -562,7 +562,7 @@ func TestPipelineFinalizeStagedPlansClearsRepairSteerWhenNoPartialRemains(t *tes
 	}
 }
 
-func TestPipelineAutoRepairBookWorldStructureAddsDanglingFactionAndAliases(t *testing.T) {
+func TestPipelineAutoRepairBookWorldStructureAddsOnlyDanglingFaction(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
@@ -571,18 +571,20 @@ func TestPipelineAutoRepairBookWorldStructureAddsDanglingFactionAndAliases(t *te
 	if err := st.World.SaveBookWorld(domain.BookWorld{
 		Version: 1,
 		Factions: []domain.WorldFaction{{
-			ID:   "operations_center",
-			Name: "运营中心",
+			ID:      "project_office",
+			Name:    "项目办公室",
+			Aliases: []string{"项目组"},
 			Relations: []domain.FactionRelation{{
-				Target: "store_ops",
+				Target: "field_team",
 				Kind:   "frontline_partner",
-				Note:   "依赖门店执行与反馈。",
+				Note:   "依赖现场执行与反馈。",
 			}},
-			Clock: &domain.FactionClock{Segments: 6, Progress: 1, Consequence: "运营中心完成一次人员缩编"},
+			Clock: &domain.FactionClock{Segments: 6, Progress: 1, Consequence: "项目办公室完成一次资源调整"},
 		}, {
-			ID:    "bridgepoint",
-			Name:  "桥点职业转型工作室",
-			Clock: &domain.FactionClock{Segments: 6, Progress: 0, Consequence: "桥点进入正式合作选择"},
+			ID:      "outside_partner",
+			Name:    "外部合作方",
+			Aliases: []string{"合作机构"},
+			Clock:   &domain.FactionClock{Segments: 6, Progress: 0, Consequence: "合作方进入正式选择"},
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -602,20 +604,46 @@ func TestPipelineAutoRepairBookWorldStructureAddsDanglingFactionAndAliases(t *te
 	if issues := world.ValidateFactionRelations(); len(issues) != 0 {
 		t.Fatalf("relations should be valid after repair, got %v", issues)
 	}
-	var storeOps *domain.WorldFaction
+	var fieldTeam *domain.WorldFaction
 	for i := range world.Factions {
-		if world.Factions[i].ID == "store_ops" {
-			storeOps = &world.Factions[i]
+		if world.Factions[i].ID == "field_team" {
+			fieldTeam = &world.Factions[i]
 		}
 	}
-	if storeOps == nil || storeOps.Clock == nil {
-		t.Fatalf("store_ops faction with clock should be added: %+v", world.Factions)
+	if fieldTeam == nil || fieldTeam.Clock == nil || fieldTeam.Name != "field team" {
+		t.Fatalf("faction derived from relation target should be added: %+v", world.Factions)
 	}
-	if got := strings.Join(storeOps.Aliases, " "); !strings.Contains(got, "门店运营组") {
-		t.Fatalf("store_ops aliases should include 门店运营组, got %+v", storeOps.Aliases)
+	if len(fieldTeam.Aliases) != 0 {
+		t.Fatalf("auto repair must not invent project-specific aliases: %+v", fieldTeam.Aliases)
 	}
-	if got := strings.Join(world.Factions[1].Aliases, " "); !strings.Contains(got, "桥点工作室") {
-		t.Fatalf("bridgepoint aliases should include 桥点工作室, got %+v", world.Factions[1].Aliases)
+	if got := strings.Join(world.Factions[1].Aliases, " "); got != "合作机构" {
+		t.Fatalf("authored aliases should remain unchanged, got %+v", world.Factions[1].Aliases)
+	}
+}
+
+func TestPipelineWorldTickForbiddenTopicsUsesStructuredUserRules(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SavePremise("当前项目正文，不通过书名或题材关键词选择禁用词表。"); err != nil {
+		t.Fatal(err)
+	}
+	if got := pipelineWorldTickForbiddenTopics(dir); got != nil {
+		t.Fatalf("premise text must not activate a hidden production profile: %v", got)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{
+		Version: rules.SnapshotVersion,
+		Status:  rules.StatusReady,
+		Structured: rules.Structured{
+			ForbiddenPhrases: []string{"外部设定", "过期流程", "外部设定"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pipelineWorldTickForbiddenTopics(dir), []string{"外部设定", "过期流程"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("forbidden topics = %v, want structured user rules %v", got, want)
 	}
 }
 
@@ -1680,7 +1708,7 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Progress.Init("鬼城", 3); err != nil {
+	if err := st.Progress.Init("城市更新", 3); err != nil {
 		t.Fatal(err)
 	}
 	// This fixture exercises incremental delivery sedimentation, not the
@@ -1688,7 +1716,7 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	if err := st.RunMeta.SetPlanningTier(domain.PlanningTierLong); err != nil {
 		t.Fatal(err)
 	}
-	chapterText := "正文原文不应该进入 RAG。江烬把欠费单压住。"
+	chapterText := "正文原文不应该进入 RAG。顾晴把现场授权单压住。"
 	if err := st.Drafts.SaveFinalChapter(1, chapterText); err != nil {
 		t.Fatal(err)
 	}
@@ -1697,43 +1725,43 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	}
 	if err := st.Summaries.SaveSummary(domain.ChapterSummary{
 		Chapter:    1,
-		Summary:    "江烬收到夜租欠费单，确认不能替人认账。",
-		Characters: []string{"江烬", "周行舟"},
-		KeyEvents:  []string{"夜租欠费单送达", "代缴确认规则成立"},
+		Summary:    "顾晴拿到临时通行凭证，确认不能替未登记人员签收。",
+		Characters: []string{"顾晴", "陆宁"},
+		KeyEvents:  []string{"临时通行凭证送达", "代领签收规则成立"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.World.AppendTimelineEvents([]domain.TimelineEvent{{
 		Chapter:    1,
-		Time:       "午夜00:17",
-		Event:      "1704收到夜租欠费单，江烬确认不能替人认账。",
-		Characters: []string{"江烬"},
+		Time:       "上午09:17",
+		Event:      "施工区收到临时通行凭证，顾晴确认不能替未登记人员签收。",
+		Characters: []string{"顾晴"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.World.AppendStateChanges([]domain.StateChange{{
 		Chapter:  1,
-		Entity:   "江烬",
-		Field:    "夜租状态",
-		NewValue: "收到1704夜租欠费单",
-		Reason:   "收租鬼上门",
+		Entity:   "顾晴",
+		Field:    "授权状态",
+		NewValue: "收到施工区临时通行凭证",
+		Reason:   "现场负责人完成登记",
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ResourceLedger.MergeClaims(1, []domain.ResourceClaim{{
-		ID:      "black-card",
-		Name:    "冥府黑卡虚拟卡面",
-		Owner:   "江烬",
-		Kind:    "payment_permission",
+		ID:      "temporary-pass",
+		Name:    "施工区临时通行凭证",
+		Owner:   "顾晴",
+		Kind:    "access_permission",
 		Status:  "booked",
 		Chapter: 1,
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.World.SaveWorldRules([]domain.WorldRule{{
-		Category: "夜租规则",
-		Rule:     "活人被视为暂住阳间的租客，必须缴夜租。",
-		Boundary: "普通现金无效，代缴必须被契约确认。",
+		Category: "现场权限",
+		Rule:     "未登记人员进入施工区必须持临时通行凭证。",
+		Boundary: "口头同意无效，代领必须完成签收确认。",
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1798,6 +1826,21 @@ func TestSettlePipelineDeliveryRefreshesLedgersAndRAGFacts(t *testing.T) {
 	}
 	if strings.Contains(state.Chunks[0].Text, "正文原文不应该进入 RAG") {
 		t.Fatalf("RAG chunk should not contain chapter body: %s", state.Chunks[0].Text)
+	}
+}
+
+func TestWorldRuleHitsDerivesTermsFromCurrentRule(t *testing.T) {
+	rule := domain.WorldRule{
+		Category: "现场权限",
+		Rule:     "未登记人员进入施工区必须持蓝色通行凭证。",
+		Boundary: "代领必须完成签收确认。",
+	}
+	hits := worldRuleHits("顾晴拿到蓝色通行凭证，并完成签收确认。", rule)
+	if len(hits) == 0 || !strings.Contains(strings.Join(hits, " "), "通行") {
+		t.Fatalf("current rule evidence was not derived dynamically: %v", hits)
+	}
+	if hits := worldRuleHits("顾晴回到办公室喝水。", rule); len(hits) != 0 {
+		t.Fatalf("unrelated corpus matched rule evidence: %v", hits)
 	}
 }
 

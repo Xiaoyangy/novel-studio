@@ -734,19 +734,17 @@ func TestCommitChapterQueuesPolishOnHighAIGC(t *testing.T) {
 	}
 }
 
-func TestCommitChapterQueuesPolishOnSecondAlgorithmDeprecatedEngine(t *testing.T) {
+func TestCommitChapterQueuesPolishOnConfiguredProjectContamination(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
 	if err := s.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := s.Outline.SavePremise("《她的第二算法》女频女性职场成长文，主角许闻溪。"); err != nil {
-		t.Fatalf("SavePremise: %v", err)
-	}
 	if err := s.Progress.Init("test", 10); err != nil {
 		t.Fatalf("InitProgress: %v", err)
 	}
-	text := "许闻溪站在发布会侧台，听见有人说日志窗口还在，原始包稍后走合规邮件。"
+	saveTestProjectContaminationTerms(t, s, "外部项目专名", "过期流程术语")
+	text := "顾晴站在发布会侧台，发现外部项目专名仍沿用过期流程术语。"
 	if err := s.Drafts.SaveDraft(1, text); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
 	}
@@ -754,10 +752,10 @@ func TestCommitChapterQueuesPolishOnSecondAlgorithmDeprecatedEngine(t *testing.T
 	tool := NewCommitChapterTool(s)
 	args, _ := json.Marshal(map[string]any{
 		"chapter":                 1,
-		"summary":                 "旧版证据链污染样章",
-		"characters":              []string{"许闻溪", "梁渡"},
-		"key_events":              []string{"旧版术语进入正文"},
-		"character_stage_records": testCharacterStageRecords("许闻溪", "梁渡"),
+		"summary":                 "外部项目元素污染样章",
+		"characters":              []string{"顾晴", "陆宁"},
+		"key_events":              []string{"禁用元素进入正文"},
+		"character_stage_records": testCharacterStageRecords("顾晴", "陆宁"),
 	})
 	raw, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -776,13 +774,13 @@ func TestCommitChapterQueuesPolishOnSecondAlgorithmDeprecatedEngine(t *testing.T
 	}
 	found := map[string]bool{}
 	for _, v := range payload.RuleViolations {
-		if v.Rule == "deprecated_story_engine" && v.Severity == "error" {
+		if v.Rule == "project_contamination" && v.Severity == "error" {
 			found[v.Target] = true
 		}
 	}
-	for _, want := range []string{"日志窗口", "原始包", "合规邮件"} {
+	for _, want := range []string{"外部项目专名", "过期流程术语"} {
 		if !found[want] {
-			t.Fatalf("expected deprecated_story_engine %q, got %+v", want, payload.RuleViolations)
+			t.Fatalf("expected project_contamination %q, got %+v", want, payload.RuleViolations)
 		}
 	}
 	if payload.Flow != string(domain.FlowPolishing) {
@@ -799,8 +797,8 @@ func TestCommitChapterQueuesPolishOnSecondAlgorithmDeprecatedEngine(t *testing.T
 	if err != nil {
 		t.Fatalf("ReadFile ai gate: %v", err)
 	}
-	if !strings.Contains(string(rawGate), "deprecated_story_engine") {
-		t.Fatalf("expected ai gate to include deprecated_story_engine:\n%s", rawGate)
+	if !strings.Contains(string(rawGate), "project_contamination") {
+		t.Fatalf("expected ai gate to include project_contamination:\n%s", rawGate)
 	}
 }
 

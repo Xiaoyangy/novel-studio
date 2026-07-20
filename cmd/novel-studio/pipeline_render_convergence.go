@@ -76,7 +76,9 @@ func (e *pipelineRenderPlanStageRequiredError) Error() string {
 
 func pipelineRenderRequiresPlanStage(err error) bool {
 	var target *pipelineRenderPlanStageRequiredError
-	return errors.As(err, &target) || tools.IsRenderConvergencePlanStageRequired(err)
+	return errors.As(err, &target) ||
+		pipelineRenderDispatchBudgetExhausted(err) ||
+		tools.IsRenderConvergencePlanStageRequired(err)
 }
 
 func pipelineRenderConvergenceDir(liveOutputDir, candidateID string) (string, error) {
@@ -93,6 +95,86 @@ func pipelineRenderConvergenceLedgerPath(liveOutputDir, candidateID string) (str
 		return "", err
 	}
 	return filepath.Join(dir, "ledger.json"), nil
+}
+
+// validatePipelineRenderConvergenceControlDir authenticates every directory
+// component used by convergence and dispatch ledgers. In particular,
+// .render-candidates/convergence must never be a symlink: it is a sibling
+// control plane derived from the mutable candidate manifest and otherwise
+// could redirect lock/ledger writes outside the live project's namespace.
+func validatePipelineRenderConvergenceControlDir(
+	liveOutputDir string,
+	candidateID string,
+	requireCandidateDir bool,
+) (string, error) {
+	dir, err := pipelineRenderConvergenceDir(liveOutputDir, candidateID)
+	if err != nil {
+		return "", err
+	}
+	namespace := pipelineRenderCandidateRoot(liveOutputDir)
+	root := filepath.Dir(dir)
+	for _, item := range []struct {
+		name     string
+		path     string
+		required bool
+	}{
+		{name: "source output", path: liveOutputDir, required: true},
+		{name: "candidate namespace", path: namespace, required: true},
+		{name: "convergence root", path: root, required: requireCandidateDir},
+		{name: "candidate convergence directory", path: dir, required: requireCandidateDir},
+	} {
+		info, statErr := os.Lstat(item.path)
+		if os.IsNotExist(statErr) && !item.required {
+			continue
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("inspect render %s: %w", item.name, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("render %s must be a real directory", item.name)
+		}
+	}
+
+	resolvedLive, err := filepath.EvalSymlinks(liveOutputDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve render source output: %w", err)
+	}
+	expectedRoot := filepath.Join(pipelineRenderCandidateRoot(resolvedLive), "convergence")
+	if _, err := os.Lstat(root); err == nil {
+		resolvedRoot, resolveErr := filepath.EvalSymlinks(root)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve render convergence root: %w", resolveErr)
+		}
+		if filepath.Clean(resolvedRoot) != filepath.Clean(expectedRoot) {
+			return "", fmt.Errorf("render convergence root escapes its authenticated source namespace")
+		}
+	}
+	if _, err := os.Lstat(dir); err == nil {
+		resolvedDir, resolveErr := filepath.EvalSymlinks(dir)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve render candidate convergence directory: %w", resolveErr)
+		}
+		expectedDir := filepath.Join(expectedRoot, candidateID)
+		if filepath.Clean(resolvedDir) != filepath.Clean(expectedDir) {
+			return "", fmt.Errorf("render candidate convergence directory escapes its authenticated source namespace")
+		}
+	}
+	return dir, nil
+}
+
+func ensurePipelineRenderConvergenceControlDir(liveOutputDir, candidateID string) (string, error) {
+	dir, err := validatePipelineRenderConvergenceControlDir(liveOutputDir, candidateID, false)
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Dir(dir)
+	if err := os.Mkdir(root, 0o755); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create render convergence root: %w", err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create render candidate convergence directory: %w", err)
+	}
+	return validatePipelineRenderConvergenceControlDir(liveOutputDir, candidateID, true)
 }
 
 func pipelineRenderConvergenceLimit(st *store.Store, chapter int) int {
@@ -162,6 +244,9 @@ func loadPipelineRenderConvergenceLedger(
 	manifest pipelineRenderCandidateManifest,
 	limit int,
 ) (*pipelineRenderConvergenceLedger, error) {
+	if _, err := validatePipelineRenderConvergenceControlDir(liveOutputDir, manifest.CandidateID, true); err != nil {
+		return nil, err
+	}
 	path, err := pipelineRenderConvergenceLedgerPath(liveOutputDir, manifest.CandidateID)
 	if err != nil {
 		return nil, err
@@ -190,6 +275,9 @@ func savePipelineRenderConvergenceLedger(
 ) error {
 	if ledger == nil {
 		return fmt.Errorf("render convergence ledger is nil")
+	}
+	if _, err := ensurePipelineRenderConvergenceControlDir(liveOutputDir, ledger.CandidateID); err != nil {
+		return err
 	}
 	sort.Slice(ledger.Records, func(i, j int) bool {
 		return ledger.Records[i].BodySHA256 < ledger.Records[j].BodySHA256
@@ -249,6 +337,72 @@ func pipelineRenderConvergenceFailedHashes(ledger *pipelineRenderConvergenceLedg
 	return hashes
 }
 
+// pipelineRenderBodyHasDurableConvergenceRejection reads the sibling control
+// plane from the authenticated frozen identity, not from a candidate's mutable
+// filesystem location. Retired candidates deliberately no longer satisfy the
+// active-candidate topology contract, but their exact-body failure record must
+// still quarantine those bytes during crash recovery.
+//
+// A missing ledger means that this older candidate has no convergence evidence.
+// An existing malformed or redirected control plane fails closed: recovery must
+// never turn an unreadable durable rejection into permission to replay prose.
+func pipelineRenderBodyHasDurableConvergenceRejection(
+	liveOutputDir string,
+	frozen *pipelineFrozenPlan,
+	candidateID string,
+	bodySHA256 string,
+) (bool, error) {
+	if frozen == nil || !pipelineRenderExactBodySHA256(bodySHA256) {
+		return false, fmt.Errorf("durable render rejection requires frozen identity and exact body hash")
+	}
+	wantID, err := pipelineRenderTransactionID(frozen)
+	if err != nil {
+		return false, err
+	}
+	if candidateID != wantID {
+		return false, fmt.Errorf("durable render rejection candidate identity mismatch")
+	}
+	if _, err := validatePipelineRenderConvergenceControlDir(
+		liveOutputDir,
+		candidateID,
+		false,
+	); err != nil {
+		return false, err
+	}
+	path, err := pipelineRenderConvergenceLedgerPath(liveOutputDir, candidateID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("inspect exact render convergence ledger: %w", err)
+	}
+	manifest := pipelineRenderCandidateManifest{
+		Version:                pipelineRenderCandidateManifestVersion,
+		CandidateID:            candidateID,
+		GenerationID:           frozen.PlanningGenerationID,
+		Chapter:                frozen.Chapter,
+		PlanDigest:             frozen.PlanDigest,
+		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
+		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
+		SourceOutputDir:        filepath.Clean(liveOutputDir),
+	}
+	ledger, err := loadPipelineRenderConvergenceLedger(liveOutputDir, manifest, 3)
+	if err != nil {
+		return false, fmt.Errorf("load exact render convergence rejection: %w", err)
+	}
+	for _, record := range ledger.Records {
+		if record.BodySHA256 != bodySHA256 {
+			continue
+		}
+		return record.ExternalBlocking || record.StructuralBlock ||
+			(record.SemanticReject && !record.FormalAccepted), nil
+	}
+	return false, nil
+}
+
 func pipelineRenderConvergenceHasPendingFormalRevalidation(
 	ledger *pipelineRenderConvergenceLedger,
 ) bool {
@@ -303,10 +457,100 @@ func loadPipelineRenderCandidateManifest(outputDir string) (*pipelineRenderCandi
 	}
 	if manifest.Version != pipelineRenderCandidateManifestVersion ||
 		manifest.Chapter <= 0 || manifest.PlanCheckpointSeq <= 0 ||
-		strings.TrimSpace(manifest.SourceOutputDir) == "" {
+		strings.TrimSpace(manifest.SourceOutputDir) == "" ||
+		!filepath.IsAbs(manifest.SourceOutputDir) ||
+		manifest.SourceOutputDir != filepath.Clean(manifest.SourceOutputDir) {
 		return nil, fmt.Errorf("render candidate manifest cannot own a convergence ledger")
 	}
+	if filepath.Clean(outputDir) != filepath.Clean(manifest.SourceOutputDir) {
+		if _, err := validateActivePipelineRenderCandidateTopology(outputDir, &manifest); err != nil {
+			return nil, err
+		}
+	}
 	return &manifest, nil
+}
+
+// validateActivePipelineRenderCandidateTopology authenticates the filesystem
+// namespace before any convergence or dispatch ledger path is derived from the
+// mutable candidate manifest. Published-live manifests are handled by the
+// caller and never enter this active-candidate path.
+func validateActivePipelineRenderCandidateTopology(
+	candidateOutputDir string,
+	manifest *pipelineRenderCandidateManifest,
+) (string, error) {
+	if manifest == nil {
+		return "", fmt.Errorf("active render candidate manifest is nil")
+	}
+	candidateOutputDir = strings.TrimSpace(candidateOutputDir)
+	liveOutputDir := strings.TrimSpace(manifest.SourceOutputDir)
+	if candidateOutputDir == "" || liveOutputDir == "" ||
+		!filepath.IsAbs(candidateOutputDir) || !filepath.IsAbs(liveOutputDir) ||
+		candidateOutputDir != filepath.Clean(candidateOutputDir) ||
+		liveOutputDir != filepath.Clean(liveOutputDir) {
+		return "", fmt.Errorf("active render candidate and source paths must be clean absolute paths")
+	}
+	if _, err := pipelineRenderConvergenceDir(liveOutputDir, manifest.CandidateID); err != nil {
+		return "", err
+	}
+	expectedCandidate := filepath.Join(
+		pipelineRenderCandidateRoot(liveOutputDir),
+		manifest.CandidateID,
+		"output",
+	)
+	if candidateOutputDir != expectedCandidate {
+		return "", fmt.Errorf("active render candidate path is outside its authenticated source namespace")
+	}
+
+	namespace := pipelineRenderCandidateRoot(liveOutputDir)
+	for _, item := range []struct {
+		name string
+		path string
+	}{
+		{name: "source output", path: liveOutputDir},
+		{name: "candidate namespace", path: namespace},
+		{name: "candidate container", path: filepath.Join(namespace, manifest.CandidateID)},
+		{name: "candidate output", path: candidateOutputDir},
+	} {
+		info, err := os.Lstat(item.path)
+		if err != nil {
+			return "", fmt.Errorf("inspect active render %s: %w", item.name, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("active render %s must be a real directory", item.name)
+		}
+	}
+
+	resolvedLive, err := filepath.EvalSymlinks(liveOutputDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve active render source output: %w", err)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidateOutputDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve active render candidate output: %w", err)
+	}
+	resolvedExpected := filepath.Join(
+		pipelineRenderCandidateRoot(resolvedLive),
+		manifest.CandidateID,
+		"output",
+	)
+	if filepath.Clean(resolvedCandidate) != filepath.Clean(resolvedExpected) {
+		return "", fmt.Errorf("resolved active render candidate escapes its authenticated source namespace")
+	}
+	liveInfo, err := os.Stat(resolvedLive)
+	if err != nil {
+		return "", fmt.Errorf("stat active render source output: %w", err)
+	}
+	candidateInfo, err := os.Stat(resolvedCandidate)
+	if err != nil {
+		return "", fmt.Errorf("stat active render candidate output: %w", err)
+	}
+	if os.SameFile(liveInfo, candidateInfo) {
+		return "", fmt.Errorf("active render candidate aliases live canon")
+	}
+	if _, err := validatePipelineRenderConvergenceControlDir(liveOutputDir, manifest.CandidateID, false); err != nil {
+		return "", err
+	}
+	return liveOutputDir, nil
 }
 
 // A promoted candidate keeps render_candidate.json as provenance in the live
@@ -336,6 +580,9 @@ func syncPipelineRenderConvergence(st *store.Store) (*pipelineRenderConvergenceL
 		return nil, nil
 	}
 	liveOutputDir := filepath.Clean(manifest.SourceOutputDir)
+	if _, err := ensurePipelineRenderConvergenceControlDir(liveOutputDir, manifest.CandidateID); err != nil {
+		return nil, err
+	}
 	limit := pipelineRenderConvergenceLimit(st, manifest.Chapter)
 	ledger, err := loadPipelineRenderConvergenceLedger(liveOutputDir, *manifest, limit)
 	if err != nil {

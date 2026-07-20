@@ -167,7 +167,7 @@ func coerceSliceShape(raw json.RawMessage, t reflect.Type) (json.RawMessage, boo
 		//   (a) 单个 struct 元素被裸写成对象（键=结构体字段名，如 environment_state 写成
 		//       {"place":..,"visible_state":..}）→ 应整体包成单元素数组 [obj]；
 		//   (b) 数组被写成 {身份键: 元素} 的对象（键=name/身份，如 character_kit 写成
-		//       {"江烬":{..}}）→ 应取 values 转数组。
+		//       {"protagonist":{..}}）→ 应取 values 转数组。
 		// 用"对象的键是否落在元素结构体的字段名集合内"来判别：命中即 (a)。
 		if structElementKeys(elem, obj) {
 			inner, _ := coerceJSONShape(raw, elem) // 递归修元素内部字段

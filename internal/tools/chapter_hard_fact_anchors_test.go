@@ -49,13 +49,13 @@ func TestInspectDraftHardFactAnchorsRejectsGenericOneBowlAndAcceptsChineseEquiva
 
 func TestInspectDraftHardFactAnchorsAcceptsContextBoundChineseAmountWithoutYuan(t *testing.T) {
 	st := newHardFactAnchorTestStore(t,
-		[]string{"林澈获得一百万元青山县专项经营额度使用权，非个人存款。"}, nil,
+		[]string{"顾晴获得一百万元专项经营额度使用权，非个人存款。"}, nil,
 	)
 
 	for _, body := range []string{
 		"手机上写得清楚：一百万专项经营额度已经绑定。",
 		"屏幕只亮了一行，一百万到账了。",
-		"可用的是100万的青山县专项经营额度，不是个人存款。",
+		"可用的是100万的专项经营额度，不是个人存款。",
 		"青山县经营专用额度为1,000,000元。",
 	} {
 		inspection, err := InspectDraftHardFactAnchors(st, 1, body)

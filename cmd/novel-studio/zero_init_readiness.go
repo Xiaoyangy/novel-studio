@@ -1096,26 +1096,13 @@ func zeroCounterpartsForCharacter(project zeroInitProject, c domain.Character) [
 }
 
 func zeroOpeningPressureName(project zeroInitProject) string {
-	if !zeroIsHorrorProject(project) {
-		if title := strings.TrimSpace(project.FirstChapter.Title); title != "" {
-			return title + "中的现实压力"
-		}
-		if zeroIsSecondAlgorithmProject(project) {
-			return "第一章岗位、资源与选择压力"
-		}
-		return "第一章目标、资源与执行压力"
+	if title := strings.TrimSpace(project.FirstChapter.Title); title != "" {
+		return title + "中的现实压力"
 	}
-	text := zeroOutlineEntryText(project.FirstChapter)
-	switch {
-	case strings.Contains(text, "夜租") || strings.Contains(text, "欠费"):
-		return "夜租欠费单与门牌规则"
-	case strings.Contains(text, "黑卡"):
-		return "冥府黑卡交易规则"
-	case strings.Contains(text, "合同") || strings.Contains(text, "契约"):
-		return "第一章契约压力"
-	default:
-		return "第一章规则压力"
+	if event := strings.TrimSpace(project.FirstChapter.CoreEvent); event != "" {
+		return event + "带来的选择压力"
 	}
+	return "第一章目标、资源与执行压力"
 }
 
 func zeroReturnPriority(project zeroInitProject, c domain.Character, firstMention int) string {

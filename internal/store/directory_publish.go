@@ -463,6 +463,60 @@ func (s *DirectoryPublishStore) LoadDirectoryPublishState(
 	return state, err
 }
 
+// LoadDirectoryPublishReceiptEvidence authenticates the immutable publish
+// intent/receipt (and finalize receipt once the intent has been removed)
+// without requiring the current live directory to retain the historical full
+// tree root. This is intentionally narrower than LoadDirectoryPublishState:
+// callers must independently verify every immutable live artifact before
+// using it after known runtime-only files, such as pipeline_execution owner,
+// have changed.
+func (s *DirectoryPublishStore) LoadDirectoryPublishReceiptEvidence(
+	transactionID string,
+) (*DirectoryPublishReceipt, error) {
+	if err := validateDirectoryPublishTransactionID(transactionID); err != nil {
+		return nil, err
+	}
+	var result *DirectoryPublishReceipt
+	err := s.withReadLock(func() error {
+		if aborted, err := s.loadAbortedReceiptUnlocked(transactionID); err != nil {
+			return err
+		} else if aborted != nil {
+			return fmt.Errorf("directory publish transaction %s was aborted", transactionID)
+		}
+		intent, err := s.loadIntentUnlocked(transactionID)
+		if err != nil {
+			return err
+		}
+		receipt, err := s.loadReceiptUnlocked(transactionID)
+		if err != nil || receipt == nil {
+			return err
+		}
+		if intent != nil {
+			if err := validateDirectoryPublishReceiptAgainstIntent(*receipt, *intent); err != nil {
+				return err
+			}
+		} else {
+			if err := validateDirectoryPublishReceipt(*receipt); err != nil {
+				return err
+			}
+			finalized, err := s.loadFinalizeReceiptUnlocked(transactionID)
+			if err != nil {
+				return err
+			}
+			if finalized == nil {
+				return fmt.Errorf("transaction %s lost intent before finalize receipt", transactionID)
+			}
+			if err := validateDirectoryPublishFinalizeReceipt(*finalized, *receipt, nil); err != nil {
+				return err
+			}
+		}
+		copy := *receipt
+		result = &copy
+		return nil
+	})
+	return result, err
+}
+
 func (s *DirectoryPublishStore) recoverUnlocked(
 	intent DirectoryPublishIntent,
 ) (*DirectoryPublishReceipt, error) {

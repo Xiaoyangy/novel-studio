@@ -890,7 +890,11 @@ func recoverPipelineOutlineAllPublishesWithControlHeld(outputDir string) error {
 				) || state.Intent.BeforeLiveRoot == "" || state.Intent.CandidateRoot == "" {
 				return fmt.Errorf("outline-all recovery transaction %s is not bound to this live/attempt namespace", id)
 			}
-			receipt, err = publisher.RecoverDirectoryPublish(id)
+			err = withPipelineWatchdogPaused(func() error {
+				var recoverErr error
+				receipt, recoverErr = publisher.RecoverDirectoryPublish(id)
+				return recoverErr
+			})
 			if err != nil {
 				return fmt.Errorf("outline-all recover transaction %s: %w", id, err)
 			}

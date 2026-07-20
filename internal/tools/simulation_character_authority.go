@@ -726,8 +726,8 @@ func preserveKnowledgeBoundaryClauses(st *store.Store, chapter int, character st
 
 // knowledgeBoundarySubjectIndex binds an epistemic restriction to its
 // grammatical subject, not to every character name appearing later as the
-// object of that restriction. For example, in "贺骁不知道林澈已回城" only 贺骁
-// receives the lock; 林澈 must not be forced to claim ignorance of himself.
+// object of that restriction. For example, in "角色甲不知道角色乙已回城" only
+// 角色甲 receives the lock; 角色乙 must not be forced to claim ignorance of themself.
 func knowledgeBoundarySubjectIndex(clause, character string) int {
 	character = strings.TrimSpace(character)
 	if character == "" {
