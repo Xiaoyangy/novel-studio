@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -61,6 +65,10 @@ func runServiceStart(argv []string) int {
 		fmt.Fprintf(os.Stderr, "service start: too many arguments: %v\n", extra)
 		return 2
 	}
+	// A healthy dashboard is not enough: replace it if it is serving stale code
+	// from a different checkout or an older version, so the user is never pinned
+	// to an outdated board that still answers requests.
+	replaceStaleDashboardIfNeeded(flags)
 	if serviceHealthy(flags) {
 		fmt.Fprintf(os.Stdout, "service: ok %s\n", serviceNovelURL(flags))
 		return 0
@@ -132,6 +140,7 @@ func runServiceOpen(argv []string) int {
 		fmt.Fprintf(os.Stderr, "service open: too many arguments: %v\n", extra)
 		return 2
 	}
+	replaceStaleDashboardIfNeeded(flags)
 	if !serviceHealthy(flags) {
 		if err := stopIncompatibleDashboard(flags); err != nil {
 			fmt.Fprintf(os.Stderr, "service open: %v\n", err)
@@ -183,6 +192,7 @@ func serviceNovelURL(flags serviceFlags) string {
 
 func ensureDashboardServiceForRun(outputDir string) {
 	flags := serviceFlags{Host: "127.0.0.1", Port: 8765}
+	replaceStaleDashboardIfNeeded(flags)
 	if serviceHealthy(flags) {
 		fmt.Fprintf(os.Stderr, "[dashboard] %s\n", serviceNovelURL(flags))
 		return
@@ -252,6 +262,25 @@ func startServiceBackground(flags serviceFlags, novelDir string) error {
 	return fmt.Errorf("service did not become healthy: %w", lastErr)
 }
 
+// replaceStaleDashboardIfNeeded stops a healthy-but-stale dashboard so the next
+// health check fails and the normal start path launches the current checkout. A
+// no-op when nothing is running or the running board already matches this code.
+func replaceStaleDashboardIfNeeded(flags serviceFlags) {
+	if !serviceHealthy(flags) {
+		return
+	}
+	script, err := findShortStoryServiceScript()
+	if err != nil {
+		return
+	}
+	if matches, reason := runningDashboardMatchesCheckout(flags, script); matches {
+		return
+	} else {
+		fmt.Fprintf(os.Stderr, "[dashboard] replacing stale board on port %d (%s)\n", flags.Port, reason)
+		_ = stopDashboardProcesses(flags)
+	}
+}
+
 func stopIncompatibleDashboard(flags serviceFlags) error {
 	healthErr := checkServiceHealth(flags)
 	if healthErr == nil {
@@ -260,17 +289,25 @@ func stopIncompatibleDashboard(flags serviceFlags) error {
 	if !strings.Contains(healthErr.Error(), "/api/novels") {
 		return nil
 	}
+	return stopDashboardProcesses(flags)
+}
+
+// stopDashboardProcesses interrupts the dashboard process listening on the port,
+// used both for an old board that lacks /api/novels and for a stale board that
+// is healthy but serving a different checkout/version.
+func stopDashboardProcesses(flags serviceFlags) error {
 	if runtime.GOOS == "windows" {
-		return fmt.Errorf("port %d is running an old dashboard without /api/novels; stop it or choose another --port", flags.Port)
+		return fmt.Errorf("port %d has a running dashboard that must be stopped manually on Windows; stop it or choose another --port", flags.Port)
 	}
 	pids, err := listeningPIDs(flags.Port)
 	if err != nil || len(pids) == 0 {
-		return fmt.Errorf("port %d is running an old dashboard without /api/novels; stop it or choose another --port", flags.Port)
+		return fmt.Errorf("port %d is occupied but its process could not be located; stop it or choose another --port", flags.Port)
 	}
 	stopped := 0
 	for _, pid := range pids {
 		cmdline, _ := processCommandLine(pid)
-		if !strings.Contains(cmdline, "services/dashboard/server.py") {
+		if !strings.Contains(cmdline, filepath.Join("services", "dashboard", "server.py")) &&
+			!strings.Contains(cmdline, "services/dashboard/server.py") {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -283,7 +320,7 @@ func stopIncompatibleDashboard(flags serviceFlags) error {
 		stopped++
 	}
 	if stopped == 0 {
-		return fmt.Errorf("port %d is running an old dashboard without /api/novels; stop it or choose another --port", flags.Port)
+		return fmt.Errorf("port %d is occupied by a non-dashboard process; stop it or choose another --port", flags.Port)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -296,7 +333,66 @@ func stopIncompatibleDashboard(flags serviceFlags) error {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return fmt.Errorf("old dashboard on port %d did not stop in time", flags.Port)
+	return fmt.Errorf("dashboard on port %d did not stop in time", flags.Port)
+}
+
+// runningDashboardMatchesCheckout reports whether the healthy dashboard on the
+// port is serving the current checkout's code. It compares the content version
+// stamped by /api/health against a hash of the local server.py + index.html, so
+// a stale instance from another checkout (or older code) is detected and
+// replaced instead of silently pinning the user to an outdated board.
+func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string) (bool, string) {
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(serviceURL(flags) + "/api/health")
+	if err != nil {
+		return false, "health unreachable"
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return false, "health unreadable"
+	}
+	var health struct {
+		Version string `json:"version"`
+		Script  string `json:"script"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		return false, "health not JSON"
+	}
+	if strings.TrimSpace(health.Version) == "" {
+		return false, "no version stamp (old dashboard)"
+	}
+	want := currentDashboardVersion(scriptPath)
+	if want == "" {
+		// Cannot compute a local version (missing files); avoid needless churn.
+		return true, ""
+	}
+	if health.Version != want {
+		return false, "version mismatch"
+	}
+	return true, ""
+}
+
+// currentDashboardVersion hashes the local dashboard code identically to the
+// Python server's /api/health version stamp: sha256(server.py + index.html)
+// truncated to 16 hex chars.
+func currentDashboardVersion(scriptPath string) string {
+	h := sha256.New()
+	indexPath := filepath.Join(filepath.Dir(scriptPath), "static", "index.html")
+	wrote := false
+	for _, p := range []string{scriptPath, indexPath} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			h.Write([]byte{0})
+			continue
+		}
+		h.Write(data)
+		wrote = true
+	}
+	if !wrote {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func listeningPIDs(port int) ([]int, error) {

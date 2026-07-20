@@ -25,6 +25,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("NOVEL_STUDIO_RUNS_DIR", ROOT / "data" / "runs"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SERVICE_SCRIPT = str(Path(__file__).resolve())
+
+
+def _dashboard_version() -> str:
+    """Content hash of the running dashboard code, so `service start` can detect a
+    stale instance serving from an old checkout and replace it instead of leaving
+    the user pinned to outdated code that still answers /api/novels."""
+    h = hashlib.sha256()
+    for p in (Path(__file__).resolve(), STATIC_DIR / "index.html"):
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+SERVICE_VERSION = _dashboard_version()
 
 ACTIVE_WINDOW_SECONDS = 300  # 运行事件 5 分钟内有更新即视为执行中
 LOG_TAIL_LINES = 80
@@ -1745,7 +1762,8 @@ class Handler(BaseHTTPRequestHandler):
                 page = (STATIC_DIR / "index.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
             if path == "/api/health":
-                return self._json({"ok": True, "runs_dir": str(RUNS_DIR), "time": time.time()})
+                return self._json({"ok": True, "runs_dir": str(RUNS_DIR), "time": time.time(),
+                                   "version": SERVICE_VERSION, "script": SERVICE_SCRIPT})
             if path == "/api/novels":
                 return self._json({"runs_dir": str(RUNS_DIR),
                                    "novels": [summarize_run(r) for r in list_runs()]})
