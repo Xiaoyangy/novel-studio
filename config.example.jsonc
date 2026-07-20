@@ -18,6 +18,11 @@
       // [1M] 后缀是长上下文变体的约定写法；具体以 provider 的模型清单为准。
       "models": ["MiniMax-M3[1M]", "MiniMax-M3"]
     },
+    "deepseek": {
+      "api_key": "sk-xxx",
+      "base_url": "https://api.deepseek.com",
+      "models": ["deepseek-v4-pro", "deepseek-v4-flash"]
+    },
     "openrouter": {
       "api_key": "sk-or-v1-xxx",
       "base_url": "https://openrouter.ai/api/v1",
@@ -44,8 +49,9 @@
   // 角色：coordinator / architect / writer / drafter / editor / reviewer。
   // fallbacks 在主模型失败（宕机/限流/余额不足）时按序尝试，恢复后自动回主路；
   // reasoning_effort 可给每个兜底模型单独设置，避免继承主模型不兼容的档位。
-  // reviewer 用于三采样 pairwise 终选与 AI 味盲测判别；LLM judge 对同族输出有
-  // 75-84% 自我偏好，writer 与 reviewer 建议用不同模型家族；未配置自动回落 editor。
+  // reviewer 用于三采样 pairwise 终选与 AI 味盲测判别；内置 DeepSeek 裸正文审核
+  // 会 fail closed 校验 reviewer 必须显式指向 DeepSeek，不能回落到 editor 或生产模型。
+  // 其他生产角色可继续使用不同 provider；这里故意不为 reviewer 配 fallback。
   // max_turns：该角色单次 subagent 运行的回合上限；0/缺省=内置默认
   // （writer=300，architect=15/20，editor=20）。
   "roles": {
@@ -59,8 +65,7 @@
                      "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
     "editor":      { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "medium",
                      "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] },
-    "reviewer":    { "provider": "minimax", "model": "MiniMax-M3[1M]", "reasoning_effort": "max",
-                     "fallbacks": [{ "provider": "minimax", "model": "MiniMax-M3" }] }
+    "reviewer":    { "provider": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "low" }
   },
 
   // 本地 RAG：写作规则、世界创造规则等设计资料统一走 RAG 召回，
