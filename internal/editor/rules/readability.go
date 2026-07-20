@@ -21,7 +21,42 @@ var (
 	// 一句里既讲流程又落在具体动作/感官上，就不算"纯报告"。
 	sensoryHumanRe       = actionSensoryRe
 	proceduralOnlyBudget = 0.34
+
+	// clinicalRegisterRe 是"取证/验收/公文"腔的收敛词表——经人工高质量语料与一部
+	// 朱雀判定 95% AI 的成稿实测标定：人类小说全程 0.00–0.11/千字，那部 AI 成稿
+	// 0.86–12.56/千字，完全不重叠。这类词并不违规，但整章被它浸透时，正文读起来
+	// 像会议纪要而非小说，是本项目最典型、也最劝退读者的 AI 质地。
+	clinicalRegisterRe = regexp.MustCompile(`(核验|复核|比对|校验|门禁|台账|登记|凭证|编号|受控|元数据|归档|留痕|封存|竣工|时间码|见证|保管|处置组|核对|相容|载体|落位|闭合|协作通道|规程|依照|按照规定|独立核验|风险升级|服务端顺序核|逐项对应|互相核验)`)
 )
+
+// clinicalRegisterDensityPerK 返回全章取证/公文腔词的千字密度。
+func clinicalRegisterDensityPerK(body string) float64 {
+	runes := utf8.RuneCountInString(body)
+	if runes < 400 {
+		return 0
+	}
+	return float64(len(clinicalRegisterRe.FindAllString(body, -1))) / float64(runes) * 1000
+}
+
+// clinicalRegisterFlags 把整章会议纪要腔升级为审阅返工依据。阈值远高于人类小说的
+// 密度上限（实测 0.11/千字），只在正文真的被取证/验收腔浸透时命中。
+func clinicalRegisterFlags(body string) []domain.AIVoiceRedFlag {
+	density := clinicalRegisterDensityPerK(body)
+	if density < 2.0 {
+		return nil
+	}
+	severity := "warning"
+	if density >= 6.0 {
+		severity = "error"
+	}
+	return []domain.AIVoiceRedFlag{{
+		Rule:       "clinical_procedural_register",
+		Severity:   severity,
+		Actual:     round4(density),
+		Limit:      1.0,
+		Suggestion: "整章被取证/验收/公文腔浸透（核验/相容/载体/协作通道/逐项对应/风险升级…），读起来像会议纪要而非小说，是最容易被检测判成 AI 的质地。把流程结果落成人物当场看见、听见、做的具体动作与真实反应，删掉“已核验/已相容/已成立”式旁白复述；同一件事只保留一次有阻力的现场，其余压成一句带过。",
+	}}
+}
 
 // ReaderExperienceScore 返回 [0,1]：越高表示读者越可能一口气读下去。它是确定性的、
 // 与题材无关的相对度量——三候选同题材比较时，选更有画面、更好读的那一稿。
@@ -44,8 +79,20 @@ func ReaderExperienceScore(text string, metrics domain.ChapterAIVoiceMetrics) fl
 	base -= wallOfTextPenalty(paragraphs)
 	base -= fragmentGridPenalty(paragraphs)
 	base -= proceduralReportPenalty(paragraphs)
+	base -= clinicalRegisterPenalty(body)
 
 	return round4(clamp(base, 0, 1))
+}
+
+// clinicalRegisterPenalty 惩罚被取证/验收/公文腔浸透的整章。人类小说密度≈0，故从
+// 1.0/千字才起算、6/千字饱和，既能压住那部会议纪要式 AI 成稿，又不误伤偶尔用到
+// 一两个流程词的正常场景。
+func clinicalRegisterPenalty(body string) float64 {
+	density := clinicalRegisterDensityPerK(body)
+	if density <= 1.0 {
+		return 0
+	}
+	return math.Min(0.40, (density-1.0)/5.0*0.40)
 }
 
 // SelectionScore 合成读者体验与真实感（roughness）。读者体验领先，真实感保留反检测

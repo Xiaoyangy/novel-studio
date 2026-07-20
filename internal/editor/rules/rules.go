@@ -119,6 +119,7 @@ func AnalyzeChapter(chapter int, text string, history []domain.ChapterAIVoiceMet
 	}
 	analysis.RedFlags = append(redFlags(metrics, history), patternFlags...)
 	analysis.RedFlags = append(analysis.RedFlags, dialogueInfoDumpFlags(text)...)
+	analysis.RedFlags = append(analysis.RedFlags, clinicalRegisterFlags(bodyText)...)
 	analysis.Label = labelFor(metrics, analysis.RedFlags)
 	analysis.Summary = summaryFor(metrics, analysis.RedFlags)
 	return analysis
