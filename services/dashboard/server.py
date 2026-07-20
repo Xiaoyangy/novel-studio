@@ -857,7 +857,7 @@ def artifact_inventory(nd: Path) -> dict:
         ("伏笔台账", [nd / "foreshadow_ledger.json", nd / "foreshadow_ledger.initial.json"]),
         ("资源台账", [nd / "meta" / "resource_ledger.json", nd / "meta" / "initial_resource_ledger.json"]),
         ("离屏日程", [nd / "meta" / "offscreen_agenda.json"]),
-        ("世界推演游标", [nd / "meta" / "world_tick.json"]),
+        ("离屏世界基线 tick", [nd / "meta" / "world_tick.json"]),
         ("RAG 索引", [nd / "meta" / "rag" / "index_state.json"]),
     ]
     items = []
@@ -1573,8 +1573,20 @@ def offscreen_payload(run: Path) -> dict:
                 "visible": bool(c.get("visible_to_protagonist")),
             } for c in changes[-12:] if isinstance(c, dict)],
         })
+    # world_tick 是「离屏世界基线」tick，Architect 只在弧/卷边界 save_world_tick 时
+    # 推进；它不是逐章推演游标。逐章世界推演落在 chapter_simulations /
+    # chapter_world_deltas，单独统计，避免把「单弧完结、tick 停在第0章」误读成推演没做。
+    prog = read_json(nd / "meta" / "progress.json") or read_json(nd / "meta" / "project_progress.json") or {}
+    completed_ch = len(prog.get("completed_chapters") or [])
+    sim_chapters = len(list((nd / "meta" / "chapter_simulations").glob("*.json")))
+    delta_chapters = len(list((nd / "meta" / "chapter_world_deltas").glob("*.json")))
     return {
         "tick": tick,
+        "simulation_coverage": {
+            "per_chapter_simulated": sim_chapters,
+            "per_chapter_deltas": delta_chapters,
+            "completed_chapters": completed_ch,
+        },
         "agendas": agendas,
         "social_mood": {
             "mood": clip(mood.get("mood"), 160),

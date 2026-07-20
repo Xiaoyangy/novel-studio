@@ -1210,6 +1210,10 @@ function renderPlan(p) {
 
 function renderOffscreen(o) {
   const t = o.tick || {};
+  const cov = o.simulation_coverage || {};
+  const covDone = cov.per_chapter_simulated ?? 0;
+  const covTotal = cov.completed_chapters ?? 0;
+  const covComplete = covTotal > 0 && covDone >= covTotal;
   const agendas = (o.agendas || []).map(a => `<tr>
     <td><b>${esc(a.name)}</b></td><td><span class="tag ${a.tier === "supporting" ? "blue" : "pending"}">${esc(a.tier)}</span></td>
     <td style="color:#c6cddc">${esc(a.goal)}</td><td><span class="tag ${a.status === "active" ? "ok" : "pending"}">${esc(a.status)}</span></td></tr>`).join("");
@@ -1238,8 +1242,10 @@ function renderOffscreen(o) {
     ${(d.changes || []).map(x => `<div class="kv"><span class="k"><span class="tag ${x.kind === "foreshadow" ? "purple" : x.kind === "state" ? "blue" : "pending"}">${esc(x.kind)}</span></span><span><b>${esc(x.entity)}</b> · ${esc(x.change)}${x.visible ? "" : ' <span class="tag pending">主角未知</span>'}</span></div>`).join("")}
   </details>`).join("");
   return `
-    <div class="sec"><h3>世界推演游标</h3><div class="panel">
-      <div class="kv"><span class="k">tick</span><span class="tag purple">${esc(t.tick_id) || "—"}</span>　<span>已推演至第 <b>${t.through_chapter ?? 0}</b> 章 · 更新 ${esc((t.updated_at || "—").replace("T", " ").slice(0, 19))}</span></div>
+    <div class="sec"><h3>世界推演</h3><div class="panel">
+      <div class="kv"><span class="k">逐章推演</span><span class="tag ${covComplete ? "ok" : "pending"}">${covDone}/${covTotal} 章</span>　<span style="color:var(--muted)">chapter_simulations / chapter_world_deltas 逐章落盘${covComplete ? "，已随正文全部完成" : ""}</span></div>
+      <div class="kv"><span class="k">离屏基线 tick</span><span class="tag purple">${esc(t.tick_id) || "—"}</span>　<span>第 <b>${t.through_chapter ?? 0}</b> 章 · 更新 ${esc((t.updated_at || "—").replace("T", " ").slice(0, 19))}</span></div>
+      <div class="kv"><span class="k"></span><span style="color:var(--muted);font-size:12px">离屏基线 tick 是弧级快照，仅在 Architect 跨弧/卷 save_world_tick 时推进；单弧完结的项目它停在第 0 章属正常，不代表逐章推演未完成。</span></div>
       <div class="kv" style="align-items:center"><span class="k">模拟分层</span><span style="flex:1">
         <span style="display:flex;height:9px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.06);max-width:280px">${tierBar}</span>
         <span style="display:block;margin-top:5px">${tiers}<span style="color:var(--muted)">· 信息差图节点 ${o.info_nodes}</span></span></span></div>
