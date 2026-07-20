@@ -50,6 +50,7 @@ Generating a plausible page is easy. Keeping a story coherent after dozens or hu
 | 🧭 Full-book orientation, arc-sized production | Freeze volume/arc/chapter navigation, then “plan one arc, render one arc”; review remains chapter-scoped |
 | 🧠 Long-term RAG memory | Separate channels for canon facts, writing craft, references and review calibration; BM25, embeddings and Qdrant are supported |
 | 🎭 Viewpoint projection | The Drafter receives only POV-visible facts, voice constraints, hard outcomes and a bounded set of writable beats |
+| 📖 Reader-first rendering | Candidate selection and prose scoring lead with readability: concrete scene, live dialogue, varied rhythm, present POV and a real forward pull; anti-AI-voice and detector checks are guardrails, not the goal |
 | ✅ Exact-body quality loop | Deterministic gates, whole-chapter checks, an independent Reviewer, Editor and actual-state matching decide publication |
 | 🛟 Resumable execution | Recover from persisted evidence rather than trusting model narration or chat history |
 | 📊 Live observability | Inspect arc planning, chapters, characters, off-screen state, RAG, reviews, model calls, costs and errors |
@@ -192,6 +193,8 @@ Every accepted chapter must answer four questions:
 - **Does the story work?** Goal, resistance, action, turn, relationship movement, reader reward and hook must be supported.
 - **Does the prose read like fiction?** The pipeline checks for report-like exposition, repetitive rhythm, dialogue-as-data-transfer and metadata leakage.
 - **Was this exact body reviewed?** Review, consistency, commit, acceptance and delivery must bind the same SHA.
+
+Prose is written for readers, not for detectors. The engine computes a deterministic **reader-experience score** (scene concreteness, live dialogue, sentence-rhythm variety, POV presence and forward pull; higher reads better). Three-candidate selection uses it to pick the more readable draft, and it surfaces in both review and the dashboard. It stays a soft signal on purpose: it steers prose toward readers, while anti-AI-voice and external detection remain hard guardrails — passing them is the floor, not the point.
 
 Third-party detector websites remain optional, user-supplied spot checks. novel-studio does not operate those sites and does not block production when no external score is reported. See the [external detector protocol](docs/external-detector-protocol.md).
 
