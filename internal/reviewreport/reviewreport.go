@@ -483,6 +483,7 @@ func renderAIVoice(b *strings.Builder, analysis *domain.AIVoiceAnalysis) {
 			fmt.Fprintf(b, "  - %s｜%s\n", flag.Severity, line)
 		}
 	}
+	b.WriteString("- 说明：AI 腔风险分是本地结构启发式，只查节奏/词频/结构指纹，不是真实检测器（如朱雀）分数；实测它与朱雀相关性弱，会把优质人类文和 AI 文都判到相近低分。发布前若对检测敏感，以真实检测器结果为准，并把该分数按精确正文 SHA 回报。\n")
 }
 
 func renderEditorReview(b *strings.Builder, entry *domain.ReviewEntry) {
