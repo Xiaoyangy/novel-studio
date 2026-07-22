@@ -1702,3 +1702,26 @@ func TestPlanChapterAllowsRewritePlanForPendingCompletedChapter(t *testing.T) {
 		t.Fatalf("rewrite planning should not mark completed chapter in-progress: %+v", progress)
 	}
 }
+
+func TestRevealBudgetAcceptsAssertionNegations(t *testing.T) {
+	// Semantically valid non-reveal phrasings (不认定/不确认/不点明…) must pass;
+	// they mean "do not assert X to the reader" and were previously rejected,
+	// blocking plan_details finalize and the whole book.
+	accept := []string{
+		"不认定姓名残字对应的具体作者",
+		"不确认贺今棠九年前的真实动机",
+		"不点明缺页样卡的最终归属",
+		"不坐实林素琴与署名案的关联",
+	}
+	for _, item := range accept {
+		if !projectAllRevealBudgetItemMechanicallyEnforceable(item) {
+			t.Fatalf("valid non-reveal assertion should be accepted: %q", item)
+		}
+	}
+	// Non-directive statements without any non-reveal marker still fail.
+	for _, item := range []string{"姓名残字很重要", "作者身份是核心谜题"} {
+		if projectAllRevealBudgetItemMechanicallyEnforceable(item) {
+			t.Fatalf("a non-directive line must not pass as an enforceable reveal budget: %q", item)
+		}
+	}
+}
