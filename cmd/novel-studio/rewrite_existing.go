@@ -1371,7 +1371,10 @@ func countCJKRunes(s string) int {
 
 func writerNovelContext(projectDir string, refs toolspkg.References, style string, chapter int) string {
 	st := store.NewStore(projectDir)
-	tool := toolspkg.NewContextTool(st, refs, style)
+	bundle := assets.Load(style)
+	resolvedStyle := bundle.ResolveStyle(style)
+	tool := toolspkg.NewContextTool(st, refs, resolvedStyle.ID).
+		WithConfiguredStyle(resolvedStyle.Body)
 	payload := []byte(fmt.Sprintf(`{"chapter":%d}`, chapter))
 	raw, err := tool.Execute(context.Background(), payload)
 	if err != nil || len(raw) == 0 {

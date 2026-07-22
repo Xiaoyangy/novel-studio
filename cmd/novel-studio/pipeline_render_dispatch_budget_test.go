@@ -26,7 +26,7 @@ func pipelineRenderDispatchFixture(t *testing.T) (string, string, pipelineRender
 		t.Fatal(err)
 	}
 	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
+		Version:                pipelineRenderCandidatePreviousManifestVersion,
 		CandidateID:            "render-ch0001-fixture",
 		GenerationID:           "pg2_dispatch-fixture",
 		Chapter:                1,
@@ -50,6 +50,9 @@ func pipelineRenderDispatchFixture(t *testing.T) (string, string, pipelineRender
 		t.Fatal(err)
 	}
 	candidateStore := store.NewStore(candidateOutputDir)
+	if err := candidateStore.Init(); err != nil {
+		t.Fatal(err)
+	}
 	if err := candidateStore.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
 		Mode: domain.PipelineExecutionRender, TargetChapter: manifest.Chapter,
 		PlanDigest: manifest.PlanDigest, Owner: "render-dispatch-fixture",

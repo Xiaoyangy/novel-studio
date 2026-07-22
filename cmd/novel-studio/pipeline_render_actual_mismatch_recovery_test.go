@@ -331,11 +331,37 @@ func newPipelineAcceptedActualMismatchFixture(t *testing.T) pipelineAcceptedActu
 		t.Fatal(err)
 	}
 	frozen := pipelineRenderCandidateTestFrozen()
+	frozen.PlanPath = "drafts/01.plan.json"
 	frozen.PlanDigest = planCheckpoint.Digest
 	frozen.PlanCheckpointSeq = planCheckpoint.Seq
+	frozen.PlanningDependencyRoot = pipelineBytesSHA([]byte("actual-mismatch-planning-dependencies"))
+	frozen.ProjectedPlanSHA256 = pipelineBytesSHA([]byte("actual-mismatch-projected-plan"))
+	frozen.ProjectedPreStateRoot = pipelineBytesSHA([]byte("actual-mismatch-pre-state"))
+	frozen.ProjectedPostStateRoot = pipelineBytesSHA([]byte("actual-mismatch-post-state"))
+	renderContext := freezeTestDraftRenderContext(t, liveStore, frozen.Chapter, frozen.PlanDigest)
+	renderDependencies, err := capturePipelineFrozenRenderDependencies(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen.RenderDependencySHA256 = renderDependencies
+	frozen.RenderContextPath = toolspkg.FrozenDraftRenderContextPath
+	frozen.RenderContextSHA256 = renderContext.PayloadSHA256
+	frozen.FrozenAt = renderContext.FrozenAt
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(live, filepath.FromSlash(pipelineFrozenPlanPath)), frozen,
+	); err != nil {
+		t.Fatal(err)
+	}
 	candidate, err := preparePipelineRenderCandidate(live, frozen)
 	if err != nil {
 		t.Fatal(err)
+	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(candidate.OutputDir, filepath.FromSlash(pipelineFrozenPlanPath)),
+		frozen,
+	); err != nil {
+		t.Fatalf("persist isolated frozen identity fixture: %v", err)
 	}
 
 	const body = "第一章\n\n门外的脚步停了。林澈没有开门，只把录音时间写在纸角。"

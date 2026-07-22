@@ -582,7 +582,9 @@ func RunProjectedChapterPlanning(
 	if model == nil {
 		return nil, fmt.Errorf("project-all writer model is unavailable")
 	}
-	contextTool := tools.NewContextTool(st, bundle.References, cfg.Style)
+	resolvedStyle := bundle.ResolveStyle(cfg.Style)
+	contextTool := tools.NewContextTool(st, bundle.References, resolvedStyle.ID).
+		WithConfiguredStyle(resolvedStyle.Body)
 	// Project-all never queries live Qdrant, but it may use the immutable local
 	// vector_store copied into this generation workspace. This keeps semantic
 	// RAG in the planning phase while render remains receipt-only.

@@ -142,7 +142,11 @@ func sealedShortWordBudgetFixture(
 ) *store.Store {
 	t.Helper()
 	root := t.TempDir()
-	st := store.NewStore(filepath.Join(root, "candidate", "output"))
+	candidateID := "render-ch0005-word-budget"
+	sourceOutput := filepath.Join(root, "live", "output")
+	st := store.NewStore(filepath.Join(
+		filepath.Dir(sourceOutput), ".render-candidates", candidateID, "output",
+	))
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +184,14 @@ func sealedShortWordBudgetFixture(
 	if !sealed {
 		return st
 	}
+	if err := os.MkdirAll(sourceOutput, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(
+		filepath.Dir(sourceOutput), ".render-candidates", "convergence", candidateID,
+	), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	plan := domain.ChapterPlan{Chapter: 5, Title: "旧账翻到第五页"}
 	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
@@ -194,15 +206,15 @@ func sealedShortWordBudgetFixture(
 		t.Fatal(err)
 	}
 	manifest := toolRenderCandidateManifest{
-		Version:                toolRenderCandidateManifestVersion,
-		CandidateID:            "render-ch0005-word-budget",
+		Version:                toolRenderCandidatePreviousManifestVersion,
+		CandidateID:            candidateID,
 		GenerationID:           "short-word-generation",
 		Chapter:                5,
 		PlanDigest:             checkpoint.Digest,
 		PlanCheckpointSeq:      checkpoint.Seq,
 		ProjectedBundleDigest:  "sha256:word-budget-bundle",
 		PromotionReceiptDigest: "sha256:word-budget-promotion",
-		SourceOutputDir:        filepath.Join(root, "live", "output"),
+		SourceOutputDir:        sourceOutput,
 	}
 	writeSealedShortWordJSON(t, filepath.Join(st.Dir(), "meta", "planning", "render_candidate.json"), manifest)
 	marker := sealedV2FrozenPlanMarker{

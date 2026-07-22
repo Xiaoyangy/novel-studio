@@ -218,6 +218,7 @@ func TestPreparePipelineRenderCandidatePrefersTombstoneBoundRewriteSourceOverOld
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, older, frozen)
 	const olderBody = "第一章\n\n这是正式审核前的旧哈希，不得在拒稿后复活。"
 	olderStore := store.NewStore(older.OutputDir)
 	if err := olderStore.Drafts.SaveDraft(1, olderBody); err != nil {
@@ -233,10 +234,13 @@ func TestPreparePipelineRenderCandidatePrefersTombstoneBoundRewriteSourceOverOld
 		t.Fatal(err)
 	}
 
-	rejected, err := prepareFreshPipelineRenderCandidate(live, frozen, older.ID, older.ContainerDir)
+	rejected, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
+		live, frozen, older.ID, older.ContainerDir, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, rejected, frozen)
 	rejectedStore := store.NewStore(rejected.OutputDir)
 	const rejectedBody = "第一章\n\n这份正文已完成正式审核，下一轮必须消费它的返工意见。"
 	if err := rejectedStore.Drafts.SaveDraft(1, rejectedBody); err != nil {
@@ -432,11 +436,12 @@ func TestPreparePipelineRenderCandidateKeepsNewerActiveSemanticContinuation(t *t
 func TestPreparePipelineRenderCandidateRestoresRetiredSemanticSeedOverInvalidActive(t *testing.T) {
 	fixture := pipelineRenderSemanticSeedTestFixture(t)
 	activeContainer := filepath.Join(pipelineRenderCandidateRoot(fixture.live), fixture.candidateID)
-	active, err := prepareFreshPipelineRenderCandidate(
+	active, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
 		fixture.live,
 		fixture.frozen,
 		fixture.candidateID,
 		activeContainer,
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -544,6 +549,7 @@ func pipelineRenderSemanticSeedTestFixture(t *testing.T) pipelineRenderSemanticS
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	candidateStore := store.NewStore(candidate.OutputDir)
 	const rejectedBody = "第一章\n\n这份正文已完成正式审核，必须作为后续 semantic rewrite seed。"
 	if err := candidateStore.Drafts.SaveDraft(frozen.Chapter, rejectedBody); err != nil {
@@ -666,6 +672,7 @@ func pipelineRenderRecoverableCandidateFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	const body = "第一章\n\n这个 exact body 可以跨进程恢复。"
 	candidateStore := store.NewStore(candidate.OutputDir)
 	if err := candidateStore.Drafts.SaveDraft(frozen.Chapter, body); err != nil {

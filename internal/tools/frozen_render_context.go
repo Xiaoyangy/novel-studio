@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -219,5 +220,25 @@ func atomicWriteFrozenRenderContext(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncFrozenRenderDirectory(filepath.Dir(path))
+}
+
+// syncFrozenRenderDirectory makes an atomic rename/create durable before a
+// provider permit is allowed to depend on it. Some filesystems do not support
+// directory fsync; match the repository's other journals by tolerating only
+// those explicit unsupported-operation errors.
+func syncFrozenRenderDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil && syncErr != syscall.EINVAL && syncErr != syscall.ENOTSUP {
+		return syncErr
+	}
+	return closeErr
 }

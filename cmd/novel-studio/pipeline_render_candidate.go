@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	pipelineRenderCandidateManifestVersion       = "pipeline-render-candidate.v2"
-	pipelineRenderCandidateLegacyManifestVersion = "pipeline-render-candidate.v1"
-	pipelineRenderRejectionTombstoneVersion      = "pipeline-render-semantic-rejection.v1"
+	pipelineRenderCandidateManifestVersion         = "pipeline-render-candidate.v3-effective-style"
+	pipelineRenderCandidatePreStyleManifestVersion = "pipeline-render-candidate.v3-pre-style"
+	pipelineRenderCandidatePreviousManifestVersion = "pipeline-render-candidate.v2"
+	pipelineRenderCandidateLegacyManifestVersion   = "pipeline-render-candidate.v1"
+	pipelineRenderRejectionTombstoneVersion        = "pipeline-render-semantic-rejection.v1"
 )
 
 type pipelineRenderCandidate struct {
@@ -50,17 +52,20 @@ type pipelineRenderCandidate struct {
 }
 
 type pipelineRenderCandidateManifest struct {
-	Version                string `json:"version"`
-	CandidateID            string `json:"candidate_id"`
-	GenerationID           string `json:"generation_id"`
-	Chapter                int    `json:"chapter"`
-	PlanDigest             string `json:"plan_digest"`
-	PlanCheckpointSeq      int64  `json:"plan_checkpoint_seq,omitempty"`
-	ProjectedBundleDigest  string `json:"projected_bundle_digest"`
-	PromotionReceiptDigest string `json:"promotion_receipt_digest"`
-	SourceOutputDir        string `json:"source_output_dir"`
-	SourceLiveRoot         string `json:"source_live_root"`
-	PreparedAt             string `json:"prepared_at"`
+	Version                     string `json:"version"`
+	CandidateID                 string `json:"candidate_id"`
+	GenerationID                string `json:"generation_id"`
+	Chapter                     int    `json:"chapter"`
+	PlanDigest                  string `json:"plan_digest"`
+	PlanCheckpointSeq           int64  `json:"plan_checkpoint_seq,omitempty"`
+	ProjectedBundleDigest       string `json:"projected_bundle_digest"`
+	PromotionReceiptDigest      string `json:"promotion_receipt_digest"`
+	PipelineRenderInputDigest   string `json:"pipeline_render_input_digest,omitempty"`
+	RenderContextSHA256         string `json:"render_context_sha256,omitempty"`
+	EffectiveStyleReceiptDigest string `json:"effective_style_receipt_digest,omitempty"`
+	SourceOutputDir             string `json:"source_output_dir"`
+	SourceLiveRoot              string `json:"source_live_root"`
+	PreparedAt                  string `json:"prepared_at"`
 }
 
 // pipelineRenderRejectionTombstone is an immutable, exact-body negative
@@ -593,7 +598,43 @@ func preparePipelineRenderCandidate(
 	} else if recovered != nil {
 		return recovered, nil
 	}
-	return prepareFreshPipelineRenderCandidate(liveOutputDir, frozen, id, container)
+	styleEpoch, err := inspectPipelineRenderStyleEpochRecovery(
+		liveOutputDir,
+		frozen,
+		id,
+		container,
+	)
+	if err != nil {
+		return nil, err
+	}
+	declareV3Epoch := styleEpoch != nil && !styleEpoch.legacyV2
+	if styleEpoch == nil {
+		declareV3Epoch = frozen.EffectiveStyleProtocol == pipelineRenderCandidateManifestVersion
+	}
+	fresh, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
+		liveOutputDir, frozen, id, container, declareV3Epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if styleEpoch == nil {
+		return fresh, nil
+	}
+	if styleEpoch.legacyV2 {
+		if err := rewritePipelineRenderCandidateAsLegacyV2(fresh.OutputDir, frozen); err != nil {
+			_ = retirePipelineRenderCandidate(fresh.ContainerDir, "legacy-style-epoch-failed")
+			return nil, err
+		}
+		return fresh, nil
+	}
+	if styleEpoch.receipt == nil {
+		return fresh, nil
+	}
+	if err := restorePipelineRenderCandidateEffectiveStyleReceipt(fresh.OutputDir, styleEpoch.receipt); err != nil {
+		_ = retirePipelineRenderCandidate(fresh.ContainerDir, "style-receipt-recovery-failed")
+		return nil, err
+	}
+	return fresh, nil
 }
 
 type pipelineRenderActualMismatchRecoveryReceipt struct {
@@ -1027,6 +1068,23 @@ func prepareFreshPipelineRenderCandidate(
 	id string,
 	container string,
 ) (*pipelineRenderCandidate, error) {
+	return prepareFreshPipelineRenderCandidateForStyleEpoch(
+		liveOutputDir, frozen, id, container, true,
+	)
+}
+
+func prepareFreshPipelineRenderCandidateForStyleEpoch(
+	liveOutputDir string,
+	frozen *pipelineFrozenPlan,
+	id string,
+	container string,
+	declareV3Epoch bool,
+) (*pipelineRenderCandidate, error) {
+	if declareV3Epoch {
+		if _, err := ensurePipelineRenderV3StyleEpochIntent(liveOutputDir, frozen, id); err != nil {
+			return nil, fmt.Errorf("declare immutable v3 render style epoch: %w", err)
+		}
+	}
 	output := filepath.Join(container, "output")
 	if _, err := os.Stat(container); err == nil {
 		if err := retirePipelineRenderCandidate(container, "stale"); err != nil {
@@ -1053,17 +1111,19 @@ func prepareFreshPipelineRenderCandidate(
 		return nil, fmt.Errorf("live canon changed while preparing sealed render candidate")
 	}
 	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
-		CandidateID:            id,
-		GenerationID:           frozen.PlanningGenerationID,
-		Chapter:                frozen.Chapter,
-		PlanDigest:             frozen.PlanDigest,
-		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
-		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
-		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
-		SourceOutputDir:        filepath.Clean(liveOutputDir),
-		SourceLiveRoot:         sourceLiveRoot,
-		PreparedAt:             time.Now().UTC().Format(time.RFC3339Nano),
+		Version:                   pipelineRenderCandidatePreStyleManifestVersion,
+		CandidateID:               id,
+		GenerationID:              frozen.PlanningGenerationID,
+		Chapter:                   frozen.Chapter,
+		PlanDigest:                frozen.PlanDigest,
+		PlanCheckpointSeq:         frozen.PlanCheckpointSeq,
+		ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+		PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+		RenderContextSHA256:       frozen.RenderContextSHA256,
+		SourceOutputDir:           filepath.Clean(liveOutputDir),
+		SourceLiveRoot:            sourceLiveRoot,
+		PreparedAt:                time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -1087,15 +1147,757 @@ func prepareFreshPipelineRenderCandidate(
 	}, nil
 }
 
+func bindPipelineRenderCandidateEffectiveStyle(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+	receipt *tools.EffectiveRenderStyleContractReceipt,
+) error {
+	if frozen == nil || receipt == nil || strings.TrimSpace(receipt.ReceiptDigest) == "" {
+		return fmt.Errorf("bind render candidate effective style requires frozen plan and receipt")
+	}
+	path := filepath.Join(outputDir, "meta", "planning", "render_candidate.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var manifest pipelineRenderCandidateManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode render candidate before style binding: %w", err)
+	}
+	if manifest.Version != pipelineRenderCandidateManifestVersion &&
+		manifest.Version != pipelineRenderCandidatePreStyleManifestVersion {
+		return fmt.Errorf("render candidate style binding refuses manifest version %q", manifest.Version)
+	}
+	if manifest.CandidateID != receipt.CandidateID || manifest.GenerationID != frozen.PlanningGenerationID ||
+		manifest.Chapter != frozen.Chapter || manifest.PlanDigest != frozen.PlanDigest ||
+		manifest.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+		manifest.PromotionReceiptDigest != frozen.PromotionReceiptDigest ||
+		receipt.GenerationID != frozen.PlanningGenerationID || receipt.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+		receipt.BaseRenderContextSHA256 != frozen.RenderContextSHA256 ||
+		receipt.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+		receipt.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+		receipt.PromotionReceiptDigest != frozen.PromotionReceiptDigest {
+		return fmt.Errorf("render candidate/effective style receipt sealed identity mismatch")
+	}
+	if manifest.Version == pipelineRenderCandidateManifestVersion &&
+		(manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			(strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" &&
+				manifest.EffectiveStyleReceiptDigest != receipt.ReceiptDigest)) {
+		return fmt.Errorf("refuse to repair drifted v3 render candidate effective-style binding")
+	}
+	if manifest.Version == pipelineRenderCandidatePreStyleManifestVersion &&
+		(manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "") {
+		return fmt.Errorf("pre-style render candidate input drifted before effective-style binding")
+	}
+	manifest.Version = pipelineRenderCandidateManifestVersion
+	manifest.PlanCheckpointSeq = frozen.PlanCheckpointSeq
+	manifest.PipelineRenderInputDigest = frozen.PipelineRunInputDigest
+	manifest.RenderContextSHA256 = frozen.RenderContextSHA256
+	manifest.EffectiveStyleReceiptDigest = receipt.ReceiptDigest
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteRewriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		return fmt.Errorf("bind render candidate effective style receipt: %w", err)
+	}
+	return nil
+}
+
+func restorePipelineRenderCandidateEffectiveStyleReceipt(
+	outputDir string,
+	receipt *tools.EffectiveRenderStyleContractReceipt,
+) error {
+	if receipt == nil || !pipelineRenderInputSHA256(receipt.ReceiptDigest) {
+		return fmt.Errorf("restore render candidate effective style requires a valid receipt")
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))
+	if err := atomicWriteRewriteFile(path, append(raw, '\n'), 0o644); err != nil {
+		return fmt.Errorf("restore exact effective style receipt: %w", err)
+	}
+	return nil
+}
+
+func loadPipelineRenderCandidateEffectiveStyleReceipt(
+	outputDir string,
+	manifest pipelineRenderCandidateManifest,
+	frozen *pipelineFrozenPlan,
+) (*tools.EffectiveRenderStyleContractReceipt, error) {
+	if frozen == nil || manifest.Version != pipelineRenderCandidateManifestVersion ||
+		manifest.Chapter != frozen.Chapter || manifest.PlanDigest != frozen.PlanDigest ||
+		manifest.CandidateID == "" || manifest.EffectiveStyleReceiptDigest == "" {
+		return nil, fmt.Errorf("v3 effective style receipt recovery identity is incomplete")
+	}
+	st := store.NewStore(outputDir)
+	currentPath := filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))
+	if info, err := os.Lstat(currentPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("v3 effective style receipt current pointer must be a real file")
+		}
+		_, receipt, err := tools.LoadEffectiveRenderStyleContract(st, frozen.Chapter, frozen.PlanDigest)
+		if err == nil {
+			return receipt, nil
+		}
+		// A committed target legitimately changes progress and cast-derived
+		// stopwords after compilation. Recovery may authenticate the immutable
+		// archive here; any later provider dispatch still passes the stricter
+		// mutable-input prose-permit validation independently.
+		_, archived, _, archiveErr := tools.LoadBoundArchivedEffectiveRenderStyleContract(
+			st, frozen.Chapter, frozen.PlanDigest,
+		)
+		if archiveErr != nil {
+			return nil, err
+		}
+		return archived, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	archivePath, err := tools.EffectiveRenderStyleContractArchivePath(
+		manifest.Chapter,
+		manifest.CandidateID,
+		manifest.EffectiveStyleReceiptDigest,
+	)
+	if err != nil {
+		return nil, err
+	}
+	receipt, err := tools.LoadArchivedEffectiveRenderStyleContract(
+		st,
+		archivePath,
+		manifest.Chapter,
+		manifest.EffectiveStyleReceiptDigest,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load archived v3 effective style receipt: %w", err)
+	}
+	if receipt.GenerationID != frozen.PlanningGenerationID ||
+		receipt.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+		receipt.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+		receipt.BaseRenderContextSHA256 != frozen.RenderContextSHA256 ||
+		receipt.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+		receipt.PromotionReceiptDigest != frozen.PromotionReceiptDigest {
+		return nil, fmt.Errorf("archived v3 effective style receipt differs from frozen identity")
+	}
+	if err := restorePipelineRenderCandidateEffectiveStyleReceipt(outputDir, receipt); err != nil {
+		return nil, err
+	}
+	_, restored, _, err := tools.LoadBoundArchivedEffectiveRenderStyleContract(
+		st, frozen.Chapter, frozen.PlanDigest,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return restored, nil
+}
+
+// rewritePipelineRenderCandidateAsLegacyV2 preserves the previous render
+// protocol for an exact v1/v2 recovery source. It deliberately does not attach
+// current style assets: legacy prose and any later legacy rerender consume only
+// the style contract embedded in the frozen render context.
+func rewritePipelineRenderCandidateAsLegacyV2(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+) error {
+	if frozen == nil {
+		return fmt.Errorf("legacy render candidate recovery requires frozen plan")
+	}
+	if err := validatePipelineRenderCandidatePlanningTree(outputDir); err != nil {
+		return err
+	}
+	path := filepath.Join(outputDir, "meta", "planning", "render_candidate.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var manifest pipelineRenderCandidateManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return err
+	}
+	if manifest.Version != pipelineRenderCandidatePreStyleManifestVersion ||
+		manifest.GenerationID != frozen.PlanningGenerationID || manifest.Chapter != frozen.Chapter ||
+		manifest.PlanDigest != frozen.PlanDigest || manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+		manifest.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+		manifest.PromotionReceiptDigest != frozen.PromotionReceiptDigest ||
+		manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+		manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+		strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+		return fmt.Errorf("fresh render candidate cannot preserve legacy style epoch")
+	}
+	manifest.Version = pipelineRenderCandidatePreviousManifestVersion
+	manifest.PipelineRenderInputDigest = ""
+	manifest.RenderContextSHA256 = ""
+	manifest.EffectiveStyleReceiptDigest = ""
+	raw, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteRewriteFile(path, append(raw, '\n'), 0o644); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// resolvePipelineRenderCandidateSourceOutput derives candidate topology from
+// the inspected directory, never from the mutable SourceOutputDir field. This
+// prevents an isolated active/retired candidate from pointing SourceOutputDir
+// at itself and hiding live CandidateID-scoped transaction or epoch evidence.
+func resolvePipelineRenderCandidateSourceOutput(
+	outputDir string,
+	manifest *pipelineRenderCandidateManifest,
+) (string, bool, error) {
+	if manifest == nil {
+		return "", false, fmt.Errorf("render candidate source topology requires manifest")
+	}
+	outputDir = strings.TrimSpace(outputDir)
+	if outputDir == "" || !filepath.IsAbs(outputDir) || outputDir != filepath.Clean(outputDir) {
+		return "", false, fmt.Errorf("render candidate output must be a clean absolute path")
+	}
+	manifestSource := strings.TrimSpace(manifest.SourceOutputDir)
+	if manifestSource != "" &&
+		(!filepath.IsAbs(manifestSource) || manifestSource != filepath.Clean(manifestSource)) {
+		return "", false, fmt.Errorf("render candidate source output must be a clean absolute path")
+	}
+
+	derivedSource := outputDir
+	isolated := false
+	candidateNamespace := ""
+	if filepath.Base(outputDir) == "output" {
+		container := filepath.Dir(outputDir)
+		parent := filepath.Dir(container)
+		switch {
+		case filepath.Base(parent) == ".render-candidates":
+			isolated = true
+			candidateNamespace = parent
+			if filepath.Base(container) != manifest.CandidateID {
+				return "", false, fmt.Errorf("active render candidate container does not match CandidateID")
+			}
+		case filepath.Base(parent) == "retired" &&
+			filepath.Base(filepath.Dir(parent)) == ".render-candidates":
+			isolated = true
+			candidateNamespace = filepath.Dir(parent)
+			if !strings.HasPrefix(filepath.Base(container), manifest.CandidateID+"-") {
+				return "", false, fmt.Errorf("retired render candidate container does not match CandidateID")
+			}
+		}
+	}
+	if isolated {
+		if manifestSource == "" {
+			return "", false, fmt.Errorf("isolated render candidate is missing source output")
+		}
+		if filepath.Clean(pipelineRenderCandidateRoot(manifestSource)) != filepath.Clean(candidateNamespace) {
+			return "", false, fmt.Errorf("render candidate source output conflicts with directory topology")
+		}
+		derivedSource = manifestSource
+	} else if manifestSource != "" && manifestSource != derivedSource {
+		return "", false, fmt.Errorf("render candidate source output conflicts with directory topology")
+	}
+	return derivedSource, isolated, nil
+}
+
+func pipelineRenderCandidateStyleProtocol(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+) (string, error) {
+	if frozen == nil {
+		return "", fmt.Errorf("render candidate style protocol requires frozen plan")
+	}
+	if err := validatePipelineRenderCandidatePlanningTree(outputDir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(outputDir, "meta", "planning", "render_candidate.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var manifest pipelineRenderCandidateManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return "", err
+	}
+	if _, _, err := resolvePipelineRenderCandidateSourceOutput(outputDir, &manifest); err != nil {
+		return "", err
+	}
+	if frozen.ProjectionBinding == "sealed_v2" {
+		expectedCandidateID, err := pipelineRenderTransactionID(frozen)
+		if err != nil {
+			return "", err
+		}
+		if manifest.CandidateID != expectedCandidateID {
+			return "", fmt.Errorf("render candidate CandidateID differs from deterministic sealed identity")
+		}
+	}
+	if manifest.GenerationID != frozen.PlanningGenerationID || manifest.Chapter != frozen.Chapter ||
+		manifest.PlanDigest != frozen.PlanDigest || manifest.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+		manifest.PromotionReceiptDigest != frozen.PromotionReceiptDigest {
+		return "", fmt.Errorf("render candidate style protocol identity mismatch")
+	}
+	switch manifest.Version {
+	case pipelineRenderCandidateManifestVersion:
+		if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			!pipelineRenderInputSHA256(manifest.EffectiveStyleReceiptDigest) {
+			return "", fmt.Errorf("v3 render candidate effective style identity is incomplete")
+		}
+	case pipelineRenderCandidatePreStyleManifestVersion:
+		if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+			return "", fmt.Errorf("pre-style render candidate identity is incomplete")
+		}
+	case pipelineRenderCandidatePreviousManifestVersion:
+		if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+			return "", fmt.Errorf("legacy v2 candidate carries v3 effective-style identity")
+		}
+		if err := rejectPipelineLegacyStyleDowngradeEvidence(outputDir, manifest, frozen); err != nil {
+			return "", err
+		}
+	case pipelineRenderCandidateLegacyManifestVersion:
+		if strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+			return "", fmt.Errorf("legacy v1 candidate carries v3 effective-style identity")
+		}
+		if err := rejectPipelineLegacyStyleDowngradeEvidence(outputDir, manifest, frozen); err != nil {
+			return "", err
+		}
+		// v1→v2 is a schema-only migration. Both protocols consume the exact
+		// embedded frozen style and carry no effective-style receipt.
+		manifest.Version = pipelineRenderCandidatePreviousManifestVersion
+		manifest.PlanCheckpointSeq = frozen.PlanCheckpointSeq
+		raw, err = json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		if err := atomicWriteRewriteFile(path, append(raw, '\n'), 0o644); err != nil {
+			return "", err
+		}
+	default:
+		return "", fmt.Errorf("unsupported render candidate style protocol %q", manifest.Version)
+	}
+	if manifest.Version == pipelineRenderCandidatePreviousManifestVersion {
+		if err := os.Remove(filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return manifest.Version, nil
+}
+
+func validatePipelineRenderCandidatePlanningTree(outputDir string) error {
+	outputDir = strings.TrimSpace(outputDir)
+	if outputDir == "" || !filepath.IsAbs(outputDir) || outputDir != filepath.Clean(outputDir) {
+		return fmt.Errorf("render candidate planning output must be a clean absolute path")
+	}
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: "output", path: outputDir},
+		{name: "meta", path: filepath.Join(outputDir, "meta")},
+		{name: "planning", path: filepath.Join(outputDir, "meta", "planning")},
+	}
+	for _, item := range paths {
+		info, err := os.Lstat(item.path)
+		if err != nil {
+			return fmt.Errorf("inspect render candidate %s directory: %w", item.name, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("render candidate %s must be a real directory", item.name)
+		}
+	}
+	resolvedOutput, err := filepath.EvalSymlinks(outputDir)
+	if err != nil {
+		return err
+	}
+	resolvedPlanning, err := filepath.EvalSymlinks(filepath.Join(outputDir, "meta", "planning"))
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(resolvedPlanning) != filepath.Join(filepath.Clean(resolvedOutput), "meta", "planning") {
+		return fmt.Errorf("render candidate planning directory escapes output")
+	}
+	return nil
+}
+
+func rejectPipelineLegacyStyleDowngradeEvidence(
+	outputDir string,
+	manifest pipelineRenderCandidateManifest,
+	frozen *pipelineFrozenPlan,
+) error {
+	if frozen == nil {
+		return fmt.Errorf("legacy style protocol requires frozen identity")
+	}
+	sourceOutputDir, _, err := resolvePipelineRenderCandidateSourceOutput(outputDir, &manifest)
+	if err != nil {
+		return err
+	}
+	if intent, err := inspectPipelineRenderV3StyleEpochIntent(
+		sourceOutputDir, frozen, manifest.CandidateID,
+	); err != nil {
+		return fmt.Errorf("inspect immutable v3 style epoch intent: %w", err)
+	} else if intent != nil {
+		return fmt.Errorf("candidate has an immutable v3 style epoch intent and cannot be relabeled as legacy v1/v2")
+	}
+	if frozen.EffectiveStyleProtocol == pipelineRenderCandidateManifestVersion {
+		return fmt.Errorf("v3 frozen style epoch cannot be relabeled as legacy v1/v2")
+	}
+	if strings.TrimSpace(frozen.RenderInputUpgradeID) != "" ||
+		strings.TrimSpace(frozen.RenderInputUpgradeReceiptDigest) != "" {
+		return fmt.Errorf("render-input-upgraded candidate cannot be relabeled as legacy v1/v2 style protocol")
+	}
+	archiveDir := filepath.Join(
+		outputDir,
+		filepath.FromSlash(tools.EffectiveRenderStyleContractArchiveDir),
+		fmt.Sprintf("ch%04d", manifest.Chapter),
+		manifest.CandidateID,
+	)
+	if info, err := os.Lstat(archiveDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("candidate effective-style archive namespace is invalid")
+		}
+		entries, err := os.ReadDir(archiveDir)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("candidate has durable v3 effective-style archive evidence and cannot be relabeled as legacy v1/v2")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	currentPath := filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))
+	if raw, err := os.ReadFile(currentPath); err == nil {
+		var receipt tools.EffectiveRenderStyleContractReceipt
+		if json.Unmarshal(raw, &receipt) == nil &&
+			receipt.CandidateID == manifest.CandidateID &&
+			receipt.Chapter == manifest.Chapter &&
+			receipt.PlanDigest == manifest.PlanDigest {
+			return fmt.Errorf("candidate has a v3 effective-style receipt and cannot be relabeled as legacy v1/v2")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 type reusablePipelineRenderCandidate struct {
 	container      string
 	manifest       pipelineRenderCandidateManifest
+	styleReceipt   *tools.EffectiveRenderStyleContractReceipt
 	body           string
 	bodyCheckpoint domain.Checkpoint
 	judge          *deepseekAIJudgeArtifact
 	editorCache    *editorReviewCacheArtifact
 	localSoftChain *tools.DraftLocalSoftEditRecoveryChain
 	score          int
+}
+
+type pipelineRenderStyleEpochRecovery struct {
+	legacyV2   bool
+	receipt    *tools.EffectiveRenderStyleContractReceipt
+	preparedAt string
+}
+
+// inspectPipelineRenderStyleEpochRecovery recovers protocol identity even when
+// a provider crash happened before any draft checkpoint existed. The sibling
+// dispatch ledger is keyed by CandidateID and survives candidate retirement,
+// so rebuilding the same candidate under another style epoch would otherwise
+// either deadlock recovery or relabel a consumed provider attempt.
+func inspectPipelineRenderStyleEpochRecovery(
+	liveOutputDir string,
+	frozen *pipelineFrozenPlan,
+	id string,
+	activeContainer string,
+) (*pipelineRenderStyleEpochRecovery, error) {
+	if frozen == nil || strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("render style epoch recovery requires frozen identity")
+	}
+	intent, err := inspectPipelineRenderV3StyleEpochIntent(liveOutputDir, frozen, id)
+	if err != nil {
+		return nil, err
+	}
+	paths := []string{activeContainer}
+	retiredRoot := filepath.Join(pipelineRenderCandidateRoot(liveOutputDir), "retired")
+	entries, err := os.ReadDir(retiredRoot)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), id+"-") {
+				paths = append(paths, filepath.Join(retiredRoot, entry.Name()))
+			}
+		}
+	}
+	sort.Strings(paths)
+	var bestV3 *pipelineRenderStyleEpochRecovery
+	var bestLegacy *pipelineRenderStyleEpochRecovery
+	for _, container := range paths {
+		manifestPath := filepath.Join(container, "output", "meta", "planning", "render_candidate.json")
+		info, statErr := os.Lstat(manifestPath)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return nil, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("render style epoch manifest must be a real file: %s", manifestPath)
+		}
+		raw, readErr := os.ReadFile(manifestPath)
+		if readErr != nil {
+			return nil, readErr
+		}
+		var manifest pipelineRenderCandidateManifest
+		if json.Unmarshal(raw, &manifest) != nil || manifest.CandidateID != id ||
+			manifest.GenerationID != frozen.PlanningGenerationID || manifest.Chapter != frozen.Chapter ||
+			manifest.PlanDigest != frozen.PlanDigest ||
+			manifest.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+			manifest.PromotionReceiptDigest != frozen.PromotionReceiptDigest ||
+			filepath.Clean(manifest.SourceOutputDir) != filepath.Clean(liveOutputDir) {
+			continue
+		}
+		switch manifest.Version {
+		case pipelineRenderCandidateManifestVersion:
+			if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+				manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+				manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+				!pipelineRenderInputSHA256(manifest.EffectiveStyleReceiptDigest) {
+				return nil, fmt.Errorf("v3 render style epoch identity is incomplete")
+			}
+			receipt, loadErr := loadPipelineRenderCandidateEffectiveStyleReceipt(
+				filepath.Join(container, "output"),
+				manifest,
+				frozen,
+			)
+			if loadErr != nil {
+				return nil, fmt.Errorf("validate v3 render style epoch receipt: %w", loadErr)
+			}
+			if receipt == nil || receipt.ReceiptDigest != manifest.EffectiveStyleReceiptDigest {
+				return nil, fmt.Errorf("v3 render style epoch receipt digest mismatch")
+			}
+			candidate := &pipelineRenderStyleEpochRecovery{receipt: receipt, preparedAt: manifest.PreparedAt}
+			if bestV3 != nil && bestV3.receipt != nil &&
+				bestV3.receipt.ReceiptDigest != receipt.ReceiptDigest {
+				return nil, fmt.Errorf(
+					"candidate id has multiple incompatible v3 effective-style receipt digests (%s, %s)",
+					bestV3.receipt.ReceiptDigest,
+					receipt.ReceiptDigest,
+				)
+			}
+			if bestV3 == nil || candidate.preparedAt > bestV3.preparedAt {
+				bestV3 = candidate
+			}
+		case pipelineRenderCandidatePreviousManifestVersion:
+			if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+				strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+				strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+				strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+				return nil, fmt.Errorf("legacy v2 render style epoch carries v3-only fields")
+			}
+			if err := rejectPipelineLegacyStyleDowngradeEvidence(
+				filepath.Join(container, "output"), manifest, frozen,
+			); err != nil {
+				return nil, err
+			}
+			candidate := &pipelineRenderStyleEpochRecovery{legacyV2: true, preparedAt: manifest.PreparedAt}
+			if bestLegacy == nil || candidate.preparedAt > bestLegacy.preparedAt {
+				bestLegacy = candidate
+			}
+		case pipelineRenderCandidateLegacyManifestVersion:
+			if strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+				strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+				strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+				return nil, fmt.Errorf("legacy v1 render style epoch carries v3-only fields")
+			}
+			if err := rejectPipelineLegacyStyleDowngradeEvidence(
+				filepath.Join(container, "output"), manifest, frozen,
+			); err != nil {
+				return nil, err
+			}
+			candidate := &pipelineRenderStyleEpochRecovery{legacyV2: true, preparedAt: manifest.PreparedAt}
+			if bestLegacy == nil || candidate.preparedAt > bestLegacy.preparedAt {
+				bestLegacy = candidate
+			}
+		case pipelineRenderCandidatePreStyleManifestVersion:
+			if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+				manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+				manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+				strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+				return nil, fmt.Errorf("pre-style render epoch identity is malformed")
+			}
+			receipt, receiptErr := loadPipelinePreStyleCandidateReceipt(
+				filepath.Join(container, "output"), manifest, frozen,
+			)
+			if receiptErr != nil {
+				return nil, receiptErr
+			}
+			if receipt != nil {
+				candidate := &pipelineRenderStyleEpochRecovery{receipt: receipt, preparedAt: manifest.PreparedAt}
+				if bestV3 != nil && bestV3.receipt != nil &&
+					bestV3.receipt.ReceiptDigest != receipt.ReceiptDigest {
+					return nil, fmt.Errorf(
+						"candidate id has multiple incompatible pre-style/v3 receipt digests (%s, %s)",
+						bestV3.receipt.ReceiptDigest,
+						receipt.ReceiptDigest,
+					)
+				}
+				if bestV3 == nil || candidate.preparedAt > bestV3.preparedAt {
+					bestV3 = candidate
+				}
+			}
+		default:
+			continue
+		}
+	}
+	if bestV3 != nil && bestLegacy != nil {
+		return nil, fmt.Errorf("candidate id is shared by incompatible legacy and v3 style epochs")
+	}
+	if intent != nil && bestLegacy != nil {
+		return nil, fmt.Errorf("immutable v3 style epoch intent forbids legacy v1/v2 candidate recovery")
+	}
+	if bestV3 != nil {
+		return bestV3, nil
+	}
+	if intent != nil {
+		return &pipelineRenderStyleEpochRecovery{}, nil
+	}
+	return bestLegacy, nil
+}
+
+func loadPipelinePreStyleCandidateReceipt(
+	outputDir string,
+	manifest pipelineRenderCandidateManifest,
+	frozen *pipelineFrozenPlan,
+) (*tools.EffectiveRenderStyleContractReceipt, error) {
+	archiveDir := filepath.Join(
+		outputDir,
+		filepath.FromSlash(tools.EffectiveRenderStyleContractArchiveDir),
+		fmt.Sprintf("ch%04d", manifest.Chapter),
+		manifest.CandidateID,
+	)
+	entries, err := os.ReadDir(archiveDir)
+	if os.IsNotExist(err) {
+		return recoverPipelinePreStyleCurrentOnlyReceipt(outputDir, manifest, frozen)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return recoverPipelinePreStyleCurrentOnlyReceipt(outputDir, manifest, frozen)
+	}
+	var recovered *tools.EffectiveRenderStyleContractReceipt
+	for _, entry := range entries {
+		path := filepath.Join(archiveDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if entry.IsDir() || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+			filepath.Ext(entry.Name()) != ".json" {
+			return nil, fmt.Errorf("pre-style effective-style archive namespace contains an invalid entry")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var candidate tools.EffectiveRenderStyleContractReceipt
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			return nil, fmt.Errorf("decode pre-style archived receipt: %w", err)
+		}
+		rel, err := tools.EffectiveRenderStyleContractArchivePath(
+			candidate.Chapter,
+			candidate.CandidateID,
+			candidate.ReceiptDigest,
+		)
+		if err != nil {
+			return nil, err
+		}
+		verified, err := tools.LoadArchivedEffectiveRenderStyleContract(
+			store.NewStore(outputDir), rel, manifest.Chapter, candidate.ReceiptDigest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("validate pre-style archived receipt: %w", err)
+		}
+		if verified.GenerationID != frozen.PlanningGenerationID ||
+			verified.Chapter != frozen.Chapter ||
+			verified.PlanDigest != frozen.PlanDigest ||
+			verified.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			verified.CandidateID != manifest.CandidateID ||
+			verified.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			verified.BaseRenderContextSHA256 != frozen.RenderContextSHA256 ||
+			verified.ProjectedBundleDigest != frozen.ProjectedBundleDigest ||
+			verified.PromotionReceiptDigest != frozen.PromotionReceiptDigest {
+			return nil, fmt.Errorf("pre-style archived receipt differs from frozen candidate identity")
+		}
+		if recovered != nil && recovered.ReceiptDigest != verified.ReceiptDigest {
+			return nil, fmt.Errorf("pre-style candidate has multiple incompatible effective-style archives")
+		}
+		recovered = verified
+	}
+	if recovered == nil {
+		return nil, nil
+	}
+	currentPath := filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))
+	if raw, err := os.ReadFile(currentPath); err == nil {
+		var current tools.EffectiveRenderStyleContractReceipt
+		if json.Unmarshal(raw, &current) == nil &&
+			current.CandidateID == manifest.CandidateID &&
+			current.ReceiptDigest != recovered.ReceiptDigest {
+			return nil, fmt.Errorf("pre-style current receipt conflicts with immutable archive")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return recovered, nil
+}
+
+func recoverPipelinePreStyleCurrentOnlyReceipt(
+	outputDir string,
+	manifest pipelineRenderCandidateManifest,
+	frozen *pipelineFrozenPlan,
+) (*tools.EffectiveRenderStyleContractReceipt, error) {
+	if frozen == nil {
+		return nil, fmt.Errorf("pre-style current-only recovery requires frozen identity")
+	}
+	currentPath := filepath.Join(outputDir, filepath.FromSlash(tools.EffectiveRenderStyleContractPath))
+	if _, err := os.Lstat(currentPath); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	recovered, _, err := tools.RecoverEffectiveRenderStyleContractArchiveFromCurrent(
+		store.NewStore(outputDir),
+		tools.EffectiveRenderStyleContractIdentity{
+			GenerationID:              frozen.PlanningGenerationID,
+			Chapter:                   frozen.Chapter,
+			PlanDigest:                frozen.PlanDigest,
+			PlanCheckpointSeq:         frozen.PlanCheckpointSeq,
+			BaseRenderContextSHA256:   frozen.RenderContextSHA256,
+			PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+			ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+			PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+			CandidateID:               manifest.CandidateID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("recover pre-style archive from current receipt: %w", err)
+	}
+	return recovered, nil
 }
 
 // newerReusablePipelineRenderCandidate compares the durable body event before
@@ -1271,14 +2073,36 @@ func recoverReusablePipelineRenderCandidate(
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	fresh, err := prepareFreshPipelineRenderCandidate(
+	declareV3Epoch := best.manifest.Version == pipelineRenderCandidateManifestVersion ||
+		best.manifest.Version == pipelineRenderCandidatePreStyleManifestVersion
+	fresh, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
 		liveOutputDir,
 		frozen,
 		id,
 		activeContainer,
+		declareV3Epoch,
 	)
 	if err != nil {
 		return nil, err
+	}
+	switch best.manifest.Version {
+	case pipelineRenderCandidateManifestVersion:
+		if best.styleReceipt == nil {
+			_ = retirePipelineRenderCandidate(fresh.ContainerDir, "recovery-style-receipt-missing")
+			return nil, fmt.Errorf("v3 render recovery source lost its effective style receipt")
+		}
+		if err := restorePipelineRenderCandidateEffectiveStyleReceipt(fresh.OutputDir, best.styleReceipt); err != nil {
+			_ = retirePipelineRenderCandidate(fresh.ContainerDir, "recovery-style-receipt-failed")
+			return nil, err
+		}
+	case pipelineRenderCandidatePreviousManifestVersion, pipelineRenderCandidateLegacyManifestVersion:
+		if err := rewritePipelineRenderCandidateAsLegacyV2(fresh.OutputDir, frozen); err != nil {
+			_ = retirePipelineRenderCandidate(fresh.ContainerDir, "recovery-legacy-style-epoch-failed")
+			return nil, err
+		}
+	default:
+		_ = retirePipelineRenderCandidate(fresh.ContainerDir, "recovery-style-epoch-invalid")
+		return nil, fmt.Errorf("render recovery source has unsupported style epoch %q", best.manifest.Version)
 	}
 	freshStore := store.NewStore(fresh.OutputDir)
 	if err := freshStore.Drafts.SaveDraft(frozen.Chapter, best.body); err != nil {
@@ -1413,6 +2237,8 @@ func inspectReusablePipelineRenderCandidate(
 	var manifest pipelineRenderCandidateManifest
 	if json.Unmarshal(raw, &manifest) != nil ||
 		(manifest.Version != pipelineRenderCandidateManifestVersion &&
+			manifest.Version != pipelineRenderCandidatePreStyleManifestVersion &&
+			manifest.Version != pipelineRenderCandidatePreviousManifestVersion &&
 			manifest.Version != pipelineRenderCandidateLegacyManifestVersion) ||
 		manifest.CandidateID != id ||
 		manifest.GenerationID != frozen.PlanningGenerationID ||
@@ -1423,8 +2249,49 @@ func inspectReusablePipelineRenderCandidate(
 		filepath.Clean(manifest.SourceOutputDir) != filepath.Clean(liveOutputDir) {
 		return result, false
 	}
-	if manifest.Version == pipelineRenderCandidateManifestVersion &&
-		manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq {
+	var styleReceipt *tools.EffectiveRenderStyleContractReceipt
+	if manifest.Version == pipelineRenderCandidateManifestVersion {
+		if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			!pipelineRenderInputSHA256(manifest.PipelineRenderInputDigest) ||
+			!pipelineRenderInputSHA256(manifest.RenderContextSHA256) ||
+			!pipelineRenderInputSHA256(manifest.EffectiveStyleReceiptDigest) {
+			return result, false
+		}
+		receipt, receiptErr := loadPipelineRenderCandidateEffectiveStyleReceipt(
+			filepath.Join(container, "output"),
+			manifest,
+			frozen,
+		)
+		if receiptErr != nil || receipt == nil ||
+			receipt.ReceiptDigest != manifest.EffectiveStyleReceiptDigest ||
+			receipt.PipelineRenderInputDigest != manifest.PipelineRenderInputDigest ||
+			receipt.BaseRenderContextSHA256 != manifest.RenderContextSHA256 {
+			return result, false
+		}
+		styleReceipt = receipt
+	} else if manifest.Version == pipelineRenderCandidatePreStyleManifestVersion {
+		if manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			manifest.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+			manifest.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" {
+			return result, false
+		}
+		// pre-style is a mechanical construction state. Any prose checkpoint in
+		// such a tree predates the immutable style binding and must never be
+		// recovered or retroactively attributed to a later receipt.
+		return result, false
+	} else if manifest.Version == pipelineRenderCandidatePreviousManifestVersion &&
+		(manifest.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+			strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "") {
+		return result, false
+	} else if manifest.Version == pipelineRenderCandidateLegacyManifestVersion &&
+		(strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "") {
 		return result, false
 	}
 	output := filepath.Join(container, "output")
@@ -1452,6 +2319,7 @@ func inspectReusablePipelineRenderCandidate(
 	return reusablePipelineRenderCandidate{
 		container:      container,
 		manifest:       manifest,
+		styleReceipt:   styleReceipt,
 		body:           draft,
 		bodyCheckpoint: *body,
 		judge:          judge,
@@ -1916,6 +2784,7 @@ func runPipelineSealedRenderCandidate(
 	frozen *pipelineFrozenPlan,
 	planCheckpoint *domain.Checkpoint,
 	matchBody pipelineSealedActualBodyEvidenceMatchFunc,
+	legacyRenderInputDrift bool,
 ) (_ *pipelineRenderCandidate, _ *pipelineRenderedChapterSnapshot, returnErr error) {
 	candidate, err := preparePipelineRenderCandidate(cfg.OutputDir, frozen)
 	if err != nil {
@@ -1948,6 +2817,36 @@ func runPipelineSealedRenderCandidate(
 	if err := bindCurrentRenderExecutionToCandidate(cfg.OutputDir, candidate, frozen); err != nil {
 		return nil, nil, err
 	}
+	styleProtocol, err := pipelineRenderCandidateStyleProtocol(candidate.OutputDir, frozen)
+	if err != nil {
+		return nil, nil, err
+	}
+	if styleProtocol == pipelineRenderCandidateManifestVersion ||
+		styleProtocol == pipelineRenderCandidatePreStyleManifestVersion {
+		resolvedStyle := bundle.ResolveStyle(cfg.Style)
+		styleReceipt, publishErr := tools.PublishEffectiveRenderStyleContract(
+			store.NewStore(candidate.OutputDir),
+			tools.EffectiveRenderStyleContractIdentity{
+				GenerationID:              frozen.PlanningGenerationID,
+				Chapter:                   frozen.Chapter,
+				PlanDigest:                frozen.PlanDigest,
+				PlanCheckpointSeq:         frozen.PlanCheckpointSeq,
+				BaseRenderContextSHA256:   frozen.RenderContextSHA256,
+				PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+				ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+				PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+				CandidateID:               candidate.ID,
+			},
+			resolvedStyle.ID,
+			resolvedStyle.Body,
+		)
+		if publishErr != nil {
+			return nil, nil, fmt.Errorf("materialize sealed effective style contract: %w", publishErr)
+		}
+		if err := bindPipelineRenderCandidateEffectiveStyle(candidate.OutputDir, frozen, styleReceipt); err != nil {
+			return nil, nil, err
+		}
+	}
 	candidateCfg := cfg
 	candidateCfg.OutputDir = candidate.OutputDir
 	candidateCfg.DisableLiveRAG = true
@@ -1973,6 +2872,12 @@ func runPipelineSealedRenderCandidate(
 			)
 			return candidate, snapshot, nil
 		}
+		if legacyRenderInputDrift {
+			return nil, nil, fmt.Errorf(
+				"render 第 %d 章 legacy input 已漂移；committed 候选仍需新 formal-review provider，必须恢复旧输入或显式重跑 plan",
+				frozen.Chapter,
+			)
+		}
 		fmt.Fprintf(
 			os.Stderr,
 			"[pipeline:render] 第 %d 章事务已封存 exact-body commit；跳过 Writer，继续 deterministic/formal review\n",
@@ -1996,6 +2901,12 @@ func runPipelineSealedRenderCandidate(
 					frozen.Chapter,
 				)
 				return candidate, snapshot, nil
+			}
+			if legacyRenderInputDrift {
+				return nil, nil, fmt.Errorf(
+					"render 第 %d 章 legacy input 已漂移；durable commit 仍需新 formal-review provider，必须恢复旧输入或显式重跑 plan",
+					frozen.Chapter,
+				)
 			}
 			fmt.Fprintf(
 				os.Stderr,
@@ -2023,6 +2934,12 @@ func runPipelineSealedRenderCandidate(
 				frozen.Chapter,
 			)
 			return candidate, recoveredSnapshot, nil
+		}
+		if legacyRenderInputDrift {
+			return nil, nil, fmt.Errorf(
+				"render 第 %d 章 legacy model/provider/prompt 输入已漂移，且没有可免 provider 收口的 formal-accepted exact body；必须恢复旧输入或显式重跑 plan",
+				frozen.Chapter,
+			)
 		}
 		if revalidated, accepted, revalidationErr := tryPipelineRenderReviewFirstFormalRevalidation(
 			opts,

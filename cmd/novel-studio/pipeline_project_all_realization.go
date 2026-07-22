@@ -809,6 +809,7 @@ func installPipelineProjectedChapter(
 		BaselineChapterSHA256:   maps.Clone(baselineChapterSHA256),
 		RenderDependencySHA256:  maps.Clone(renderDependencies),
 		PipelineRunInputDigest:  runInputDigest,
+		EffectiveStyleProtocol:  pipelineRenderCandidateManifestVersion,
 		RenderContextPath:       tools.FrozenDraftRenderContextPath,
 		RenderContextSHA256:     contextEnvelope.PayloadSHA256,
 		PlanningGenerationID:    bundle.GenerationID,

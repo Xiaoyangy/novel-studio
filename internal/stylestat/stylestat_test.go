@@ -1,6 +1,7 @@
 package stylestat
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,32 @@ func TestComputeBelowMinChapters(t *testing.T) {
 	in := Input{Chapters: []string{"a", "b", "c", "d"}}
 	if Compute(in) != nil {
 		t.Fatal("below minChapters should return nil")
+	}
+}
+
+func TestSerialMemoryCompilerCanonicalInputsAndRoot(t *testing.T) {
+	completed, err := CanonicalCompletedChapters([]int{3, 1, 3, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(completed, []int{1, 2, 3}) {
+		t.Fatalf("completed chapter set is not canonical: %#v", completed)
+	}
+	stopwords := CanonicalStopwords([]string{" 沈岚 ", "阿岚", "沈岚", ""})
+	if !slices.Equal(stopwords, []string{"沈岚", "阿岚"}) {
+		t.Fatalf("stopwords are not canonical: %#v", stopwords)
+	}
+	sources := []SerialMemorySourceBody{
+		{Chapter: 1, BodySHA256: "sha256:" + strings.Repeat("1", 64)},
+		{Chapter: 2, BodySHA256: "sha256:" + strings.Repeat("2", 64)},
+		{Chapter: 3, BodySHA256: "sha256:" + strings.Repeat("3", 64)},
+	}
+	root := SerialMemoryCompilerRoot(completed, sources, stopwords)
+	if root == SerialMemoryCompilerRoot(completed, sources, append(stopwords, "新别名")) {
+		t.Fatal("compiler root did not bind canonical stopwords")
+	}
+	if root == SerialMemoryCompilerRoot([]int{1, 2}, sources[:2], stopwords) {
+		t.Fatal("compiler root did not bind completed chapter set/body hashes")
 	}
 }
 
@@ -42,6 +69,50 @@ func TestComputePatterns(t *testing.T) {
 	}
 	if len(s.Patterns) != 4 {
 		t.Errorf("want 4 pattern classes, got %d: %+v", len(s.Patterns), s.Patterns)
+	}
+}
+
+func TestComputeStripsCanonicalChapterHeadingBeforeAllProseStats(t *testing.T) {
+	chapters := make([]string, 10)
+	for i := range chapters {
+		heading := "# 清晨不是愤怒而是恐惧青云山巅反复出现青云山巅反复出现"
+		if i%2 != 0 {
+			heading = "第一章 清晨不是愤怒而是恐惧青云山巅反复出现青云山巅反复出现"
+		}
+		chapters[i] = "\n" + heading + "\n正文。\n结尾。"
+	}
+	// A heading-only chapter must not contribute its long title as an ending.
+	chapters[0] = "\n" + strings.Split(strings.TrimSpace(chapters[0]), "\n")[0]
+
+	s := Compute(Input{Chapters: chapters})
+	if s == nil {
+		t.Fatal("expected stats")
+	}
+	if len(s.Patterns) != 0 {
+		t.Errorf("chapter headings contaminated pattern stats: %+v", s.Patterns)
+	}
+	if len(s.TopPhrases) != 0 {
+		t.Errorf("chapter headings contaminated phrase stats: %+v", s.TopPhrases)
+	}
+	if len(s.RepeatedSentences) != 0 {
+		t.Errorf("chapter headings contaminated repeated sentences: %+v", s.RepeatedSentences)
+	}
+	if s.OpeningTimeRate != 0 {
+		t.Errorf("chapter headings contaminated opening rate: %v", s.OpeningTimeRate)
+	}
+	if s.Ending.ShortRatio != 1 || s.Ending.MedianRunes != len([]rune("结尾。")) {
+		t.Errorf("ending should come from prose body, got %+v", s.Ending)
+	}
+}
+
+func TestComputeKeepsLaterMarkdownHeadingAsProse(t *testing.T) {
+	chapters := make([]string, 5)
+	for i := range chapters {
+		chapters[i] = "# 第1章 标题\n正文开头。\n## 不是愤怒而是恐惧\n正文结尾。"
+	}
+	s := Compute(Input{Chapters: chapters})
+	if s == nil || len(s.Patterns) != 1 || s.Patterns[0].Total != 5 {
+		t.Fatalf("later body heading should remain observable: %+v", s)
 	}
 }
 

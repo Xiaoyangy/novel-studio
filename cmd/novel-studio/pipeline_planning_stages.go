@@ -141,6 +141,7 @@ type pipelineFrozenPlan struct {
 	BaselineChapterSHA256           map[string]string `json:"baseline_chapter_sha256"`
 	RenderDependencySHA256          map[string]string `json:"render_dependency_sha256"`
 	PipelineRunInputDigest          string            `json:"pipeline_run_input_digest"`
+	EffectiveStyleProtocol          string            `json:"effective_style_protocol,omitempty"`
 	RenderContextPath               string            `json:"render_context_path"`
 	RenderContextSHA256             string            `json:"render_context_sha256"`
 	PlanningGenerationID            string            `json:"planning_generation_id"`
@@ -161,29 +162,33 @@ type pipelineFrozenPlan struct {
 }
 
 type pipelineRenderReceipt struct {
-	Version                string            `json:"version"`
-	Chapter                int               `json:"chapter"`
-	PlanDigest             string            `json:"plan_digest"`
-	PlanCheckpointSeq      int64             `json:"plan_checkpoint_seq"`
-	CommitDigest           string            `json:"commit_digest"`
-	CommitCheckpointSeq    int64             `json:"commit_checkpoint_seq"`
-	ChapterPath            string            `json:"chapter_path"`
-	ChapterBodySHA256      string            `json:"chapter_body_sha256"`
-	ActualCanonRoot        string            `json:"actual_canon_root"`
-	RenderDependencySHA256 map[string]string `json:"render_dependency_sha256"`
-	PipelineRunInputDigest string            `json:"pipeline_run_input_digest"`
-	RenderContextSHA256    string            `json:"render_context_sha256"`
-	ProjectedStateRoot     string            `json:"projected_state_root,omitempty"`
-	ProjectionBound        bool              `json:"projection_receipt_bound"`
-	PlanningGenerationID   string            `json:"planning_generation_id,omitempty"`
-	ProjectedBundleDigest  string            `json:"projected_bundle_digest,omitempty"`
-	PromotionReceiptDigest string            `json:"promotion_receipt_digest,omitempty"`
-	OutcomeReceiptDigest   string            `json:"outcome_receipt_digest,omitempty"`
-	DirectoryPublishID     string            `json:"directory_publish_transaction_id,omitempty"`
-	DirectoryPublishDigest string            `json:"directory_publish_receipt_digest,omitempty"`
-	DownstreamInvalid      bool              `json:"downstream_invalidated"`
-	NextAction             string            `json:"next_action,omitempty"`
-	RenderedAt             string            `json:"rendered_at"`
+	Version                      string            `json:"version"`
+	Chapter                      int               `json:"chapter"`
+	PlanDigest                   string            `json:"plan_digest"`
+	PlanCheckpointSeq            int64             `json:"plan_checkpoint_seq"`
+	CommitDigest                 string            `json:"commit_digest"`
+	CommitCheckpointSeq          int64             `json:"commit_checkpoint_seq"`
+	ChapterPath                  string            `json:"chapter_path"`
+	ChapterBodySHA256            string            `json:"chapter_body_sha256"`
+	ActualCanonRoot              string            `json:"actual_canon_root"`
+	RenderDependencySHA256       map[string]string `json:"render_dependency_sha256"`
+	PipelineRunInputDigest       string            `json:"pipeline_run_input_digest"`
+	RenderContextSHA256          string            `json:"render_context_sha256"`
+	EffectiveStyleReceiptPath    string            `json:"effective_style_receipt_path,omitempty"`
+	EffectiveStyleReceiptDigest  string            `json:"effective_style_receipt_digest,omitempty"`
+	EffectiveStyleArtifactSHA256 string            `json:"effective_style_artifact_sha256,omitempty"`
+	ProjectedStateRoot           string            `json:"projected_state_root,omitempty"`
+	ProjectionBound              bool              `json:"projection_receipt_bound"`
+	PlanningGenerationID         string            `json:"planning_generation_id,omitempty"`
+	ProjectedBundleDigest        string            `json:"projected_bundle_digest,omitempty"`
+	PromotionReceiptDigest       string            `json:"promotion_receipt_digest,omitempty"`
+	OutcomeReceiptDigest         string            `json:"outcome_receipt_digest,omitempty"`
+	ChapterAcceptanceDigest      string            `json:"chapter_acceptance_receipt_digest,omitempty"`
+	DirectoryPublishID           string            `json:"directory_publish_transaction_id,omitempty"`
+	DirectoryPublishDigest       string            `json:"directory_publish_receipt_digest,omitempty"`
+	DownstreamInvalid            bool              `json:"downstream_invalidated"`
+	NextAction                   string            `json:"next_action,omitempty"`
+	RenderedAt                   string            `json:"rendered_at"`
 }
 
 type pipelineProjectionEntry struct {
@@ -608,9 +613,11 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("plan 记录冻结渲染依赖: %w", err)
 	}
+	resolvedStyle := bundle.ResolveStyle(cfg.Style)
 	frozenContext, err := tools.FreezeDraftRenderContext(
 		context.Background(),
-		tools.NewContextTool(st, bundle.References, cfg.Style),
+		tools.NewContextTool(st, bundle.References, resolvedStyle.ID).
+			WithConfiguredStyle(resolvedStyle.Body),
 		chapter,
 		cp.Digest,
 	)
@@ -629,6 +636,7 @@ func pipelinePlan(opts cliOptions, flags pipelineFlags) (returnErr error) {
 		BaselineChapterSHA256:   baselineChapterSHA256,
 		RenderDependencySHA256:  renderDependencySHA256,
 		PipelineRunInputDigest:  pipelineRunInputDigest(cfg, bundle),
+		EffectiveStyleProtocol:  pipelineRenderCandidateManifestVersion,
 		RenderContextPath:       tools.FrozenDraftRenderContextPath,
 		RenderContextSHA256:     frozenContext.PayloadSHA256,
 		PlanningGenerationID:    preplanReceipt.GenerationID,
@@ -756,20 +764,47 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		return err
 	}
 	chapter := frozen.Chapter
+	legacyRenderInputDrift := false
 	_, postCommitRecovery := pipelineCommittedAfterFrozenBaseline(st, frozen)
 	if !postCommitRecovery {
 		currentInputDigest := pipelineRunInputDigest(cfg, bundle)
 		if frozen.ProjectionBinding == "sealed_v2" {
 			currentInputDigest = pipelineRenderInputDigest(cfg, bundle)
+			if frozen.PipelineRunInputDigest == currentInputDigest &&
+				frozen.EffectiveStyleProtocol != pipelineRenderCandidateManifestVersion {
+				return fmt.Errorf("current v4 sealed render input is missing its immutable v3 effective-style protocol declaration")
+			}
 		}
 		if frozen.PipelineRunInputDigest == "" || frozen.PipelineRunInputDigest != currentInputDigest {
-			if !flags.RefreshRenderInput {
-				return fmt.Errorf("render 模型/provider/prompt 运行输入已漂移（frozen=%s current=%s）；必须重新执行 plan，或对尚未开始的 sealed 候选稿显式使用 --refresh-render-input",
-					frozen.PipelineRunInputDigest, currentInputDigest)
+			candidateID, idErr := pipelineRenderTransactionID(frozen)
+			if idErr != nil {
+				return idErr
 			}
-			frozen, err = pipelineUpgradeFrozenRenderInput(st, frozen, currentInputDigest)
-			if err != nil {
-				return fmt.Errorf("render 显式升级 model/provider/prompt 绑定: %w", err)
+			legacyEpoch, epochErr := inspectPipelineRenderStyleEpochRecovery(
+				cfg.OutputDir,
+				frozen,
+				candidateID,
+				filepath.Join(pipelineRenderCandidateRoot(cfg.OutputDir), candidateID),
+			)
+			if epochErr != nil {
+				return fmt.Errorf("validate frozen render-input style epoch: %w", epochErr)
+			}
+			if legacyEpoch != nil && legacyEpoch.legacyV2 {
+				legacyRenderInputDrift = true
+				fmt.Fprintf(
+					os.Stderr,
+					"[pipeline:render] 第 %d 章检测到已开始的 legacy v1/v2 候选；输入已漂移，仅允许无需任何新 provider 调用的 exact-body 收口\n",
+					frozen.Chapter,
+				)
+			} else {
+				if !flags.RefreshRenderInput {
+					return fmt.Errorf("render 模型/provider/prompt 运行输入已漂移（frozen=%s current=%s）；必须重新执行 plan，或对尚未开始的 sealed 候选稿显式使用 --refresh-render-input",
+						frozen.PipelineRunInputDigest, currentInputDigest)
+				}
+				frozen, err = pipelineUpgradeFrozenRenderInput(st, frozen, currentInputDigest)
+				if err != nil {
+					return fmt.Errorf("render 显式升级 model/provider/prompt 绑定: %w", err)
+				}
 			}
 		}
 		actionable, _, actionErr := pipelineCurrentActionableChapter(st, flags)
@@ -788,6 +823,23 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "[pipeline:render] 检测到第 %d 章 commit 已落盘但 render receipt 尚待收口；从冻结计划恢复 fresh review/receipt，不重复写正文\n", chapter)
+	}
+	if postCommitRecovery && frozen.ProjectionBinding == "sealed_v2" {
+		currentInputDigest := pipelineRenderInputDigest(cfg, bundle)
+		if frozen.PipelineRunInputDigest == "" || frozen.PipelineRunInputDigest != currentInputDigest {
+			styleProtocol, protocolErr := pipelineRenderCandidateStyleProtocol(cfg.OutputDir, frozen)
+			if protocolErr != nil {
+				return fmt.Errorf("render 第 %d 章 post-commit 风格纪元不可验证: %w", chapter, protocolErr)
+			}
+			if styleProtocol == pipelineRenderCandidatePreviousManifestVersion {
+				legacyRenderInputDrift = true
+				fmt.Fprintf(
+					os.Stderr,
+					"[pipeline:render] 第 %d 章 legacy post-commit 输入已漂移；仅允许已有 exact-body 审核证据的 provider-free 收口\n",
+					chapter,
+				)
+			}
+		}
 	}
 	if postCommitRecovery {
 		progress, progressErr := st.Progress.Load()
@@ -872,8 +924,20 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 	}
 	if lockedFrozen.Chapter != chapter ||
 		lockedFrozen.PlanDigest != frozen.PlanDigest ||
-		lockedFrozen.ProjectionBinding != frozen.ProjectionBinding {
+		lockedFrozen.PlanCheckpointSeq != frozen.PlanCheckpointSeq ||
+		lockedFrozen.ProjectionBinding != frozen.ProjectionBinding ||
+		lockedFrozen.RenderContextSHA256 != frozen.RenderContextSHA256 ||
+		lockedFrozen.EffectiveStyleProtocol != frozen.EffectiveStyleProtocol ||
+		lockedFrozen.RenderInputUpgradeID != frozen.RenderInputUpgradeID ||
+		lockedFrozen.RenderInputUpgradeReceiptDigest != frozen.RenderInputUpgradeReceiptDigest {
 		return fmt.Errorf("render 获取执行锁期间 frozen plan identity 漂移")
+	}
+	if sealedV2 {
+		oldTransactionID, oldIDErr := pipelineRenderTransactionID(frozen)
+		lockedTransactionID, lockedIDErr := pipelineRenderTransactionID(lockedFrozen)
+		if oldIDErr != nil || lockedIDErr != nil || oldTransactionID != lockedTransactionID {
+			return fmt.Errorf("render 获取执行锁期间 sealed candidate identity 漂移")
+		}
 	}
 	frozen, cp = lockedFrozen, lockedCP
 	if sealedV2 {
@@ -946,6 +1010,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			frozen,
 			cp,
 			sealedBodyEvidenceMatcher,
+			legacyRenderInputDrift,
 		)
 		if err != nil {
 			return err
@@ -1093,6 +1158,16 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			fmt.Fprintf(os.Stderr, "[pipeline:render] 第 %d 章 exact-body 逐章审核回执已封存；恢复时不重复改写审核文件\n", chapter)
 		}
 	}
+	if legacyRenderInputDrift && !reviewAlreadyAccepted {
+		if err := requirePipelineAcceptedExactReview(cfg.OutputDir, chapter); err == nil {
+			reviewAlreadyAccepted = true
+			fmt.Fprintf(
+				os.Stderr,
+				"[pipeline:render] 第 %d 章 legacy input 漂移但已有 fresh exact-body accept；跳过所有 Reviewer provider\n",
+				chapter,
+			)
+		}
+	}
 	// ProjectedState.PostStateRoot and the canonical artifact root are different
 	// hash domains and must never be compared directly. Exact frozen-plan
 	// identity plus a fresh exact-body accept realizes this chapter's projection;
@@ -1128,6 +1203,12 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 					err,
 				)
 			}
+		}
+		if legacyRenderInputDrift {
+			return fmt.Errorf(
+				"render 第 %d 章 legacy input 已漂移且缺少既有 fresh exact-body accept；禁止调用当前 Reviewer provider，必须恢复旧输入或显式重跑 plan",
+				chapter,
+			)
 		}
 		if err := reviewExistingPipeline(opts, reviewArgs); err != nil {
 			return fmt.Errorf("render 第 %d 章 fresh exact-body review 失败: %w", chapter, err)
@@ -1228,6 +1309,8 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		return fmt.Errorf("render 计算复审后 canon root: %w", err)
 	}
 	outcomeReceiptDigest := ""
+	chapterAcceptanceDigest := ""
+	renderedAt := strings.TrimSpace(frozen.FrozenAt)
 	if sealedV2 {
 		projectionBound = true
 		outcome, outcomeErr := acceptPipelineSealedRenderOutcome(
@@ -1242,6 +1325,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			return outcomeErr
 		}
 		outcomeReceiptDigest = outcome.ReceiptDigest
+		renderedAt = outcome.AcceptedAt
 		if chapterRenderTransactionEnabled {
 			if err := pipelineAdvanceChapterRenderOutcome(
 				cfg.OutputDir,
@@ -1264,6 +1348,7 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		if acceptanceErr != nil {
 			return fmt.Errorf("render 第 %d 章封存 exact-body 逐章审核回执失败: %w", chapter, acceptanceErr)
 		}
+		chapterAcceptanceDigest = acceptance.ReceiptDigest
 		if chapterRenderTransactionEnabled {
 			if err := pipelineAdvanceChapterRenderAcceptance(
 				cfg.OutputDir,
@@ -1300,30 +1385,41 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		}
 		nextAction = "render changed canonical state; refresh preplan before promoting any future chapter"
 	}
+	if renderedAt == "" {
+		renderedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	styleEvidence, err := pipelineEffectiveStyleArchiveEvidence(cfg.OutputDir, frozen)
+	if err != nil {
+		return fmt.Errorf("render 第 %d 章风格回执归档证据不可验证: %w", chapter, err)
+	}
 	receipt := pipelineRenderReceipt{
-		Version:                pipelinePlanningSchema,
-		Chapter:                chapter,
-		PlanDigest:             frozen.PlanDigest,
-		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
-		CommitDigest:           commit.Digest,
-		CommitCheckpointSeq:    commit.Seq,
-		ChapterPath:            chapterPath,
-		ChapterBodySHA256:      bodySHA,
-		ActualCanonRoot:        actualCanonRoot,
-		RenderDependencySHA256: maps.Clone(frozen.RenderDependencySHA256),
-		PipelineRunInputDigest: frozen.PipelineRunInputDigest,
-		RenderContextSHA256:    frozen.RenderContextSHA256,
-		ProjectedStateRoot:     frozen.ProjectedPostStateRoot,
-		ProjectionBound:        projectionBound,
-		PlanningGenerationID:   frozen.PlanningGenerationID,
-		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
-		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
-		OutcomeReceiptDigest:   outcomeReceiptDigest,
-		DirectoryPublishID:     directoryPublishTransactionID,
-		DirectoryPublishDigest: directoryPublishReceiptDigest,
-		DownstreamInvalid:      downstreamInvalidated,
-		NextAction:             nextAction,
-		RenderedAt:             time.Now().UTC().Format(time.RFC3339Nano),
+		Version:                      pipelinePlanningSchema,
+		Chapter:                      chapter,
+		PlanDigest:                   frozen.PlanDigest,
+		PlanCheckpointSeq:            frozen.PlanCheckpointSeq,
+		CommitDigest:                 commit.Digest,
+		CommitCheckpointSeq:          commit.Seq,
+		ChapterPath:                  chapterPath,
+		ChapterBodySHA256:            bodySHA,
+		ActualCanonRoot:              actualCanonRoot,
+		RenderDependencySHA256:       maps.Clone(frozen.RenderDependencySHA256),
+		PipelineRunInputDigest:       frozen.PipelineRunInputDigest,
+		RenderContextSHA256:          frozen.RenderContextSHA256,
+		EffectiveStyleReceiptPath:    styleEvidence.Path,
+		EffectiveStyleReceiptDigest:  styleEvidence.ReceiptDigest,
+		EffectiveStyleArtifactSHA256: styleEvidence.ArtifactSHA256,
+		ProjectedStateRoot:           frozen.ProjectedPostStateRoot,
+		ProjectionBound:              projectionBound,
+		PlanningGenerationID:         frozen.PlanningGenerationID,
+		ProjectedBundleDigest:        frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest:       frozen.PromotionReceiptDigest,
+		OutcomeReceiptDigest:         outcomeReceiptDigest,
+		ChapterAcceptanceDigest:      chapterAcceptanceDigest,
+		DirectoryPublishID:           directoryPublishTransactionID,
+		DirectoryPublishDigest:       directoryPublishReceiptDigest,
+		DownstreamInvalid:            downstreamInvalidated,
+		NextAction:                   nextAction,
+		RenderedAt:                   renderedAt,
 	}
 	renderReceiptDigest, err := writePipelinePlanningJSON(filepath.Join(cfg.OutputDir, pipelineRenderReceiptPath), receipt)
 	if err != nil {
@@ -1760,6 +1856,10 @@ func loadAndVerifyPipelineFrozenPlan(outputDir string) (*pipelineFrozenPlan, *do
 		strings.TrimSpace(frozen.RenderContextSHA256) == "" {
 		return nil, nil, fmt.Errorf("冻结计划回执无效")
 	}
+	if frozen.EffectiveStyleProtocol != "" &&
+		frozen.EffectiveStyleProtocol != pipelineRenderCandidateManifestVersion {
+		return nil, nil, fmt.Errorf("冻结计划 effective style protocol 无效")
+	}
 	if frozen.ProjectionBinding == "sealed_v2" &&
 		(strings.TrimSpace(frozen.PlanningGenerationID) == "" ||
 			strings.TrimSpace(frozen.PlanningDependencyRoot) == "" ||
@@ -2174,6 +2274,27 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 	if frozen.RenderContextSHA256 != receipt.RenderContextSHA256 {
 		return evidence, fmt.Errorf("render 回执未绑定正文实际消费的冻结正文上下文")
 	}
+	manifestPath := filepath.Join(outputDir, "meta", "planning", "render_candidate.json")
+	_, manifestStatErr := os.Lstat(manifestPath)
+	styleFieldCount, v3StyleEpoch, err := validatePipelineRenderFinalStyleProtocol(
+		outputDir, frozen, receipt, manifestStatErr,
+	)
+	if err != nil {
+		return evidence, err
+	}
+	if styleFieldCount == 3 || manifestStatErr == nil {
+		styleEvidence, styleErr := pipelineEffectiveStyleArchiveEvidence(outputDir, frozen)
+		if styleErr != nil {
+			return evidence, fmt.Errorf("render 回执风格归档证据不可验证: %w", styleErr)
+		}
+		if receipt.EffectiveStyleReceiptPath != styleEvidence.Path ||
+			receipt.EffectiveStyleReceiptDigest != styleEvidence.ReceiptDigest ||
+			receipt.EffectiveStyleArtifactSHA256 != styleEvidence.ArtifactSHA256 {
+			return evidence, fmt.Errorf("render 回执未绑定正文实际消费的不可变风格回执归档")
+		}
+	} else if !os.IsNotExist(manifestStatErr) {
+		return evidence, fmt.Errorf("render candidate 风格协议清单不可读取: %w", manifestStatErr)
+	}
 	st := store.NewStore(outputDir)
 	if frozen.ProjectionBinding == "sealed_v2" {
 		binding, err := validatePipelineSealedRenderBinding(st, frozen, true)
@@ -2203,6 +2324,30 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 			publishState.Receipt == nil ||
 			publishState.Receipt.ReceiptDigest != receipt.DirectoryPublishDigest {
 			return evidence, fmt.Errorf("render sealed_v2 回执未绑定 exact bundle/promotion/outcome")
+		}
+		if v3StyleEpoch {
+			acceptance, err := st.ArcCycle().LoadChapterAcceptanceReceipt(
+				frozen.PlanningGenerationID,
+				frozen.Chapter,
+				receipt.ChapterAcceptanceDigest,
+			)
+			if err != nil || acceptance == nil {
+				return evidence, fmt.Errorf("v3 render 回执绑定的 chapter acceptance 不可验证: %w", err)
+			}
+			if err := st.ArcCycle().ValidateArcCycle(frozen.PlanningGenerationID); err != nil {
+				return evidence, fmt.Errorf("v3 render chapter acceptance 的正文/审核/风格证据已漂移: %w", err)
+			}
+			if acceptance.Version != domain.ChapterAcceptanceReceiptVersion ||
+				acceptance.ReceiptDigest != receipt.ChapterAcceptanceDigest ||
+				acceptance.GenerationID != frozen.PlanningGenerationID ||
+				acceptance.Chapter != frozen.Chapter ||
+				acceptance.ChapterBodySHA256 != receipt.ChapterBodySHA256 ||
+				acceptance.OutcomeReceiptDigest != receipt.OutcomeReceiptDigest ||
+				acceptance.EffectiveStyleReceiptPath != receipt.EffectiveStyleReceiptPath ||
+				acceptance.EffectiveStyleReceiptDigest != receipt.EffectiveStyleReceiptDigest ||
+				acceptance.EffectiveStyleArtifactSHA256 != receipt.EffectiveStyleArtifactSHA256 {
+				return evidence, fmt.Errorf("v3 render 回执与 chapter acceptance 的 body/outcome/style 证据链不一致")
+			}
 		}
 	} else {
 		manifest, err := st.Planning.LoadStagedChapterPlanManifest(receipt.Chapter)
@@ -2264,6 +2409,41 @@ func verifyPipelineRenderStage(outputDir string, evidence domain.PipelineStageEv
 		evidence.Message += "; " + receipt.NextAction
 	}
 	return evidence, nil
+}
+
+func validatePipelineRenderFinalStyleProtocol(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+	receipt pipelineRenderReceipt,
+	manifestStatErr error,
+) (int, bool, error) {
+	if frozen == nil {
+		return 0, false, fmt.Errorf("render final style protocol requires frozen identity")
+	}
+	styleFieldCount := 0
+	for _, value := range []string{
+		receipt.EffectiveStyleReceiptPath,
+		receipt.EffectiveStyleReceiptDigest,
+		receipt.EffectiveStyleArtifactSHA256,
+	} {
+		if strings.TrimSpace(value) != "" {
+			styleFieldCount++
+		}
+	}
+	if styleFieldCount != 0 && styleFieldCount != 3 {
+		return styleFieldCount, false, fmt.Errorf("render 回执风格归档证据不完整")
+	}
+	v3StyleEpoch, err := pipelineRenderV3StyleEpochDeclared(outputDir, frozen)
+	if err != nil {
+		return styleFieldCount, false, fmt.Errorf("render final immutable style epoch is invalid: %w", err)
+	}
+	if v3StyleEpoch && (styleFieldCount != 3 || strings.TrimSpace(receipt.ChapterAcceptanceDigest) == "") {
+		return styleFieldCount, true, fmt.Errorf("v3 render 回执必须绑定完整风格归档与 chapter acceptance digest")
+	}
+	if v3StyleEpoch && os.IsNotExist(manifestStatErr) {
+		return styleFieldCount, true, fmt.Errorf("v3 render 回执缺少不可变风格协议清单")
+	}
+	return styleFieldCount, v3StyleEpoch, nil
 }
 
 func pipelineBuildCausalSkeletons(volumes []domain.VolumeOutline, flat []domain.OutlineEntry) (

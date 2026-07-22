@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestResetCompletedSealedPipelineCycleIgnoresOrdinaryRenderState(t *testing.T) {
@@ -55,6 +56,11 @@ func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) 
 	if len(bundles) != generation.ExpectedChapterCount {
 		t.Fatalf("terminal fixture bundles=%d want=%d", len(bundles), generation.ExpectedChapterCount)
 	}
+	manifests, err := st.ArcCycle().ListArcPlanningManifests(generation.GenerationID)
+	if err != nil || len(manifests) != 1 {
+		t.Fatalf("load terminal arc manifest: manifests=%+v err=%v", manifests, err)
+	}
+	manifest := manifests[0]
 
 	var finalOutcome domain.ActualOutcomeReceiptV2
 	for _, bundle := range bundles {
@@ -85,6 +91,7 @@ func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) 
 		if _, err := projected.Promote(*cursor, promotion); err != nil {
 			t.Fatalf("chapter %d promote fixture: %v", bundle.Chapter, err)
 		}
+		installTerminalLegacyV2RenderIdentity(t, st, generation, bundle, promotion)
 
 		body := fmt.Sprintf("第%d章\n\n", bundle.Chapter)
 		for len([]rune(body)) < 2100 {
@@ -148,14 +155,34 @@ func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) 
 			t.Fatalf("chapter %d accept outcome fixture: %v", bundle.Chapter, err)
 		}
 		mustWriteCurrentReviewArtifacts(t, st.Dir(), bundle.Chapter)
-		if _, err := savePipelineChapterAcceptance(
-			st.Dir(),
-			st,
-			generation,
-			bundle.Chapter,
-			bodySHA,
-			&outcome,
-		); err != nil {
+		inspection := inspectCurrentChapterReview(st.Dir(), bundle.Chapter)
+		if len(inspection.Issues) > 0 || !pipelineReviewAcceptedForProjection(inspection.Verdict, inspection.Disposition) {
+			t.Fatalf("chapter %d legacy review fixture is not accepted: %+v", bundle.Chapter, inspection)
+		}
+		artifacts := make([]domain.ChapterReviewArtifactBinding, 0, len(inspection.Artifacts))
+		for _, rel := range inspection.Artifacts {
+			digest, err := pipelineRequiredFileSHA(st.Dir(), rel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts = append(artifacts, domain.ChapterReviewArtifactBinding{Path: rel, Digest: digest})
+		}
+		acceptance, err := domain.SignChapterAcceptanceReceipt(domain.ChapterAcceptanceReceipt{
+			Version:              domain.ChapterAcceptanceReceiptLegacyVersion,
+			ArcID:                manifest.ArcID,
+			ArcManifestDigest:    manifest.ManifestDigest,
+			GenerationID:         generation.GenerationID,
+			Chapter:              bundle.Chapter,
+			ChapterBodySHA256:    bodySHA,
+			ChapterBodyRunes:     len([]rune(body)),
+			ReviewArtifacts:      domain.CanonicalChapterReviewArtifacts(artifacts),
+			OutcomeReceiptDigest: outcome.ReceiptDigest,
+			AcceptedAt:           outcome.AcceptedAt,
+		})
+		if err != nil {
+			t.Fatalf("chapter %d sign legacy exact-body acceptance: %v", bundle.Chapter, err)
+		}
+		if _, err := st.ArcCycle().SaveChapterAcceptanceReceipt(acceptance); err != nil {
 			t.Fatalf("chapter %d save exact-body acceptance: %v", bundle.Chapter, err)
 		}
 		finalOutcome = outcome
@@ -361,5 +388,131 @@ func TestTerminalArcCycleResetIsIdempotentAndDoesNotOpenSuccessor(t *testing.T) 
 	}
 	if len(afterReplayCompletions) != 1 || afterReplayCompletions[0].ReceiptDigest != completions[0].ReceiptDigest {
 		t.Fatalf("terminal replay duplicated or changed arc completion: %+v", afterReplayCompletions)
+	}
+}
+
+func installTerminalLegacyV2RenderIdentity(
+	t *testing.T,
+	st *store.Store,
+	generation *domain.PlanningGenerationV2,
+	bundle domain.ProjectedChapterBundle,
+	promotion domain.PromotionReceiptV2,
+) {
+	t.Helper()
+	projectedPlanDigest, err := domain.ComputeChapterPlanV2Digest(bundle.ChapterPlan)
+	if err != nil {
+		t.Fatalf("chapter %d digest promoted plan: %v", bundle.Chapter, err)
+	}
+	if projectedPlanDigest != promotion.FrozenPlanDigest {
+		t.Fatalf(
+			"chapter %d projected plan identity drift: bundle=%s promotion=%s",
+			bundle.Chapter,
+			projectedPlanDigest,
+			promotion.FrozenPlanDigest,
+		)
+	}
+	if err := st.Drafts.SaveChapterPlan(bundle.ChapterPlan); err != nil {
+		t.Fatalf("chapter %d install promoted plan: %v", bundle.Chapter, err)
+	}
+	checkpoint, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(bundle.Chapter),
+		"plan",
+		fmt.Sprintf("drafts/%02d.plan.json", bundle.Chapter),
+	)
+	if err != nil {
+		t.Fatalf("chapter %d checkpoint promoted plan: %v", bundle.Chapter, err)
+	}
+	contextEnvelope, err := tools.PublishFrozenDraftRenderContext(
+		st,
+		bundle.Chapter,
+		checkpoint.Digest,
+		bundle.RenderContext,
+	)
+	if err != nil {
+		t.Fatalf("chapter %d publish legacy frozen render context: %v", bundle.Chapter, err)
+	}
+	renderDependencies, err := capturePipelineFrozenRenderDependencies(st.Dir())
+	if err != nil {
+		t.Fatalf("chapter %d capture legacy render dependencies: %v", bundle.Chapter, err)
+	}
+	frozen := pipelineFrozenPlan{
+		Version:                pipelinePlanningSchema,
+		Chapter:                bundle.Chapter,
+		PlanPath:               fmt.Sprintf("drafts/%02d.plan.json", bundle.Chapter),
+		PlanDigest:             checkpoint.Digest,
+		PlanCheckpointSeq:      checkpoint.Seq,
+		RenderDependencySHA256: renderDependencies,
+		PipelineRunInputDigest: projectAllCmdTestDigest(fmt.Sprintf("terminal-render-input-%d", bundle.Chapter)),
+		RenderContextPath:      tools.FrozenDraftRenderContextPath,
+		RenderContextSHA256:    contextEnvelope.PayloadSHA256,
+		PlanningGenerationID:   generation.GenerationID,
+		PlanningDependencyRoot: generation.PlanningDependencyRoot,
+		ProjectionBinding:      "sealed_v2",
+		ProjectedPlanSHA256:    promotion.FrozenPlanDigest,
+		ProjectedPreStateRoot:  bundle.ProjectedPreStateRoot,
+		ProjectedPostStateRoot: bundle.ProjectedPostStateRoot,
+		ProjectedBundleDigest:  bundle.BundleDigest,
+		PromotionReceiptDigest: promotion.ReceiptDigest,
+		FrozenAt:               promotion.PromotedAt,
+	}
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(st.Dir(), pipelineFrozenPlanPath),
+		frozen,
+	); err != nil {
+		t.Fatalf("chapter %d save legacy frozen render identity: %v", bundle.Chapter, err)
+	}
+	verified, _, err := loadAndVerifyPipelineFrozenPlan(st.Dir())
+	if err != nil {
+		t.Fatalf("chapter %d verify legacy frozen render identity: %v", bundle.Chapter, err)
+	}
+	installVerifiedLegacyV2RenderCandidateForTest(
+		t,
+		st,
+		verified,
+		promotion.PromotedAt,
+	)
+}
+
+func installVerifiedLegacyV2RenderCandidateForTest(
+	t *testing.T,
+	st *store.Store,
+	frozen *pipelineFrozenPlan,
+	preparedAt string,
+) {
+	t.Helper()
+	if st == nil || frozen == nil {
+		t.Fatal("legacy v2 render candidate fixture requires store and frozen identity")
+	}
+	candidateID, err := pipelineRenderTransactionID(frozen)
+	if err != nil {
+		t.Fatalf("chapter %d derive legacy v2 CandidateID: %v", frozen.Chapter, err)
+	}
+	manifest := pipelineRenderCandidateManifest{
+		Version:                pipelineRenderCandidatePreviousManifestVersion,
+		CandidateID:            candidateID,
+		GenerationID:           frozen.PlanningGenerationID,
+		Chapter:                frozen.Chapter,
+		PlanDigest:             frozen.PlanDigest,
+		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
+		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
+		SourceOutputDir:        st.Dir(),
+		SourceLiveRoot:         st.Dir(),
+		PreparedAt:             preparedAt,
+	}
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(st.Dir(), "meta", "planning", "render_candidate.json"),
+		manifest,
+	); err != nil {
+		t.Fatalf("chapter %d save legacy v2 candidate identity: %v", frozen.Chapter, err)
+	}
+	if protocol, err := pipelineRenderCandidateStyleProtocol(st.Dir(), frozen); err != nil ||
+		protocol != pipelineRenderCandidatePreviousManifestVersion {
+		t.Fatalf(
+			"chapter %d verify legacy v2 candidate protocol: protocol=%q err=%v",
+			frozen.Chapter,
+			protocol,
+			err,
+		)
 	}
 }

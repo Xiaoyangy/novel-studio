@@ -44,12 +44,43 @@ type Bundle struct {
 	Styles     map[string]string
 }
 
+// ResolvedStyle is the effective configured asset identity and body after
+// defaulting/fallback. Callers that bind provenance must use both fields from
+// the same resolution instead of pairing a missing requested ID with the
+// default asset body.
+type ResolvedStyle struct {
+	ID   string
+	Body string
+}
+
+// ResolveStyle resolves the configured prose-style asset atomically. Empty or
+// unknown/non-content IDs both resolve to the default ID and default body.
+func (b Bundle) ResolveStyle(style string) ResolvedStyle {
+	style = strings.TrimSpace(style)
+	if style == "" {
+		style = "default"
+	}
+	if raw := b.Styles[style]; strings.TrimSpace(raw) != "" {
+		return ResolvedStyle{ID: style, Body: raw}
+	}
+	return ResolvedStyle{ID: "default", Body: b.Styles["default"]}
+}
+
+// SelectedStyle returns the configured prose-style asset with the same
+// defaulting rule used by references. Keeping selection in one place prevents
+// an empty config style from silently dropping the render-only style contract.
+func (b Bundle) SelectedStyle(style string) string {
+	return b.ResolveStyle(style).Body
+}
+
 // Load 返回指定风格对应的资源集合。
 func Load(style string) Bundle {
+	styles := loadStyles()
+	effectiveStyle := (Bundle{Styles: styles}).ResolveStyle(style)
 	return Bundle{
-		References: loadReferences(style),
+		References: loadReferences(effectiveStyle.ID),
 		Prompts:    loadPrompts(),
-		Styles:     loadStyles(),
+		Styles:     styles,
 	}
 }
 
@@ -148,6 +179,7 @@ func promptFingerprint(raw string) string {
 }
 
 func loadReferences(style string) tools.References {
+	style = strings.TrimSpace(style)
 	if style == "" {
 		style = "default"
 	}

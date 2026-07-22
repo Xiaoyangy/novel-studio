@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -37,17 +38,21 @@ type pipelineRenderConvergenceRecord struct {
 }
 
 type pipelineRenderConvergenceLedger struct {
-	Version                string                            `json:"version"`
-	CandidateID            string                            `json:"candidate_id"`
-	GenerationID           string                            `json:"generation_id"`
-	Chapter                int                               `json:"chapter"`
-	PlanDigest             string                            `json:"plan_digest"`
-	PlanCheckpointSeq      int64                             `json:"plan_checkpoint_seq"`
-	ProjectedBundleDigest  string                            `json:"projected_bundle_digest"`
-	PromotionReceiptDigest string                            `json:"promotion_receipt_digest"`
-	FailureLimit           int                               `json:"failure_limit"`
-	Records                []pipelineRenderConvergenceRecord `json:"records"`
-	UpdatedAt              string                            `json:"updated_at"`
+	Version                     string                            `json:"version"`
+	CandidateManifestVersion    string                            `json:"candidate_manifest_version,omitempty"`
+	CandidateID                 string                            `json:"candidate_id"`
+	GenerationID                string                            `json:"generation_id"`
+	Chapter                     int                               `json:"chapter"`
+	PlanDigest                  string                            `json:"plan_digest"`
+	PlanCheckpointSeq           int64                             `json:"plan_checkpoint_seq"`
+	ProjectedBundleDigest       string                            `json:"projected_bundle_digest"`
+	PromotionReceiptDigest      string                            `json:"promotion_receipt_digest"`
+	PipelineRenderInputDigest   string                            `json:"pipeline_render_input_digest,omitempty"`
+	RenderContextSHA256         string                            `json:"render_context_sha256,omitempty"`
+	EffectiveStyleReceiptDigest string                            `json:"effective_style_receipt_digest,omitempty"`
+	FailureLimit                int                               `json:"failure_limit"`
+	Records                     []pipelineRenderConvergenceRecord `json:"records"`
+	UpdatedAt                   string                            `json:"updated_at"`
 }
 
 // pipelineRenderPlanStageRequiredError is intentionally typed.  The sealed
@@ -167,14 +172,37 @@ func ensurePipelineRenderConvergenceControlDir(liveOutputDir, candidateID string
 	if err != nil {
 		return "", err
 	}
+	namespace := pipelineRenderCandidateRoot(liveOutputDir)
 	root := filepath.Dir(dir)
 	if err := os.Mkdir(root, 0o755); err != nil && !os.IsExist(err) {
 		return "", fmt.Errorf("create render convergence root: %w", err)
 	}
+	if err := syncPipelineRenderControlDirectory(namespace); err != nil {
+		return "", fmt.Errorf("sync render candidate namespace after convergence root creation: %w", err)
+	}
 	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
 		return "", fmt.Errorf("create render candidate convergence directory: %w", err)
 	}
+	if err := syncPipelineRenderControlDirectory(root); err != nil {
+		return "", fmt.Errorf("sync render convergence root after candidate directory creation: %w", err)
+	}
 	return validatePipelineRenderConvergenceControlDir(liveOutputDir, candidateID, true)
+}
+
+// syncPipelineRenderControlDirectory persists newly linked control-plane
+// directory entries in their containing directory. Unsupported directory
+// fsync is tolerated consistently with the store's other atomic journals.
+func syncPipelineRenderControlDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil && syncErr != syscall.EINVAL && syncErr != syscall.ENOTSUP {
+		return syncErr
+	}
+	return closeErr
 }
 
 func pipelineRenderConvergenceLimit(st *store.Store, chapter int) int {
@@ -199,15 +227,19 @@ func newPipelineRenderConvergenceLedger(
 	limit int,
 ) pipelineRenderConvergenceLedger {
 	return pipelineRenderConvergenceLedger{
-		Version:                pipelineRenderConvergenceLedgerVersion,
-		CandidateID:            manifest.CandidateID,
-		GenerationID:           manifest.GenerationID,
-		Chapter:                manifest.Chapter,
-		PlanDigest:             manifest.PlanDigest,
-		PlanCheckpointSeq:      manifest.PlanCheckpointSeq,
-		ProjectedBundleDigest:  manifest.ProjectedBundleDigest,
-		PromotionReceiptDigest: manifest.PromotionReceiptDigest,
-		FailureLimit:           limit,
+		Version:                     pipelineRenderConvergenceLedgerVersion,
+		CandidateManifestVersion:    manifest.Version,
+		CandidateID:                 manifest.CandidateID,
+		GenerationID:                manifest.GenerationID,
+		Chapter:                     manifest.Chapter,
+		PlanDigest:                  manifest.PlanDigest,
+		PlanCheckpointSeq:           manifest.PlanCheckpointSeq,
+		ProjectedBundleDigest:       manifest.ProjectedBundleDigest,
+		PromotionReceiptDigest:      manifest.PromotionReceiptDigest,
+		PipelineRenderInputDigest:   manifest.PipelineRenderInputDigest,
+		RenderContextSHA256:         manifest.RenderContextSHA256,
+		EffectiveStyleReceiptDigest: manifest.EffectiveStyleReceiptDigest,
+		FailureLimit:                limit,
 	}
 }
 
@@ -225,6 +257,33 @@ func validatePipelineRenderConvergenceLedger(
 		ledger.PromotionReceiptDigest != manifest.PromotionReceiptDigest ||
 		ledger.FailureLimit < 2 || ledger.FailureLimit > 4 {
 		return fmt.Errorf("render convergence ledger identity mismatch")
+	}
+	switch manifest.Version {
+	case pipelineRenderCandidateManifestVersion:
+		if !pipelineRenderInputSHA256(manifest.PipelineRenderInputDigest) ||
+			!pipelineRenderInputSHA256(manifest.RenderContextSHA256) ||
+			!pipelineRenderInputSHA256(manifest.EffectiveStyleReceiptDigest) ||
+			ledger.CandidateManifestVersion != pipelineRenderCandidateManifestVersion ||
+			ledger.PipelineRenderInputDigest != manifest.PipelineRenderInputDigest ||
+			ledger.RenderContextSHA256 != manifest.RenderContextSHA256 ||
+			ledger.EffectiveStyleReceiptDigest != manifest.EffectiveStyleReceiptDigest {
+			return fmt.Errorf("render convergence ledger effective-style identity mismatch")
+		}
+	case pipelineRenderCandidatePreviousManifestVersion:
+		if strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "" ||
+			(ledger.CandidateManifestVersion != "" &&
+				ledger.CandidateManifestVersion != pipelineRenderCandidatePreviousManifestVersion) ||
+			strings.TrimSpace(ledger.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(ledger.RenderContextSHA256) != "" ||
+			strings.TrimSpace(ledger.EffectiveStyleReceiptDigest) != "" {
+			return fmt.Errorf("legacy render convergence ledger contains v3 style identity")
+		}
+	case pipelineRenderCandidatePreStyleManifestVersion:
+		return fmt.Errorf("pre-style render candidate cannot own a durable convergence ledger")
+	default:
+		return fmt.Errorf("render convergence manifest protocol %q is unsupported", manifest.Version)
 	}
 	seen := map[string]struct{}{}
 	for _, record := range ledger.Records {
@@ -254,6 +313,9 @@ func loadPipelineRenderConvergenceLedger(
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		ledger := newPipelineRenderConvergenceLedger(manifest, limit)
+		if err := validatePipelineRenderConvergenceLedger(&ledger, manifest); err != nil {
+			return nil, err
+		}
 		return &ledger, nil
 	}
 	if err != nil {
@@ -267,6 +329,105 @@ func loadPipelineRenderConvergenceLedger(
 		return nil, err
 	}
 	return &ledger, nil
+}
+
+// pipelineRenderManifestForStoredConvergenceLedger reconstructs the exact
+// candidate protocol from the durable ledger itself. Read-only recovery paths
+// often no longer have an active candidate tree; synthesizing a partial v3
+// manifest in those paths used to turn the missing fields into wildcards.
+func pipelineRenderManifestForStoredConvergenceLedger(
+	base pipelineRenderCandidateManifest,
+	ledger *pipelineRenderConvergenceLedger,
+	expectedPipelineRenderInputDigest string,
+	expectedRenderContextSHA256 string,
+) (pipelineRenderCandidateManifest, error) {
+	if ledger == nil {
+		return base, fmt.Errorf("render convergence ledger is nil")
+	}
+	switch ledger.CandidateManifestVersion {
+	case "", pipelineRenderCandidatePreviousManifestVersion:
+		base.Version = pipelineRenderCandidatePreviousManifestVersion
+		base.PipelineRenderInputDigest = ""
+		base.RenderContextSHA256 = ""
+		base.EffectiveStyleReceiptDigest = ""
+	case pipelineRenderCandidateManifestVersion:
+		if !pipelineRenderInputSHA256(ledger.PipelineRenderInputDigest) ||
+			!pipelineRenderInputSHA256(ledger.RenderContextSHA256) ||
+			!pipelineRenderInputSHA256(ledger.EffectiveStyleReceiptDigest) {
+			return base, fmt.Errorf("stored v3 render convergence style identity is incomplete")
+		}
+		if strings.TrimSpace(expectedPipelineRenderInputDigest) != "" &&
+			ledger.PipelineRenderInputDigest != expectedPipelineRenderInputDigest {
+			return base, fmt.Errorf("stored render convergence input digest differs from frozen identity")
+		}
+		if strings.TrimSpace(expectedRenderContextSHA256) != "" &&
+			ledger.RenderContextSHA256 != expectedRenderContextSHA256 {
+			return base, fmt.Errorf("stored render convergence context digest differs from frozen identity")
+		}
+		base.Version = pipelineRenderCandidateManifestVersion
+		base.PipelineRenderInputDigest = ledger.PipelineRenderInputDigest
+		base.RenderContextSHA256 = ledger.RenderContextSHA256
+		base.EffectiveStyleReceiptDigest = ledger.EffectiveStyleReceiptDigest
+	default:
+		return base, fmt.Errorf(
+			"stored render convergence candidate protocol %q is not durable",
+			ledger.CandidateManifestVersion,
+		)
+	}
+	if err := validatePipelineRenderConvergenceLedger(ledger, base); err != nil {
+		return base, err
+	}
+	return base, nil
+}
+
+func loadFrozenPipelineRenderConvergenceLedger(
+	liveOutputDir string,
+	frozen *pipelineFrozenPlan,
+	candidateID string,
+) (*pipelineRenderConvergenceLedger, pipelineRenderCandidateManifest, error) {
+	var manifest pipelineRenderCandidateManifest
+	if frozen == nil {
+		return nil, manifest, fmt.Errorf("frozen render convergence identity is nil")
+	}
+	path, err := pipelineRenderConvergenceLedgerPath(liveOutputDir, candidateID)
+	if err != nil {
+		return nil, manifest, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, manifest, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, manifest, fmt.Errorf("render convergence ledger must be a real file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, manifest, err
+	}
+	var ledger pipelineRenderConvergenceLedger
+	if err := json.Unmarshal(raw, &ledger); err != nil {
+		return nil, manifest, fmt.Errorf("decode frozen render convergence ledger: %w", err)
+	}
+	manifest = pipelineRenderCandidateManifest{
+		CandidateID:            candidateID,
+		GenerationID:           frozen.PlanningGenerationID,
+		Chapter:                frozen.Chapter,
+		PlanDigest:             frozen.PlanDigest,
+		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
+		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
+		SourceOutputDir:        filepath.Clean(liveOutputDir),
+	}
+	manifest, err = pipelineRenderManifestForStoredConvergenceLedger(
+		manifest,
+		&ledger,
+		frozen.PipelineRunInputDigest,
+		frozen.RenderContextSHA256,
+	)
+	if err != nil {
+		return nil, manifest, err
+	}
+	return &ledger, manifest, nil
 }
 
 func savePipelineRenderConvergenceLedger(
@@ -378,18 +539,7 @@ func pipelineRenderBodyHasDurableConvergenceRejection(
 	} else if err != nil {
 		return false, fmt.Errorf("inspect exact render convergence ledger: %w", err)
 	}
-	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
-		CandidateID:            candidateID,
-		GenerationID:           frozen.PlanningGenerationID,
-		Chapter:                frozen.Chapter,
-		PlanDigest:             frozen.PlanDigest,
-		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
-		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
-		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
-		SourceOutputDir:        filepath.Clean(liveOutputDir),
-	}
-	ledger, err := loadPipelineRenderConvergenceLedger(liveOutputDir, manifest, 3)
+	ledger, _, err := loadFrozenPipelineRenderConvergenceLedger(liveOutputDir, frozen, candidateID)
 	if err != nil {
 		return false, fmt.Errorf("load exact render convergence rejection: %w", err)
 	}
@@ -455,12 +605,44 @@ func loadPipelineRenderCandidateManifest(outputDir string) (*pipelineRenderCandi
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		return nil, fmt.Errorf("decode render candidate manifest for convergence: %w", err)
 	}
-	if manifest.Version != pipelineRenderCandidateManifestVersion ||
+	if (manifest.Version != pipelineRenderCandidateManifestVersion &&
+		manifest.Version != pipelineRenderCandidatePreStyleManifestVersion &&
+		manifest.Version != pipelineRenderCandidatePreviousManifestVersion) ||
 		manifest.Chapter <= 0 || manifest.PlanCheckpointSeq <= 0 ||
 		strings.TrimSpace(manifest.SourceOutputDir) == "" ||
 		!filepath.IsAbs(manifest.SourceOutputDir) ||
 		manifest.SourceOutputDir != filepath.Clean(manifest.SourceOutputDir) {
 		return nil, fmt.Errorf("render candidate manifest cannot own a convergence ledger")
+	}
+	if manifest.Version == pipelineRenderCandidateManifestVersion {
+		if !pipelineRenderInputSHA256(manifest.PipelineRenderInputDigest) ||
+			!pipelineRenderInputSHA256(manifest.RenderContextSHA256) ||
+			!pipelineRenderInputSHA256(manifest.EffectiveStyleReceiptDigest) {
+			return nil, fmt.Errorf("v3 render candidate effective style binding is incomplete")
+		}
+		_, receipt, _, err := tools.LoadBoundArchivedEffectiveRenderStyleContract(
+			store.NewStore(outputDir),
+			manifest.Chapter,
+			manifest.PlanDigest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("validate render candidate effective style: %w", err)
+		}
+		if receipt == nil || receipt.ReceiptDigest != manifest.EffectiveStyleReceiptDigest ||
+			receipt.PipelineRenderInputDigest != manifest.PipelineRenderInputDigest ||
+			receipt.BaseRenderContextSHA256 != manifest.RenderContextSHA256 {
+			return nil, fmt.Errorf("render candidate effective style binding mismatch")
+		}
+	} else if manifest.Version == pipelineRenderCandidatePreStyleManifestVersion &&
+		(!pipelineRenderInputSHA256(manifest.PipelineRenderInputDigest) ||
+			!pipelineRenderInputSHA256(manifest.RenderContextSHA256) ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "") {
+		return nil, fmt.Errorf("pre-style render candidate effective-style input identity is incomplete")
+	} else if manifest.Version == pipelineRenderCandidatePreviousManifestVersion &&
+		(strings.TrimSpace(manifest.PipelineRenderInputDigest) != "" ||
+			strings.TrimSpace(manifest.RenderContextSHA256) != "" ||
+			strings.TrimSpace(manifest.EffectiveStyleReceiptDigest) != "") {
+		return nil, fmt.Errorf("v2 render candidate contains v3 effective-style fields")
 	}
 	if filepath.Clean(outputDir) != filepath.Clean(manifest.SourceOutputDir) {
 		if _, err := validateActivePipelineRenderCandidateTopology(outputDir, &manifest); err != nil {
@@ -1012,17 +1194,6 @@ func requireFrozenPipelineRenderConvergenceAvailable(
 	if err != nil {
 		return err
 	}
-	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
-		CandidateID:            id,
-		GenerationID:           frozen.PlanningGenerationID,
-		Chapter:                frozen.Chapter,
-		PlanDigest:             frozen.PlanDigest,
-		PlanCheckpointSeq:      frozen.PlanCheckpointSeq,
-		ProjectedBundleDigest:  frozen.ProjectedBundleDigest,
-		PromotionReceiptDigest: frozen.PromotionReceiptDigest,
-		SourceOutputDir:        filepath.Clean(liveOutputDir),
-	}
 	path, err := pipelineRenderConvergenceLedgerPath(liveOutputDir, id)
 	if err != nil {
 		return err
@@ -1032,7 +1203,7 @@ func requireFrozenPipelineRenderConvergenceAvailable(
 	} else if err != nil {
 		return err
 	}
-	ledger, err := loadPipelineRenderConvergenceLedger(liveOutputDir, manifest, 3)
+	ledger, _, err := loadFrozenPipelineRenderConvergenceLedger(liveOutputDir, frozen, id)
 	if err != nil {
 		return err
 	}

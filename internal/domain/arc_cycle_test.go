@@ -58,7 +58,7 @@ func arcCycleDomainTestManifest(t *testing.T, generationID string) ArcPlanningMa
 func arcCycleDomainTestAcceptance(t *testing.T, manifest ArcPlanningManifest, chapter int, acceptedAt string) ChapterAcceptanceReceipt {
 	t.Helper()
 	receipt := ChapterAcceptanceReceipt{
-		Version:           ChapterAcceptanceReceiptVersion,
+		Version:           ChapterAcceptanceReceiptLegacyVersion,
 		ArcID:             manifest.ArcID,
 		ArcManifestDigest: manifest.ManifestDigest,
 		GenerationID:      manifest.GenerationID,
@@ -112,6 +112,86 @@ func TestChapterAcceptanceRejectsArcOrDraftReviewArtifacts(t *testing.T) {
 		if _, err := SignChapterAcceptanceReceipt(receipt); err == nil {
 			t.Fatalf("review path %q should not be accepted", reviewPath)
 		}
+	}
+}
+
+func TestChapterAcceptanceVersionSeparatesLegacyAndEffectiveStyleEvidence(t *testing.T) {
+	manifest := arcCycleDomainTestManifest(t, "pg2_arc_acceptance_style_version")
+	legacy := arcCycleDomainTestAcceptance(t, manifest, 3, "2026-07-17T10:01:00Z")
+
+	downgraded := legacy
+	downgraded.Version = ChapterAcceptanceReceiptVersion
+	downgraded.ReceiptDigest = ""
+	if _, err := SignChapterAcceptanceReceipt(downgraded); err == nil ||
+		!strings.Contains(err.Error(), "v3 requires complete effective style") {
+		t.Fatalf("v3 acceptance without style archive evidence was signed: %v", err)
+	}
+
+	legacyWithStyle := legacy
+	legacyWithStyle.EffectiveStyleReceiptPath = "meta/planning/effective_render_style_contracts/ch0003/render-ch0003-test/sha256-test.json"
+	legacyWithStyle.EffectiveStyleReceiptDigest = arcCycleDomainTestDigest("style-receipt")
+	legacyWithStyle.EffectiveStyleArtifactSHA256 = arcCycleDomainTestDigest("style-artifact")
+	legacyWithStyle.ReceiptDigest = ""
+	if _, err := SignChapterAcceptanceReceipt(legacyWithStyle); err == nil ||
+		!strings.Contains(err.Error(), "legacy v2 cannot carry") {
+		t.Fatalf("legacy acceptance carried v3 style evidence: %v", err)
+	}
+}
+
+func TestChapterAcceptanceV3BindsCompleteFormalReviewSetAndKeepsV2Compatible(t *testing.T) {
+	manifest := arcCycleDomainTestManifest(t, "pg2_arc_acceptance_review_set")
+	legacy := arcCycleDomainTestAcceptance(t, manifest, 3, "2026-07-17T10:01:00Z")
+
+	legacySubset := legacy
+	legacySubset.ReviewArtifacts = append([]ChapterReviewArtifactBinding(nil), legacy.ReviewArtifacts[:1]...)
+	legacySubset.ReceiptDigest = ""
+	if _, err := SignChapterAcceptanceReceipt(legacySubset); err != nil {
+		t.Fatalf("legacy v2 acceptance should keep its nonempty review-set compatibility: %v", err)
+	}
+
+	v3 := legacy
+	v3.Version = ChapterAcceptanceReceiptVersion
+	v3.ReviewArtifacts = []ChapterReviewArtifactBinding{
+		{Path: "reviews/03.json", Digest: arcCycleDomainTestDigest("editor")},
+		{Path: "reviews/03.md", Digest: arcCycleDomainTestDigest("report")},
+		{Path: "reviews/03_ai_gate.json", Digest: arcCycleDomainTestDigest("ai-gate")},
+		{Path: "reviews/03_ai_voice_redflags.json", Digest: arcCycleDomainTestDigest("ai-voice")},
+		{Path: "reviews/03_deepseek_ai_judge.json", Digest: arcCycleDomainTestDigest("deepseek")},
+		{Path: "reviews/03_model_provenance.json", Digest: arcCycleDomainTestDigest("model-provenance")},
+	}
+	v3.EffectiveStyleReceiptPath = "meta/planning/effective_render_style_contracts/ch0003/render-ch0003-test/sha256-test.json"
+	v3.EffectiveStyleReceiptDigest = arcCycleDomainTestDigest("style-receipt")
+	v3.EffectiveStyleArtifactSHA256 = arcCycleDomainTestDigest("style-artifact")
+	v3.ReceiptDigest = ""
+	v3, err := SignChapterAcceptanceReceipt(v3)
+	if err != nil {
+		t.Fatalf("complete v3 review set should sign: %v", err)
+	}
+
+	extra := append([]ChapterReviewArtifactBinding(nil), v3.ReviewArtifacts...)
+	extra = append(extra, ChapterReviewArtifactBinding{
+		Path:   "reviews/03_optional.json",
+		Digest: arcCycleDomainTestDigest("optional"),
+	})
+	replaced := append([]ChapterReviewArtifactBinding(nil), v3.ReviewArtifacts...)
+	replaced[len(replaced)-1] = ChapterReviewArtifactBinding{
+		Path:   "reviews/03_other.json",
+		Digest: arcCycleDomainTestDigest("other"),
+	}
+	for name, artifacts := range map[string][]ChapterReviewArtifactBinding{
+		"missing":  append([]ChapterReviewArtifactBinding(nil), v3.ReviewArtifacts[:len(v3.ReviewArtifacts)-1]...),
+		"extra":    extra,
+		"replaced": replaced,
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := v3
+			invalid.ReviewArtifacts = artifacts
+			invalid.ReceiptDigest = ""
+			if _, signErr := SignChapterAcceptanceReceipt(invalid); signErr == nil ||
+				!strings.Contains(signErr.Error(), "complete formal review set") {
+				t.Fatalf("inexact v3 review set was signed: %v", signErr)
+			}
+		})
 	}
 }
 

@@ -59,6 +59,7 @@ type ContextTool struct {
 	store             *store.Store
 	refs              References
 	style             string
+	configuredStyle   string
 	ragEmbedder       rag.Embedder
 	ragVectorSearcher rag.VectorSearcher
 	ragBM25Mu         sync.Mutex
@@ -81,6 +82,18 @@ type ragRecallCacheEntry struct {
 // user_rules 由 buildUserRules 直接读本书快照（meta/user_rules.json）注入，不再依赖加载选项。
 func NewContextTool(store *store.Store, refs References, style string) *ContextTool {
 	return &ContextTool{store: store, refs: refs, style: style}
+}
+
+// WithConfiguredStyle binds the selected assets/styles/<style>.md body to the
+// prose and review surfaces.  It is deliberately separate from References:
+// project-all hashes/consumes planning references, while this guide is a
+// render-only input and must not invalidate or steer the sealed world/causal
+// simulation.
+func (t *ContextTool) WithConfiguredStyle(raw string) *ContextTool {
+	if t != nil {
+		t.configuredStyle = strings.TrimSpace(raw)
+	}
+	return t
 }
 
 func (t *ContextTool) WithRAGEmbedder(embedder rag.Embedder) *ContextTool {
@@ -129,6 +142,9 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
 	}
+	if err := t.store.Runtime.ValidatePipelineRenderCandidateEvidenceTree(); err != nil {
+		return nil, fmt.Errorf("novel_context 校验冻结渲染候选文件树: %w", err)
+	}
 	lock, err := t.store.Runtime.LoadPipelineExecution()
 	if err != nil {
 		return nil, fmt.Errorf("novel_context 读取 pipeline execution lock: %w", err)
@@ -159,7 +175,36 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 		if err != nil {
 			return nil, err
 		}
-		return applyProseRenderCompatibilityOverlay(raw)
+		raw, err = applyProseRenderCompatibilityOverlay(raw)
+		if err != nil {
+			return nil, err
+		}
+		// Sealed candidates publish the exact effective style contract before
+		// Drafter can run. Both Drafter and formal Editor then consume this
+		// content-addressed receipt. Legacy contexts without a receipt keep the
+		// style_contract embedded in their frozen bytes; never rebuild them from
+		// current config during recovery.
+		required, _, err := EffectiveRenderStyleContractRequired(
+			t.store,
+			lock.TargetChapter,
+			lock.PlanDigest,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !required {
+			return raw, nil
+		}
+		effective, err := ApplyEffectiveRenderStyleContract(
+			raw,
+			t.store,
+			lock.TargetChapter,
+			lock.PlanDigest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("load required sealed render style receipt: %w", err)
+		}
+		return effective, nil
 	}
 
 	requestedChapter := a.Chapter

@@ -208,7 +208,7 @@ func TestParseReviewIssuesKeepsActionableIssue(t *testing.T) {
 	}
 }
 
-func TestSanitizeEditorReviewAcceptsExplicitZeroActionRewrite(t *testing.T) {
+func TestSanitizeEditorReviewNeverDowngradesExplicitRewrite(t *testing.T) {
 	dimensions := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
 	for _, name := range reviewDimensionNames {
 		dimensions = append(dimensions, domain.DimensionScore{
@@ -225,8 +225,8 @@ func TestSanitizeEditorReviewAcceptsExplicitZeroActionRewrite(t *testing.T) {
 	}
 
 	removed := sanitizeEditorReviewForProject(nil, 3, "正文", domain.AIVoiceAnalysis{}, &entry)
-	if len(removed) != 1 || len(entry.Issues) != 0 || entry.Verdict != "accept" || len(entry.AffectedChapters) != 0 {
-		t.Fatalf("zero-action contradiction was not normalized: removed=%v entry=%+v", removed, entry)
+	if len(removed) != 1 || len(entry.Issues) != 0 || entry.Verdict != "rewrite" || len(entry.AffectedChapters) != 1 {
+		t.Fatalf("explicit rewrite was downgraded during sanitization: removed=%v entry=%+v", removed, entry)
 	}
 }
 
@@ -542,7 +542,7 @@ func TestSanitizeEditorReviewKeepsUnstructuredResistanceComplaint(t *testing.T) 
 	}
 }
 
-func TestReviewVerdictAllPassingDimensionsDoNotForcePolish(t *testing.T) {
+func TestReviewVerdictExplicitRewriteNeverSynthesizesAccept(t *testing.T) {
 	dimensions := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
 	for _, name := range reviewDimensionNames {
 		dimensions = append(dimensions, domain.DimensionScore{
@@ -552,12 +552,12 @@ func TestReviewVerdictAllPassingDimensionsDoNotForcePolish(t *testing.T) {
 		})
 	}
 	md := "## 是否需要改写：是"
-	if got := reviewVerdictFromMarkdown(md, dimensions); got != "accept" {
-		t.Fatalf("all-pass review verdict = %q, want accept", got)
+	if got := reviewVerdictFromMarkdown(md, dimensions); got != "rewrite" {
+		t.Fatalf("all-pass explicit rewrite verdict = %q, want rewrite", got)
 	}
 	dimensions[2].Score = 70
 	dimensions[2].Verdict = "warning"
-	if got := reviewVerdictFromMarkdown(md, dimensions); got != "polish" {
-		t.Fatalf("warning-dimension review verdict = %q, want polish", got)
+	if got := reviewVerdictFromMarkdown(md, dimensions); got != "rewrite" {
+		t.Fatalf("warning-dimension explicit rewrite verdict = %q, want rewrite", got)
 	}
 }

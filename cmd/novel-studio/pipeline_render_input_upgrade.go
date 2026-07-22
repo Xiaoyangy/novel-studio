@@ -87,6 +87,7 @@ func pipelineUpgradeFrozenRenderInput(
 
 	upgraded := *frozen
 	upgraded.PipelineRunInputDigest = currentInputDigest
+	upgraded.EffectiveStyleProtocol = pipelineRenderCandidateManifestVersion
 	upgraded.RenderInputUpgradeID = ""
 	upgraded.RenderInputUpgradeReceiptDigest = ""
 	currentCandidateID, err := pipelineRenderTransactionID(&upgraded)
@@ -115,6 +116,14 @@ func pipelineUpgradeFrozenRenderInput(
 	)
 	if err != nil {
 		return nil, err
+	}
+	// Declare the target's v3 style epoch before the mutable frozen pointer can
+	// expose that CandidateID. A crash may leave an orphan intent, but can never
+	// leave a visible v3 candidate without its non-disposable protocol marker.
+	if _, err := ensurePipelineRenderV3StyleEpochIntent(
+		st.Dir(), &upgraded, currentCandidateID,
+	); err != nil {
+		return nil, fmt.Errorf("declare upgraded render style epoch: %w", err)
 	}
 	upgraded.RenderInputUpgradeID = receipt.UpgradeID
 	upgraded.RenderInputUpgradeReceiptDigest = receipt.ReceiptDigest

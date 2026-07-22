@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	ArcPlanningManifestVersion      = "arc-planning-manifest.v2"
-	ChapterAcceptanceReceiptVersion = "chapter-acceptance-receipt.v2"
-	ArcCompletionReceiptVersion     = "arc-completion-receipt.v2"
+	ArcPlanningManifestVersion            = "arc-planning-manifest.v2"
+	ChapterAcceptanceReceiptLegacyVersion = "chapter-acceptance-receipt.v2"
+	ChapterAcceptanceReceiptVersion       = "chapter-acceptance-receipt.v3-effective-style"
+	ArcCompletionReceiptVersion           = "arc-completion-receipt.v2"
 )
 
 // ArcChapterBodyRuneContract freezes the exact Unicode-rune delivery range
@@ -99,17 +100,20 @@ type ChapterReviewArtifactBinding struct {
 // chapter body, its exact review artifacts, and its accepted outcome all refer
 // to the same arc generation.
 type ChapterAcceptanceReceipt struct {
-	Version              string                         `json:"version"`
-	ArcID                string                         `json:"arc_id"`
-	ArcManifestDigest    string                         `json:"arc_manifest_digest"`
-	GenerationID         string                         `json:"generation_id"`
-	Chapter              int                            `json:"chapter"`
-	ChapterBodySHA256    string                         `json:"chapter_body_sha256"`
-	ChapterBodyRunes     int                            `json:"chapter_body_runes"`
-	ReviewArtifacts      []ChapterReviewArtifactBinding `json:"review_artifacts"`
-	OutcomeReceiptDigest string                         `json:"outcome_receipt_digest"`
-	AcceptedAt           string                         `json:"accepted_at"`
-	ReceiptDigest        string                         `json:"receipt_digest"`
+	Version                      string                         `json:"version"`
+	ArcID                        string                         `json:"arc_id"`
+	ArcManifestDigest            string                         `json:"arc_manifest_digest"`
+	GenerationID                 string                         `json:"generation_id"`
+	Chapter                      int                            `json:"chapter"`
+	ChapterBodySHA256            string                         `json:"chapter_body_sha256"`
+	ChapterBodyRunes             int                            `json:"chapter_body_runes"`
+	ReviewArtifacts              []ChapterReviewArtifactBinding `json:"review_artifacts"`
+	EffectiveStyleReceiptPath    string                         `json:"effective_style_receipt_path,omitempty"`
+	EffectiveStyleReceiptDigest  string                         `json:"effective_style_receipt_digest,omitempty"`
+	EffectiveStyleArtifactSHA256 string                         `json:"effective_style_artifact_sha256,omitempty"`
+	OutcomeReceiptDigest         string                         `json:"outcome_receipt_digest"`
+	AcceptedAt                   string                         `json:"accepted_at"`
+	ReceiptDigest                string                         `json:"receipt_digest"`
 }
 
 // ArcChapterAcceptanceBinding preserves acceptance order in the completion
@@ -378,7 +382,8 @@ func SignChapterAcceptanceReceipt(receipt ChapterAcceptanceReceipt) (ChapterAcce
 
 func ValidateChapterAcceptanceReceipt(receipt ChapterAcceptanceReceipt) error {
 	const prefix = "chapter acceptance receipt"
-	if receipt.Version != ChapterAcceptanceReceiptVersion {
+	if receipt.Version != ChapterAcceptanceReceiptVersion &&
+		receipt.Version != ChapterAcceptanceReceiptLegacyVersion {
 		return fmt.Errorf("%s: unsupported version %q", prefix, receipt.Version)
 	}
 	if strings.TrimSpace(receipt.ArcID) == "" || strings.TrimSpace(receipt.ArcID) != receipt.ArcID {
@@ -420,6 +425,51 @@ func ValidateChapterAcceptanceReceipt(receipt ChapterAcceptanceReceipt) error {
 			return fmt.Errorf("%s: %w", prefix, err)
 		}
 	}
+	styleEvidenceCount := 0
+	for _, value := range []string{
+		receipt.EffectiveStyleReceiptPath,
+		receipt.EffectiveStyleReceiptDigest,
+		receipt.EffectiveStyleArtifactSHA256,
+	} {
+		if strings.TrimSpace(value) != "" {
+			styleEvidenceCount++
+		}
+	}
+	if styleEvidenceCount != 0 && styleEvidenceCount != 3 {
+		return fmt.Errorf("%s: effective style archive evidence must be all present or all absent", prefix)
+	}
+	if receipt.Version == ChapterAcceptanceReceiptVersion && styleEvidenceCount != 3 {
+		return fmt.Errorf("%s: v3 requires complete effective style archive evidence", prefix)
+	}
+	if receipt.Version == ChapterAcceptanceReceiptLegacyVersion && styleEvidenceCount != 0 {
+		return fmt.Errorf("%s: legacy v2 cannot carry v3 effective style archive evidence", prefix)
+	}
+	if receipt.Version == ChapterAcceptanceReceiptVersion {
+		required := requiredChapterAcceptanceV3ReviewArtifactPaths(receipt.Chapter)
+		if len(receipt.ReviewArtifacts) != len(required) {
+			return fmt.Errorf("%s: v3 review_artifacts must bind the complete formal review set", prefix)
+		}
+		for i, artifact := range receipt.ReviewArtifacts {
+			if artifact.Path != required[i] {
+				return fmt.Errorf("%s: v3 review_artifacts must bind the complete formal review set", prefix)
+			}
+		}
+	}
+	if styleEvidenceCount == 3 {
+		clean := path.Clean(receipt.EffectiveStyleReceiptPath)
+		prefixPath := fmt.Sprintf("meta/planning/effective_render_style_contracts/ch%04d/", receipt.Chapter)
+		if clean != receipt.EffectiveStyleReceiptPath || path.IsAbs(clean) ||
+			strings.HasPrefix(clean, "../") || !strings.HasPrefix(clean, prefixPath) ||
+			!strings.HasSuffix(clean, ".json") {
+			return fmt.Errorf("%s: effective_style_receipt_path is unsafe or belongs to another chapter", prefix)
+		}
+		if err := validatePlanningV2Digest("effective_style_receipt_digest", receipt.EffectiveStyleReceiptDigest); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
+		if err := validatePlanningV2Digest("effective_style_artifact_sha256", receipt.EffectiveStyleArtifactSHA256); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
+	}
 	if err := validatePlanningV2Time("accepted_at", receipt.AcceptedAt); err != nil {
 		return fmt.Errorf("%s: %w", prefix, err)
 	}
@@ -431,6 +481,17 @@ func ValidateChapterAcceptanceReceipt(receipt ChapterAcceptanceReceipt) error {
 		return fmt.Errorf("%s: receipt_digest mismatch; chapter body or review evidence may have drifted", prefix)
 	}
 	return nil
+}
+
+func requiredChapterAcceptanceV3ReviewArtifactPaths(chapter int) []string {
+	return []string{
+		fmt.Sprintf("reviews/%02d.json", chapter),
+		fmt.Sprintf("reviews/%02d.md", chapter),
+		fmt.Sprintf("reviews/%02d_ai_gate.json", chapter),
+		fmt.Sprintf("reviews/%02d_ai_voice_redflags.json", chapter),
+		fmt.Sprintf("reviews/%02d_deepseek_ai_judge.json", chapter),
+		fmt.Sprintf("reviews/%02d_model_provenance.json", chapter),
+	}
 }
 
 func ValidateChapterAcceptanceReceiptAgainstManifest(receipt ChapterAcceptanceReceipt, manifest ArcPlanningManifest) error {

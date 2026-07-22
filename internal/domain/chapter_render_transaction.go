@@ -66,10 +66,11 @@ type ChapterRenderArtifactBinding struct {
 // own fields; later receipts are chained to earlier evidence by
 // PreviousReceiptDigest rather than copying a mutable cumulative snapshot.
 type ChapterRenderPhaseEvidence struct {
-	BodyCheckpointSeq    int64  `json:"body_checkpoint_seq,omitempty"`
-	BodyCheckpointDigest string `json:"body_checkpoint_digest,omitempty"`
-	CommitCheckpointSeq  int64  `json:"commit_checkpoint_seq,omitempty"`
-	CommitDigest         string `json:"commit_digest,omitempty"`
+	BodyCheckpointSeq           int64  `json:"body_checkpoint_seq,omitempty"`
+	BodyCheckpointDigest        string `json:"body_checkpoint_digest,omitempty"`
+	EffectiveStyleReceiptDigest string `json:"effective_style_receipt_digest,omitempty"`
+	CommitCheckpointSeq         int64  `json:"commit_checkpoint_seq,omitempty"`
+	CommitDigest                string `json:"commit_digest,omitempty"`
 	// CandidateRoot is the deterministic canon root at commit time. It binds
 	// chapter bodies and every other canonical artifact while excluding
 	// operational namespaces such as meta/runtime.
@@ -397,6 +398,11 @@ func validateChapterRenderPhaseEvidence(
 			return err
 		}
 		return nil
+	}
+	if evidence.EffectiveStyleReceiptDigest != "" {
+		if err := requireDigest("effective_style_receipt_digest", evidence.EffectiveStyleReceiptDigest); err != nil {
+			return err
+		}
 	}
 	switch phase {
 	case ChapterRenderPhaseBodyReady:

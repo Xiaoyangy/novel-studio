@@ -75,6 +75,9 @@ func (m *renderContextPrimedModel) prime(
 	if m == nil || m.store == nil || m.contextTool == nil || m.base == nil {
 		return nil, 0, fmt.Errorf("render context priming is not configured")
 	}
+	if err := m.store.Runtime.ValidatePipelineRenderCandidateEvidenceTree(); err != nil {
+		return nil, 0, fmt.Errorf("render context priming validate candidate evidence tree: %w", err)
+	}
 	lock, err := m.store.Runtime.LoadPipelineExecution()
 	if err != nil {
 		return nil, 0, fmt.Errorf("render context priming load execution lock: %w", err)

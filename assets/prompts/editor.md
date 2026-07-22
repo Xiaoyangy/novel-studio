@@ -114,7 +114,7 @@ rewrite 审阅要额外核对台账同步：如果修改后的正文改变角色
 - **表达质感与基础 AI 味**：描写质感（抽象概述 vs 具象五感、情绪贴标签）、对话区分度（去掉说话人标记能否分辨角色）、用词质量（排比三连 / 四字成语堆砌 / "如同XX般"套句 / 重复用词）统一以 `reference_pack.references.anti_ai_tone` 为准，逐类对照原文检查，引用违例段落并指出改法。疲劳词与套句频次已由 `working_memory.user_rules.structured` 机械检查，issue 直接引用 `rule_violations.target`，不另列字词。量化 AI 腔门禁必须放入第八维 `ai_voice_detection`，不要只塞进 aesthetic。
 
 - **叙事手法与文学合同**：先看 `render_packet.literary_render_contract`（没有时再看 plan 的 `causal_simulation.literary_rendering_plan`）。只把焦点人物、叙事权限和知识边界作硬核对；`soft_perceptual_bias`、`soft_scene_choices`、`soft_lens_choices`、afterimage、距离换挡、scene/summary、母题、句法和潜台词都是候选，未采用、重排或替换不构成缺陷，也不得逐段寻找对应项。只有未声明的跨脑读取、人物不可能知道的幕后事实，以及关键转折与前序行动完全无因果关系才是硬问题；其余只能引用正文实际位置与效果作软诊断。
-- **题材专项合同**：若 `render_packet.style_contract` 或 `reference_pack.genre_style_profile` 存在，核对题材语域、普通口述气口、喜剧因果、经营结果压缩、唯一感情线和系统声口。它不要求逐卡出现；审核必须引用原句和现场后果。快节奏不能替“同一意思被切成连续2—4汉字句号短句”辩护，人物专业也不能替合同口述腔辩护。
+- **题材与配置风格合同**：若 `render_packet.style_contract`、`reference_pack.configured_style` 或 `reference_pack.genre_style_profile` 存在，先核对 `configured_style_rules` 所承诺的叙述声音、距离、节奏、意象与对白质感，再核对题材语域、普通口述气口、喜剧因果、经营结果压缩、唯一感情线和系统声口。风格合同不允许反向修改冻结事件、人物决定、事实顺序或知识边界，也不要求逐卡出现；审核必须引用原句和现场效果。若 `serial_style_memory` 指出的非必要短语、逐字句或同构开收尾在当前章继续复现，归 aesthetic；不能要求机械同义替换。快节奏不能替“同一意思被切成连续2—4汉字句号短句”辩护，人物专业也不能替合同口述腔辩护。
 
 - **情感打动力**：是否有让读者心跳加速、喉头发紧或嘴角上扬的段落？重要刺激之后，主角的感知、误判、压住的反应是否改变了选择或关系判断，还是补一个“心里一暖/手指一顿”就继续执行计划？如果整章情感平淡，指出最该加强的 1-2 个因果位置，写清刺激、主观体验、选择变化和余波，不给通用微动作补丁。
 

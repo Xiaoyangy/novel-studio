@@ -3,12 +3,13 @@ package domain
 import (
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 const (
-	PipelineRenderDispatchLedgerVersion  = "pipeline-render-dispatch-budget.v1"
+	PipelineRenderDispatchLedgerVersion  = "pipeline-render-dispatch-budget.v2-source-output"
 	PipelineRenderWholeBodyDispatchLimit = 3
 )
 
@@ -25,17 +26,21 @@ type PipelineRenderDispatchReservation struct {
 }
 
 type PipelineRenderDispatchLedger struct {
-	Version                string                              `json:"version"`
-	CandidateID            string                              `json:"candidate_id"`
-	GenerationID           string                              `json:"generation_id"`
-	Chapter                int                                 `json:"chapter"`
-	PlanDigest             string                              `json:"plan_digest"`
-	PlanCheckpointSeq      int64                               `json:"plan_checkpoint_seq"`
-	ProjectedBundleDigest  string                              `json:"projected_bundle_digest"`
-	PromotionReceiptDigest string                              `json:"promotion_receipt_digest"`
-	Limit                  int                                 `json:"limit"`
-	Reservations           []PipelineRenderDispatchReservation `json:"reservations"`
-	UpdatedAt              string                              `json:"updated_at"`
+	Version                     string                              `json:"version"`
+	CandidateID                 string                              `json:"candidate_id"`
+	SourceOutputDir             string                              `json:"source_output_dir"`
+	GenerationID                string                              `json:"generation_id"`
+	Chapter                     int                                 `json:"chapter"`
+	PlanDigest                  string                              `json:"plan_digest"`
+	PlanCheckpointSeq           int64                               `json:"plan_checkpoint_seq"`
+	ProjectedBundleDigest       string                              `json:"projected_bundle_digest"`
+	PromotionReceiptDigest      string                              `json:"promotion_receipt_digest"`
+	PipelineRenderInputDigest   string                              `json:"pipeline_render_input_digest,omitempty"`
+	RenderContextSHA256         string                              `json:"render_context_sha256,omitempty"`
+	EffectiveStyleReceiptDigest string                              `json:"effective_style_receipt_digest,omitempty"`
+	Limit                       int                                 `json:"limit"`
+	Reservations                []PipelineRenderDispatchReservation `json:"reservations"`
+	UpdatedAt                   string                              `json:"updated_at"`
 }
 
 // ValidatePipelineRenderDispatchLedger validates the complete shared ledger
@@ -44,11 +49,28 @@ type PipelineRenderDispatchLedger struct {
 func ValidatePipelineRenderDispatchLedger(ledger *PipelineRenderDispatchLedger) error {
 	if ledger == nil || ledger.Version != PipelineRenderDispatchLedgerVersion ||
 		strings.TrimSpace(ledger.CandidateID) == "" || ledger.CandidateID == "." || ledger.CandidateID == ".." || strings.ContainsAny(ledger.CandidateID, `/\\`) ||
+		strings.TrimSpace(ledger.SourceOutputDir) == "" || !filepath.IsAbs(ledger.SourceOutputDir) || filepath.Clean(ledger.SourceOutputDir) != ledger.SourceOutputDir ||
 		strings.TrimSpace(ledger.GenerationID) == "" || ledger.Chapter <= 0 ||
 		!validPlanningSHA256(ledger.PlanDigest) || ledger.PlanCheckpointSeq <= 0 ||
 		!validPlanningSHA256(ledger.ProjectedBundleDigest) || !validPlanningSHA256(ledger.PromotionReceiptDigest) ||
 		ledger.Limit != PipelineRenderWholeBodyDispatchLimit || len(ledger.Reservations) > ledger.Limit {
 		return fmt.Errorf("render dispatch ledger identity or limit is malformed")
+	}
+	styleBindingCount := 0
+	for _, digest := range []string{
+		ledger.PipelineRenderInputDigest,
+		ledger.RenderContextSHA256,
+		ledger.EffectiveStyleReceiptDigest,
+	} {
+		if strings.TrimSpace(digest) != "" {
+			styleBindingCount++
+			if !validPlanningSHA256(digest) {
+				return fmt.Errorf("render dispatch ledger effective-style binding is malformed")
+			}
+		}
+	}
+	if styleBindingCount != 0 && styleBindingCount != 3 {
+		return fmt.Errorf("render dispatch ledger effective-style binding is incomplete")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, ledger.UpdatedAt); err != nil {
 		return fmt.Errorf("render dispatch ledger updated_at is invalid: %w", err)

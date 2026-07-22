@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -124,6 +125,7 @@ func TestPreparePipelineRenderCandidateRecoversDurableActiveAndStaleDraft(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	candidateStore := store.NewStore(candidate.OutputDir)
 	const body = "第一章\n\n候选草稿带着精确 checkpoint 跨进程恢复。"
 	if err := candidateStore.Drafts.SaveDraft(1, body); err != nil {
@@ -178,6 +180,7 @@ func TestPreparePipelineRenderCandidateDoesNotRecoverDurablyRejectedDraft(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	candidateStore := store.NewStore(candidate.OutputDir)
 	const rejectedBody = "第一章\n\n已被语义拒绝的候选。"
 	if err := candidateStore.Drafts.SaveDraft(1, rejectedBody); err != nil {
@@ -255,6 +258,7 @@ func TestPreparePipelineRenderCandidateReplaysDraftOntoCurrentLiveRoot(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	const body = "第一章\n\n跨进程恢复只重放这一份精确正文。"
 	candidateStore := store.NewStore(candidate.OutputDir)
 	if err := candidateStore.Drafts.SaveDraft(1, body); err != nil {
@@ -338,6 +342,7 @@ func TestPreparePipelineRenderCandidateRejectsLivePlanSequenceDrift(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	if err := store.NewStore(candidate.OutputDir).Drafts.SaveDraft(1, "第一章\n\n旧 epoch 草稿。"); err != nil {
 		t.Fatal(err)
 	}
@@ -396,14 +401,19 @@ func TestBindCurrentRenderExecutionToCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reservation, reused, err := reservePipelineWholeBodyDispatch(candidate.OutputDir, "stale-before-recovery", 1)
-	if err != nil || reused || reservation == nil {
-		t.Fatalf("reserve stale recovery permit: reservation=%+v reused=%v err=%v", reservation, reused, err)
+	stalePermit, err := json.Marshal(store.PipelineRenderProsePermit{
+		Version: 2, AuthorizationDigest: frozen.PlanDigest, ReservationAttempt: 1,
+		CandidateID: candidate.ID, GenerationID: frozen.PlanningGenerationID,
+		Chapter: frozen.Chapter, PlanDigest: frozen.PlanDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.NewStore(candidate.OutputDir).Runtime.ArmPipelineRenderProsePermit(
-		reservation.AuthorizationDigest,
-		reservation.Attempt,
-	); err != nil {
+	permitPath := filepath.Join(candidate.OutputDir, "meta", "runtime", "render_prose_permit.json")
+	if err := os.MkdirAll(filepath.Dir(permitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permitPath, stalePermit, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.NewStore(candidate.OutputDir).Runtime.ReleasePipelineExecution(owner); err != nil {
@@ -617,6 +627,79 @@ func pipelineRenderCandidateTestFrozen() *pipelineFrozenPlan {
 		ProjectedBundleDigest:  "sha256:" + strings.Repeat("2", 64),
 		PromotionReceiptDigest: "sha256:" + strings.Repeat("3", 64),
 		PipelineRunInputDigest: "sha256:" + strings.Repeat("4", 64),
+	}
+}
+
+// Most candidate recovery tests predate the effective-style protocol and are
+// intentionally about body/checkpoint transport rather than style compilation.
+// Mark those fixtures as explicit v2 before writing prose: a v3-pre-style tree
+// is only a construction state and must never contain recoverable body bytes.
+func mustUseLegacyPipelineRenderCandidateForTest(
+	t *testing.T,
+	candidate *pipelineRenderCandidate,
+	frozen *pipelineFrozenPlan,
+) {
+	t.Helper()
+	if candidate == nil {
+		t.Fatal("legacy render candidate fixture is nil")
+	}
+	manifestPath := filepath.Join(candidate.OutputDir, "meta", "planning", "render_candidate.json")
+	manifestRaw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read candidate before legacy fixture conversion: %v", err)
+	}
+	var manifest pipelineRenderCandidateManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatalf("decode candidate before legacy fixture conversion: %v", err)
+	}
+	frozen.EffectiveStyleProtocol = ""
+	intentPath, err := pipelineRenderStyleEpochIntentPath(
+		filepath.Clean(manifest.SourceOutputDir), manifest.CandidateID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(intentPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove v3 epoch intent from explicit legacy fixture: %v", err)
+	}
+	frozenPath := filepath.Join(manifest.SourceOutputDir, filepath.FromSlash(pipelineFrozenPlanPath))
+	if _, err := os.Lstat(frozenPath); err == nil {
+		if _, err := writePipelinePlanningJSON(frozenPath, frozen); err != nil {
+			t.Fatalf("persist explicit legacy frozen fixture: %v", err)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := rewritePipelineRenderCandidateAsLegacyV2(candidate.OutputDir, frozen); err != nil {
+		t.Fatalf("mark render candidate fixture as legacy v2: %v", err)
+	}
+}
+
+func TestLegacyStyleNormalizationRejectsSymlinkedPlanningAncestor(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "candidate-output")
+	externalPlanning := filepath.Join(t.TempDir(), "external-planning")
+	if err := os.MkdirAll(filepath.Join(outputDir, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(externalPlanning, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(externalPlanning, "render_candidate.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	externalStyle := filepath.Join(externalPlanning, "effective_render_style_contract.json")
+	if err := os.WriteFile(externalStyle, []byte("external must survive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalPlanning, filepath.Join(outputDir, "meta", "planning")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipelineRenderCandidateStyleProtocol(outputDir, &pipelineFrozenPlan{}); err == nil ||
+		!strings.Contains(err.Error(), "planning must be a real directory") {
+		t.Fatalf("symlinked planning ancestor reached legacy normalization: %v", err)
+	}
+	if raw, err := os.ReadFile(externalStyle); err != nil || string(raw) != "external must survive\n" {
+		t.Fatalf("legacy normalization changed external style file: raw=%q err=%v", raw, err)
 	}
 }
 

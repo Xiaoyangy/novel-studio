@@ -268,7 +268,8 @@ func renderAgentPermitFixture(t *testing.T) (*store.Store, string) {
 	authorization := digest("b")
 	ledger := domain.PipelineRenderDispatchLedger{
 		Version: domain.PipelineRenderDispatchLedgerVersion, CandidateID: candidateID,
-		GenerationID: "pg2_agent_permit", Chapter: 1, PlanDigest: digest("a"),
+		SourceOutputDir: live,
+		GenerationID:    "pg2_agent_permit", Chapter: 1, PlanDigest: digest("a"),
 		PlanCheckpointSeq: 1, ProjectedBundleDigest: digest("c"), PromotionReceiptDigest: digest("d"),
 		Limit: domain.PipelineRenderWholeBodyDispatchLimit, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Reservations: []domain.PipelineRenderDispatchReservation{{

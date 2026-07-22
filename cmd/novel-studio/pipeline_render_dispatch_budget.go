@@ -75,19 +75,27 @@ func pipelineRenderDispatchAuthorization(
 		return "", fmt.Errorf("render dispatch authorization requires invocation id and host turn")
 	}
 	digest, err := domain.DeterministicPlanningHash(struct {
-		Version      string `json:"version"`
-		CandidateID  string `json:"candidate_id"`
-		GenerationID string `json:"generation_id"`
-		Chapter      int    `json:"chapter"`
-		InvocationID string `json:"invocation_id"`
-		HostTurn     int    `json:"host_turn"`
+		Version                     string `json:"version"`
+		CandidateID                 string `json:"candidate_id"`
+		SourceOutputDir             string `json:"source_output_dir"`
+		GenerationID                string `json:"generation_id"`
+		Chapter                     int    `json:"chapter"`
+		PipelineRenderInputDigest   string `json:"pipeline_render_input_digest,omitempty"`
+		RenderContextSHA256         string `json:"render_context_sha256,omitempty"`
+		EffectiveStyleReceiptDigest string `json:"effective_style_receipt_digest,omitempty"`
+		InvocationID                string `json:"invocation_id"`
+		HostTurn                    int    `json:"host_turn"`
 	}{
-		Version:      "pipeline-render-dispatch-authorization.v1",
-		CandidateID:  manifest.CandidateID,
-		GenerationID: manifest.GenerationID,
-		Chapter:      manifest.Chapter,
-		InvocationID: strings.TrimSpace(invocationID),
-		HostTurn:     hostTurn,
+		Version:                     "pipeline-render-dispatch-authorization.v3-source-output",
+		CandidateID:                 manifest.CandidateID,
+		SourceOutputDir:             manifest.SourceOutputDir,
+		GenerationID:                manifest.GenerationID,
+		Chapter:                     manifest.Chapter,
+		PipelineRenderInputDigest:   manifest.PipelineRenderInputDigest,
+		RenderContextSHA256:         manifest.RenderContextSHA256,
+		EffectiveStyleReceiptDigest: manifest.EffectiveStyleReceiptDigest,
+		InvocationID:                strings.TrimSpace(invocationID),
+		HostTurn:                    hostTurn,
 	})
 	if err != nil {
 		return "", err
@@ -97,16 +105,20 @@ func pipelineRenderDispatchAuthorization(
 
 func newPipelineRenderDispatchLedger(manifest pipelineRenderCandidateManifest) pipelineRenderDispatchLedger {
 	return pipelineRenderDispatchLedger{
-		Version:                pipelineRenderDispatchLedgerVersion,
-		CandidateID:            manifest.CandidateID,
-		GenerationID:           manifest.GenerationID,
-		Chapter:                manifest.Chapter,
-		PlanDigest:             manifest.PlanDigest,
-		PlanCheckpointSeq:      manifest.PlanCheckpointSeq,
-		ProjectedBundleDigest:  manifest.ProjectedBundleDigest,
-		PromotionReceiptDigest: manifest.PromotionReceiptDigest,
-		Limit:                  pipelineRenderWholeBodyDispatchLimit,
-		Reservations:           []pipelineRenderDispatchReservation{},
+		Version:                     pipelineRenderDispatchLedgerVersion,
+		CandidateID:                 manifest.CandidateID,
+		SourceOutputDir:             manifest.SourceOutputDir,
+		GenerationID:                manifest.GenerationID,
+		Chapter:                     manifest.Chapter,
+		PlanDigest:                  manifest.PlanDigest,
+		PlanCheckpointSeq:           manifest.PlanCheckpointSeq,
+		ProjectedBundleDigest:       manifest.ProjectedBundleDigest,
+		PromotionReceiptDigest:      manifest.PromotionReceiptDigest,
+		PipelineRenderInputDigest:   manifest.PipelineRenderInputDigest,
+		RenderContextSHA256:         manifest.RenderContextSHA256,
+		EffectiveStyleReceiptDigest: manifest.EffectiveStyleReceiptDigest,
+		Limit:                       pipelineRenderWholeBodyDispatchLimit,
+		Reservations:                []pipelineRenderDispatchReservation{},
 	}
 }
 
@@ -119,12 +131,16 @@ func validatePipelineRenderDispatchLedger(
 	}
 	if ledger == nil ||
 		ledger.CandidateID != manifest.CandidateID ||
+		ledger.SourceOutputDir != manifest.SourceOutputDir ||
 		ledger.GenerationID != manifest.GenerationID ||
 		ledger.Chapter != manifest.Chapter ||
 		ledger.PlanDigest != manifest.PlanDigest ||
 		ledger.PlanCheckpointSeq != manifest.PlanCheckpointSeq ||
 		ledger.ProjectedBundleDigest != manifest.ProjectedBundleDigest ||
-		ledger.PromotionReceiptDigest != manifest.PromotionReceiptDigest {
+		ledger.PromotionReceiptDigest != manifest.PromotionReceiptDigest ||
+		ledger.PipelineRenderInputDigest != manifest.PipelineRenderInputDigest ||
+		ledger.RenderContextSHA256 != manifest.RenderContextSHA256 ||
+		ledger.EffectiveStyleReceiptDigest != manifest.EffectiveStyleReceiptDigest {
 		return fmt.Errorf("render dispatch budget ledger identity mismatch")
 	}
 	return nil

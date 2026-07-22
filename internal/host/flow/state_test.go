@@ -115,7 +115,12 @@ func TestLoadStateMarksOnlyExactPipelineRenderTarget(t *testing.T) {
 
 func TestLoadStateClosesDrafterRouteOnCombinedRenderConvergenceLedger(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "candidate")
+	sourceOutputDir := filepath.Join(root, "live", "novel")
+	candidateID := "render-ch0001-flow-total"
+	dir := filepath.Join(filepath.Dir(sourceOutputDir), ".render-candidates", candidateID, "output")
+	if err := os.MkdirAll(sourceOutputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
@@ -130,8 +135,6 @@ func TestLoadStateClosesDrafterRouteOnCombinedRenderConvergenceLedger(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceOutputDir := filepath.Join(root, "live", "novel")
-	candidateID := "render-ch0001-flow-total"
 	writeJSON := func(path string, value any) {
 		t.Helper()
 		raw, marshalErr := json.Marshal(value)

@@ -127,6 +127,30 @@ func TestRenderContextPrimingLoadFailureCallsNoProvider(t *testing.T) {
 	}
 }
 
+func TestRenderContextPrimingEvidenceSymlinkCallsNoProvider(t *testing.T) {
+	st, contextTool, ledgerPath := newRenderContextPrimingFixture(t, true)
+	external := filepath.Join(t.TempDir(), "characters.json")
+	if err := os.WriteFile(external, []byte("[]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(st.Dir(), "characters.json")); err != nil {
+		t.Fatal(err)
+	}
+	provider := &renderPrimingCaptureModel{}
+	model := withRenderContextPriming(provider, st, contextTool)
+	if _, err := model.Generate(context.Background(), []agentcore.Message{{
+		Role: agentcore.RoleUser, Content: []agentcore.ContentBlock{agentcore.TextBlock("直接写正文")},
+	}}, nil); err == nil {
+		t.Fatal("symlinked candidate evidence reached render provider")
+	}
+	if calls, messages := provider.snapshot(); calls != 0 || len(messages) != 0 {
+		t.Fatalf("provider was called with symlinked evidence: calls=%d messages=%d", calls, len(messages))
+	}
+	if got := loadRenderAgentPermitLedger(t, ledgerPath).Reservations[0].Status; got != "permit_armed" {
+		t.Fatalf("symlink rejection consumed provider permit: status=%q", got)
+	}
+}
+
 func TestRenderContextPrimingStreamConsumesPermitAtProviderBoundary(t *testing.T) {
 	st, contextTool, ledgerPath := newRenderContextPrimingFixture(t, true)
 	provider := &renderPrimingCaptureModel{}
@@ -254,7 +278,8 @@ func newRenderContextPrimingFixture(t *testing.T, publish bool) (*store.Store, *
 	authorization := digest("b")
 	ledger := domain.PipelineRenderDispatchLedger{
 		Version: domain.PipelineRenderDispatchLedgerVersion, CandidateID: candidateID,
-		GenerationID: "pg2_priming", Chapter: 1, PlanDigest: checkpoint.Digest,
+		SourceOutputDir: live,
+		GenerationID:    "pg2_priming", Chapter: 1, PlanDigest: checkpoint.Digest,
 		PlanCheckpointSeq: 1, ProjectedBundleDigest: digest("c"), PromotionReceiptDigest: digest("d"),
 		Limit: domain.PipelineRenderWholeBodyDispatchLimit, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Reservations: []domain.PipelineRenderDispatchReservation{{

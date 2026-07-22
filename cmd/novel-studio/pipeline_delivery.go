@@ -3942,6 +3942,7 @@ func savePipelineState(path string, state *domain.PipelineState) error {
 }
 
 func pipelineRunInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
+	selectedStyle := bundle.ResolveStyle(cfg.Style)
 	brainstormSHA := ""
 	brainstormPath := filepath.Clean(filepath.Join(cfg.OutputDir, "..", "..", "brainstorm.md"))
 	if body, err := os.ReadFile(brainstormPath); err == nil {
@@ -3954,21 +3955,21 @@ func pipelineRunInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
 		Model           string
 		ReasoningEffort string
 		Style           string
+		StyleBody       string
 		Roles           map[string]bootstrap.RoleConfig
 		Prompts         assets.Prompts
 		References      tools.References
-		Styles          map[string]string
 		BrainstormSHA   string
 	}{
-		Schema:          "pipeline-input-v3-20260716",
+		Schema:          "pipeline-input-v4-20260722-effective-style-id",
 		Provider:        cfg.Provider,
 		Model:           cfg.ModelName,
 		ReasoningEffort: cfg.ReasoningEffort,
-		Style:           cfg.Style,
+		Style:           selectedStyle.ID,
+		StyleBody:       selectedStyle.Body,
 		Roles:           cfg.Roles,
 		Prompts:         bundle.Prompts,
 		References:      bundle.References,
-		Styles:          bundle.Styles,
 		BrainstormSHA:   brainstormSHA,
 	})
 	sum := sha256.Sum256(payload)
@@ -3978,7 +3979,9 @@ func pipelineRunInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
 // pipelineProjectAllInputDigest is intentionally narrower than the legacy
 // whole-pipeline digest. Editor/reviewer/drafter changes do not alter a world
 // simulation or POV plan and therefore must not invalidate an expensive sealed
-// full-book projection.
+// arc projection. The configured assets/styles body is likewise a
+// render-only overlay; style-selected planning references remain bound through
+// bundle.References because those are the bytes project-all actually consumes.
 func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) string {
 	writer := resolvedPipelineRoleConfig(cfg, "writer")
 	contextWindow, _ := cfg.ResolveContextWindow(writer.Model)
@@ -3989,11 +3992,9 @@ func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) s
 		ReasoningEffort string
 		ContextWindow   int
 		Role            bootstrap.RoleConfig
-		Style           string
 		PlannerPrompt   string
 		AgentProtocol   string
 		References      tools.References
-		Styles          map[string]string
 		Embedding       struct {
 			Enabled   bool   `json:"enabled"`
 			LocalGGUF string `json:"local_gguf"`
@@ -4003,17 +4004,15 @@ func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) s
 		} `json:"embedding"`
 		SeedContract string
 	}{
-		Schema:          "project-all-input-v1-20260716",
+		Schema:          "project-all-input-v2-20260722-effective-style-id",
 		Provider:        cfg.Provider,
 		Model:           cfg.ModelName,
 		ReasoningEffort: cfg.ReasoningEffort,
 		ContextWindow:   contextWindow,
 		Role:            writer,
-		Style:           cfg.Style,
 		PlannerPrompt:   bundle.Prompts.Planner,
 		AgentProtocol:   agents.ProjectAllPlanningProtocolDigest(bundle.Prompts.Planner),
 		References:      bundle.References,
-		Styles:          bundle.Styles,
 		Embedding: struct {
 			Enabled   bool   `json:"enabled"`
 			LocalGGUF string `json:"local_gguf"`
@@ -4042,7 +4041,7 @@ func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) strin
 	reviewer := resolvedPipelineRoleConfig(cfg, "reviewer")
 	contextWindow, _ := cfg.ResolveContextWindow(drafter.Model)
 	coordinatorContextWindow, _ := cfg.ResolveContextWindow(coordinator.Model)
-	selectedStyle := bundle.Styles[cfg.Style]
+	selectedStyle := bundle.ResolveStyle(cfg.Style)
 	payload, _ := json.Marshal(struct {
 		Schema                   string
 		Provider                 string
@@ -4058,10 +4057,11 @@ func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) strin
 		DrafterPrompt            string
 		CoordinatorPrompt        string
 		SamplingProtocol         string
+		StyleContractProtocol    string
 		StrictPrimaryModels      bool
 		RenderToolProtocol       string
 	}{
-		Schema:                   "sealed-render-input-v3-20260720",
+		Schema:                   "sealed-render-input-v4-20260722-style-contract",
 		Provider:                 cfg.Provider,
 		Model:                    cfg.ModelName,
 		ReasoningEffort:          cfg.ReasoningEffort,
@@ -4070,13 +4070,14 @@ func pipelineRenderInputDigest(cfg bootstrap.Config, bundle assets.Bundle) strin
 		CoordinatorRole:          coordinator,
 		CoordinatorContextWindow: coordinatorContextWindow,
 		ReviewerRole:             reviewer,
-		Style:                    cfg.Style,
-		StyleBody:                selectedStyle,
+		Style:                    selectedStyle.ID,
+		StyleBody:                selectedStyle.Body,
 		DrafterPrompt:            bundle.Prompts.Drafter,
 		CoordinatorPrompt:        bundle.Prompts.Coordinator,
 		SamplingProtocol:         writersampler.ProtocolDigest(),
+		StyleContractProtocol:    tools.RenderStyleContractProtocolVersion,
 		StrictPrimaryModels:      true,
-		RenderToolProtocol:       "frozen-render-tools.v3:no-planner,no-live-rag,no-web;draft,read,check,commit;server-owned-hidden-delta;anti_ai_render_contract-v1-prospective",
+		RenderToolProtocol:       "frozen-render-tools.v4:no-planner,no-live-rag,no-web;draft,read,check,commit;server-owned-hidden-delta;anti_ai_render_contract-v1-prospective;configured-style-and-serial-memory",
 	})
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,22 @@ const editorCacheTestMarkdown = `# ch01 评审
 
 ## 总体评分：35 / 40
 ## 是否需要改写：否
-## 一句话诊断：正文通过。`
+## 一句话诊断：正文通过。
+
+## 八维打分
+| 维度 | 分 | 证据 |
+|---|---|---|
+| 1 设定一致性 | 1 | 设定与已知事实一致。 |
+| 2 角色行为 | 1 | 人物行为有明确动机。 |
+| 3 节奏 | 1 | 信息与动作节奏清晰。 |
+| 4 叙事连贯 | 1 | 时间线与视角连贯。 |
+| 5 伏笔 | 1 | 伏笔的露出程度合理。 |
+| 6 钩子 | 0 | 章末有具体的下一步拉力。 |
+| 7 审美品质 | 0 | 叙述与对话质感稳定。 |
+| 8 AI 腔检测 | 0 | 未发现阻断性模板化表达。 |
+
+## 主要问题（按严重度排序）
+1. 无严重问题，无需改写。`
 
 type reviewCacheModel struct {
 	response string
@@ -46,6 +63,145 @@ func (m *reviewCacheModel) GenerateStream(context.Context, []agentcore.Message, 
 func (m *reviewCacheModel) SupportsTools() bool { return false }
 
 func (m *reviewCacheModel) callCount() int { return int(m.calls.Load()) }
+
+// defaultReviewDimensions is test fixture shorthand only. Production parsing
+// no longer has a synthetic passing-dimension fallback.
+func defaultReviewDimensions() []domain.DimensionScore {
+	dims := make([]domain.DimensionScore, 0, len(reviewDimensionNames))
+	for _, name := range reviewDimensionNames {
+		dims = append(dims, domain.DimensionScore{
+			Dimension: name,
+			Score:     80,
+			Verdict:   "pass",
+			Comment:   "test fixture",
+		})
+	}
+	return dims
+}
+
+func TestStructuredReviewFromMarkdownRequiresCompleteUniqueValidContract(t *testing.T) {
+	entry, err := structuredReviewFromMarkdown(1, editorCacheTestMarkdown)
+	if err != nil {
+		t.Fatalf("valid Editor Markdown rejected: %v", err)
+	}
+	if entry.Verdict != "accept" || len(entry.Dimensions) != len(reviewDimensionNames) {
+		t.Fatalf("valid Editor Markdown parsed unexpectedly: %+v", entry)
+	}
+	optionalMarkdown := strings.Replace(
+		editorCacheTestMarkdown,
+		"## 是否需要改写：否",
+		"## 是否需要改写：可选",
+		1,
+	)
+	if optional, err := structuredReviewFromMarkdown(1, optionalMarkdown); err != nil || optional.Verdict != "accept" {
+		t.Fatalf("valid optional Editor disposition changed behavior: entry=%+v err=%v", optional, err)
+	}
+	rewriteMarkdown := strings.Replace(
+		editorCacheTestMarkdown,
+		"## 是否需要改写：否",
+		"## 是否需要改写：是",
+		1,
+	)
+	if rewrite, err := structuredReviewFromMarkdown(1, rewriteMarkdown); err != nil || rewrite.Verdict != "rewrite" {
+		t.Fatalf("explicit Editor rewrite was not preserved: entry=%+v err=%v", rewrite, err)
+	}
+	shadowedRewrite := "<!-- ## 是否需要改写：否 -->\n" + rewriteMarkdown
+	if rewrite, err := structuredReviewFromMarkdown(1, shadowedRewrite); err != nil || rewrite.Verdict != "rewrite" {
+		t.Fatalf("comment shadow changed exact Editor disposition: entry=%+v err=%v", rewrite, err)
+	}
+
+	tests := []struct {
+		name     string
+		markdown string
+	}{
+		{
+			name:     "partial dimension table",
+			markdown: strings.Replace(editorCacheTestMarkdown, "| 8 AI 腔检测 | 0 | 未发现阻断性模板化表达。 |\n", "", 1),
+		},
+		{
+			name:     "duplicate rewrite disposition",
+			markdown: editorCacheTestMarkdown + "\n## 是否需要改写：否\n",
+		},
+		{
+			name:     "duplicate dimension",
+			markdown: strings.Replace(editorCacheTestMarkdown, "## 主要问题", "| 1 设定一致性 | 0 | 重复行。 |\n\n## 主要问题", 1),
+		},
+		{
+			name:     "out of range dimension score",
+			markdown: strings.Replace(editorCacheTestMarkdown, "| 1 设定一致性 | 1 |", "| 1 设定一致性 | 6 |", 1),
+		},
+		{
+			name:     "non integer dimension score",
+			markdown: strings.Replace(editorCacheTestMarkdown, "| 1 设定一致性 | 1 |", "| 1 设定一致性 | 1.5 |", 1),
+		},
+		{
+			name:     "out of range overall score",
+			markdown: strings.Replace(editorCacheTestMarkdown, "35 / 40", "41 / 40", 1),
+		},
+		{
+			name:     "malformed overall score",
+			markdown: strings.Replace(editorCacheTestMarkdown, "35 / 40", "三十五分", 1),
+		},
+		{
+			name:     "missing diagnosis",
+			markdown: strings.Replace(editorCacheTestMarkdown, "## 一句话诊断：正文通过。\n", "", 1),
+		},
+		{
+			name:     "wrong chapter title",
+			markdown: strings.Replace(editorCacheTestMarkdown, "# ch01 评审", "# ch02 评审", 1),
+		},
+		{
+			name:     "swapped canonical dimension label",
+			markdown: strings.Replace(editorCacheTestMarkdown, "| 1 设定一致性 |", "| 1 角色行为 |", 1),
+		},
+		{
+			name:     "dimension row outside dimension section",
+			markdown: strings.Replace(editorCacheTestMarkdown, "## 八维打分\n", "| 1 设定一致性 | 0 | shadow |\n\n## 八维打分\n", 1),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if entry, err := structuredReviewFromMarkdown(1, tt.markdown); err == nil {
+				t.Fatalf("invalid Editor Markdown synthesized entry: %+v", entry)
+			}
+		})
+	}
+}
+
+func TestLoadOrGenerateEditorReviewPreservesRewriteBeforeCaching(t *testing.T) {
+	dir := t.TempDir()
+	body := "第一章\n\n林澈把手机翻过来。"
+	analysis := editorCacheTestAnalysis(body, "2026-07-22T10:00:00+08:00")
+	rewriteMarkdown := strings.Replace(
+		editorCacheTestMarkdown,
+		"## 是否需要改写：否",
+		"## 是否需要改写：是",
+		1,
+	)
+	model := &reviewCacheModel{response: rewriteMarkdown}
+
+	result := loadOrGenerateEditorReview(
+		dir, model, "openai", "editor-v1", "premise", "rules", "chapter-context",
+		1, body, analysis, time.Second,
+	)
+	if result.Err != nil {
+		t.Fatalf("valid explicit rewrite was rejected: %+v", result)
+	}
+	entry, err := structuredReviewFromMarkdown(1, result.Review)
+	if err != nil || entry.Verdict != "rewrite" {
+		t.Fatalf("explicit rewrite was softened after model response: entry=%+v err=%v", entry, err)
+	}
+	if result.CacheArtifact == nil || !result.CachePersisted || result.CacheHit || result.ModelCalls != 1 {
+		t.Fatalf("valid rewrite did not reach the exact-response cache path: %+v", result)
+	}
+	cacheFiles, err := filepath.Glob(filepath.Join(dir, "reviews", reviewExistingCacheDirectoryName, editorReviewCacheBranch, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cacheFiles) != 1 {
+		t.Fatalf("valid Editor rewrite cache files=%v", cacheFiles)
+	}
+}
 
 func TestBuildEditorChapterReviewContextUsesResultLevelContract(t *testing.T) {
 	st := store.NewStore(t.TempDir())
@@ -71,6 +227,173 @@ func TestBuildEditorChapterReviewContextUsesResultLevelContract(t *testing.T) {
 	}
 	if strings.Contains(context, "系统绑定一百万元额度") {
 		t.Fatalf("Editor context kept duplicate staging language instead of the visible result: %s", context)
+	}
+}
+
+func TestEditorReviewPayloadNeverTruncatesStyleContractAndHashesProviderBytes(t *testing.T) {
+	styleMarker := "STYLE-TAIL-" + strings.Repeat("风格证据", 2500)
+	raw, err := json.Marshal(map[string]any{
+		"style_contract": map[string]any{
+			"version": 3,
+			"configured_style": map[string]any{
+				"id":    "large-style",
+				"rules": []string{styleMarker},
+			},
+		},
+		"chapter": 1,
+		"contract": map[string]any{
+			"required_beats": []string{strings.Repeat("冻结结果合同", 3000)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerPayload := editorReviewChapterContextPayload(string(raw))
+	if !strings.Contains(providerPayload, styleMarker) {
+		t.Fatal("untruncated style contract tail is missing from Editor provider payload")
+	}
+	if !strings.Contains(providerPayload, "同源只读 style_contract（不可截断）") ||
+		!strings.Contains(providerPayload, "结构化预算 8000 bytes") {
+		t.Fatalf("Editor payload did not separate style and plan budgets: %s", providerPayload[:min(len(providerPayload), 500)])
+	}
+	policy := newEditorReviewCachePolicy(
+		"openai", "editor-v1", "premise", "rules", string(raw),
+		1, "chapter body", "ai-voice-context",
+	)
+	if policy.ChapterReviewContextSHA256 != reviewExistingSHA256(providerPayload) {
+		t.Fatalf("Editor cache hashed different bytes than provider payload: policy=%s payload=%s",
+			policy.ChapterReviewContextSHA256, reviewExistingSHA256(providerPayload))
+	}
+}
+
+func TestSealedDrafterAndEditorConsumeExactStyleReceiptBytes(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.ChapterPlan{Chapter: 1, Title: "同源风格"}
+	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := st.Checkpoints.AppendArtifactLatest(
+		domain.ChapterScope(1), "plan", "drafts/01.plan.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := json.RawMessage(`{
+		"_context_profile":"draft",
+		"working_memory":{"render_packet":{
+			"version":11,"chapter":1,"title":"同源风格",
+			"required_beats":["冻结事件"],
+			"style_contract":{"version":3}
+		}}
+	}`)
+	frozenContext, err := toolspkg.PublishFrozenDraftRenderContext(st, 1, checkpoint.Digest, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := func(seed string) string { return "sha256:" + strings.Repeat(seed, 64) }
+	frozen := &pipelineFrozenPlan{
+		Version: pipelinePlanningSchema, Chapter: 1,
+		PlanDigest: checkpoint.Digest, PlanCheckpointSeq: checkpoint.Seq,
+		PlanningGenerationID: "pg2_editor-style-receipt", ProjectionBinding: "sealed_v2",
+		ProjectedBundleDigest: digest("2"), PromotionReceiptDigest: digest("3"),
+		PipelineRunInputDigest: digest("4"), RenderContextSHA256: frozenContext.PayloadSHA256,
+	}
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(st.Dir(), filepath.FromSlash(pipelineFrozenPlanPath)), frozen,
+	); err != nil {
+		t.Fatal(err)
+	}
+	manifest := pipelineRenderCandidateManifest{
+		Version:     pipelineRenderCandidatePreStyleManifestVersion,
+		CandidateID: "render-ch0001-editor-style-receipt", GenerationID: frozen.PlanningGenerationID,
+		Chapter: 1, PlanDigest: frozen.PlanDigest, PlanCheckpointSeq: frozen.PlanCheckpointSeq,
+		ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+		PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+		RenderContextSHA256:       frozen.RenderContextSHA256,
+		SourceOutputDir:           st.Dir(),
+	}
+	manifestPath := filepath.Join(st.Dir(), "meta", "planning", "render_candidate.json")
+	if _, err := writePipelinePlanningJSON(manifestPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := toolspkg.PublishEffectiveRenderStyleContract(
+		st,
+		toolspkg.EffectiveRenderStyleContractIdentity{
+			GenerationID: frozen.PlanningGenerationID, Chapter: 1,
+			PlanDigest: frozen.PlanDigest, PlanCheckpointSeq: frozen.PlanCheckpointSeq,
+			BaseRenderContextSHA256:   frozen.RenderContextSHA256,
+			PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+			ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+			PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+			CandidateID:               manifest.CandidateID,
+		},
+		"realist",
+		"# 同源风格\n- 叙述声音：克制具体。\n- 句法：压力处缩短。\n- 冲突设计：不得进入表达合同。",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Version = pipelineRenderCandidateManifestVersion
+	manifest.EffectiveStyleReceiptDigest = receipt.ReceiptDigest
+	if _, err := writePipelinePlanningJSON(manifestPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionRender, TargetChapter: 1,
+		PlanDigest: frozen.PlanDigest, Owner: "editor-style-receipt-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	drafterContext, err := toolspkg.NewContextTool(st, toolspkg.References{}, "changed-current-style").
+		WithConfiguredStyle("# changed\n- 叙述声音：不应出现。").
+		Execute(context.Background(), json.RawMessage(`{"chapter":1,"profile":"draft"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drafterStyle, err := toolspkg.ExtractRenderStyleContract(drafterContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drafterStyleRaw, err := json.Marshal(drafterStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editorStyleRaw, err := buildEditorReviewStyleContract(
+		st,
+		1,
+		toolspkg.References{},
+		"changed-current-style",
+		"# changed\n- 叙述声音：也不应出现。",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(drafterStyleRaw, receipt.StyleContract) ||
+		!bytes.Equal(editorStyleRaw, receipt.StyleContract) {
+		t.Fatalf("Drafter/Editor/receipt style bytes differ\nreceipt=%s\ndrafter=%s\neditor=%s",
+			receipt.StyleContract, drafterStyleRaw, editorStyleRaw)
+	}
+	if err := st.Runtime.ReleasePipelineExecution("editor-style-receipt-test"); err != nil {
+		t.Fatal(err)
+	}
+	standaloneEditorStyle, err := buildEditorReviewStyleContract(
+		st,
+		1,
+		toolspkg.References{},
+		"changed-again-after-render-lock",
+		"# changed again\n- 叙述声音：standalone Editor 也不得采用。",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(standaloneEditorStyle, receipt.StyleContract) {
+		t.Fatalf("standalone Editor ignored the chapter-owned style archive\nreceipt=%s\neditor=%s",
+			receipt.StyleContract, standaloneEditorStyle)
 	}
 }
 
@@ -419,8 +742,8 @@ func TestEditorSystemPromptTreatsCanonicalChapterHeadingAsMetadata(t *testing.T)
 			t.Fatalf("embedded review-existing prompt missing chapter-heading boundary %q", want)
 		}
 	}
-	if editorReviewProtocolVersion != "review-existing/editor/v5" {
-		t.Fatalf("editor review protocol = %q, want v5", editorReviewProtocolVersion)
+	if editorReviewProtocolVersion != "review-existing/editor/v6-style-contract" {
+		t.Fatalf("editor review protocol = %q, want v6 style contract", editorReviewProtocolVersion)
 	}
 	policy := newEditorReviewCachePolicy(
 		"openai", "editor-v1", "premise", "rules", "chapter-context",

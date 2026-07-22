@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/stylestat"
 )
 
 func arcCycleStoreTestDigest(label string) string {
@@ -103,7 +106,7 @@ func arcCycleStoreTestAcceptance(
 ) domain.ChapterAcceptanceReceipt {
 	t.Helper()
 	receipt := domain.ChapterAcceptanceReceipt{
-		Version:           domain.ChapterAcceptanceReceiptVersion,
+		Version:           domain.ChapterAcceptanceReceiptLegacyVersion,
 		ArcID:             manifest.ArcID,
 		ArcManifestDigest: manifest.ManifestDigest,
 		GenerationID:      manifest.GenerationID,
@@ -218,6 +221,277 @@ func TestArcCycleStoreDetectsBodyAndReviewArtifactReplacement(t *testing.T) {
 	if _, err := arcStore.SaveChapterAcceptanceReceipt(acceptance); err == nil || !strings.Contains(err.Error(), "review artifact hash drift") {
 		t.Fatalf("idempotent re-save must still detect review replacement, got %v", err)
 	}
+}
+
+func TestArcCycleStoreRejectsUnsafeSealedEvidencePaths(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, root string, evidence arcCycleStoreEvidence)
+	}{
+		{
+			name: "chapter leaf symlink",
+			mutate: func(t *testing.T, root string, evidence arcCycleStoreEvidence) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "chapter.md")
+				if err := os.WriteFile(target, evidence.body, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				replaceArcCycleTestPathWithSymlink(t, filepath.Join(root, "chapters", "01.md"), target)
+			},
+		},
+		{
+			name: "review leaf symlink",
+			mutate: func(t *testing.T, root string, evidence arcCycleStoreEvidence) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "review.json")
+				if err := os.WriteFile(target, evidence.review, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				replaceArcCycleTestPathWithSymlink(t, filepath.Join(root, filepath.FromSlash(evidence.reviewPath)), target)
+			},
+		},
+		{
+			name: "chapter hardlink",
+			mutate: func(t *testing.T, root string, evidence arcCycleStoreEvidence) {
+				t.Helper()
+				external := filepath.Join(root, "external", "chapter.md")
+				if err := os.MkdirAll(filepath.Dir(external), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(external, evidence.body, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(root, "chapters", "01.md")
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(external, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "review fifo",
+			mutate: func(t *testing.T, root string, evidence arcCycleStoreEvidence) {
+				t.Helper()
+				path := filepath.Join(root, filepath.FromSlash(evidence.reviewPath))
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "review ancestor symlink",
+			mutate: func(t *testing.T, root string, _ arcCycleStoreEvidence) {
+				t.Helper()
+				original := filepath.Join(root, "reviews")
+				external := filepath.Join(t.TempDir(), "reviews")
+				if err := os.Rename(original, external); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, original); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			arcStore := NewStore(root).ArcCycle()
+			generationID := "pg2_arc_store_unsafe_" + strings.NewReplacer(" ", "_", "/", "_").Replace(tc.name)
+			manifest := arcCycleStoreTestManifest(t, generationID)
+			if _, err := arcStore.SaveArcPlanningManifest(manifest); err != nil {
+				t.Fatal(err)
+			}
+			evidence := arcCycleStoreWriteEvidence(t, root, 1)
+			acceptance := arcCycleStoreTestAcceptance(t, manifest, 1, evidence)
+			if _, err := arcStore.SaveChapterAcceptanceReceipt(acceptance); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.mutate(t, root, evidence)
+			if _, err := arcStore.SaveChapterAcceptanceReceipt(acceptance); err == nil {
+				t.Fatal("idempotent acceptance save accepted unsafe sealed evidence path")
+			}
+			if err := arcStore.ValidateArcCycle(manifest.GenerationID); err == nil {
+				t.Fatal("arc validation accepted unsafe sealed evidence path")
+			}
+		})
+	}
+}
+
+func replaceArcCycleTestPathWithSymlink(t *testing.T, path string, target string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArcCycleStoreDetectsEffectiveStyleArchiveMissingAndTamper(t *testing.T) {
+	setup := func(t *testing.T) (*ArcCycleStore, string, string, []byte) {
+		t.Helper()
+		root := t.TempDir()
+		arcStore := NewStore(root).ArcCycle()
+		manifest := arcCycleStoreTestManifest(t, "pg2_arc_store_style_archive_"+strings.ReplaceAll(t.Name(), "/", "_"))
+		if _, err := arcStore.SaveArcPlanningManifest(manifest); err != nil {
+			t.Fatal(err)
+		}
+		evidence := arcCycleStoreWriteEvidence(t, root, 1)
+		styleContract := json.RawMessage(`{"version":3,"usage_policy":"surface-only"}`)
+		styleReceipt := renderPermitEffectiveStyleContractReceipt{
+			Version:                   renderPermitEffectiveStyleContractVersion,
+			GenerationID:              manifest.GenerationID,
+			Chapter:                   1,
+			PlanDigest:                arcCycleStoreTestDigest("style-plan"),
+			PlanCheckpointSeq:         1,
+			BaseRenderContextSHA256:   arcCycleStoreTestDigest("style-context"),
+			PipelineRenderInputDigest: arcCycleStoreTestDigest("style-render-input"),
+			ProjectedBundleDigest:     manifest.Chapters[0].BundleDigest,
+			PromotionReceiptDigest:    arcCycleStoreTestDigest("style-promotion"),
+			CandidateID:               "render-ch0001-archive-evidence",
+			StyleID:                   "archive-evidence",
+			StyleAssetSHA256:          arcCycleStoreTestDigest("style-asset"),
+			StyleContractProtocol:     renderPermitStyleContractProtocolVersion,
+			StyleContract:             styleContract,
+			StyleContractSHA256:       renderPermitEffectiveStyleSHA256(styleContract),
+			SerialMemoryCompletedSet:  []int{},
+			SourceChapterBodies:       []renderPermitEffectiveStyleSourceBody{},
+			SerialMemoryStopwords:     []string{},
+			SerialMemoryCompiler:      stylestat.SerialMemoryCompilerProtocolVersion,
+			CreatedAt:                 "2026-07-17T11:01:00Z",
+		}
+		styleReceipt.SerialMemoryCompilerRoot = stylestat.SerialMemoryCompilerRoot(
+			styleReceipt.SerialMemoryCompletedSet,
+			styleReceipt.SourceChapterBodies,
+			styleReceipt.SerialMemoryStopwords,
+		)
+		var err error
+		styleReceipt.ReceiptDigest, err = renderPermitEffectiveStyleReceiptDigest(styleReceipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archiveRel := filepath.ToSlash(filepath.Join(
+			"meta", "planning", "effective_render_style_contracts", "ch0001",
+			styleReceipt.CandidateID,
+			strings.TrimPrefix(styleReceipt.ReceiptDigest, "sha256:")+".json",
+		))
+		archiveRaw, err := json.Marshal(styleReceipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archiveRaw = append(archiveRaw, '\n')
+		archivePath := filepath.Join(root, filepath.FromSlash(archiveRel))
+		if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archivePath, archiveRaw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		acceptance := arcCycleStoreTestAcceptance(t, manifest, 1, evidence)
+		acceptance.Version = domain.ChapterAcceptanceReceiptVersion
+		v3ReviewArtifacts := []struct {
+			path string
+			raw  []byte
+		}{
+			{path: evidence.reviewPath, raw: evidence.review},
+			{path: "reviews/01.md", raw: []byte("# review\n")},
+			{path: evidence.aiGatePath, raw: evidence.aiGate},
+			{path: "reviews/01_ai_voice_redflags.json", raw: []byte(`{"chapter":1}`)},
+			{path: "reviews/01_deepseek_ai_judge.json", raw: []byte(`{"chapter":1}`)},
+			{path: "reviews/01_model_provenance.json", raw: []byte(`{"chapter":1}`)},
+		}
+		acceptance.ReviewArtifacts = make([]domain.ChapterReviewArtifactBinding, 0, len(v3ReviewArtifacts))
+		for _, artifact := range v3ReviewArtifacts {
+			if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(artifact.path)), artifact.raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			acceptance.ReviewArtifacts = append(acceptance.ReviewArtifacts, domain.ChapterReviewArtifactBinding{
+				Path:   artifact.path,
+				Digest: domain.ComputeArcArtifactSHA256(artifact.raw),
+			})
+		}
+		acceptance.ReviewArtifacts = domain.CanonicalChapterReviewArtifacts(acceptance.ReviewArtifacts)
+		acceptance.EffectiveStyleReceiptPath = archiveRel
+		acceptance.EffectiveStyleReceiptDigest = styleReceipt.ReceiptDigest
+		acceptance.EffectiveStyleArtifactSHA256 = domain.ComputeArcArtifactSHA256(archiveRaw)
+		acceptance.ReceiptDigest = ""
+		acceptance, err = domain.SignChapterAcceptanceReceipt(acceptance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := arcStore.SaveChapterAcceptanceReceipt(acceptance); err != nil {
+			t.Fatalf("save acceptance with effective-style archive: %v", err)
+		}
+		return arcStore, manifest.GenerationID, archivePath, archiveRaw
+	}
+
+	t.Run("missing", func(t *testing.T) {
+		arcStore, generationID, archivePath, _ := setup(t)
+		if err := os.Remove(archivePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := arcStore.ValidateArcCycle(generationID); err == nil ||
+			!strings.Contains(err.Error(), "effective style receipt archive is missing") {
+			t.Fatalf("missing effective-style archive was not rejected: %v", err)
+		}
+	})
+
+	t.Run("tampered bytes", func(t *testing.T) {
+		arcStore, generationID, archivePath, archiveRaw := setup(t)
+		tampered := append(append([]byte(nil), archiveRaw...), ' ')
+		if err := os.WriteFile(archivePath, tampered, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := arcStore.ValidateArcCycle(generationID); err == nil ||
+			!strings.Contains(err.Error(), "effective style receipt archive hash drift") {
+			t.Fatalf("tampered effective-style archive was not rejected: %v", err)
+		}
+	})
+
+	t.Run("symlink file", func(t *testing.T) {
+		arcStore, generationID, archivePath, archiveRaw := setup(t)
+		external := filepath.Join(t.TempDir(), "external-style-receipt.json")
+		if err := os.WriteFile(external, archiveRaw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(archivePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, archivePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := arcStore.ValidateArcCycle(generationID); err == nil ||
+			!strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("symlinked effective-style archive was not rejected: %v", err)
+		}
+	})
+
+	t.Run("hardlink file", func(t *testing.T) {
+		arcStore, generationID, archivePath, archiveRaw := setup(t)
+		external := filepath.Join(filepath.Dir(filepath.Dir(archivePath)), "hardlinked-style-receipt.json")
+		if err := os.WriteFile(external, archiveRaw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(archivePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(external, archivePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := arcStore.ValidateArcCycle(generationID); err == nil ||
+			!strings.Contains(err.Error(), "hard link") {
+			t.Fatalf("hardlinked effective-style archive was not rejected: %v", err)
+		}
+	})
 }
 
 func TestArcCycleStoreEnforcesSealedUnicodeRuneRangeAndReviewImmutability(t *testing.T) {

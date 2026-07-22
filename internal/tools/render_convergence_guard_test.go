@@ -214,6 +214,14 @@ func TestManagedDraftKeepsProviderPendingProbabilityOutOfConvergenceBudget(t *te
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(
+		filepath.Dir(live), ".render-candidates", "convergence", candidateID,
+	), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.Progress.Init("test", 3); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +231,7 @@ func TestManagedDraftKeepsProviderPendingProbabilityOutOfConvergenceBudget(t *te
 		t.Fatal(err)
 	}
 	manifest := toolRenderCandidateManifest{
-		Version:                toolRenderCandidateManifestVersion,
+		Version:                toolRenderCandidatePreviousManifestVersion,
 		CandidateID:            candidateID,
 		GenerationID:           "generation",
 		Chapter:                1,
@@ -259,7 +267,7 @@ func TestManagedDraftKeepsProviderPendingProbabilityOutOfConvergenceBudget(t *te
 			SemanticReject: true,
 		}},
 	}
-	if err := saveToolRenderConvergenceLedger(ledger, toolRenderConvergenceLedgerPath(&manifest)); err != nil {
+	if err := saveToolRenderConvergenceLedger(st, &manifest, ledger); err != nil {
 		t.Fatal(err)
 	}
 	if err := SaveRenderConvergenceGuard(st, 1, plan.Digest, []string{priorSemanticSHA}); err != nil {
@@ -316,6 +324,14 @@ func TestSemanticRejectedEditedAttemptAuthorizesExactlyNextWholeDraftBoundary(t 
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(
+		filepath.Dir(live), ".render-candidates", "convergence", candidateID,
+	), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	markPipelineManaged(t, st)
 	plan := domain.ChapterPlan{Chapter: 1, Title: "编辑结算尝试"}
 	if err := st.Drafts.SaveChapterPlan(plan); err != nil {
@@ -368,7 +384,7 @@ func TestSemanticRejectedEditedAttemptAuthorizesExactlyNextWholeDraftBoundary(t 
 		t.Fatal(err)
 	}
 	manifest := toolRenderCandidateManifest{
-		Version:                toolRenderCandidateManifestVersion,
+		Version:                toolRenderCandidatePreviousManifestVersion,
 		CandidateID:            candidateID,
 		GenerationID:           "generation",
 		Chapter:                1,
@@ -407,7 +423,7 @@ func TestSemanticRejectedEditedAttemptAuthorizesExactlyNextWholeDraftBoundary(t 
 			},
 		},
 	}
-	if err := saveToolRenderConvergenceLedger(ledger, toolRenderConvergenceLedgerPath(&manifest)); err != nil {
+	if err := saveToolRenderConvergenceLedger(st, &manifest, ledger); err != nil {
 		t.Fatal(err)
 	}
 

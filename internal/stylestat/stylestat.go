@@ -6,10 +6,88 @@
 package stylestat
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
+
+// SerialMemoryCompilerProtocolVersion identifies the deterministic input
+// projection used to compile prose-facing serial style memory. Receipts bind
+// this value as well as the canonical input root so compiler changes cannot be
+// mistaken for recovery of an older result.
+const SerialMemoryCompilerProtocolVersion = "serial-style-memory-compiler.v2-heading-stripped-canonical-entities"
+
+// SerialMemorySourceBody is the canonical identity of one accepted prose body
+// consumed by the serial-memory compiler.
+type SerialMemorySourceBody struct {
+	Chapter    int    `json:"chapter"`
+	BodySHA256 string `json:"body_sha256"`
+}
+
+// CanonicalCompletedChapters turns the authoritative progress list into set
+// order. Invalid chapter numbers fail closed instead of being silently omitted
+// from the receipt input root.
+func CanonicalCompletedChapters(chapters []int) ([]int, error) {
+	out := slices.Clone(chapters)
+	for _, chapter := range out {
+		if chapter <= 0 {
+			return nil, fmt.Errorf("completed chapter set contains invalid chapter %d", chapter)
+		}
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if out == nil {
+		out = []int{}
+	}
+	return out, nil
+}
+
+// CanonicalStopwords normalizes entity names and aliases before they become a
+// compiler input. Ordering and duplicate differences in character/cast files
+// therefore cannot create two roots for the same logical stopword set.
+func CanonicalStopwords(words []string) []string {
+	out := make([]string, 0, len(words))
+	for _, word := range words {
+		if word = strings.TrimSpace(word); word != "" {
+			out = append(out, word)
+		}
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// SerialMemoryCompilerRoot binds every deterministic input that can affect
+// serial style memory: the authoritative completed set, the ordered accepted
+// body hashes, canonical stopwords, and the compiler protocol itself.
+func SerialMemoryCompilerRoot(
+	completed []int,
+	sources []SerialMemorySourceBody,
+	stopwords []string,
+) string {
+	payload := struct {
+		Protocol          string                   `json:"protocol"`
+		CompletedChapters []int                    `json:"completed_chapters"`
+		SourceBodies      []SerialMemorySourceBody `json:"source_bodies"`
+		Stopwords         []string                 `json:"stopwords"`
+	}{
+		Protocol:          SerialMemoryCompilerProtocolVersion,
+		CompletedChapters: slices.Clone(completed),
+		SourceBodies:      slices.Clone(sources),
+		Stopwords:         slices.Clone(stopwords),
+	}
+	raw, _ := json.Marshal(payload)
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // minChapters 少于此章数不出统计——样本太小，频率没有意义。
 const minChapters = 5
@@ -81,9 +159,11 @@ var patternDefs = []struct {
 }
 
 var (
-	sentenceSplit = regexp.MustCompile(`[。！？\n]+`)
-	openingTimeRe = regexp.MustCompile(`夜|清晨|黎明|天亮|醒来|晨光|一整夜`)
-	titlePrefixRe = regexp.MustCompile(`^#{0,2}\s*第[零〇一二三四五六七八九十百千万\d]+章`)
+	sentenceSplit         = regexp.MustCompile(`[。！？\n]+`)
+	openingTimeRe         = regexp.MustCompile(`夜|清晨|黎明|天亮|醒来|晨光|一整夜`)
+	titlePrefixRe         = regexp.MustCompile(`^#{0,2}\s*第[零〇一二三四五六七八九十百千万\d]+章`)
+	markdownHeadingRe     = regexp.MustCompile(`^#{1,6}(?:[ \t]+|$)`)
+	plainChapterHeadingRe = regexp.MustCompile(`^第[零〇一二三四五六七八九十百千万两\d]+章`)
 )
 
 // shortEndingRunes 末行不超过此字数计为"短结尾"。
@@ -95,7 +175,8 @@ func Compute(in Input) *Stats {
 	if n < minChapters {
 		return nil
 	}
-	all := strings.Join(in.Chapters, "\n")
+	chapters := proseBodies(in.Chapters)
+	all := strings.Join(chapters, "\n")
 
 	s := &Stats{Chapters: n}
 	for _, def := range patternDefs {
@@ -109,12 +190,34 @@ func Compute(in Input) *Stats {
 			PerChapter: round1(float64(total) / float64(n)),
 		})
 	}
-	s.TopPhrases = minePhrases(recentWindow(in.Chapters), in.Stopwords)
-	s.RepeatedSentences = repeatedSentences(in.Chapters)
-	s.Ending = endingShape(in.Chapters)
-	s.OpeningTimeRate = openingTimeRate(in.Chapters)
+	s.TopPhrases = minePhrases(recentWindow(chapters), in.Stopwords)
+	s.RepeatedSentences = repeatedSentences(chapters)
+	s.Ending = endingShape(chapters)
+	s.OpeningTimeRate = openingTimeRate(chapters)
 	s.TitleFormats = titleFormats(in.Titles)
 	return s
+}
+
+// proseBodies removes the one canonical chapter heading allowed before prose.
+// Only the first non-empty line is eligible: later Markdown headings belong to
+// the body and must remain observable by style statistics.
+func proseBodies(chapters []string) []string {
+	out := make([]string, len(chapters))
+	for i, chapter := range chapters {
+		lines := strings.Split(chapter, "\n")
+		for lineIndex, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if markdownHeadingRe.MatchString(trimmed) || plainChapterHeadingRe.MatchString(trimmed) {
+				lines = append(lines[:lineIndex], lines[lineIndex+1:]...)
+			}
+			break
+		}
+		out[i] = strings.Join(lines, "\n")
+	}
+	return out
 }
 
 func recentWindow(chapters []string) []string {

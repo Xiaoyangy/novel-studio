@@ -135,10 +135,15 @@ func pipelineEnsureChapterRenderCommitted(
 	if err != nil {
 		return domain.ChapterRenderBodyIdentity{}, err
 	}
+	styleReceiptDigest, err := pipelineEffectiveStyleReceiptDigest(artifactOutputDir, frozen)
+	if err != nil {
+		return domain.ChapterRenderBodyIdentity{}, err
+	}
 	txnStore := store.NewChapterRenderTransactionStore(liveOutputDir)
 	if _, err := txnStore.BeginBody(identity, []byte(verified.Body), domain.ChapterRenderPhaseEvidence{
-		BodyCheckpointSeq:    bodyCheckpoint.Seq,
-		BodyCheckpointDigest: bodyCheckpoint.Digest,
+		BodyCheckpointSeq:           bodyCheckpoint.Seq,
+		BodyCheckpointDigest:        bodyCheckpoint.Digest,
+		EffectiveStyleReceiptDigest: styleReceiptDigest,
 	}); err != nil {
 		return domain.ChapterRenderBodyIdentity{}, fmt.Errorf("persist body_ready render transaction: %w", err)
 	}
@@ -251,11 +256,116 @@ func pipelineAdvanceChapterRenderFormal(
 			ReviewVerdict:     inspection.Verdict,
 			ReviewDisposition: inspection.Disposition,
 			ReviewArtifacts:   artifacts,
+			EditorCacheKey:    inspection.EditorCacheKey,
+			DeepSeekCacheKey:  inspection.DeepSeekCacheKey,
 		},
 	); err != nil {
 		return fmt.Errorf("persist %s render transaction: %w", phase, err)
 	}
 	return pipelineChapterRenderTransactionFault(phase)
+}
+
+func pipelineEffectiveStyleReceiptDigest(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+) (string, error) {
+	evidence, err := pipelineEffectiveStyleArchiveEvidence(outputDir, frozen)
+	if err != nil {
+		return "", err
+	}
+	return evidence.ReceiptDigest, nil
+}
+
+type pipelineEffectiveStyleEvidence struct {
+	Protocol       string
+	CandidateID    string
+	Path           string
+	ReceiptDigest  string
+	ArtifactSHA256 string
+}
+
+func pipelineEffectiveStyleArchiveEvidence(
+	outputDir string,
+	frozen *pipelineFrozenPlan,
+) (pipelineEffectiveStyleEvidence, error) {
+	var evidence pipelineEffectiveStyleEvidence
+	if frozen == nil {
+		return evidence, fmt.Errorf("effective style receipt requires frozen plan")
+	}
+	protocol, err := pipelineRenderCandidateStyleProtocol(outputDir, frozen)
+	if err != nil {
+		return evidence, fmt.Errorf("validate effective style candidate protocol: %w", err)
+	}
+	evidence.Protocol = protocol
+	st := store.NewStore(outputDir)
+	manifestPath := filepath.Join(outputDir, "meta", "planning", "render_candidate.json")
+	manifestInfo, err := os.Lstat(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return evidence, fmt.Errorf("effective style protocol manifest is missing; legacy recovery requires an explicit v1/v2 candidate")
+		}
+		return evidence, fmt.Errorf("inspect effective style protocol manifest: %w", err)
+	}
+	if manifestInfo.Mode()&os.ModeSymlink != 0 || !manifestInfo.Mode().IsRegular() {
+		return evidence, fmt.Errorf("effective style protocol manifest must be a real file")
+	}
+	required, expectedDigest, err := tools.EffectiveRenderStyleContractRequired(
+		st,
+		frozen.Chapter,
+		frozen.PlanDigest,
+	)
+	if err != nil {
+		return evidence, fmt.Errorf("resolve effective style receipt requirement: %w", err)
+	}
+	if !required {
+		if protocol == pipelineRenderCandidatePreStyleManifestVersion ||
+			frozen.EffectiveStyleProtocol == pipelineRenderCandidateManifestVersion {
+			return evidence, fmt.Errorf("v3 frozen style epoch is missing its effective-style receipt binding")
+		}
+		if protocol != pipelineRenderCandidatePreviousManifestVersion {
+			return evidence, fmt.Errorf("unsupported style protocol %q without effective-style receipt", protocol)
+		}
+		return evidence, nil
+	}
+	if protocol != pipelineRenderCandidateManifestVersion {
+		return evidence, fmt.Errorf("legacy candidate cannot require a v3 effective-style receipt")
+	}
+	if frozen.EffectiveStyleProtocol != "" &&
+		frozen.EffectiveStyleProtocol != pipelineRenderCandidateManifestVersion {
+		return evidence, fmt.Errorf("frozen effective-style protocol does not match v3 candidate")
+	}
+	_, receipt, rel, err := tools.LoadBoundArchivedEffectiveRenderStyleContract(
+		st, frozen.Chapter, frozen.PlanDigest,
+	)
+	if err != nil {
+		return evidence, fmt.Errorf("load required immutable effective style receipt: %w", err)
+	}
+	if receipt == nil || receipt.ReceiptDigest != expectedDigest {
+		return evidence, fmt.Errorf("required effective style receipt does not match candidate manifest")
+	}
+	if receipt.PlanDigest != frozen.PlanDigest ||
+		receipt.PipelineRenderInputDigest != frozen.PipelineRunInputDigest ||
+		receipt.BaseRenderContextSHA256 != frozen.RenderContextSHA256 {
+		return evidence, fmt.Errorf("archived effective style receipt differs from frozen render identity")
+	}
+	expectedCandidateID, err := pipelineRenderTransactionID(frozen)
+	if err != nil {
+		return evidence, err
+	}
+	if receipt.CandidateID != expectedCandidateID {
+		return evidence, fmt.Errorf("archived effective style receipt CandidateID differs from deterministic sealed identity")
+	}
+	artifactSHA, err := pipelineRequiredFileSHA(outputDir, rel)
+	if err != nil {
+		return evidence, err
+	}
+	return pipelineEffectiveStyleEvidence{
+		Protocol:       protocol,
+		CandidateID:    receipt.CandidateID,
+		Path:           rel,
+		ReceiptDigest:  receipt.ReceiptDigest,
+		ArtifactSHA256: artifactSHA,
+	}, nil
 }
 
 func pipelineAdvanceChapterRenderActualMatch(
@@ -405,7 +515,9 @@ func pipelineAdvanceChapterRenderOutcome(
 		loaded.ChapterBodySHA256 != identity.BodySHA256 ||
 		loaded.CommitCheckpointSeq != commit.Seq ||
 		loaded.GenerationID != frozen.PlanningGenerationID ||
-		loaded.Chapter != frozen.Chapter || !loaded.ProjectionMatch {
+		loaded.Chapter != frozen.Chapter ||
+		loaded.PromotionReceiptDigest != frozen.PromotionReceiptDigest ||
+		!loaded.ProjectionMatch {
 		return fmt.Errorf("durable actual outcome receipt identity drifted")
 	}
 	if _, err := store.NewChapterRenderTransactionStore(liveOutputDir).Advance(
@@ -448,7 +560,26 @@ func pipelineAdvanceChapterRenderAcceptance(
 		loaded.Chapter != frozen.Chapter {
 		return fmt.Errorf("durable chapter acceptance receipt identity drifted")
 	}
-	if _, err := store.NewChapterRenderTransactionStore(liveOutputDir).Advance(
+	txnStore := store.NewChapterRenderTransactionStore(liveOutputDir)
+	receipts, err := txnStore.LoadReceipts(identity)
+	if err != nil {
+		return err
+	}
+	bodyReady := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseBodyReady)
+	outcome := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseOutcomeAccepted)
+	styleEvidence, err := pipelineEffectiveStyleArchiveEvidence(liveOutputDir, frozen)
+	if err != nil {
+		return fmt.Errorf("validate chapter acceptance effective style evidence: %w", err)
+	}
+	if bodyReady == nil || outcome == nil ||
+		loaded.OutcomeReceiptDigest != outcome.Evidence.OutcomeReceiptDigest ||
+		loaded.EffectiveStyleReceiptDigest != bodyReady.Evidence.EffectiveStyleReceiptDigest ||
+		loaded.EffectiveStyleReceiptPath != styleEvidence.Path ||
+		loaded.EffectiveStyleReceiptDigest != styleEvidence.ReceiptDigest ||
+		loaded.EffectiveStyleArtifactSHA256 != styleEvidence.ArtifactSHA256 {
+		return fmt.Errorf("durable chapter acceptance receipt conflicts with body/outcome/style transaction evidence")
+	}
+	if _, err := txnStore.Advance(
 		identity,
 		domain.ChapterRenderPhaseChapterAccepted,
 		domain.ChapterRenderPhaseEvidence{ChapterAcceptanceDigest: loaded.ReceiptDigest},
@@ -500,17 +631,98 @@ func pipelineAdvanceChapterRenderCompleted(
 	if err != nil {
 		return err
 	}
+	bodyReady := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseBodyReady)
 	committed := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseCommitted)
 	published := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhasePublished)
 	outcome := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseOutcomeAccepted)
 	acceptance := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseChapterAccepted)
-	if committed == nil || published == nil || outcome == nil || acceptance == nil ||
+	if bodyReady == nil || committed == nil || published == nil || outcome == nil || acceptance == nil ||
 		committed.Evidence.CommitCheckpointSeq != receipt.CommitCheckpointSeq ||
 		committed.Evidence.CommitDigest != receipt.CommitDigest ||
 		published.Evidence.DirectoryPublishID != receipt.DirectoryPublishID ||
 		published.Evidence.DirectoryPublishDigest != receipt.DirectoryPublishDigest ||
 		outcome.Evidence.OutcomeReceiptDigest != receipt.OutcomeReceiptDigest {
 		return fmt.Errorf("durable render receipt conflicts with prior transaction evidence")
+	}
+	styleEvidenceCount := 0
+	for _, value := range []string{
+		receipt.EffectiveStyleReceiptPath,
+		receipt.EffectiveStyleReceiptDigest,
+		receipt.EffectiveStyleArtifactSHA256,
+	} {
+		if strings.TrimSpace(value) != "" {
+			styleEvidenceCount++
+		}
+	}
+	if styleEvidenceCount != 0 && styleEvidenceCount != 3 {
+		return fmt.Errorf("durable render receipt has partial style archive evidence")
+	}
+	legacyCompletion := styleEvidenceCount == 0
+	acceptanceDigest := receipt.ChapterAcceptanceDigest
+	if legacyCompletion {
+		v3StyleEpoch, err := pipelineRenderV3StyleEpochDeclared(liveOutputDir, frozen)
+		if err != nil {
+			return fmt.Errorf("validate completed immutable style epoch: %w", err)
+		}
+		if v3StyleEpoch {
+			return fmt.Errorf("v3 frozen style epoch cannot downgrade to a legacy final receipt")
+		}
+		// Transaction receipts produced before acceptance/style archive binding
+		// remain recoverable only when their already-authenticated body_ready
+		// phase is also pre-style. A v3 body can therefore never be relabeled as
+		// this compatibility protocol.
+		if strings.TrimSpace(bodyReady.Evidence.EffectiveStyleReceiptDigest) != "" {
+			return fmt.Errorf("v3 render transaction cannot downgrade to a legacy final receipt")
+		}
+		if strings.TrimSpace(acceptanceDigest) == "" {
+			acceptanceDigest = acceptance.Evidence.ChapterAcceptanceDigest
+		}
+	} else if strings.TrimSpace(receipt.ChapterAcceptanceDigest) == "" {
+		return fmt.Errorf("durable render receipt has partial chapter acceptance/style evidence")
+	}
+	loadedAcceptance, err := store.NewStore(liveOutputDir).ArcCycle().LoadChapterAcceptanceReceipt(
+		frozen.PlanningGenerationID,
+		frozen.Chapter,
+		acceptanceDigest,
+	)
+	if err != nil || loadedAcceptance == nil {
+		return fmt.Errorf("load completed chapter acceptance receipt: %w", err)
+	}
+	if acceptance.Evidence.ChapterAcceptanceDigest != acceptanceDigest ||
+		loadedAcceptance.ReceiptDigest != acceptanceDigest ||
+		loadedAcceptance.GenerationID != frozen.PlanningGenerationID ||
+		loadedAcceptance.Chapter != frozen.Chapter ||
+		loadedAcceptance.ChapterBodySHA256 != identity.BodySHA256 ||
+		loadedAcceptance.OutcomeReceiptDigest != receipt.OutcomeReceiptDigest {
+		return fmt.Errorf("durable render receipt conflicts with prior transaction evidence")
+	}
+	if legacyCompletion {
+		if loadedAcceptance.Version != domain.ChapterAcceptanceReceiptLegacyVersion ||
+			loadedAcceptance.EffectiveStyleReceiptPath != "" ||
+			loadedAcceptance.EffectiveStyleReceiptDigest != "" ||
+			loadedAcceptance.EffectiveStyleArtifactSHA256 != "" {
+			return fmt.Errorf("legacy final receipt conflicts with style-bound chapter acceptance")
+		}
+	} else {
+		if err := store.NewStore(liveOutputDir).ArcCycle().ValidateArcCycle(frozen.PlanningGenerationID); err != nil {
+			return fmt.Errorf("completed chapter acceptance proof chain drifted: %w", err)
+		}
+		if loadedAcceptance.Version != domain.ChapterAcceptanceReceiptVersion {
+			return fmt.Errorf("v3 final receipt conflicts with legacy chapter acceptance")
+		}
+		styleEvidence, err := pipelineEffectiveStyleArchiveEvidence(liveOutputDir, frozen)
+		if err != nil {
+			return fmt.Errorf("validate completed effective style evidence: %w", err)
+		}
+		if bodyReady.Evidence.EffectiveStyleReceiptDigest != receipt.EffectiveStyleReceiptDigest ||
+			receipt.EffectiveStyleReceiptPath != styleEvidence.Path ||
+			receipt.EffectiveStyleReceiptDigest != styleEvidence.ReceiptDigest ||
+			receipt.EffectiveStyleArtifactSHA256 != styleEvidence.ArtifactSHA256 ||
+			loadedAcceptance.EffectiveStyleReceiptPath != receipt.EffectiveStyleReceiptPath ||
+			loadedAcceptance.EffectiveStyleReceiptDigest != receipt.EffectiveStyleReceiptDigest ||
+			loadedAcceptance.EffectiveStyleArtifactSHA256 != receipt.EffectiveStyleArtifactSHA256 {
+			return fmt.Errorf("durable render receipt conflicts with body/acceptance/style evidence")
+		}
 	}
 	if _, err := txnStore.Advance(
 		identity,
@@ -1000,9 +1212,14 @@ func pipelineVerifyChapterRenderRecoveryArtifacts(
 	}
 	bodyReady := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseBodyReady)
 	committed := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseCommitted)
+	styleReceiptDigest, err := pipelineEffectiveStyleReceiptDigest(outputDir, frozen)
+	if err != nil {
+		return err
+	}
 	if bodyReady == nil || committed == nil ||
 		bodyReady.Evidence.BodyCheckpointSeq != bodyCheckpoint.Seq ||
 		bodyReady.Evidence.BodyCheckpointDigest != bodyCheckpoint.Digest ||
+		bodyReady.Evidence.EffectiveStyleReceiptDigest != styleReceiptDigest ||
 		committed.Evidence.CommitCheckpointSeq != snapshot.Commit.Seq ||
 		committed.Evidence.CommitDigest != snapshot.Commit.Digest {
 		return fmt.Errorf("recovery checkpoint evidence differs from durable candidate")
@@ -1029,6 +1246,8 @@ func pipelineVerifyChapterRenderRecoveryArtifacts(
 		}
 		if formal.Evidence.ReviewVerdict != inspection.Verdict ||
 			formal.Evidence.ReviewDisposition != inspection.Disposition ||
+			formal.Evidence.EditorCacheKey != inspection.EditorCacheKey ||
+			formal.Evidence.DeepSeekCacheKey != inspection.DeepSeekCacheKey ||
 			!reflect.DeepEqual(formal.Evidence.ReviewArtifacts, artifacts) {
 			return fmt.Errorf("recovery formal review artifact digests drifted")
 		}

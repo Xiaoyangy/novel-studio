@@ -291,7 +291,7 @@ func arcOutcomeChainTestFixture(
 		reviewBody := []byte(fmt.Sprintf(`{"chapter":%d,"verdict":"accept"}`, chapter))
 		projectAllCmdTestWriteFile(t, filepath.Join(st.Dir(), reviewPath), string(reviewBody))
 		acceptance, err := domain.SignChapterAcceptanceReceipt(domain.ChapterAcceptanceReceipt{
-			Version:              domain.ChapterAcceptanceReceiptVersion,
+			Version:              domain.ChapterAcceptanceReceiptLegacyVersion,
 			ArcID:                manifest.ArcID,
 			ArcManifestDigest:    manifest.ManifestDigest,
 			GenerationID:         sealed.GenerationID,

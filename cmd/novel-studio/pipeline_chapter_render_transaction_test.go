@@ -3,13 +3,17 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestPipelineChapterRenderTransactionCrashReplayBoundaries(t *testing.T) {
@@ -380,6 +384,11 @@ func TestPipelineChapterRenderTransactionSameBodyCacheRevalidationAccepts(t *tes
 
 func TestPipelineChapterRenderTransactionFinalReceiptCrashRecovery(t *testing.T) {
 	live, frozen, plan, candidate, snapshot := newPipelineChapterRenderTransactionFixture(t)
+	legacyManifest, err := os.ReadFile(filepath.Join(candidate.OutputDir, "meta", "planning", "render_candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectAllCmdTestWriteFile(t, filepath.Join(live, "meta", "planning", "render_candidate.json"), string(legacyManifest))
 	if _, err := pipelineEnsureChapterRenderCommitted(
 		live, candidate.OutputDir, frozen, plan, snapshot,
 	); err != nil {
@@ -409,8 +418,68 @@ func TestPipelineChapterRenderTransactionFinalReceiptCrashRecovery(t *testing.T)
 		t.Fatal(err)
 	}
 	publishDigest := pipelineBytesSHA([]byte("publish-receipt"))
-	outcomeDigest := pipelineBytesSHA([]byte("outcome-receipt"))
-	acceptanceDigest := pipelineBytesSHA([]byte("acceptance-receipt"))
+	actualPreStateRoot := pipelineBytesSHA([]byte("actual-pre-state"))
+	actualPostStateRoot, err := domain.DeriveProjectedPostStateRootV2(actualPreStateRoot, match.ActualDelta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := domain.ActualOutcomeReceiptV2{
+		Version:                     domain.ActualOutcomeReceiptV2Version,
+		GenerationID:                frozen.PlanningGenerationID,
+		Chapter:                     frozen.Chapter,
+		PromotionReceiptDigest:      frozen.PromotionReceiptDigest,
+		ChapterBodySHA256:           snapshot.BodySHA256,
+		CommitCheckpointSeq:         snapshot.Commit.Seq,
+		ActualDelta:                 match.ActualDelta,
+		ActualPreStateRoot:          actualPreStateRoot,
+		ActualPostStateRoot:         actualPostStateRoot,
+		ActualCanonRoot:             pipelineBytesSHA([]byte("actual-canon")),
+		ProjectedPostStateRoot:      actualPostStateRoot,
+		ObligationsSatisfied:        []string{},
+		ObligationsCreatedUnplanned: []string{},
+		ProjectionMatch:             true,
+		AcceptedAt:                  "2026-07-22T00:00:00Z",
+	}
+	outcome.ReceiptDigest, err = domain.ComputeActualOutcomeReceiptV2Digest(outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeDigest := outcome.ReceiptDigest
+	if _, err := writePipelinePlanningJSON(filepath.Join(
+		live,
+		"meta", "planning", "v2", "actual_outcomes",
+		frozen.PlanningGenerationID,
+		fmt.Sprintf("%04d", frozen.Chapter),
+		outcomeDigest+".json",
+	), outcome); err != nil {
+		t.Fatal(err)
+	}
+	acceptance := domain.ChapterAcceptanceReceipt{
+		Version:              domain.ChapterAcceptanceReceiptLegacyVersion,
+		ArcID:                "arc:transaction-test",
+		ArcManifestDigest:    pipelineBytesSHA([]byte("arc-manifest")),
+		GenerationID:         frozen.PlanningGenerationID,
+		Chapter:              frozen.Chapter,
+		ChapterBodySHA256:    snapshot.BodySHA256,
+		ChapterBodyRunes:     len([]rune(snapshot.Body)),
+		ReviewArtifacts:      []domain.ChapterReviewArtifactBinding{{Path: "reviews/01.md", Digest: pipelineBytesSHA([]byte("review"))}},
+		OutcomeReceiptDigest: outcomeDigest,
+		AcceptedAt:           outcome.AcceptedAt,
+	}
+	acceptance, err = domain.SignChapterAcceptanceReceipt(acceptance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptanceDigest := acceptance.ReceiptDigest
+	if _, err := writePipelinePlanningJSON(filepath.Join(
+		live,
+		"meta", "planning", "v3", "arc_cycle", "acceptances",
+		frozen.PlanningGenerationID,
+		fmt.Sprintf("%06d", frozen.Chapter),
+		acceptanceDigest+".json",
+	), acceptance); err != nil {
+		t.Fatal(err)
+	}
 	txnStore := store.NewChapterRenderTransactionStore(live)
 	if _, err := txnStore.Advance(identity, domain.ChapterRenderPhasePublished, domain.ChapterRenderPhaseEvidence{
 		DirectoryPublishID: publishID, DirectoryPublishDigest: publishDigest,
@@ -454,6 +523,283 @@ func TestPipelineChapterRenderTransactionFinalReceiptCrashRecovery(t *testing.T)
 	latest, err := txnStore.LoadLatest(identity)
 	if err != nil || latest == nil || latest.Phase != domain.ChapterRenderPhaseCompleted {
 		t.Fatalf("completed phase missing after replay: latest=%+v err=%v", latest, err)
+	}
+}
+
+func TestPipelineChapterRenderTransactionV3StyleAcceptanceFinalChain(t *testing.T) {
+	opts, setupStore, _ := projectAllCmdTestInstallThreeChapterCLIProjection(t)
+	if err := pipelineSeal(opts, pipelineFlags{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelinePromote(opts, pipelineFlags{Start: 1, End: 1}); err != nil {
+		t.Fatal(err)
+	}
+	live := setupStore.Dir()
+	frozen, plan, err := loadAndVerifyPipelineFrozenPlan(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := preparePipelineRenderCandidate(live, frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	styleReceipt, err := tools.PublishEffectiveRenderStyleContract(
+		store.NewStore(candidate.OutputDir),
+		tools.EffectiveRenderStyleContractIdentity{
+			GenerationID:              frozen.PlanningGenerationID,
+			Chapter:                   frozen.Chapter,
+			PlanDigest:                frozen.PlanDigest,
+			PlanCheckpointSeq:         frozen.PlanCheckpointSeq,
+			BaseRenderContextSHA256:   frozen.RenderContextSHA256,
+			PipelineRenderInputDigest: frozen.PipelineRunInputDigest,
+			ProjectedBundleDigest:     frozen.ProjectedBundleDigest,
+			PromotionReceiptDigest:    frozen.PromotionReceiptDigest,
+			CandidateID:               candidate.ID,
+		},
+		"v3-chain-style",
+		"# V3 闭环风格\n- 叙述声音：克制、具体。\n- 句法：压力处缩短。",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindPipelineRenderCandidateEffectiveStyle(candidate.OutputDir, frozen, styleReceipt); err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := "第一章\n\n主角在截止前完成小额验证，并把可复核票据收进衣袋。"
+	body := prefix + strings.Repeat("县", 2100-len([]rune(prefix)))
+	candidateStore := store.NewStore(candidate.OutputDir)
+	if err := candidateStore.Drafts.SaveDraft(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidateStore.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "draft", "drafts/01.draft.md",
+		"plan", "rerender-request", "draft", "edit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := candidateStore.Drafts.SaveFinalChapter(1, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidateStore.Checkpoints.AppendArtifactLatestAcross(
+		domain.ChapterScope(1), "commit", "chapters/01.md",
+		"plan", "draft", "edit", "commit",
+	); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := candidateStore.Progress.Load()
+	if err != nil || progress == nil {
+		t.Fatalf("load candidate progress: %+v %v", progress, err)
+	}
+	progress.CompletedChapters = []int{1}
+	if err := candidateStore.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loadPipelineRenderedChapterSnapshot(candidate.OutputDir, frozen, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipelineEnsureChapterRenderCommitted(
+		live, candidate.OutputDir, frozen, plan, snapshot,
+	); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteCurrentReviewArtifactsWithVerdict(t, candidate.OutputDir, 1, "accept")
+	mustPersistReviewModelProvenanceForBody(t, candidate.OutputDir, 1, body)
+	if err := pipelineAdvanceChapterRenderFormal(
+		live, candidate.OutputDir, frozen, plan, snapshot, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := validatePipelineSealedRenderBinding(store.NewStore(live), frozen, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualMatch := pipelineSealedActualDeltaMatch{
+		ActualDelta:          binding.Bundle.ProjectedDelta,
+		ProjectionMatch:      true,
+		Complete:             true,
+		ObligationsSatisfied: append([]string(nil), binding.Bundle.ObligationsConsumed...),
+	}
+	if err := savePipelineSealedActualMatch(candidate.OutputDir, actualMatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineAdvanceChapterRenderActualMatch(
+		live, candidate.OutputDir, frozen, snapshot.BodySHA256,
+	); err != nil {
+		t.Fatal(err)
+	}
+	publishReceipt, err := publishPipelineRenderCandidate(live, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSnapshot, err := loadPipelineRenderedChapterSnapshot(live, frozen, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineAdvanceChapterRenderPublished(live, frozen, plan, liveSnapshot.BodySHA256); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizePipelineRenderCandidate(live, publishReceipt.TransactionID); err != nil {
+		t.Fatal(err)
+	}
+	liveStore := store.NewStore(live)
+	outcome, err := acceptPipelineSealedRenderOutcome(
+		liveStore,
+		binding,
+		liveSnapshot.Commit,
+		liveSnapshot.BodySHA256,
+		pipelineProjectAllCanonRootFromSnapshot(liveSnapshot.ActualCanonRoot),
+		&actualMatch,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineAdvanceChapterRenderOutcome(
+		live, frozen, liveSnapshot.Commit, liveSnapshot.BodySHA256, outcome,
+	); err != nil {
+		t.Fatal(err)
+	}
+	acceptance, err := savePipelineChapterAcceptance(
+		live, liveStore, &binding.Generation, 1, liveSnapshot.BodySHA256, outcome,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acceptance.Version != domain.ChapterAcceptanceReceiptVersion ||
+		acceptance.EffectiveStyleReceiptDigest != styleReceipt.ReceiptDigest {
+		t.Fatalf("v3 acceptance lost effective style identity: %+v", acceptance)
+	}
+	if err := pipelineAdvanceChapterRenderAcceptance(
+		live, frozen, liveSnapshot.BodySHA256, acceptance,
+	); err != nil {
+		t.Fatal(err)
+	}
+	styleEvidence, err := pipelineEffectiveStyleArchiveEvidence(live, frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err = liveStore.Progress.Load()
+	if err != nil || progress == nil {
+		t.Fatalf("load live progress: %+v %v", progress, err)
+	}
+	actualCanonRoot, err := pipelineCanonRoot(live, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalReceipt := pipelineRenderReceipt{
+		Version:                      pipelinePlanningSchema,
+		Chapter:                      1,
+		PlanDigest:                   frozen.PlanDigest,
+		PlanCheckpointSeq:            frozen.PlanCheckpointSeq,
+		CommitDigest:                 liveSnapshot.Commit.Digest,
+		CommitCheckpointSeq:          liveSnapshot.Commit.Seq,
+		ChapterPath:                  liveSnapshot.ChapterPath,
+		ChapterBodySHA256:            liveSnapshot.BodySHA256,
+		ActualCanonRoot:              actualCanonRoot,
+		RenderDependencySHA256:       maps.Clone(frozen.RenderDependencySHA256),
+		PipelineRunInputDigest:       frozen.PipelineRunInputDigest,
+		RenderContextSHA256:          frozen.RenderContextSHA256,
+		EffectiveStyleReceiptPath:    styleEvidence.Path,
+		EffectiveStyleReceiptDigest:  styleEvidence.ReceiptDigest,
+		EffectiveStyleArtifactSHA256: styleEvidence.ArtifactSHA256,
+		ProjectedStateRoot:           frozen.ProjectedPostStateRoot,
+		ProjectionBound:              true,
+		PlanningGenerationID:         frozen.PlanningGenerationID,
+		ProjectedBundleDigest:        frozen.ProjectedBundleDigest,
+		PromotionReceiptDigest:       frozen.PromotionReceiptDigest,
+		OutcomeReceiptDigest:         outcome.ReceiptDigest,
+		ChapterAcceptanceDigest:      acceptance.ReceiptDigest,
+		DirectoryPublishID:           publishReceipt.TransactionID,
+		DirectoryPublishDigest:       publishReceipt.ReceiptDigest,
+		RenderedAt:                   outcome.AcceptedAt,
+	}
+	finalDigest, err := writePipelinePlanningJSON(
+		filepath.Join(live, pipelineRenderReceiptPath), finalReceipt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pipelineAdvanceChapterRenderCompleted(
+		live, frozen, liveSnapshot.BodySHA256, finalDigest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyPipelineRenderStage(live, domain.PipelineStageEvidence{Stage: "render"}); err != nil {
+		t.Fatalf("complete v3 style/acceptance/final chain failed verification: %v", err)
+	}
+
+	reviewPath := filepath.Join(live, acceptance.ReviewArtifacts[0].Path)
+	originalReview, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, append(originalReview, []byte("\n漂移")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyPipelineRenderStage(live, domain.PipelineStageEvidence{Stage: "render"}); err == nil ||
+		!strings.Contains(err.Error(), "审核/风格证据已漂移") {
+		t.Fatalf("v3 final accepted review artifacts outside its acceptance chain: %v", err)
+	}
+}
+
+func mustPersistReviewModelProvenanceForBody(t *testing.T, dir string, chapter int, body string) {
+	t.Helper()
+	chapterReviewContext, err := buildEditorChapterReviewContextWithStyle(
+		store.NewStore(dir), chapter, tools.References{}, "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editorPolicy := newEditorReviewCachePolicy(
+		"test-openai", "editor-test", "premise", "rules", chapterReviewContext,
+		chapter, body, "ai-voice-context",
+	)
+	editorCache := &editorReviewCacheArtifact{
+		Chapter:     chapter,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		CacheKey:    reviewExistingCacheKey(editorPolicy),
+		CachePolicy: editorPolicy,
+		Markdown:    editorCacheTestMarkdown,
+	}
+	if err := saveEditorReviewCache(dir, editorCache); err != nil {
+		t.Fatal(err)
+	}
+	selection := deepseekAIJudgeModelSelection{
+		Provider: "deepseek", Model: "deepseek-test", Explicit: true,
+	}
+	deepSeekPolicy := newDeepSeekAIJudgeCachePolicy(selection, chapter, body)
+	deepSeek := &deepseekAIJudgeArtifact{
+		Chapter: chapter, GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		CacheKey: reviewExistingCacheKey(deepSeekPolicy), CachePolicy: deepSeekPolicy,
+		Provider: selection.Provider, Model: selection.Model, ReviewerExplicit: selection.Explicit,
+		ReasoningEffort: string(deepseekAIJudgeReasoningEffort), RawBodyOnly: true,
+		UserPayloadKind: "chapter_body_only", BodySHA256: reviewreport.BodySHA256(body),
+		Verdict: "human_like", RiskLevel: "low", AIProbabilityPercent: 2,
+		PassExclusivePercent: deepseekAIJudgePassExclusive, Confidence: "high",
+		AdviceComplete: true, AttemptCount: 1, Summary: "裸正文外审通过。",
+		RawResponse: deepseekCompleteHumanResponse, ModelSelection: selection,
+	}
+	if err := saveDeepSeekAIJudgeCache(dir, deepSeek); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveDeepSeekAIJudge(dir, deepSeek); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendDeepSeekAIJudgeToUnifiedMarkdown(dir, deepSeek); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rebuildReviewSummary(dir); err != nil {
+		t.Fatal(err)
+	}
+	var finalEditor domain.ReviewEntry
+	readJSONFileForFreshness(
+		t, filepath.Join(dir, "reviews", fmt.Sprintf("%02d.json", chapter)), &finalEditor,
+	)
+	if err := persistReviewModelProvenance(
+		store.NewStore(dir), chapter, reviewreport.BodySHA256(body), editorCache, &finalEditor, deepSeek,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -537,21 +883,39 @@ func newPipelineChapterRenderTransactionFixtureForChapter(t *testing.T, chapter 
 		PlanCheckpointSeq:      plan.Seq,
 		BaselineCommitSeq:      0,
 		PlanningGenerationID:   fmt.Sprintf("pg2_chapter_render_transaction_test_%d", chapter),
+		PlanningDependencyRoot: pipelineBytesSHA([]byte("planning-dependencies")),
 		ProjectionBinding:      "sealed_v2",
+		ProjectedPlanSHA256:    pipelineBytesSHA([]byte("projected-plan")),
+		ProjectedPreStateRoot:  pipelineBytesSHA([]byte("projected-pre-state")),
+		ProjectedPostStateRoot: pipelineBytesSHA([]byte("projected-post-state")),
 		ProjectedBundleDigest:  pipelineBytesSHA([]byte("bundle")),
 		PromotionReceiptDigest: pipelineBytesSHA([]byte("promotion")),
 		PipelineRunInputDigest: pipelineBytesSHA([]byte("render-input")),
-		RenderContextSHA256:    pipelineBytesSHA([]byte("render-context")),
+	}
+	renderContext := freezeTestDraftRenderContext(t, liveStore, chapter, plan.Digest)
+	renderDependencies, err := capturePipelineFrozenRenderDependencies(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen.RenderDependencySHA256 = renderDependencies
+	frozen.RenderContextPath = tools.FrozenDraftRenderContextPath
+	frozen.RenderContextSHA256 = renderContext.PayloadSHA256
+	frozen.FrozenAt = renderContext.FrozenAt
+	if _, err := writePipelinePlanningJSON(filepath.Join(live, pipelineFrozenPlanPath), frozen); err != nil {
+		t.Fatal(err)
 	}
 	id, err := pipelineRenderTransactionID(frozen)
 	if err != nil {
 		t.Fatal(err)
 	}
 	container := filepath.Join(pipelineRenderCandidateRoot(live), id)
-	candidate, err := prepareFreshPipelineRenderCandidate(live, frozen, id, container)
+	candidate, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
+		live, frozen, id, container, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	const body = "第一章\n\n门外脚步停住。林澈把录音时间写在纸角，随后关掉了灯。"
 	candidateStore := store.NewStore(candidate.OutputDir)
 	if err := candidateStore.Drafts.SaveDraft(frozen.Chapter, body); err != nil {

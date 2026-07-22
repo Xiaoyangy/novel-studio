@@ -733,7 +733,7 @@ func applyDraftContextProfile(result map[string]any) {
 	// final-prose whitelist removes, creating provider-dependent rewrite loops.
 	for _, key := range []string{
 		"ai_voice_redflags", "ai_voice_redflags_policy", "chapter_ai_voice_metrics",
-		"genre_style_profile", "literary_rendering_cards", "writing_engine", "style_rules",
+		"genre_style_profile", "configured_style", "literary_rendering_cards", "writing_engine", "style_rules",
 		"draft_external_ai_review", "draft_external_ai_review_policy", "rewrite_brief",
 		"relationship_state", "character_snapshots", "chapter_participants",
 		"review_lessons", "story_threads", "resource_audit", "foreshadow_ledger",
@@ -826,7 +826,7 @@ func compactFinalizedPlanningContext(result map[string]any, working map[string]a
 	}
 	for _, key := range []string{
 		"ai_voice_redflags", "ai_voice_redflags_policy", "chapter_ai_voice_metrics",
-		"genre_style_profile", "literary_rendering_cards", "writing_engine", "style_rules",
+		"genre_style_profile", "configured_style", "literary_rendering_cards", "writing_engine", "style_rules",
 		"draft_external_ai_review", "draft_external_ai_review_policy", "rewrite_brief",
 		"relationship_state", "character_snapshots", "chapter_participants",
 	} {

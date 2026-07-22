@@ -153,7 +153,12 @@ render 在隔离候选工作区中执行：
 5. 独立验证 actual delta 是否实现 sealed plan。
 6. 通过后原子发布 live canon，写入本章不可变验收回执。
 
-`ChapterAcceptanceReceipt` 必须绑定 arc ID、arc manifest digest、generation、chapter number、final body SHA、独立复算的 Unicode rune 数、fresh review artifact paths/digests 和 actual outcome receipt digest。arc manifest 再间接绑定该章 bundle、capacity 与封存字数区间。保存回执、恢复重放和弧完成都会重新读取 `chapters/NN.md`，同时校验 SHA 与实际 rune 数；正文任何字节变化、短于下限或长于上限都会使旧回执失效。已经被 acceptance 绑定的章级审核文件也不能再由 standalone `--review-existing` 原地覆盖。
+正文表达层的 surface-only 风格编译、有效风格回执、Drafter/Editor 同源合同和恢复边界，见
+[《小说生产流水线与渲染风格审计（2026-07-22）》](design-audits/render-style-pipeline-audit-20260722.md)。
+
+`ChapterAcceptanceReceipt` 必须绑定 arc ID、arc manifest digest、generation、chapter number、final body SHA、独立复算的 Unicode rune 数、fresh review artifact paths/digests 和 actual outcome receipt digest。当前 v3 回执还必须绑定 CandidateID 对应的有效风格归档路径、回执 digest 与归档文件 SHA-256，并精确列出 Editor JSON、报告 Markdown、机械 AI gate、AI 声纹红旗、DeepSeek judge、model provenance 六项正式审核工件；缺项、替换或额外路径均无效。历史 v2 回执则必须完全不带风格三字段，不能混用。arc manifest 再间接绑定该章 bundle、capacity 与封存字数区间。保存回执、恢复重放和弧完成都会重新读取 `chapters/NN.md`，同时校验 SHA 与实际 rune 数；正文任何字节变化、短于下限或长于上限都会使旧回执失效。已经被 acceptance 绑定的章级审核文件也不能再由 standalone `--review-existing` 原地覆盖。
+
+这些正文、正式审核和风格来源文件还必须是项目根内的真实单链接普通文件；leaf/ancestor symlink、hardlink、FIFO 或设备文件即使能返回相同字节也不能通过验收、final 或弧完成复验。
 
 不存在“弧级正文评分”取代章级审核的路径。弧级只负责验证章级验收证据是否齐全、有序且未漂移。
 

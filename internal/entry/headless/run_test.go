@@ -71,7 +71,13 @@ func TestInspectRenderOnlyReplanStopRejectsExhaustedCausalEpoch(t *testing.T) {
 }
 
 func TestInspectRenderOnlyReplanStopAbortsBeforeThirdProjectionOnCombinedLedger(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	sourceOutputDir := filepath.Join(root, "output", "novel")
+	candidateID := "render-ch0001-headless-event"
+	dir := filepath.Join(filepath.Dir(sourceOutputDir), ".render-candidates", candidateID, "output")
+	if err := os.MkdirAll(sourceOutputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
@@ -83,8 +89,6 @@ func TestInspectRenderOnlyReplanStopAbortsBeforeThirdProjectionOnCombinedLedger(
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceOutputDir := filepath.Join(t.TempDir(), "output", "novel")
-	candidateID := "render-ch0001-headless-event"
 	manifest := map[string]any{
 		"version": "pipeline-render-candidate.v2", "candidate_id": candidateID,
 		"generation_id": "generation", "chapter": 1,

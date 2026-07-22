@@ -402,7 +402,7 @@ func (s *ArcCycleStore) validateAcceptedBodyUnlocked(
 	manifest domain.ArcPlanningManifest,
 ) error {
 	rel := filepath.Join("chapters", fmt.Sprintf("%02d.md", receipt.Chapter))
-	body, err := s.io.ReadFileUnlocked(rel)
+	body, err := readArcCycleSealedEvidenceFile(s.io.dir, rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("chapter %d accepted body is missing", receipt.Chapter)
@@ -431,12 +431,15 @@ func (s *ArcCycleStore) validateAcceptedBodyUnlocked(
 	return nil
 }
 
-func (s *ArcCycleStore) validateReviewArtifactsUnlocked(receipt domain.ChapterAcceptanceReceipt) error {
+func (s *ArcCycleStore) validateReviewArtifactsUnlocked(
+	receipt domain.ChapterAcceptanceReceipt,
+	manifest domain.ArcPlanningManifest,
+) error {
 	for _, artifact := range receipt.ReviewArtifacts {
 		if err := domain.ValidateChapterReviewArtifactPath(artifact.Path, receipt.Chapter); err != nil {
 			return err
 		}
-		raw, err := s.io.ReadFileUnlocked(artifact.Path)
+		raw, err := readArcCycleSealedEvidenceFile(s.io.dir, artifact.Path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return fmt.Errorf("chapter %d review artifact %s is missing", receipt.Chapter, artifact.Path)
@@ -453,6 +456,169 @@ func (s *ArcCycleStore) validateReviewArtifactsUnlocked(receipt domain.ChapterAc
 				want,
 			)
 		}
+	}
+	if receipt.EffectiveStyleReceiptPath != "" {
+		raw, err := readArcCycleSealedEvidenceFile(s.io.dir, receipt.EffectiveStyleReceiptPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("chapter %d effective style receipt archive is missing: %w", receipt.Chapter, err)
+			}
+			return fmt.Errorf("chapter %d effective style receipt archive path is invalid: %w", receipt.Chapter, err)
+		}
+		if got := domain.ComputeArcArtifactSHA256(raw); got != receipt.EffectiveStyleArtifactSHA256 {
+			return fmt.Errorf(
+				"chapter %d effective style receipt archive hash drift: accepted=%s current=%s",
+				receipt.Chapter,
+				receipt.EffectiveStyleArtifactSHA256,
+				got,
+			)
+		}
+		styleReceipt, err := validateArchivedRenderPermitEffectiveStyleReceipt(
+			raw,
+			receipt.Chapter,
+			receipt.EffectiveStyleReceiptDigest,
+			receipt.EffectiveStyleReceiptPath,
+		)
+		if err != nil {
+			return err
+		}
+		if styleReceipt.GenerationID != receipt.GenerationID {
+			return fmt.Errorf(
+				"chapter %d effective style receipt belongs to generation %s, want %s",
+				receipt.Chapter,
+				styleReceipt.GenerationID,
+				receipt.GenerationID,
+			)
+		}
+		bundleDigest := ""
+		for _, binding := range manifest.Chapters {
+			if binding.Chapter == receipt.Chapter {
+				bundleDigest = binding.BundleDigest
+				break
+			}
+		}
+		if bundleDigest == "" || styleReceipt.ProjectedBundleDigest != bundleDigest {
+			return fmt.Errorf(
+				"chapter %d effective style receipt does not bind the arc manifest bundle",
+				receipt.Chapter,
+			)
+		}
+		for _, source := range styleReceipt.SourceChapterBodies {
+			bodyPath := fmt.Sprintf("chapters/%02d.md", source.Chapter)
+			body, err := readArcCycleSealedEvidenceFile(s.io.dir, bodyPath)
+			if err != nil || renderPermitEffectiveStyleSHA256(body) != source.BodySHA256 {
+				return fmt.Errorf("chapter %d effective style source chapter %d drift", receipt.Chapter, source.Chapter)
+			}
+		}
+	}
+	return nil
+}
+
+// readArcCycleSealedEvidenceFile reads path-bound immutable evidence without
+// following symlinks and rejects alternate hard-link names. Arc-cycle receipt
+// publication deliberately uses hard links and therefore does not use this
+// helper; it is reserved for chapter, review, and style evidence.
+func readArcCycleSealedEvidenceFile(root string, rel string) ([]byte, error) {
+	path, before, err := validateArcCycleSealedEvidenceFilesystemPath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateArcCycleSealedEvidenceFileInfo(opened); err != nil {
+		return nil, err
+	}
+	if !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("sealed evidence path changed before open")
+	}
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	afterPath, after, err := validateArcCycleSealedEvidenceFilesystemPath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	if afterPath != path || !os.SameFile(opened, after) {
+		return nil, fmt.Errorf("sealed evidence path changed while reading")
+	}
+	openedAfter, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateArcCycleSealedEvidenceFileInfo(openedAfter); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func validateArcCycleSealedEvidenceFilesystemPath(root string, rel string) (string, os.FileInfo, error) {
+	root = filepath.Clean(root)
+	cleanRel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(rel)))
+	if !filepath.IsAbs(root) || cleanRel == "." || filepath.IsAbs(cleanRel) || cleanRel == ".." ||
+		strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
+		return "", nil, fmt.Errorf("sealed evidence path is unsafe")
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", nil, fmt.Errorf("sealed evidence project root must be a real directory")
+	}
+	cursor := root
+	components := strings.Split(filepath.ToSlash(cleanRel), "/")
+	var leafInfo os.FileInfo
+	for index, component := range components {
+		if component == "" || component == "." {
+			continue
+		}
+		cursor = filepath.Join(cursor, component)
+		info, err := os.Lstat(cursor)
+		if err != nil {
+			return "", nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", nil, fmt.Errorf("sealed evidence path contains a symlink")
+		}
+		if index == len(components)-1 {
+			if err := validateArcCycleSealedEvidenceFileInfo(info); err != nil {
+				return "", nil, err
+			}
+			leafInfo = info
+		} else if !info.IsDir() {
+			return "", nil, fmt.Errorf("sealed evidence parent is not a directory")
+		}
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", nil, err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(cursor)
+	if err != nil {
+		return "", nil, err
+	}
+	within, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+		return "", nil, fmt.Errorf("sealed evidence resolves outside the project root")
+	}
+	return cursor, leafInfo, nil
+}
+
+func validateArcCycleSealedEvidenceFileInfo(info os.FileInfo) error {
+	if info == nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("sealed evidence is not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("sealed evidence link count is unavailable")
+	}
+	if stat.Nlink != 1 {
+		return fmt.Errorf("sealed evidence must have exactly one hard link")
 	}
 	return nil
 }
@@ -532,7 +698,7 @@ func (s *ArcCycleStore) SaveChapterAcceptanceReceipt(receipt domain.ChapterAccep
 		if err := s.validateAcceptedBodyUnlocked(receipt, *manifest); err != nil {
 			return err
 		}
-		if err := s.validateReviewArtifactsUnlocked(receipt); err != nil {
+		if err := s.validateReviewArtifactsUnlocked(receipt, *manifest); err != nil {
 			return err
 		}
 		for _, saved := range existing {
@@ -593,7 +759,7 @@ func (s *ArcCycleStore) SaveArcCompletionReceipt(receipt domain.ArcCompletionRec
 			if err := s.validateAcceptedBodyUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
-			if err := s.validateReviewArtifactsUnlocked(acceptance); err != nil {
+			if err := s.validateReviewArtifactsUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
 		}
@@ -800,7 +966,7 @@ func (s *ArcCycleStore) ValidateArcCycle(generationID string) error {
 			if err := s.validateAcceptedBodyUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
-			if err := s.validateReviewArtifactsUnlocked(acceptance); err != nil {
+			if err := s.validateReviewArtifactsUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
 		}
@@ -855,7 +1021,7 @@ func (s *ArcCycleStore) ValidateArcCompletion(generationID, digest string) error
 			if err := s.validateAcceptedBodyUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
-			if err := s.validateReviewArtifactsUnlocked(acceptance); err != nil {
+			if err := s.validateReviewArtifactsUnlocked(acceptance, *manifest); err != nil {
 				return err
 			}
 		}

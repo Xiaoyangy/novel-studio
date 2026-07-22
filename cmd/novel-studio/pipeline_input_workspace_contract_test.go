@@ -38,6 +38,18 @@ func TestPipelineProjectAllInputDigestUsesOnlyPlanningInputs(t *testing.T) {
 		{"drafter prompt", func(_ *bootstrap.Config, bundle *assets.Bundle) {
 			bundle.Prompts.Drafter += "\ndrafter drift"
 		}},
+		{"missing style ID resolved to default", func(cfg *bootstrap.Config, _ *assets.Bundle) {
+			cfg.Style = "missing-style"
+		}},
+		{"spaced default style ID", func(cfg *bootstrap.Config, _ *assets.Bundle) {
+			cfg.Style = "  default  "
+		}},
+		{"render-only selected style body", func(_ *bootstrap.Config, bundle *assets.Bundle) {
+			bundle.Styles["default"] += "\nrender-only drift"
+		}},
+		{"style ID without consumed reference change", func(cfg *bootstrap.Config, _ *assets.Bundle) {
+			cfg.Style = "other"
+		}},
 	}
 	for _, tc := range sameCases {
 		t.Run("ignores "+tc.name, func(t *testing.T) {
@@ -61,9 +73,6 @@ func TestPipelineProjectAllInputDigestUsesOnlyPlanningInputs(t *testing.T) {
 		}},
 		{"reference", func(_ *bootstrap.Config, bundle *assets.Bundle) {
 			bundle.References.AntiAITone += "\nreference drift"
-		}},
-		{"style", func(_ *bootstrap.Config, bundle *assets.Bundle) {
-			bundle.Styles["default"] += "\nstyle drift"
 		}},
 		{"writer context window", func(cfg *bootstrap.Config, _ *assets.Bundle) {
 			cfg.ContextWindows["writer-v1"] = 131072
@@ -100,6 +109,12 @@ func TestPipelineRenderInputDigestUsesOnlyProseInputs(t *testing.T) {
 		}},
 		{"editor prompt", func(_ *bootstrap.Config, bundle *assets.Bundle) {
 			bundle.Prompts.Editor += "\neditor drift"
+		}},
+		{"missing style ID resolved to default", func(cfg *bootstrap.Config, _ *assets.Bundle) {
+			cfg.Style = "missing-style"
+		}},
+		{"spaced default style ID", func(cfg *bootstrap.Config, _ *assets.Bundle) {
+			cfg.Style = "  default  "
 		}},
 	}
 	for _, tc := range sameCases {

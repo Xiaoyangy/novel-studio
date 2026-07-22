@@ -1294,6 +1294,22 @@ func TestProjectAllSealPromoteOutcomeRecoveryAndCycleReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This branch intentionally exercises the pre-effective-style v2 recovery
+	// protocol. Make the frozen epoch explicit before constructing its legacy
+	// candidate; a production v3 freeze must never be relabeled after the fact.
+	frozen.EffectiveStyleProtocol = ""
+	if _, err := writePipelinePlanningJSON(
+		filepath.Join(st.Dir(), filepath.FromSlash(pipelineFrozenPlanPath)),
+		frozen,
+	); err != nil {
+		t.Fatal(err)
+	}
+	installVerifiedLegacyV2RenderCandidateForTest(
+		t,
+		st,
+		frozen,
+		frozen.FrozenAt,
+	)
 	binding, err := validatePipelineSealedRenderBinding(st, frozen, false)
 	if err != nil {
 		t.Fatalf("sealed render binding before outcome: %v", err)
@@ -1336,15 +1352,14 @@ func TestProjectAllSealPromoteOutcomeRecoveryAndCycleReset(t *testing.T) {
 		t.Fatalf("accepted outcome lost actual canon root: %+v", outcome)
 	}
 	mustWriteCurrentReviewArtifacts(t, st.Dir(), 1)
-	if _, err := savePipelineChapterAcceptance(
-		st.Dir(),
-		st,
-		&binding.Generation,
-		1,
-		bodySHA,
-		outcome,
-	); err != nil {
+	acceptance, err := savePipelineChapterAcceptance(
+		st.Dir(), st, &binding.Generation, 1, bodySHA, outcome,
+	)
+	if err != nil {
 		t.Fatalf("save exact-body chapter acceptance: %v", err)
+	}
+	if acceptance.Version != domain.ChapterAcceptanceReceiptLegacyVersion {
+		t.Fatalf("legacy v2 candidate emitted acceptance protocol %q", acceptance.Version)
 	}
 	acceptedCursor, err := projected.LoadRealizationCursor()
 	if err != nil || acceptedCursor == nil {

@@ -188,7 +188,6 @@ func inspectPipelineSealedConvergenceReplanEligibility(outputDir string) (*pipel
 		return nil, err
 	}
 	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
 		CandidateID:            id,
 		GenerationID:           frozen.PlanningGenerationID,
 		Chapter:                frozen.Chapter,
@@ -206,7 +205,7 @@ func inspectPipelineSealedConvergenceReplanEligibility(outputDir string) (*pipel
 	if err != nil {
 		return nil, fmt.Errorf("sealed convergence replan 缺少 durable exhausted ledger: %w", err)
 	}
-	ledger, err := loadPipelineRenderConvergenceLedger(outputDir, manifest, 3)
+	ledger, manifest, err := loadFrozenPipelineRenderConvergenceLedger(outputDir, frozen, id)
 	if err != nil {
 		return nil, err
 	}
@@ -513,9 +512,11 @@ func pipelineSealedConvergenceReplan(opts cliOptions, flags pipelineFlags) (retu
 		}
 	}
 
+	resolvedStyle := promptBundle.ResolveStyle(cfg.Style)
 	frozenContext, err := tools.FreezeDraftRenderContext(
 		context.Background(),
-		tools.NewContextTool(st, promptBundle.References, cfg.Style),
+		tools.NewContextTool(st, promptBundle.References, resolvedStyle.ID).
+			WithConfiguredStyle(resolvedStyle.Body),
 		chapter,
 		cp.Digest,
 	)
@@ -1727,7 +1728,13 @@ func validatePipelineSealedConvergenceReplanIntent(outputDir string, intent pipe
 		ProjectedBundleDigest:  intent.SourceFrozen.ProjectedBundleDigest,
 		PromotionReceiptDigest: intent.SourceFrozen.PromotionReceiptDigest,
 	}
-	if err := validatePipelineRenderConvergenceLedger(&ledger, manifest); err != nil ||
+	manifest, err = pipelineRenderManifestForStoredConvergenceLedger(
+		manifest,
+		&ledger,
+		intent.SourceFrozen.PipelineRunInputDigest,
+		intent.SourceFrozen.RenderContextSHA256,
+	)
+	if err != nil ||
 		pipelineRenderConvergenceFailureCount(&ledger) < ledger.FailureLimit ||
 		!reflect.DeepEqual(pipelineRenderConvergenceFailedHashes(&ledger), intent.FailedBodySHA256) {
 		return nil, fmt.Errorf("sealed convergence replan ledger no longer proves exact exhausted set: %w", err)
@@ -1934,7 +1941,8 @@ func loadAndVerifyPipelineSealedConvergenceReplanReceipt(
 		ProjectedBundleDigest:  receipt.BundleDigest,
 		PromotionReceiptDigest: receipt.PromotionReceiptDigest,
 	}
-	if err := validatePipelineRenderConvergenceLedger(&ledger, manifest); err != nil ||
+	manifest, err = pipelineRenderManifestForStoredConvergenceLedger(manifest, &ledger, "", "")
+	if err != nil ||
 		ledger.FailureLimit != receipt.FailureLimit ||
 		pipelineRenderConvergenceFailureCount(&ledger) != receipt.FailureCount ||
 		!reflect.DeepEqual(pipelineRenderConvergenceFailedHashes(&ledger), receipt.FailedBodySHA256) {

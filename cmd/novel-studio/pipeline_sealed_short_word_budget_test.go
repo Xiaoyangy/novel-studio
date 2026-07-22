@@ -96,6 +96,32 @@ func TestPipelineZeroCostWordGateUsesSealedShortAcceptedCumulative(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This test exercises the historical word-budget overlay, not the v3 style
+	// receipt boundary. Keep its deliberately non-canonical digest fixture on
+	// the legacy v2 candidate protocol.
+	manifestPath := filepath.Join(candidate.OutputDir, "meta", "planning", "render_candidate.json")
+	manifestRaw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pipelineRenderCandidateManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Version = pipelineRenderCandidatePreviousManifestVersion
+	manifest.PipelineRenderInputDigest = ""
+	manifest.RenderContextSHA256 = ""
+	manifest.EffectiveStyleReceiptDigest = ""
+	manifestRaw, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, append(manifestRaw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensurePipelineRenderConvergenceControlDir(live, manifest.CandidateID); err != nil {
+		t.Fatal(err)
+	}
 	candidateStore := store.NewStore(candidate.OutputDir)
 	liveBounds, err := tools.InspectShortChapterWordBoundsFromAcceptedProse(liveStore, 5)
 	if err != nil || !liveBounds.Active || liveBounds.Min != 2444 || liveBounds.Max != 2600 {

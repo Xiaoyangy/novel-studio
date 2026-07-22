@@ -1103,7 +1103,7 @@ func TestPipelineRunInputDigestBindsBrainstormArtifact(t *testing.T) {
 	}
 }
 
-func TestPipelineRunInputDigestBindsReferencesAndStyles(t *testing.T) {
+func TestPipelineRunInputDigestBindsReferencesAndEffectiveStyle(t *testing.T) {
 	cfg := bootstrap.Config{
 		OutputDir: filepath.Join(t.TempDir(), "output", "novel"),
 		Provider:  "openai",
@@ -1132,6 +1132,36 @@ func TestPipelineRunInputDigestBindsReferencesAndStyles(t *testing.T) {
 			t.Fatal("style drift must invalidate the pipeline input digest")
 		}
 	})
+
+	t.Run("unselected styles are not consumed", func(t *testing.T) {
+		drifted := baseBundle
+		drifted.Styles = make(map[string]string, len(baseBundle.Styles))
+		for name, body := range baseBundle.Styles {
+			drifted.Styles[name] = body
+		}
+		drifted.Styles["fantasy"] += "\n未被本次运行选择。"
+		if got := pipelineRunInputDigest(cfg, drifted); got != baseDigest {
+			t.Fatal("unselected style drift changed pipeline input digest")
+		}
+	})
+}
+
+func TestPipelineRunInputDigestCanonicalizesEffectiveStyleID(t *testing.T) {
+	cfg := bootstrap.Config{
+		OutputDir: filepath.Join(t.TempDir(), "output", "novel"),
+		Provider:  "openai",
+		ModelName: "gpt-5.6-sol",
+		Style:     "default",
+	}
+	bundle := assets.Load("default")
+	want := pipelineRunInputDigest(cfg, bundle)
+	for _, equivalent := range []string{"", "  default  ", "missing-style"} {
+		candidate := cfg
+		candidate.Style = equivalent
+		if got := pipelineRunInputDigest(candidate, bundle); got != want {
+			t.Fatalf("equivalent style %q changed pipeline identity: got=%s want=%s", equivalent, got, want)
+		}
+	}
 }
 
 func TestVerifyStoredPipelineArtifactDigestsRejectsDrift(t *testing.T) {

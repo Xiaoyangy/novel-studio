@@ -320,17 +320,38 @@ func savePipelineChapterAcceptance(
 		}
 		artifacts = append(artifacts, domain.ChapterReviewArtifactBinding{Path: rel, Digest: digest})
 	}
+	frozen, _, err := loadAndVerifyPipelineFrozenPlan(outputDir)
+	if err != nil || frozen == nil || frozen.Chapter != chapter {
+		return nil, fmt.Errorf("chapter %d effective style acceptance identity is unavailable: %w", chapter, err)
+	}
+	if frozen.PlanningGenerationID != generation.GenerationID ||
+		outcome.PromotionReceiptDigest != frozen.PromotionReceiptDigest {
+		return nil, fmt.Errorf("chapter %d outcome/style identity does not match frozen generation and promotion", chapter)
+	}
+	styleEvidence, err := pipelineEffectiveStyleArchiveEvidence(outputDir, frozen)
+	if err != nil {
+		return nil, fmt.Errorf("chapter %d effective style acceptance evidence: %w", chapter, err)
+	}
+	acceptanceVersion := domain.ChapterAcceptanceReceiptVersion
+	if styleEvidence.Protocol == pipelineRenderCandidatePreviousManifestVersion {
+		acceptanceVersion = domain.ChapterAcceptanceReceiptLegacyVersion
+	} else if styleEvidence.Protocol != pipelineRenderCandidateManifestVersion {
+		return nil, fmt.Errorf("chapter %d cannot accept unresolved style protocol %q", chapter, styleEvidence.Protocol)
+	}
 	receipt := domain.ChapterAcceptanceReceipt{
-		Version:              domain.ChapterAcceptanceReceiptVersion,
-		ArcID:                manifest.ArcID,
-		ArcManifestDigest:    manifest.ManifestDigest,
-		GenerationID:         generation.GenerationID,
-		Chapter:              chapter,
-		ChapterBodySHA256:    bodySHA,
-		ChapterBodyRunes:     bodyRunes,
-		ReviewArtifacts:      domain.CanonicalChapterReviewArtifacts(artifacts),
-		OutcomeReceiptDigest: outcome.ReceiptDigest,
-		AcceptedAt:           outcome.AcceptedAt,
+		Version:                      acceptanceVersion,
+		ArcID:                        manifest.ArcID,
+		ArcManifestDigest:            manifest.ManifestDigest,
+		GenerationID:                 generation.GenerationID,
+		Chapter:                      chapter,
+		ChapterBodySHA256:            bodySHA,
+		ChapterBodyRunes:             bodyRunes,
+		ReviewArtifacts:              domain.CanonicalChapterReviewArtifacts(artifacts),
+		EffectiveStyleReceiptPath:    styleEvidence.Path,
+		EffectiveStyleReceiptDigest:  styleEvidence.ReceiptDigest,
+		EffectiveStyleArtifactSHA256: styleEvidence.ArtifactSHA256,
+		OutcomeReceiptDigest:         outcome.ReceiptDigest,
+		AcceptedAt:                   outcome.AcceptedAt,
 	}
 	receipt, err = domain.SignChapterAcceptanceReceipt(receipt)
 	if err != nil {

@@ -45,6 +45,7 @@ func TestPreparePipelineRenderCandidatePrefersLatestEditAfterTransportFailure(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, older, frozen)
 	olderStore := store.NewStore(older.OutputDir)
 	const olderBody = "第一章\n\n旧候选已经提交，但不是超时前最后保存的正文。"
 	if err := olderStore.Drafts.SaveDraft(1, olderBody); err != nil {
@@ -87,15 +88,17 @@ func TestPreparePipelineRenderCandidatePrefersLatestEditAfterTransportFailure(t 
 	}
 
 	activeContainer := filepath.Join(pipelineRenderCandidateRoot(live), older.ID)
-	latest, err := prepareFreshPipelineRenderCandidate(
+	latest, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
 		live,
 		frozen,
 		older.ID,
 		activeContainer,
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, latest, frozen)
 	latestStore := store.NewStore(latest.OutputDir)
 	if err := latestStore.Drafts.SaveDraft(1, "第一章\n\n新一轮的初稿。\n"); err != nil {
 		t.Fatal(err)
@@ -323,6 +326,7 @@ func TestPreparePipelineRenderCandidateMergesLocalSoftChainAndExactJudgeCache(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, chainCandidate, frozen)
 	chainStore := store.NewStore(chainCandidate.OutputDir)
 	preEdit := "第五章\n\n这不是提醒，而是命令。值班员把登记册推了回来。"
 	if err := chainStore.Drafts.SaveDraft(chapter, preEdit); err != nil {
@@ -390,15 +394,17 @@ func TestPreparePipelineRenderCandidateMergesLocalSoftChainAndExactJudgeCache(t 
 		t.Fatal(err)
 	}
 
-	judgeCandidate, err := prepareFreshPipelineRenderCandidate(
+	judgeCandidate, err := prepareFreshPipelineRenderCandidateForStyleEpoch(
 		live,
 		frozen,
 		chainCandidate.ID,
 		filepath.Join(pipelineRenderCandidateRoot(live), chainCandidate.ID),
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, judgeCandidate, frozen)
 	judgeStore := store.NewStore(judgeCandidate.OutputDir)
 	for index, version := range []struct {
 		step string
@@ -506,6 +512,7 @@ func pipelineLegacyRejectedEditFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	candidateStore := store.NewStore(candidate.OutputDir)
 	if err := candidateStore.Drafts.SaveDraft(chapter, "第五章\n\n旧的整章初稿。"); err != nil {
 		t.Fatal(err)

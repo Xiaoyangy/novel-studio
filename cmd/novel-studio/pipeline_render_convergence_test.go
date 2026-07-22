@@ -169,7 +169,7 @@ func TestRenderConvergenceRestoresExactHashJudgeWithoutModelCall(t *testing.T) {
 
 func TestRenderConvergenceCountsOneExactHashOnceAcrossAllFailureKinds(t *testing.T) {
 	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
+		Version:                pipelineRenderCandidatePreviousManifestVersion,
 		CandidateID:            "render-ch0001-test",
 		GenerationID:           "generation",
 		Chapter:                1,
@@ -190,7 +190,7 @@ func TestRenderConvergenceCountsOneExactHashOnceAcrossAllFailureKinds(t *testing
 
 func TestRenderConvergenceDefersExhaustedSemanticLedgerForCachedRevalidationAndResolves(t *testing.T) {
 	manifest := pipelineRenderCandidateManifest{
-		Version:                pipelineRenderCandidateManifestVersion,
+		Version:                pipelineRenderCandidatePreviousManifestVersion,
 		CandidateID:            "render-ch0001-semantic-revalidation",
 		GenerationID:           "generation",
 		Chapter:                1,
@@ -476,5 +476,6 @@ func pipelineRenderConvergenceFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustUseLegacyPipelineRenderCandidateForTest(t, candidate, frozen)
 	return live, frozen, candidate
 }

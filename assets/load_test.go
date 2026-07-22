@@ -16,6 +16,52 @@ func TestLoadReferencesIncludesProductionPlaybook(t *testing.T) {
 	}
 }
 
+func TestBundleSelectedStyleDefaultsAndFallsBack(t *testing.T) {
+	bundle := Load("")
+	defaultStyle := bundle.Styles["default"]
+	if strings.TrimSpace(defaultStyle) == "" {
+		t.Fatal("embedded default style is empty")
+	}
+	if got := bundle.ResolveStyle(""); got.ID != "default" || got.Body != defaultStyle {
+		t.Fatalf("empty configured style did not resolve default identity/body: %#v", got)
+	}
+	if got := bundle.ResolveStyle("missing-style"); got.ID != "default" || got.Body != defaultStyle {
+		t.Fatalf("missing configured style split fallback identity/body: %#v", got)
+	}
+	if got := bundle.ResolveStyle("romance"); got.ID != "romance" || !strings.Contains(got.Body, "言情风格") {
+		t.Fatalf("explicit style selection failed: %#v", got)
+	}
+	if got := bundle.SelectedStyle("missing-style"); got != defaultStyle {
+		t.Fatal("body-only compatibility selector diverged from resolved fallback")
+	}
+}
+
+func TestLoadUsesTheSameEffectiveStyleForReferencesAndBody(t *testing.T) {
+	canonical := Load("fantasy")
+	spaced := Load("  fantasy  ")
+	if strings.TrimSpace(canonical.References.StyleReference) == "" ||
+		strings.TrimSpace(canonical.References.ArcTemplates) == "" {
+		t.Fatal("fantasy genre references are unexpectedly empty")
+	}
+	if spaced.References.StyleReference != canonical.References.StyleReference ||
+		spaced.References.ArcTemplates != canonical.References.ArcTemplates {
+		t.Fatal("whitespace-normalized style body and genre references diverged")
+	}
+	if got := spaced.ResolveStyle("  fantasy  "); got.ID != "fantasy" || got.Body != canonical.Styles["fantasy"] {
+		t.Fatalf("whitespace-normalized effective style diverged: %#v", got)
+	}
+
+	defaultBundle := Load("default")
+	missing := Load("missing-style")
+	if missing.References.StyleReference != defaultBundle.References.StyleReference ||
+		missing.References.ArcTemplates != defaultBundle.References.ArcTemplates {
+		t.Fatal("missing style did not atomically fall back to default references")
+	}
+	if got := missing.ResolveStyle("missing-style"); got.ID != "default" || got.Body != defaultBundle.Styles["default"] {
+		t.Fatalf("missing style did not atomically fall back to default body: %#v", got)
+	}
+}
+
 func TestLoadReferencesIncludesHumanFeelCraft(t *testing.T) {
 	bundle := Load("default")
 	if !strings.Contains(bundle.References.HumanFeelCraft, "同桌是只假装高冷的猫") {

@@ -314,7 +314,9 @@ func BuildCoordinatorWithOptions(
 	// 共享工具
 	// Task 072：real_lm 维度配置注入（未配置时 ai_gate 报告无痕）。
 	aigc.SetRealLMRuntimeConfig(cfg.AIGC.RealLM.Endpoint, cfg.AIGC.RealLM.Model, cfg.AIGC.RealLM.Weight)
-	contextTool := tools.NewContextTool(store, bundle.References, cfg.Style)
+	resolvedStyle := bundle.ResolveStyle(cfg.Style)
+	contextTool := tools.NewContextTool(store, bundle.References, resolvedStyle.ID).
+		WithConfiguredStyle(resolvedStyle.Body)
 	commitChapter := tools.NewCommitChapterTool(store)
 	saveFoundation := tools.NewSaveFoundationTool(store)
 	saveReview := tools.NewSaveReviewTool(store)
@@ -798,6 +800,9 @@ func pipelineOutlineAllAgentGate(st *store.Store) agentcore.ToolGate {
 	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
 		if req.Call.Name != "subagent" || st == nil {
 			return nil, nil
+		}
+		if err := st.Runtime.ValidatePipelineRenderCandidateEvidenceTree(); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: "无法验证 render candidate evidence tree：" + err.Error()}, nil
 		}
 		lock, err := st.Runtime.LoadPipelineExecution()
 		if err != nil {

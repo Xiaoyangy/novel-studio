@@ -852,18 +852,12 @@ func (t *ContextTool) styleStatsInputKey(completed []int) string {
 
 // styleStopwords 收集角色名与别名供短语挖掘过滤——出场人名天然高频，不是文风问题。
 func (t *ContextTool) styleStopwords() []string {
-	var words []string
-	if chars, err := t.store.Characters.Load(); err == nil {
-		for _, c := range chars {
-			words = append(words, c.Name)
-			words = append(words, c.Aliases...)
-		}
+	if t == nil || t.store == nil {
+		return nil
 	}
-	if cast, err := t.store.Cast.RecentActive(50); err == nil {
-		for _, e := range cast {
-			words = append(words, e.Name)
-			words = append(words, e.Aliases...)
-		}
+	words, err := t.store.CanonicalSerialStyleMemoryStopwords()
+	if err != nil {
+		return nil
 	}
 	return words
 }
@@ -1485,6 +1479,15 @@ func (t *ContextTool) buildChapterEpisodicMemory(envelope *chapterContextEnvelop
 }
 
 func (t *ContextTool) buildChapterReferencePack(envelope *chapterContextEnvelope, state contextBuildState, warn func(string, error)) {
+	// assets/styles is a prose/review contract, not a planning input.  Keep it
+	// out of world_simulation/planning so changing narrative texture cannot alter
+	// the user's sealed inference path. Draft and full review/writer surfaces get
+	// only the compact parsed rules; the raw markdown is never sent to a model.
+	if state.requestedProfile == "draft" || state.requestedProfile == "" || state.requestedProfile == "full" {
+		if configured := configuredStyleProfileFromMarkdown(t.style, t.configuredStyle); configured != nil {
+			envelope.References["configured_style"] = configured
+		}
+	}
 	if state.writingEngine != nil {
 		envelope.References["writing_engine"] = state.writingEngine
 		if state.styleRules != nil {
