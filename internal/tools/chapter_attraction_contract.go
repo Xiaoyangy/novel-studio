@@ -118,11 +118,34 @@ func attractionRequirementsForChapter(s *store.Store, chapter int) chapterAttrac
 		if progress, err := s.Progress.Load(); err == nil && progress != nil && progress.TotalChapters >= 50 {
 			requirements.Longform = true
 		}
-		if strings.Contains(globalSource, "长篇") || strings.Contains(globalSource, "万字") {
+		if longformScaleDeclared(globalSource) {
 			requirements.Longform = true
 		}
 	}
 	return requirements
+}
+
+// longformScaleDeclared reports an explicit large-scale declaration. It ignores
+// neutral mentions that pair 长篇 with 短篇 (e.g. a POV rule "无论长篇还是短篇，统一
+// 采用第三人称") and a bare 万字 word count, both of which appear in short-story
+// contracts and used to wrongly trigger the chapter-one longform-opening
+// requirement, blocking project-all for the whole book.
+func longformScaleDeclared(text string) bool {
+	for _, neutral := range []string{
+		"无论长篇还是短篇", "无论长篇短篇", "不论长篇还是短篇", "不论长篇短篇",
+		"长篇还是短篇", "长篇或短篇", "长篇与短篇", "长篇短篇",
+	} {
+		text = strings.ReplaceAll(text, neutral, "")
+	}
+	for _, big := range []string{
+		"长篇连载", "长篇小说", "百万字", "数十万字", "几十万字",
+		"十万字", "二十万字", "三十万字", "四十万字", "五十万字", "长篇",
+	} {
+		if strings.Contains(text, big) {
+			return true
+		}
+	}
+	return false
 }
 
 // ChapterAttractionPlanReadyForProject is the shared prewrite/commit contract.

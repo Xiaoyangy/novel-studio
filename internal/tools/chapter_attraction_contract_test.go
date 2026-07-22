@@ -422,3 +422,23 @@ func completeAttractionTestPlan() domain.ChapterPlan {
 		},
 	}}
 }
+
+func TestLongformScaleDeclaredIgnoresNeutralMentions(t *testing.T) {
+	// A short-story contract whose POV rule says "无论长篇还是短篇" must NOT be read
+	// as a longform declaration (that wrongly required a chapter-one longform
+	// opening and blocked project-all for the whole book).
+	shortContracts := []string{
+		"无论长篇还是短篇，统一采用第三人称视角；总字数2.8万—3万中文字",
+		"当代职业爱情短篇，不论长篇短篇都用近距离限知",
+	}
+	for _, c := range shortContracts {
+		if longformScaleDeclared(c) {
+			t.Fatalf("neutral 长篇/短篇 mention must not declare longform: %q", c)
+		}
+	}
+	for _, c := range []string{"这是一部百万字长篇连载", "本书为长篇都市小说", "预计三十万字"} {
+		if !longformScaleDeclared(c) {
+			t.Fatalf("explicit large-scale declaration must register: %q", c)
+		}
+	}
+}
