@@ -28,12 +28,40 @@ func TrendLanguageRequested(text string) bool {
 			return false
 		}
 	}
-	for _, wanted := range []string{"热梗", "网络梗", "流行梗", "轻梗"} {
-		if strings.Contains(text, wanted) {
+	// 逐句判定：热梗关键词只有在所在小句未被回避性动词统辖时才算“要求使用”。
+	// 例如“避免滥用唯美修辞、网络热梗、说教对白”里，“避免”统辖整串顿号列表，
+	// 网络热梗是被禁止而非被要求；旧版仅按子串命中“热梗”会误判成必须使用。
+	keywords := []string{"热梗", "网络梗", "流行梗", "轻梗"}
+	avoidVerbs := []string{"避免", "不要", "禁止", "杜绝", "远离", "拒绝", "慎用", "少用", "不用", "不搞", "不玩", "摒弃", "剔除", "切忌", "忌用", "不采用", "不使用", "不得"}
+	requested := false
+	for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case '。', '！', '？', '\n', '；', ';', '!', '?':
 			return true
 		}
+		return false
+	}) {
+		idx := -1
+		for _, k := range keywords {
+			if i := strings.Index(clause, k); i >= 0 && (idx < 0 || i < idx) {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		governed := false
+		for _, v := range avoidVerbs {
+			if strings.Contains(clause[:idx], v) {
+				governed = true
+				break
+			}
+		}
+		if !governed {
+			requested = true
+		}
 	}
-	return false
+	return requested
 }
 
 // ReaderEntertainmentRequested 判断项目是否把轻松、喜剧或爽感列为明确风格承诺。

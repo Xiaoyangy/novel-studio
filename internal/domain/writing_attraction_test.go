@@ -26,6 +26,28 @@ func TestProjectStyleRequests(t *testing.T) {
 	}
 }
 
+func TestTrendLanguageAvoidanceIsNotARequest(t *testing.T) {
+	// A contract that lists 网络热梗 among things to avoid must NOT activate the
+	// trend-language requirement (previously a bare substring hit on 热梗 made
+	// every chapter's project-all demand a trend_language_plan and fail).
+	avoiding := []string{
+		"避免滥用唯美修辞、网络热梗、说教对白、同义抒情反复、百科搬运、流程报告和证据清单式叙述",
+		"全书克制、具象，远离网络热梗与说教对白",
+		"整体成年克制，杜绝网络热梗",
+	}
+	for _, text := range avoiding {
+		if TrendLanguageRequested(text) {
+			t.Fatalf("avoidance wording must not be read as a trend-language request: %q", text)
+		}
+	}
+	// Genuine requests must still register.
+	for _, text := range []string{"需要网络热梗融入", "可以适当加入轻梗调节气氛", "每章一个热梗，但不堆网络梗"} {
+		if !TrendLanguageRequested(text) {
+			t.Fatalf("explicit trend-language request must register: %q", text)
+		}
+	}
+}
+
 func TestSystemCompanionVoiceRequestedFromWorldRule(t *testing.T) {
 	if !SystemCompanionVoiceRequested("系统是主角的稳定吐槽搭子和情绪支持者，会聊天，也会提醒风险。") {
 		t.Fatal("world-rule companion wording should enable the system voice contract")
