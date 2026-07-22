@@ -16,7 +16,7 @@ A local-first AI novel generator with self-hosted orchestration for long-form fi
 
 [简体中文](README.md) · [English](README_EN.md)
 
-[Why novel-studio?](#why-novel-studio) · [Preview](#preview) · [Quick start](#quick-start) · [Workflow](#from-world-to-prose) · [RAG](#rag-that-can-be-traced) · [Docs](#documentation-and-community)
+[Quick start](#quick-start) · [Why novel-studio?](#why-novel-studio) · [Preview](#preview) · [Workflow](#from-world-to-prose) · [RAG](#rag-that-can-be-traced) · [Docs](#documentation-and-community)
 
 </div>
 
@@ -63,9 +63,9 @@ Generating a plausible page is easy. Keeping a story coherent after dozens or hu
 <details>
 <summary><strong>Character and off-screen world views</strong></summary>
 
-![novel-studio character simulation with goals, pressure, knowledge boundaries, relationships and growth](docs/assets/dashboard-characters-20260710.png)
+![novel-studio character simulation with goals, pressure, knowledge boundaries, relationships and growth](docs/assets/dashboard-characters-20260710.webp)
 
-![novel-studio off-screen world simulation with independent actions, faction clocks, social mood and information flow](docs/assets/dashboard-offscreen-20260710.png)
+![novel-studio off-screen world simulation with independent actions, faction clocks, social mood and information flow](docs/assets/dashboard-offscreen-20260710.webp)
 
 </details>
 
@@ -77,7 +77,7 @@ The dashboard cross-checks prose, progress, sealed planning, reviews, RAG, check
 
 - Native macOS or Linux. Use WSL2 on Windows; do not use the native Windows ZIP from an older Release.
 - Release installs do not require a local Go toolchain; building from source requires Go 1.25.5.
-- At least one configured text-model provider. The complete sealed pipeline requires the `reviewer` role to explicitly use DeepSeek.
+- At least one configured text-model provider. The complete sealed pipeline requires `roles.reviewer` to explicitly target DeepSeek; the standalone `--draft-ai-judge` command enforces the same route.
 - Python 3 for the dashboard. It currently starts from a source checkout; the one-line Release installer installs only the CLI binary. Embeddings and Qdrant are optional and config-driven.
 - “Local-first” does not automatically mean fully offline. That also depends on text, embedding and vector providers, plus whether the run invokes `web_research` or another network-dependent setup step.
 
@@ -95,8 +95,11 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ```bash
-# Option B: stable Release, CLI only
-curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
+# Option B: stable Release, CLI only; install without sudo
+mkdir -p "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \
+  | NOVEL_STUDIO_INSTALL_DIR="$HOME/.local/bin" sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ### 2. Configure and verify providers
@@ -106,7 +109,7 @@ novel-studio
 novel-studio --check
 ```
 
-Global configuration lives at `~/.novel-studio/config.json`. A project-local `./.novel-studio/config.json` can override it. See [config.example.jsonc](config.example.jsonc).
+Global configuration lives at `~/.novel-studio/config.json`. A project-local `./.novel-studio/config.json` can override it. The first-run wizard configures only the default model route; before running the complete sealed pipeline, add `providers.deepseek` and `roles.reviewer` as shown in [config.example.jsonc](config.example.jsonc). `--check` verifies configured routes, and the pipeline rejects a non-DeepSeek reviewer before prose review.
 
 ### 3. Start a book
 
@@ -129,16 +132,28 @@ This creates the project and enters a **bounded, resumable** pipeline. It does n
 novel-studio --pipeline --dir data/runs/<book-name>
 ```
 
-Repeat the same command to continue from durable evidence. Do not edit `progress.json` by hand, and do not run two writing pipelines for the same book.
+Repeat the same command until every arc and chapter has been accepted. The pipeline resumes from durable evidence rather than rerunning completed work. Do not edit `progress.json` by hand, and do not run two writing pipelines for the same book.
 
-### 5. Open the dashboard from the source checkout
+### 5. Finalize and deliver an eligible short book
+
+The default stages do not include whole-book review. After the final chapter and terminal-arc receipt are present, run:
 
 ```bash
-novel-studio service start
+novel-studio --pipeline --dir data/runs/<book-name> \
+  --stages finalize,deliver
+```
+
+Eligible short books produce `output/novel/正文.md`, whole-book review artifacts and a publication package. A long-form project's current terminal state is its complete chapter-acceptance chain; this is not presented as an exact-book review.
+
+### 6. Open the dashboard from the source checkout
+
+```bash
 novel-studio service open
 ```
 
-Default URL: [http://127.0.0.1:8765/](http://127.0.0.1:8765/)
+`service open` starts the dashboard in the background when needed, then opens the browser. Default URL: [http://127.0.0.1:8765/](http://127.0.0.1:8765/). To watch server logs in the foreground, run `novel-studio service start` in a separate terminal.
+
+> **Path guide:** pipeline and `--diag` use `data/runs/<book-name>`; RAG commands use `data/runs/<book-name>/output/novel`; dashboard commands run from the source-checkout root.
 
 ## From world to prose
 
@@ -244,7 +259,7 @@ Roles can use different providers, models and reasoning effort. Adapters current
 | `budget` | Per-book cost warnings and hard stops |
 | `notify` | Desktop or custom notifications |
 
-Project state stays local. The complete sealed pipeline requires its independent bare-text `reviewer` to explicitly target DeepSeek; other production roles remain independently routable. A run is fully offline only when every active role and retrieval service is local and no stage invokes `web_research` or another network-dependent setup step. Never commit real API keys.
+Project state stays local. The complete sealed pipeline requires an explicitly configured DeepSeek `reviewer` for independent raw-body review; other production roles remain independently routable. A run is fully offline only when every active role and retrieval service is local and no stage invokes `web_research` or another network-dependent setup step. Never commit real API keys.
 
 ## Who is it for?
 
@@ -258,17 +273,20 @@ novel-studio is currently a CLI-centered production engine, not a drag-and-drop 
 
 ## Common commands
 
+In the table below, `<RUN>` means `data/runs/<book-name>`.
+
 | Command | Purpose |
 |---|---|
 | `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the pipeline |
-| `novel-studio --pipeline --dir data/runs/<book>` | Resume the next legal step |
-| `novel-studio --pipeline --stages preplan,project-all,seal` | Simulate and seal the current arc without prose |
-| `novel-studio --pipeline --stages preplan,project-all,seal,promote,render` | Verify the sealed arc, then render and review the next chapter |
-| `novel-studio --pipeline --stages finalize,deliver` | For eligible short books only, run exact-book review and build the publication package after all chapters pass |
-| `novel-studio --build-rag --dir .../output/novel` | Build the project RAG index |
-| `novel-studio --rag-ready --dir .../output/novel` | Validate embedding and vector state |
+| `novel-studio --pipeline --dir <RUN>` | Resume the next legal step |
+| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Simulate and seal the current arc without prose |
+| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal,promote,render` | Verify the sealed arc, then render and review the next chapter |
+| `novel-studio --pipeline --dir <RUN> --stages render --refresh-render-input` | Refresh model/provider/prompt bindings for a sealed chapter that has no durable candidate evidence |
+| `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | For eligible short books only, run exact-book review and build the publication package after all chapters pass |
+| `novel-studio --build-rag --dir <RUN>/output/novel` | Build the project RAG index |
+| `novel-studio --rag-ready --dir <RUN>/output/novel` | Validate embedding and vector state |
 | `novel-studio service open` | Open the dashboard |
-| `novel-studio --diag` | Run read-only diagnostics |
+| `novel-studio --diag --dir <RUN>` | Generate diagnostics without advancing production state |
 | `novel-studio --check` | Check provider, model and fallback configuration |
 
 Advanced rebase, outline repair, successor-generation, slow-run diagnostics, the full output tree and execution receipts live in the [production reference](README-TECHNICAL.md).
@@ -337,6 +355,7 @@ go vet ./...
 go build -o /tmp/novel-studio ./cmd/novel-studio
 
 python3 scripts/validate_skill_context.py
+python3 -m unittest discover -s quality/audit/scripts -p 'test_*.py' -v
 python3 -m unittest services.dashboard.test_server -v
 
 git diff --check

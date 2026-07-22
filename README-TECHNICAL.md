@@ -273,9 +273,9 @@ novel-studio --pipeline \
 <details>
 <summary><strong>展开人物与离屏世界视图</strong></summary>
 
-![novel-studio 人物视图：角色档案、目标压力、知识边界和关系契约](docs/assets/dashboard-characters-20260710.png)
+![novel-studio 人物视图：角色档案、目标压力、知识边界和关系契约](docs/assets/dashboard-characters-20260710.webp)
 
-![novel-studio 离屏世界视图：角色独立行动、势力进度钟与信息传播](docs/assets/dashboard-offscreen-20260710.png)
+![novel-studio 离屏世界视图：角色独立行动、势力进度钟与信息传播](docs/assets/dashboard-offscreen-20260710.webp)
 
 </details>
 
