@@ -413,7 +413,13 @@ func contextBudget(chapter int, profile string) int {
 		return 60 * 1024
 	}
 	switch profile {
-	case "planning", "draft":
+	case "planning":
+		// The arc's project_all_state accumulates as chapters are projected, so
+		// later chapters carry a larger planning context. 64 KiB overflowed by
+		// chapter 3 on a normal book even though the writer model has a 272K-token
+		// window; use a budget that reflects that capacity.
+		return 160 * 1024
+	case "draft":
 		return 64 * 1024
 	case "world_simulation":
 		return 96 * 1024
@@ -429,7 +435,7 @@ func contextBudget(chapter int, profile string) int {
 // remainder may use the same 96 KiB ceiling as world simulation.
 func contextHardBudget(chapter int, profile string) int {
 	if chapter > 0 && profile == "planning" {
-		return 96 * 1024
+		return 224 * 1024
 	}
 	return contextBudget(chapter, profile)
 }

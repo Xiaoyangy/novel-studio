@@ -1238,10 +1238,10 @@ func TestFinalizeContextResultAllowsOnlyBoundedRewritePlanningOverflow(t *testin
 	t.Run("rewrite planning keeps protected source after preferred trimming", func(t *testing.T) {
 		working := map[string]any{
 			"rewrite_source": map[string]any{
-				"current_body": strings.Repeat("b", 42*1024),
+				"current_body": strings.Repeat("b", 120*1024),
 			},
 			"rewrite_brief": map[string]any{
-				"brief_markdown": strings.Repeat("r", 26*1024),
+				"brief_markdown": strings.Repeat("r", 70*1024),
 			},
 			"current_chapter_outline": map[string]any{"chapter": 1, "goal": "保留当前章任务"},
 		}
@@ -1284,7 +1284,7 @@ func TestFinalizeContextResultAllowsOnlyBoundedRewritePlanningOverflow(t *testin
 		result := map[string]any{
 			"active_chapter_task": map[string]any{
 				"mode":   "new_chapter",
-				"policy": strings.Repeat("x", 70*1024),
+				"policy": strings.Repeat("x", 170*1024),
 			},
 		}
 		if raw, err := finalizeContextResult(result, 1, "planning"); err == nil || raw != nil {
@@ -1296,7 +1296,7 @@ func TestFinalizeContextResultAllowsOnlyBoundedRewritePlanningOverflow(t *testin
 		result := map[string]any{
 			"working_memory": map[string]any{
 				"rewrite_source": map[string]any{
-					"current_body": strings.Repeat("x", 100*1024),
+					"current_body": strings.Repeat("x", 240*1024),
 				},
 			},
 		}
