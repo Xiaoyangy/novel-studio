@@ -36,10 +36,10 @@ novel-studio 是一个开源、自托管、local-first 的 AI 小说生产系统
 |---|---|
 | 单世界全角色推演 | 每个角色依据自己的目标、压力、知识、关系和资源作决定；离屏角色不会围着主角静止等待 |
 | 主视角投影 | 完整世界决定留在模拟层，正文只接收主角可见事实、必要结果与人物声口 |
-| 读者优先渲染 | 三采样按合成分选稿，以确定性读者体验分（现场具体、对白活、节奏起伏、主视角在场、章末前推力）为先，反 AI 腔真实感为辅；读者体验分不进硬门禁，只驱动选稿与看板 |
+| 读者优先渲染 | 普通 Writer/Drafter 路径可按读者体验分三采样择优；sealed `NewRender` 单次调用并把同一分数用于审核与看板。读者体验分不进硬门禁 |
 | 规划与渲染分离 | 全书章纲先冻结；此后每次只对当前一弧完成 `preplan → project-all → seal`，再按章 `promote → render → exact-body review`，弧内全章验收后才进入下一弧 |
 | 长篇记忆 | 项目事实、写法资料、对标素材和审核校准分通道路由，支持 BM25、embedding、本地向量与 Qdrant |
-| 质量闭环 | 机械规则、本地整章 AIGC、独立 DeepSeek 裸正文审核、Editor 和 hard consistency 共同决定候选正文能否最终验收与交付 |
+| 质量闭环 | 机械规则、本地整章 AIGC、独立裸正文 Reviewer 分支（生产建议 DeepSeek）、Editor 和 hard consistency 共同决定候选正文能否最终验收与交付 |
 | 断点恢复 | pipeline、章节、review、rewrite、commit 和 RAG 都有持久化状态与 checkpoint |
 | 项目隔离 | 每本书拥有独立 prompt、世界、人物、计划、正文、审核、RAG 和交付快照 |
 | 有界执行 | 每个 sealed candidate 最多预留 3 个持久正文 realization 名额（初稿 + 2 次整章重渲染）；第 4 个名额在 provider 前熔断 |
@@ -67,7 +67,7 @@ Host 加载 exact frozen render context
 | 单次正文调用 | 一次持久 dispatch reservation 只能换取一个绑定当前执行租约的一次性 permit；一次 permit 至多越过一次正文 provider 边界，也可能在 provider 前失败而不产生正文调用 |
 | 有界重渲染 | 同一 sealed candidate 最多预留 3 个持久 realization 名额（初稿 + 最多两次整章重渲染）；崩溃不会返还已预留名额，第 4 个名额在 provider 前熔断。合法 successor candidate 使用新的身份与账本，不等于删除旧账本重置 |
 | 精确恢复 | sealed plan identity 与 exact body SHA 两级寻址；恢复按不可变 phase receipt 跳过已经完成的 Writer、review 或目录发布步骤 |
-| 审核去重 | Editor 与 DeepSeek 按 exact request identity 合并并发 cache miss；等待者在锁内复读缓存。若胜者在 provider 返回后、缓存落盘前崩溃，恢复仍可能重试，不承诺跨崩溃 exactly-once |
+| 审核去重 | Editor 与裸正文 Reviewer 分支按 exact request identity 合并并发 cache miss；等待者在锁内复读缓存。若胜者在 provider 返回后、缓存落盘前崩溃，恢复仍可能重试，不承诺跨崩溃 exactly-once |
 | 慢章诊断 | 15 秒 heartbeat、5 分钟无持久进展标记 stalled、25 分钟生成一次脱敏诊断；watchdog 只诊断，不会擅自取消仍在运行的 provider |
 
 > [!NOTE]
@@ -141,7 +141,7 @@ projected state delta。
 - 新增服务端 `project_all_grounded` authority receipt：绑定 generation/context/input/角色决定和 phase access；generation 先固定，再生成 simulation ID，任何身份漂移都 fail closed。
 - 第二投影章起以逐角色 projected continuity 为权威；zero-init 只为从未出现过连续态的角色提供首次入场回退，`hold_baseline` 控制 no-op 不进入 state delta。
 - 正文上下文升级到冻结 `render_packet v11`：保留 hard contract、事实锚点、人物声口与有来源的 craft methods；raw RAG、隐藏世界状态和检测指标不进入正文会话。
-- render 改为候选目录生产：Drafter、commit、DeepSeek/Editor exact-body review、actual-delta 匹配都在副本内完成，通过后才原子发布。
+- render 改为候选目录生产：Drafter、commit、裸正文 Reviewer / Editor exact-body review、actual-delta 匹配都在副本内完成，通过后才原子发布。
 - 新增多文件 project-all intent journal 与目录发布 transaction；覆盖 bundle/cursor 六个写入窗口、live archive/candidate promote 四个窗口、跨进程锁、幂等恢复和内容篡改检测。
 - outline-all 的最后一条模型消息由宿主从唯一 `OUTLINE_ALL_INTENT` 重新生成，只包含本次 operation/type/volume/arc/span；即使前文含有大量旧弧，模型也不能把历史目标当成当前授权，原有候选与 operation receipt 可原样断点续跑。
 - `ArcPlanningManifest` 额外封存章级字数区间与来源 `user_rules` 摘要；每份 chapter acceptance 记录并复算最终正文 Unicode rune 数，弧完成重放也会再次校验。已经被 acceptance 绑定的章级审核文件禁止被 standalone review 覆盖。
@@ -206,7 +206,7 @@ novel-studio --check
 
 配置默认读取 `~/.novel-studio/config.json`；项目目录中的 `./.novel-studio/config.json` 可覆盖全局配置。完整示例见 [config.example.jsonc](config.example.jsonc)。
 
-完整 sealed pipeline 的独立裸正文审核要求 `reviewer` 显式配置为 DeepSeek；Editor、Drafter 与其他生产角色仍可使用不同 provider。
+生产配置建议把独立裸正文 `reviewer` 路由到 DeepSeek；Editor、Drafter 与其他角色仍可使用不同 provider。普通 review 对非 DeepSeek 路由只记录配置警告，不会仅因 provider 身份阻断；审核结论和其他门禁仍正常决定验收。独立 `--draft-ai-judge` 命令则要求有效 reviewer 的 provider 与 model 均为 DeepSeek。
 
 ### 新建一本书
 
@@ -464,7 +464,7 @@ novel-studio --pipeline --dir "$PROJECT" \
 1. **事实对不对**：金额、数量、时间、地点、知识边界、授权和因果顺序是否与正式 plan 一致。
 2. **故事好不好看**：目标、阻力、爽点、关系变化、人物声口和章节钩子是否成立。
 3. **文字像不像人**：是否存在对白传送带、流程报告、过度解释、同构节奏、客服式系统话术或元数据泄漏。
-4. **证据是不是同一稿**：本地门禁、DeepSeek 裸正文、Editor、consistency 和 commit 是否绑定同一个 `body_sha256`。
+4. **证据是不是同一稿**：本地门禁、独立裸正文 Reviewer、Editor、consistency 和 commit 是否绑定同一个 `body_sha256`。
 
 ```text
 exact frozen render context + render_packet v11
@@ -517,7 +517,7 @@ exact frozen render context + render_packet v11
 - 普通 Writer/Drafter 会话对 `draft_chapter` 做三采样（`candidateCount=3`）；sealed render 路径（`NewRender`）刻意只发一次 provider 调用（`renderCandidateCount=1`），不走投机采样与 pairwise。
 - 每个候选算两个确定性分：`RoughnessScore`（反模板真实感，越高越不像平滑 AI 文）与 `ReaderExperienceScore ∈ [0,1]`（读者体验，越高越好读）。后者由五项加权构成——现场具体度、对白活性、句长变异系数（节奏起伏）、主视角在场、章末前推力，再对文字墙、碎句网格和“验收录像”式流程报告扣分。
 - 确定性初筛按合成分 `SelectionScore = 0.6·ReaderExperienceScore + 0.4·(RoughnessScore/1.5)` 排序、淘汰最差；剩余 top2 若配置了 `reviewer` 裁判（异族防同族自偏）走换位两轮一致的 pairwise 终选，不一致或未配置则保持确定性首选。旧版只按 `RoughnessScore` 选稿，会系统性地选出“最粗糙但最难读”的一稿——这是本次修正的核心。
-- 读者体验分**刻意不进硬门禁**：字数、禁用词、本地 whole-text AIGC、DeepSeek 裸正文判定与 consistency 仍是硬拦截，读者体验分只驱动选稿与可视化，不与正确性门禁抢优先级。达标只是及格，好读才是目标。
+- 读者体验分**刻意不进硬门禁**：字数、禁用词、本地 whole-text AIGC、独立裸正文 Reviewer 判定与 consistency 仍是硬拦截，读者体验分只驱动普通路径选稿与全路径可视化，不与正确性门禁抢优先级。达标只是及格，好读才是目标。
 - 该分落盘于 `ChapterAIVoiceMetrics.reader_experience_score`、`SamplingCandidate.readability_score` / `selection_score`，并在 `draft_chapter` 响应、章级审核报告与看板同时展示，为写作循环提供一个正向靶子。
 - 选稿语义变化会 bump `sampler.ProtocolDigest`（当前 v4）；该指纹绑定进 sealed render receipt，回归测试锁定其稳定性。
 
