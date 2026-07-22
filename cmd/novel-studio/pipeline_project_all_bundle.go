@@ -66,6 +66,33 @@ func buildPipelineProjectedChapterBundle(
 	}
 	simulation := *artifacts.WorldSimulation
 	plan := *artifacts.Plan
+	// simulation_id is a content hash (chNNN-<hex>) the planner LLM must echo
+	// verbatim; models routinely reproduce it wrong. The chapter and generation
+	// identity are already validated above, so this plan provably belongs to this
+	// simulation — bind the authoritative id (and keep context_sources
+	// consistent) instead of failing the projected-bundle check on a mis-typed
+	// hash the model was never a reliable source of.
+	if strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID) {
+		stale := strings.TrimSpace(plan.CausalSimulation.WorldSimulationID)
+		plan.CausalSimulation.WorldSimulationID = simulation.SimulationID
+		if stale != "" {
+			sources := append([]string(nil), plan.CausalSimulation.ContextSources...)
+			for i, src := range sources {
+				if strings.TrimSpace(src) == stale {
+					sources[i] = simulation.SimulationID
+				}
+			}
+			plan.CausalSimulation.ContextSources = sources
+		}
+	}
+	// The protagonist decision must equal the simulation projection's chosen
+	// decision verbatim; the planner LLM paraphrases it. The projection is the
+	// authority for what the protagonist decided, so bind its exact text rather
+	// than fail the bundle on a reworded copy.
+	if chosen := strings.TrimSpace(simulation.ProtagonistProjection.ChosenDecision); chosen != "" &&
+		strings.TrimSpace(plan.CausalSimulation.ProtagonistDecision) != chosen {
+		plan.CausalSimulation.ProtagonistDecision = simulation.ProtagonistProjection.ChosenDecision
+	}
 	if domain.IsArcPlanningGenerationV2(generation) {
 		var predecessor *domain.ProjectedPlanningPredecessorContractV2
 		if chapter > generation.FirstProjectedChapter {
