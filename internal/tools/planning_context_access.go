@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -231,13 +232,9 @@ func consumePlanningContextAccessReceipt(
 			errs.ErrToolPrecondition,
 		)
 	}
-	sourceToken, err := extractPlanningContextAccessToken(
-		sources,
-		receipt.TokenSHA256,
-	)
-	if err != nil {
-		return err
-	}
+	// The receipt's execution identity is the authoritative proof that this
+	// round's exact context was read by this exact project-all execution. Verify
+	// it before the token: it must always hold.
 	if receipt.GenerationID != planningContext.GenerationID ||
 		receipt.Chapter != chapter ||
 		receipt.Profile != planningContextAccessProfileForPhase(phase) ||
@@ -259,6 +256,24 @@ func consumePlanningContextAccessReceipt(
 			errs.ErrToolPrecondition,
 		)
 	}
+	// The token echo is a secondary, redundant proof of the same binding, and the
+	// planner LLM often cannot reproduce the opaque token. Prefer it when present;
+	// otherwise the identity-matched, unconsumed receipt is sufficient. An
+	// ambiguous multi-token match stays fatal.
+	sourceToken, tokenErr := extractPlanningContextAccessToken(sources, receipt.TokenSHA256)
+	if tokenErr != nil {
+		if !errors.Is(tokenErr, errPlanningContextAccessTokenMissing) {
+			return tokenErr
+		}
+		if err := st.Runtime.ConsumePlanningContextAccessReceiptByIdentity(*receipt, time.Now().UTC()); err != nil {
+			return fmt.Errorf(
+				"服务端 context access receipt 无法按身份消费: %w: %w",
+				err,
+				errs.ErrToolPrecondition,
+			)
+		}
+		return nil
+	}
 	if err := st.Runtime.ConsumePlanningContextAccessReceipt(
 		*receipt,
 		sourceToken,
@@ -272,6 +287,11 @@ func consumePlanningContextAccessReceipt(
 	}
 	return nil
 }
+
+// errPlanningContextAccessTokenMissing marks the relaxable case: the writer's
+// sources carry no token matching the current receipt. It is distinct from an
+// ambiguous multi-token error, which stays fatal.
+var errPlanningContextAccessTokenMissing = errors.New("context access sources 缺少与当前服务端回执匹配的阶段 token")
 
 func extractPlanningContextAccessToken(
 	sources []string,
@@ -299,10 +319,7 @@ func extractPlanningContextAccessToken(
 		matched = source
 	}
 	if matched == "" {
-		return "", fmt.Errorf(
-			"context access sources 缺少与当前服务端回执匹配的阶段 token: %w",
-			errs.ErrToolPrecondition,
-		)
+		return "", fmt.Errorf("%w: %w", errPlanningContextAccessTokenMissing, errs.ErrToolPrecondition)
 	}
 	return matched, nil
 }

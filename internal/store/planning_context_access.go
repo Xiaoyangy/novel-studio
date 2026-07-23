@@ -67,6 +67,29 @@ func (s *RuntimeStore) ConsumePlanningContextAccessReceipt(
 	sourceToken string,
 	consumedAt time.Time,
 ) error {
+	return s.consumePlanningContextAccessReceipt(expected, sourceToken, true, consumedAt)
+}
+
+// ConsumePlanningContextAccessReceiptByIdentity consumes the receipt without a
+// source-token match. It is only safe when the caller has already verified the
+// receipt's full execution identity (generation/chapter/digest/lock owner,
+// process and times): that binding already proves this round's context was read
+// by this exact execution. The opaque token echo is redundant with it and the
+// planner LLM cannot reliably reproduce it. Digest match, single-use and expiry
+// are still enforced.
+func (s *RuntimeStore) ConsumePlanningContextAccessReceiptByIdentity(
+	expected domain.PlanningContextAccessReceipt,
+	consumedAt time.Time,
+) error {
+	return s.consumePlanningContextAccessReceipt(expected, "", false, consumedAt)
+}
+
+func (s *RuntimeStore) consumePlanningContextAccessReceipt(
+	expected domain.PlanningContextAccessReceipt,
+	sourceToken string,
+	requireToken bool,
+	consumedAt time.Time,
+) error {
 	if err := domain.ValidatePlanningContextAccessReceipt(expected); err != nil {
 		return err
 	}
@@ -98,12 +121,14 @@ func (s *RuntimeStore) ConsumePlanningContextAccessReceipt(
 		if consumedAt.Before(current.IssuedAt) || !consumedAt.Before(current.ExpiresAt) {
 			return fmt.Errorf("planning context access receipt is expired")
 		}
-		tokenSHA, hashErr := domain.PlanningContextAccessTokenSHA256(sourceToken)
-		if hashErr != nil || subtle.ConstantTimeCompare(
-			[]byte(tokenSHA),
-			[]byte(current.TokenSHA256),
-		) != 1 {
-			return fmt.Errorf("planning context access receipt token does not match")
+		if requireToken {
+			tokenSHA, hashErr := domain.PlanningContextAccessTokenSHA256(sourceToken)
+			if hashErr != nil || subtle.ConstantTimeCompare(
+				[]byte(tokenSHA),
+				[]byte(current.TokenSHA256),
+			) != 1 {
+				return fmt.Errorf("planning context access receipt token does not match")
+			}
 		}
 		current.ConsumedAt = consumedAt
 		return s.io.WriteJSONUnlocked(path, current)
