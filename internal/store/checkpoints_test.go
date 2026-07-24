@@ -1,10 +1,12 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -65,6 +67,61 @@ func TestCheckpointStore_Idempotent(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, checkpointsFile))
 	if got := countLines(data); got != 1 {
 		t.Fatalf("disk should have 1 line, got %d", got)
+	}
+}
+
+func TestCheckpointStore_AppendArtifactAlwaysCreatesSameBodyEpoch(t *testing.T) {
+	cs, dir := newTestCheckpointStore(t)
+	artifact := "premise.md"
+	if err := os.WriteFile(filepath.Join(dir, artifact), []byte("same body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := cs.AppendArtifactAlways(domain.GlobalScope(), "foundation_refresh:premise", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cs.AppendArtifactAlways(domain.GlobalScope(), "foundation_refresh:premise", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Seq <= first.Seq || second.Digest != first.Digest {
+		t.Fatalf("same-body refresh did not create a fresh hashed epoch: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestCheckpointStore_AllStrictRejectsMalformedJournal(t *testing.T) {
+	cs, dir := newTestCheckpointStore(t)
+	path := filepath.Join(dir, checkpointsFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{truncated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.AllStrict(); err == nil {
+		t.Fatal("strict checkpoint reader accepted a malformed journal")
+	}
+}
+
+func TestCheckpointStore_AllStrictRejectsSemanticallyInvalidGlobalScope(t *testing.T) {
+	cs, dir := newTestCheckpointStore(t)
+	cp := domain.Checkpoint{
+		Seq: 1, Scope: domain.Scope{Kind: domain.ScopeGlobal, Chapter: 1},
+		Step: "forged-global", OccurredAt: time.Now().UTC(),
+	}
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, checkpointsFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.AllStrict(); err == nil {
+		t.Fatal("strict checkpoint reader accepted a forged global scope")
 	}
 }
 

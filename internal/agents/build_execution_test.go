@@ -99,6 +99,182 @@ func TestSingleSubagentModeGateAllowsSynchronousSingleTask(t *testing.T) {
 	}
 }
 
+func TestFoundationRefreshCoordinatorGateAllowsOnlyArchitectLong(t *testing.T) {
+	gate := foundationRefreshCoordinatorGate("premise")
+	for _, tc := range []struct {
+		name    string
+		args    string
+		allowed bool
+	}{
+		{name: "subagent", args: `{"agent":"architect_long","task":"refresh premise"}`, allowed: true},
+		{name: "subagent", args: `{"agent":"architect_short","task":"refresh premise"}`, allowed: false},
+		{name: "subagent", args: `{"agent":"writer","task":"write"}`, allowed: false},
+		{name: "novel_context", args: `{}`, allowed: false},
+		{name: "save_user_rules", args: `{}`, allowed: false},
+		{name: "reopen_book", args: `{}`, allowed: false},
+	} {
+		decision, err := gate(context.Background(), agentcore.GateRequest{Call: agentcore.ToolCall{
+			Name: tc.name, Args: json.RawMessage(tc.args),
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotAllowed := decision == nil || decision.Allowed
+		if gotAllowed != tc.allowed {
+			t.Fatalf("tool=%s args=%s allowed=%v decision=%+v", tc.name, tc.args, gotAllowed, decision)
+		}
+	}
+}
+
+func TestFoundationRefreshStopsAfterFirstSuccessfulExactSave(t *testing.T) {
+	result := json.RawMessage(`{"saved":true,"type":"premise","foundation_ready":true}`)
+	if !foundationRefreshShouldStopAfterToolResult("premise", "save_foundation", result) {
+		t.Fatal("exact successful foundation save did not stop the refresh subagent")
+	}
+	if foundationRefreshShouldStopAfterToolResult("characters", "save_foundation", result) ||
+		foundationRefreshShouldStopAfterToolResult("premise", "novel_context", result) {
+		t.Fatal("refresh stop accepted a different target or tool")
+	}
+}
+
+func TestPipelineInitialWorldTickAgentGateAllowsOnlyCurrentContractArchitectLong(t *testing.T) {
+	st, contract := initialWorldTickAgentGateFixture(t, "林照微只提交独立风险告知，许珩单方保留四十八小时窗口", "章末贺今棠的名字出现在公开委托候选名单")
+	gate := pipelineInitialWorldTickAgentGate(st)
+	partialTask := strings.Join([]string{
+		contract.Marker,
+		contract.CoreEvent,
+		contract.Hook,
+		tools.InitialWorldTickNoPreemptToken,
+	}, "\n")
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		agent   string
+		task    string
+		allowed bool
+	}{
+		{name: "exact contract", tool: "subagent", agent: "architect_long", task: contract.Block, allowed: true},
+		{name: "contract inside instruction", tool: "subagent", agent: "architect_long", task: "只执行初始 world_tick：\n" + contract.Block, allowed: true},
+		{name: "wrong agent", tool: "subagent", agent: "architect_short", task: contract.Block},
+		{name: "writer", tool: "subagent", agent: "writer", task: contract.Block},
+		{name: "missing task", tool: "subagent", agent: "architect_long"},
+		{name: "token without full no-preempt block", tool: "subagent", agent: "architect_long", task: partialTask},
+		{name: "non subagent", tool: "novel_context"},
+		{name: "coordinator mutation", tool: "save_user_rules"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"agent": tc.agent, "task": tc.task})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := gate(context.Background(), agentcore.GateRequest{
+				Call: agentcore.ToolCall{Name: tc.tool, Args: args},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotAllowed := decision == nil || decision.Allowed
+			if gotAllowed != tc.allowed {
+				t.Fatalf("allowed=%v, decision=%+v", gotAllowed, decision)
+			}
+			if !tc.allowed && (decision == nil || !strings.Contains(decision.Reason, contract.Block)) {
+				t.Fatalf("rejection did not return the complete current retry contract: %+v", decision)
+			}
+		})
+	}
+}
+
+func TestPipelineInitialWorldTickAgentGateRejectsTaskAfterAuthoritativeOutlineDrift(t *testing.T) {
+	st, stale := initialWorldTickAgentGateFixture(t, "旧核心：林照微只发出风险告知", "旧钩子：名单尚未公开")
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumes[0].Arcs[0].Chapters[0].CoreEvent = "新核心：林照微完成独立取样后选择公开风险告知"
+	volumes[0].Arcs[0].Chapters[0].Hook = "新钩子：贺今棠进入公开委托候选名单"
+	if err := st.Outline.SaveLayeredOutline(volumes); err != nil {
+		t.Fatal(err)
+	}
+	current, err := tools.BuildInitialWorldTickDispatchContract(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Marker == stale.Marker {
+		t.Fatal("outline drift did not change the signed dispatch marker")
+	}
+
+	gate := pipelineInitialWorldTickAgentGate(st)
+	staleArgs, _ := json.Marshal(map[string]string{"agent": "architect_long", "task": stale.Block})
+	decision, err := gate(context.Background(), agentcore.GateRequest{
+		Call: agentcore.ToolCall{Name: "subagent", Args: staleArgs},
+	})
+	if err != nil || decision == nil || decision.Allowed {
+		t.Fatalf("stale contract crossed the world_tick gate: decision=%+v err=%v", decision, err)
+	}
+	if !strings.Contains(decision.Reason, current.Block) {
+		t.Fatalf("stale rejection did not return current contract: %s", decision.Reason)
+	}
+
+	currentArgs, _ := json.Marshal(map[string]string{"agent": "architect_long", "task": current.Block})
+	decision, err = gate(context.Background(), agentcore.GateRequest{
+		Call: agentcore.ToolCall{Name: "subagent", Args: currentArgs},
+	})
+	if err != nil || decision != nil && !decision.Allowed {
+		t.Fatalf("current authoritative contract was rejected: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestPipelineInitialWorldTickAgentGateDoesNotAffectOtherExecutionModes(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: "non-world-tick-agent-gate-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gate := pipelineInitialWorldTickAgentGate(st)
+	for _, request := range []agentcore.GateRequest{
+		{Call: agentcore.ToolCall{Name: "reopen_book", Args: json.RawMessage(`{}`)}},
+		{Call: agentcore.ToolCall{Name: "subagent", Args: json.RawMessage(`{"agent":"writer","task":"写第1章"}`)}},
+	} {
+		decision, err := gate(context.Background(), request)
+		if err != nil || decision != nil {
+			t.Fatalf("non-world_tick mode was affected: decision=%+v err=%v", decision, err)
+		}
+	}
+}
+
+func initialWorldTickAgentGateFixture(t *testing.T, coreEvent, hook string) (*store.Store, tools.InitialWorldTickDispatchContract) {
+	t.Helper()
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Chapters: []domain.OutlineEntry{{
+				Title: "公开窗口", CoreEvent: coreEvent, Hook: hook,
+			}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionWorldTick, TargetChapter: 1, Owner: "initial-world-tick-agent-gate-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contract, err := tools.BuildInitialWorldTickDispatchContract(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, contract
+}
+
 func TestFrozenRenderToolInventoryRejectsDynamicResearch(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

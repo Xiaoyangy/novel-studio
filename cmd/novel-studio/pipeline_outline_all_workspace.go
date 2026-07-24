@@ -509,6 +509,69 @@ func validatePipelineOutlineAllEntry(st *store.Store) error {
 	return nil
 }
 
+// validatePipelineOutlineAllLiveEntry adds the pre-attempt evidence boundary
+// used only on the live chapter-zero tree. Candidate outline-all operations
+// legitimately append arc-scoped checkpoints, so their per-operation validator
+// must remain limited to canon/prose/projection evidence.
+func validatePipelineOutlineAllLiveEntry(st *store.Store) error {
+	if err := validatePipelineOutlineAllEntry(st); err != nil {
+		return err
+	}
+	checkpoints, err := st.Checkpoints.AllStrict()
+	if err != nil {
+		return fmt.Errorf("outline-all requires an intact checkpoint journal: %w", err)
+	}
+	for _, checkpoint := range checkpoints {
+		if checkpoint.Scope.Kind != domain.ScopeGlobal {
+			return fmt.Errorf(
+				"outline-all refuses %s checkpoint seq=%d step=%s before an explicit rebase",
+				checkpoint.Scope.String(), checkpoint.Seq, checkpoint.Step,
+			)
+		}
+	}
+	return nil
+}
+
+func ensurePipelineOutlineAllGeneration(
+	st *store.Store,
+	proposedID string,
+) (string, bool, error) {
+	if st == nil {
+		return "", false, fmt.Errorf("outline-all generation initialization requires a store")
+	}
+	if err := validatePipelineOutlineAllLiveEntry(st); err != nil {
+		return "", false, err
+	}
+	progress, err := st.Progress.Load()
+	if err != nil || progress == nil {
+		return "", false, fmt.Errorf("outline-all generation initialization requires progress: %w", err)
+	}
+	currentID := strings.TrimSpace(progress.GenerationID)
+	currentMode := strings.TrimSpace(progress.GenerationMode)
+	if (currentID == "") != (currentMode == "") {
+		return "", false, fmt.Errorf("outline-all refuses a partially initialized progress generation")
+	}
+	if currentID != "" && currentMode != domain.GenerationModeSimulationRestartFromSeed {
+		return "", false, fmt.Errorf("outline-all refuses unsupported progress generation_mode %q", progress.GenerationMode)
+	}
+	updated, created, err := st.Progress.EnsureGenerationIfEmpty(
+		proposedID,
+		domain.GenerationModeSimulationRestartFromSeed,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	if updated == nil || strings.TrimSpace(updated.GenerationID) == "" ||
+		updated.GenerationID != strings.TrimSpace(updated.GenerationID) ||
+		updated.GenerationMode != domain.GenerationModeSimulationRestartFromSeed {
+		return "", false, fmt.Errorf("outline-all generation initialization produced an invalid progress lineage")
+	}
+	if err := validatePipelineOutlineAllLiveEntry(st); err != nil {
+		return "", false, fmt.Errorf("outline-all generation initialization left chapter zero: %w", err)
+	}
+	return updated.GenerationID, created, nil
+}
+
 func directoryHasRegularFile(root string) (bool, error) {
 	found := false
 	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, walkErr error) error {
@@ -583,7 +646,7 @@ func pipelineOutlineAllProtectedCanonRoot(outputDir string) (string, error) {
 	return pipelineProjectAllDigest(struct {
 		Version    string            `json:"version"`
 		Components map[string]string `json:"components"`
-	}{Version: "outline-all-protected-canon.v2", Components: components}), nil
+	}{Version: "outline-all-protected-canon.v3", Components: components}), nil
 }
 
 // pipelineOutlineAllStableProgressRoot binds every JSON field, including
@@ -625,7 +688,7 @@ func outlineAllMutableOrVolatilePath(rel string) bool {
 	}
 	switch rel {
 	case "outline.json", "outline.md", "layered_outline.json", "layered_outline.md",
-		"meta/progress.json", "meta/pipeline.json", "meta/usage.json", "meta/diag-export.md",
+		"meta/progress.json", "meta/pipeline.json", pipelineTimingLogPath, "meta/usage.json", "meta/diag-export.md",
 		"meta/run.json",
 		"meta/architect_readiness.json", "meta/architect_readiness.md",
 		"meta/brainstorm.md",

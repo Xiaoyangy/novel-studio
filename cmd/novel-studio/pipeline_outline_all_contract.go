@@ -52,12 +52,7 @@ func repairPipelineOutlineAllDerivedArtifacts(st *store.Store, volumes []domain.
 	if err := st.Outline.SaveOutline(flat); err != nil {
 		return "", err
 	}
-	progress, err := st.Progress.Load()
-	if err != nil || progress == nil {
-		return "", fmt.Errorf("outline-all repair requires progress: %w", err)
-	}
-	progress.TotalChapters = domain.TotalChapters(volumes)
-	if err := st.Progress.Save(progress); err != nil {
+	if err := st.Progress.SetTotalChapters(domain.TotalChapters(volumes)); err != nil {
 		return "", err
 	}
 	return domain.ComputeFlatOutlineDigest(flat)

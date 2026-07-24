@@ -18,6 +18,7 @@ func storeOutlineAllReceiptForTest(t *testing.T) domain.OutlineAllExecutionRecei
 		Mode:                     domain.OutlineAllExecutionMode,
 		Status:                   domain.OutlineAllExecutionBuilding,
 		BaseCanonChapter:         0,
+		GenerationID:             "store-planning-generation",
 		WritingMode:              domain.WritingPipelineModeSealedTwoPassV2,
 		WritingModeReceiptDigest: domain.PlanningV2DigestPrefix + strings.Repeat("a", 64),
 		CompassDigest:            domain.PlanningV2DigestPrefix + strings.Repeat("b", 64),

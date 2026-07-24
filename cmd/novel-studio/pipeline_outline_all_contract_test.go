@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,47 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
+
+func TestRepairPipelineOutlineAllDerivedArtifactsPreservesStableUnknownProgress(t *testing.T) {
+	outputDir := t.TempDir()
+	st := store.NewStore(outputDir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	progressPath := filepath.Join(outputDir, "meta", "progress.json")
+	raw := []byte(`{"novel_name":"future","phase":"init","current_chapter":0,"total_chapters":1,"completed_chapters":null,"total_word_count":0,"future_state":{"keep":true}}`)
+	if err := os.WriteFile(progressPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := pipelineOutlineAllStableProgressRoot(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumes := []domain.VolumeOutline{{Index: 1, Title: "卷", Arcs: []domain.ArcOutline{{
+		Index: 1, Title: "弧", Chapters: []domain.OutlineEntry{{Title: "一"}, {Title: "二"}},
+	}}}}
+	if _, err := repairPipelineOutlineAllDerivedArtifacts(st, volumes); err != nil {
+		t.Fatal(err)
+	}
+	after, err := pipelineOutlineAllStableProgressRoot(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("outline-all derived repair changed stable progress: before=%s after=%s", before, after)
+	}
+	updated, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(updated, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["future_state"]; !ok {
+		t.Fatal("outline-all derived repair lost unknown progress field")
+	}
+}
 
 func TestOutlineAllPlannerExpandsReservationsBeforeRevisingThinExpandedArcs(t *testing.T) {
 	makeChapters := func(prefix string, count int, thinFrom int) []domain.OutlineEntry {
@@ -242,6 +284,7 @@ func TestPipelineOutlineAllProtectedCanonIgnoresHeadlessRuntimeFiles(t *testing.
 	write("logs/headless.log", "second runtime log\n")
 	write("logs/agent-debug.log", "new runtime log\n")
 	write("meta/run.json", `{"started_at":"second"}`)
+	write("meta/pipeline_timings.jsonl", `{"schema":"pipeline-timing.v1","stage":"outline-all","status":"ok"}`+"\n")
 	afterRuntime, err := pipelineOutlineAllProtectedCanonRoot(outputDir)
 	if err != nil {
 		t.Fatal(err)

@@ -7,8 +7,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -408,6 +410,16 @@ func zeroInitCleanChapterZeroProgress(progress *domain.Progress) bool {
 }
 
 func writeZeroInitOpeningPlanArtifacts(dir string, project zeroInitProject) error {
+	st := store.NewStore(dir)
+	storyTimeContract, published, err := zeroEnsureStoryTimeContract(st, &project)
+	if err != nil {
+		return err
+	}
+	if !published && storyTimeContract != nil {
+		if err := zeroSyncStoryCalendar(st, *storyTimeContract); err != nil {
+			return err
+		}
+	}
 	dynamics := zeroInitDynamics(project)
 	crowdPolicy := zeroInitCrowdPolicy(project)
 	storycraft := zeroInitStorycraftPlan(project, dynamics)
@@ -522,6 +534,10 @@ func loadZeroInitProjectWithArchitectReadiness(
 	if err != nil {
 		return zeroInitProject{}, err
 	}
+	projectName, err := zeroInitResolvedProjectName(st, dir, premise)
+	if err != nil {
+		return zeroInitProject{}, err
+	}
 	outline, err := zeroAuthoritativeOutline(st)
 	if err != nil {
 		return zeroInitProject{}, err
@@ -547,7 +563,7 @@ func loadZeroInitProjectWithArchitectReadiness(
 	generatedAt := time.Now().Format(time.RFC3339)
 	return zeroInitProject{
 		Dir:           dir,
-		Name:          zeroInitProjectName(dir),
+		Name:          projectName,
 		GenerationID:  zeroSimulationGenerationID(generatedAt),
 		Premise:       strings.TrimSpace(premise),
 		Outline:       outline,
@@ -559,6 +575,24 @@ func loadZeroInitProjectWithArchitectReadiness(
 		FirstMentions: firstMentions,
 		GeneratedAt:   generatedAt,
 	}, nil
+}
+
+func zeroInitResolvedProjectName(st *store.Store, dir, premise string) (string, error) {
+	if name := strings.TrimSpace(domain.ExtractNovelNameFromPremise(premise)); name != "" {
+		return name, nil
+	}
+	if st != nil {
+		progress, err := st.Progress.Load()
+		if err != nil {
+			return "", fmt.Errorf("读取项目名 progress: %w", err)
+		}
+		if progress != nil {
+			if name := strings.TrimSpace(progress.NovelName); name != "" {
+				return name, nil
+			}
+		}
+	}
+	return zeroInitProjectName(dir), nil
 }
 
 func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool) error {
@@ -596,7 +630,10 @@ func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool
 	}
 
 	dynamics := zeroInitDynamics(*project)
-	refreshDynamics := overwrite || zeroShouldWriteArtifact(dir, false, "meta/initial_character_dynamics.json", "meta/initial_character_dynamics.md") || len(zeroCheckDynamicsCoverage(dir)) > 0
+	refreshDynamics := overwrite ||
+		zeroShouldWriteArtifact(dir, false, "meta/initial_character_dynamics.json", "meta/initial_character_dynamics.md") ||
+		len(zeroCheckDynamicsCoverage(dir)) > 0 ||
+		len(zeroCheckInitialRelationshipState(dir)) > 0
 	if err := writeZeroJSON(filepath.Join(dir, "meta", "initial_character_dynamics.json"), dynamics, refreshDynamics); err != nil {
 		return err
 	}
@@ -1555,7 +1592,206 @@ func zeroCompletedOutlineAllTimeSource(st *store.Store) (int, string, bool, erro
 	if flatDigest != receipt.FinalFlatDigest || len(flat) != receipt.TargetChapters {
 		return 0, "", false, fmt.Errorf("outline-all flat outline no longer matches completed receipt")
 	}
-	return receipt.TargetChapters, receipt.EstimatedScale, true, nil
+	timeHint, err := zeroOutlineAllReceiptStoryTimeHint(*receipt)
+	if err != nil {
+		return 0, "", false, err
+	}
+	estimatedScale := strings.TrimSpace(receipt.EstimatedScale)
+	if timeHint != "" {
+		estimatedScale += "；主线时间跨度" + timeHint
+	}
+	return receipt.TargetChapters, estimatedScale, true, nil
+}
+
+var zeroStoryDurationRE = regexp.MustCompile(
+	`(?i)(?:约为|大约|约|大致)?\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+)(?:\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+))?\s*(日|天|年|years?|days?)`,
+)
+
+var zeroStoryDurationScopeMarkers = []string{
+	"现在线", "主线时间跨度", "主线跨度", "全书故事跨度", "故事时间跨度", "故事跨度", "正文时间跨度", "叙事跨度",
+}
+
+type zeroStoryDurationCandidate struct {
+	MinDays float64
+	MaxDays float64
+}
+
+func zeroOutlineAllReceiptStoryTimeHint(receipt domain.OutlineAllExecutionReceipt) (string, error) {
+	if raw := strings.TrimSpace(receipt.StoryTimeHint); raw != "" {
+		candidates, err := zeroStoryDurationCandidates(raw, false)
+		if err != nil {
+			return "", err
+		}
+		if len(candidates) == 0 {
+			// Preserve legacy free-form hints. The downstream parser will either
+			// understand them or retain its historical nominal fallback.
+			return raw, nil
+		}
+		return zeroCanonicalStoryDuration(candidates[0]), nil
+	}
+	var candidates []zeroStoryDurationCandidate
+	for _, contract := range receipt.NonNegotiables {
+		found, err := zeroStoryDurationCandidates(contract, true)
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, found...)
+	}
+	candidates = zeroUniqueStoryDurations(candidates)
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	if len(candidates) > 1 {
+		var values []string
+		for _, candidate := range candidates {
+			values = append(values, zeroCanonicalStoryDuration(candidate))
+		}
+		return "", fmt.Errorf("outline-all sealed non_negotiables contain conflicting story durations: %s", strings.Join(values, ", "))
+	}
+	return zeroCanonicalStoryDuration(candidates[0]), nil
+}
+
+func zeroStoryDurationCandidates(text string, requireScope bool) ([]zeroStoryDurationCandidate, error) {
+	var out []zeroStoryDurationCandidate
+	for _, indexes := range zeroStoryDurationRE.FindAllStringSubmatchIndex(text, -1) {
+		if len(indexes) < 8 {
+			continue
+		}
+		if requireScope && !zeroStoryDurationHasScope(text, indexes[0], indexes[1]) {
+			continue
+		}
+		min, err := zeroParseStoryDurationNumber(text[indexes[2]:indexes[3]])
+		if err != nil {
+			return nil, err
+		}
+		max := min
+		if indexes[4] >= 0 {
+			max, err = zeroParseStoryDurationNumber(text[indexes[4]:indexes[5]])
+			if err != nil {
+				return nil, err
+			}
+		}
+		unit := strings.ToLower(strings.TrimSpace(text[indexes[6]:indexes[7]]))
+		if unit == "年" || strings.HasPrefix(unit, "year") {
+			min *= domain.StoryDaysPerYear
+			max *= domain.StoryDaysPerYear
+		}
+		if min > max {
+			min, max = max, min
+		}
+		out = append(out, zeroStoryDurationCandidate{MinDays: min, MaxDays: max})
+	}
+	return zeroUniqueStoryDurations(out), nil
+}
+
+func zeroStoryDurationHasScope(text string, start, end int) bool {
+	before := []rune(text[:start])
+	after := []rune(text[end:])
+	if len(before) > 16 {
+		before = before[len(before)-16:]
+	}
+	if len(after) > 16 {
+		after = after[:16]
+	}
+	context := string(before) + string(after)
+	for _, marker := range zeroStoryDurationScopeMarkers {
+		if strings.Contains(context, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func zeroParseStoryDurationNumber(raw string) (float64, error) {
+	raw = strings.TrimSpace(raw)
+	if value, err := strconv.ParseFloat(raw, 64); err == nil {
+		return value, nil
+	}
+	digit := func(r rune) (int, bool) {
+		switch r {
+		case '零', '〇':
+			return 0, true
+		case '一':
+			return 1, true
+		case '二', '两':
+			return 2, true
+		case '三':
+			return 3, true
+		case '四':
+			return 4, true
+		case '五':
+			return 5, true
+		case '六':
+			return 6, true
+		case '七':
+			return 7, true
+		case '八':
+			return 8, true
+		case '九':
+			return 9, true
+		default:
+			return 0, false
+		}
+	}
+	runes := []rune(raw)
+	if len(runes) == 1 {
+		if runes[0] == '十' {
+			return 10, nil
+		}
+		if value, ok := digit(runes[0]); ok {
+			return float64(value), nil
+		}
+	}
+	for i, r := range runes {
+		if r != '十' {
+			continue
+		}
+		tens := 1
+		if i > 0 {
+			var ok bool
+			tens, ok = digit(runes[i-1])
+			if !ok {
+				break
+			}
+		}
+		ones := 0
+		if i+1 < len(runes) {
+			var ok bool
+			ones, ok = digit(runes[i+1])
+			if !ok {
+				break
+			}
+		}
+		return float64(tens*10 + ones), nil
+	}
+	return 0, fmt.Errorf("unsupported story duration number %q", raw)
+}
+
+func zeroUniqueStoryDurations(values []zeroStoryDurationCandidate) []zeroStoryDurationCandidate {
+	var out []zeroStoryDurationCandidate
+	for _, candidate := range values {
+		duplicate := false
+		for _, existing := range out {
+			if math.Abs(existing.MinDays-candidate.MinDays) <= 1e-9 && math.Abs(existing.MaxDays-candidate.MaxDays) <= 1e-9 {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func zeroCanonicalStoryDuration(candidate zeroStoryDurationCandidate) string {
+	format := func(value float64) string {
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
+	if math.Abs(candidate.MinDays-candidate.MaxDays) <= 1e-9 {
+		return format(candidate.MinDays) + "日"
+	}
+	return format(candidate.MinDays) + "-" + format(candidate.MaxDays) + "日"
 }
 
 func zeroStoryTimeTargetChapters(st *store.Store, progress *domain.Progress, project *zeroInitProject) int {

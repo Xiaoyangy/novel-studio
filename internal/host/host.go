@@ -32,22 +32,24 @@ import (
 // 职责：启动/恢复/干预注入/事件投影/模型管理。
 // 不做任何调度决策，不做空闲续跑。
 type Host struct {
-	cfg               bootstrap.Config
-	bundle            assets.Bundle
-	store             *storepkg.Store
-	models            *bootstrap.ModelSet
-	coordinator       *agentcore.Agent
-	coordinatorCtxMgr *corecontext.ContextEngine // 切 default/coordinator 模型时联动 SetContextWindow + SetReserveTokens
-	thinkingApplier   agents.ApplyThinking       // /model 调推理强度时联动 live agent（coordinator + 子代理）
-	askUser           *tools.AskUserTool
-	writerRestore     *ctxpack.WriterRestorePack
-	observer          *observer
-	router            *flow.Dispatcher
-	usage             *UsageTracker
-	usageCancel       context.CancelFunc // 停掉 autoSaveLoop 并触发最后一次 flush
-	budget            *BudgetSentinel    // 预算政策；未启用为 nil（方法 nil 安全）
-	budgetDetach      func()
-	notifier          *notify.Notifier // 无人值守告警；未启用为 nil（Send nil 安全）
+	cfg                        bootstrap.Config
+	bundle                     assets.Bundle
+	store                      *storepkg.Store
+	models                     *bootstrap.ModelSet
+	coordinator                *agentcore.Agent
+	coordinatorCtxMgr          *corecontext.ContextEngine // 切 default/coordinator 模型时联动 SetContextWindow + SetReserveTokens
+	thinkingApplier            agents.ApplyThinking       // /model 调推理强度时联动 live agent（coordinator + 子代理）
+	askUser                    *tools.AskUserTool
+	writerRestore              *ctxpack.WriterRestorePack
+	observer                   *observer
+	router                     *flow.Dispatcher
+	usage                      *UsageTracker
+	usageCancel                context.CancelFunc // 停掉 autoSaveLoop 并触发最后一次 flush
+	budget                     *BudgetSentinel    // 预算政策；未启用为 nil（方法 nil 安全）
+	budgetDetach               func()
+	notifier                   *notify.Notifier // 无人值守告警；未启用为 nil（Send nil 安全）
+	preserveCheckpointsOnStart bool
+	disableFlowRouter          bool
 
 	events   chan Event
 	streamCh chan string
@@ -69,11 +71,16 @@ const (
 	lifecycleCompleted lifecycle = "completed"
 )
 
-// NewOptions contains process-local host wiring. WriterSessionIdentity changes
-// only where the Planner subagent appends its audit transcript; it does not
-// rename the logical writer role or alter normal resume/context behavior.
+// NewOptions contains process-local host wiring. These capabilities are never
+// exposed through model tool schemas or persisted as reusable user input.
 type NewOptions struct {
-	WriterSessionIdentity string
+	WriterSessionIdentity             string
+	PreserveCheckpointsOnStart        bool
+	DisableFlowRouter                 bool
+	AllowChapterZeroFoundationRefresh bool
+	FoundationRefreshTarget           string
+	RecordFoundationRefreshEpoch      bool
+	OneShotFoundationRefresh          bool
 }
 
 // New 创建 Host。
@@ -143,25 +150,33 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		if router != nil {
 			router.Dispatch()
 		}
-	}, agents.CoordinatorBuildOptions{WriterSessionIdentity: opts.WriterSessionIdentity})
+	}, agents.CoordinatorBuildOptions{
+		WriterSessionIdentity:             opts.WriterSessionIdentity,
+		AllowChapterZeroFoundationRefresh: opts.AllowChapterZeroFoundationRefresh,
+		FoundationRefreshTarget:           opts.FoundationRefreshTarget,
+		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
+		OneShotFoundationRefresh:          opts.OneShotFoundationRefresh,
+	})
 	store.Signals.ClearStaleSignals()
 
 	h := &Host{
-		cfg:               cfg,
-		bundle:            bundle,
-		store:             store,
-		models:            models,
-		coordinator:       coordinator,
-		coordinatorCtxMgr: coordinatorCtxMgr,
-		thinkingApplier:   applyThinking,
-		askUser:           askUser,
-		writerRestore:     restore,
-		usage:             usage,
-		usageCancel:       usageCancel,
-		events:            make(chan Event, 100),
-		streamCh:          make(chan string, 256),
-		done:              make(chan struct{}, 4),
-		lifecycle:         lifecycleIdle,
+		cfg:                        cfg,
+		bundle:                     bundle,
+		store:                      store,
+		models:                     models,
+		coordinator:                coordinator,
+		coordinatorCtxMgr:          coordinatorCtxMgr,
+		thinkingApplier:            applyThinking,
+		askUser:                    askUser,
+		writerRestore:              restore,
+		usage:                      usage,
+		usageCancel:                usageCancel,
+		preserveCheckpointsOnStart: opts.PreserveCheckpointsOnStart,
+		disableFlowRouter:          opts.DisableFlowRouter,
+		events:                     make(chan Event, 100),
+		streamCh:                   make(chan string, 256),
+		done:                       make(chan struct{}, 4),
+		lifecycle:                  lifecycleIdle,
 	}
 	h.observer = newObserver(coordinator, store, h.emitEvent, h.emitDelta, h.emitClear)
 	if cfg.Notify.IsEnabled() {
@@ -303,9 +318,12 @@ func (h *Host) StartPrepared(promptText string) error {
 	slog.Info("开始创作", "module", "host", "prompt_len", len(promptText))
 	h.emitEvent(Event{Time: time.Now(), Category: "SYSTEM", Summary: "开始创作", Level: "info"})
 	h.observer.setAborting(false)
-	// 先重置重复追踪并启用路由，再启动 Prompt，避免首轮事件先于 Enable 抵达
+	// 先重置重复追踪；普通会话再启用路由。受限的 Architect
+	// sidecar 保持 router disabled，防止写作态项目在 foundation 保存后抢跑 Writer。
 	h.router.ResetRepeat()
-	h.router.Enable()
+	if !h.disableFlowRouter {
+		h.router.Enable()
+	}
 	h.mu.Lock()
 	h.lifecycle = lifecycleRunning
 	h.mu.Unlock()
@@ -317,15 +335,19 @@ func (h *Host) StartPrepared(promptText string) error {
 	}
 	// 主动派发一次首条指令：若已进入写作阶段（Phase=Writing），Host 立即下达；
 	// 规划阶段 Route 返回 nil，无副作用。
-	h.router.Dispatch()
+	if !h.disableFlowRouter {
+		h.router.Dispatch()
+	}
 
 	go h.waitDone()
 	return nil
 }
 
 func (h *Host) resetStartRuntimeState() error {
-	if err := h.store.Checkpoints.Reset(); err != nil {
-		return fmt.Errorf("reset checkpoints: %w", err)
+	if !h.preserveCheckpointsOnStart {
+		if err := h.store.Checkpoints.Reset(); err != nil {
+			return fmt.Errorf("reset checkpoints: %w", err)
+		}
 	}
 	if err := h.store.Runtime.Reset(); err != nil {
 		return fmt.Errorf("reset runtime: %w", err)
@@ -382,7 +404,9 @@ func (h *Host) Resume() (string, error) {
 	h.refreshWriterRestore()
 	h.observer.setAborting(false)
 	h.router.ResetRepeat()
-	h.router.Enable()
+	if !h.disableFlowRouter {
+		h.router.Enable()
+	}
 	h.mu.Lock()
 	h.lifecycle = lifecycleRunning
 	h.mu.Unlock()
@@ -402,7 +426,9 @@ func (h *Host) Resume() (string, error) {
 		}
 	}
 	// 主动派发一次首条指令，避免 Coordinator 对恢复 prompt 只回文字而 StopGuard 反复拦截。
-	h.router.Dispatch()
+	if !h.disableFlowRouter {
+		h.router.Dispatch()
+	}
 
 	go h.waitDone()
 	return label, nil

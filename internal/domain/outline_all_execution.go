@@ -273,6 +273,10 @@ func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) erro
 		receipt.WritingMode != WritingPipelineModeSealedTwoPassV2 {
 		return fmt.Errorf("outline-all execution receipt has invalid identity")
 	}
+	if strings.TrimSpace(receipt.GenerationID) == "" ||
+		receipt.GenerationID != strings.TrimSpace(receipt.GenerationID) {
+		return fmt.Errorf("outline-all execution receipt requires a canonical generation_id")
+	}
 	if receipt.Status != OutlineAllExecutionBuilding &&
 		receipt.Status != OutlineAllExecutionComplete {
 		return fmt.Errorf("outline-all execution receipt has invalid status %q", receipt.Status)
@@ -474,6 +478,10 @@ func ValidateOutlineAllChapterZeroProgress(
 ) error {
 	if progress == nil {
 		return fmt.Errorf("outline-all requires initialized progress")
+	}
+	if strings.TrimSpace(progress.GenerationID) == "" ||
+		strings.TrimSpace(receipt.GenerationID) == "" {
+		return fmt.Errorf("outline-all chapter-zero progress requires a generation_id")
 	}
 	if progress.GenerationID != receipt.GenerationID {
 		return fmt.Errorf("outline-all execution receipt generation_id does not match progress")

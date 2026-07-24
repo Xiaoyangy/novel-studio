@@ -1,12 +1,52 @@
 package store
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
+
+func seedUnknownOutlineProgressField(t *testing.T, st *Store) {
+	t.Helper()
+	path := filepath.Join(st.Dir(), "meta", "progress.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["future_state"] = json.RawMessage(`{"keep":true}`)
+	encoded, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireUnknownOutlineProgressField(t *testing.T, st *Store) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(st.Dir(), "meta", "progress.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	var futureState map[string]bool
+	if err := json.Unmarshal(fields["future_state"], &futureState); err != nil || !futureState["keep"] {
+		t.Fatalf("outline mutation lost unknown progress field: %s err=%v", fields["future_state"], err)
+	}
+}
 
 func stableLayeredFixture() []domain.VolumeOutline {
 	return []domain.VolumeOutline{{
@@ -260,6 +300,29 @@ func TestAppendVolumeRegenerationPreservesExistingStableChapterNumbers(t *testin
 	if flat[2].Title != "后一" || flat[4].Title != "新一" {
 		t.Fatalf("append changed existing mapping: %+v", flat)
 	}
+}
+
+func TestExpandAndAppendPreserveUnknownProgressFields(t *testing.T) {
+	volumes := stableLayeredFixture()
+	st := setupLayered(t, volumes)
+	if err := st.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		t.Fatal(err)
+	}
+	seedUnknownOutlineProgressField(t, st)
+	if err := st.ExpandArc(1, 2, []domain.OutlineEntry{
+		{Title: "中一"}, {Title: "中二"}, {Title: "中三"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireUnknownOutlineProgressField(t, st)
+	if err := st.AppendVolume(domain.VolumeOutline{
+		Index: 2, Title: "第二卷", Arcs: []domain.ArcOutline{{
+			Index: 1, Title: "新弧", Chapters: []domain.OutlineEntry{{Title: "新章"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireUnknownOutlineProgressField(t, st)
 }
 
 func TestAppendVolumeValidation(t *testing.T) {

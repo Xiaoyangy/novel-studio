@@ -859,6 +859,42 @@ func TestZeroWorldSimDoesNotRewritePublishedStoryTimeArtifacts(t *testing.T) {
 	}
 }
 
+func TestZeroOutlineAllReceiptStoryTimeHintUsesScopedSealedContract(t *testing.T) {
+	receipt := domain.OutlineAllExecutionReceipt{
+		EstimatedScale: "1-1卷、12-12章，总字数28000-30000字",
+		NonNegotiables: []string{
+			"两位主角九年前分离，九年后重逢。",
+			"规模与POV：固定12章，采用约十日现在线单线推进。",
+			"正式文书端到端送达统一耗时0.5-1.0日；数月后另写共同生活尾声。",
+		},
+	}
+	hint, err := zeroOutlineAllReceiptStoryTimeHint(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hint != "10日" {
+		t.Fatalf("story time hint=%q, want 10日", hint)
+	}
+	contract, err := domain.DeriveStoryTimeContract(receipt.EstimatedScale+"；主线时间跨度"+hint, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contract.DurationDaysMin != 10 || contract.DurationDaysMax != 10 ||
+		math.Abs(contract.NominalDaysPerChapter-10.0/12.0) > 1e-9 {
+		t.Fatalf("contract=%+v", contract)
+	}
+}
+
+func TestZeroOutlineAllReceiptStoryTimeHintRejectsConflictingScopedContracts(t *testing.T) {
+	_, err := zeroOutlineAllReceiptStoryTimeHint(domain.OutlineAllExecutionReceipt{NonNegotiables: []string{
+		"采用约十日现在线推进。",
+		"全书故事跨度12天。",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "conflicting story durations") {
+		t.Fatalf("conflicting sealed durations must fail closed, got %v", err)
+	}
+}
+
 func seedZeroInitProject(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

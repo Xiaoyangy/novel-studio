@@ -133,6 +133,107 @@ func TestInitialWorldTickQualityIssuesUsesLayeredOutlineOverStaleFlat(t *testing
 	}
 }
 
+func TestInitialWorldTickQualityIssuesPreservesChapterOneTimeAnchors(t *testing.T) {
+	tests := []struct {
+		name          string
+		summary       string
+		wantMissing   []string
+		wantNoMissing bool
+	}{
+		{
+			name:        "drifted setup loses both sealed clocks",
+			summary:     "许珩完成首批材料清点，并把复制件列入交接清单。",
+			wantMissing: []string{"四十八小时", "次日上午"},
+		},
+		{
+			name:          "pending setup carries exact duration and deadline",
+			summary:       "许珩保留单件四十八小时应急原位保护的单方批准权；贺今棠的披露截止仍为次日上午。",
+			wantNoMissing: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := store.NewStore(t.TempDir())
+			if err := st.Init(); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Characters.Save([]domain.Character{{Name: "许珩", Role: "女性项目负责人"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+				Index: 1,
+				Arcs: []domain.ArcOutline{{
+					Index: 1,
+					Chapters: []domain.OutlineEntry{{
+						Chapter:   1,
+						Title:     "开篇",
+						CoreEvent: "许珩收到风险告知后单方批准单件四十八小时应急原位保护。",
+						Hook:      "次日上午前必须完成书面披露。",
+					}},
+				}},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			saveInitialWorldTickGateFixture(t, st, domain.WorldEvent{
+				TickID:            "v1-a1",
+				Chapter:           0,
+				Actors:            []string{"许珩"},
+				Summary:           tc.summary,
+				VisibilityChapter: 1,
+			}, domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1})
+
+			joined := strings.Join(InitialWorldTickQualityIssues(st), "；")
+			if tc.wantNoMissing {
+				if strings.Contains(joined, "未保留第1章显式时间锚点") {
+					t.Fatalf("exact pending time anchors were rejected: %s", joined)
+				}
+				return
+			}
+			for _, anchor := range tc.wantMissing {
+				if !strings.Contains(joined, `时间锚点 "`+anchor+`"`) {
+					t.Fatalf("missing anchor %q was not rejected: %s", anchor, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestInitialWorldTickTimeAnchorsUseLayeredOutlineOverStaleFlat(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{{Name: "许珩", Role: "女性项目负责人"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+		Chapter: 1, CoreEvent: "旧口径给三日保护。",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Chapters: []domain.OutlineEntry{{
+				Chapter: 1, CoreEvent: "当前口径给四十八小时保护。",
+			}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	saveInitialWorldTickGateFixture(t, st, domain.WorldEvent{
+		TickID: "v1-a1", Chapter: 0, Actors: []string{"许珩"},
+		Summary: "许珩保留四十八小时保护窗口。", VisibilityChapter: 1,
+	}, domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1})
+
+	joined := strings.Join(InitialWorldTickQualityIssues(st), "；")
+	if strings.Contains(joined, "未保留第1章显式时间锚点") || strings.Contains(joined, `时间锚点 "三日"`) {
+		t.Fatalf("stale flat time anchor won over layered outline: %s", joined)
+	}
+}
+
 func TestInitialWorldTickQualityIssuesScansEveryVisibleEventTextField(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -160,6 +261,151 @@ func TestInitialWorldTickQualityIssuesScansEveryVisibleEventTextField(t *testing
 			joined := strings.Join(InitialWorldTickQualityIssues(st), "；")
 			if !strings.Contains(joined, "早于大纲首次可见第7章") {
 				t.Fatalf("field %s escaped first-visibility scan: %q", tc.name, joined)
+			}
+		})
+	}
+}
+
+func TestInitialWorldTickQualityIssuesRejectsMalePronounForExplicitFemaleActor(t *testing.T) {
+	tests := []struct {
+		name       string
+		characters []domain.Character
+		summary    string
+		wantIssue  bool
+	}{
+		{
+			name: "current 许珩 regression",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性债务重整管理人团队负责人"},
+			},
+			summary:   "许珩完成权限核对：收到独立专业人员的风险告知后，他可单方批准单件四十八小时应急原位保护，并可启用一个替代核验窗口。",
+			wantIssue: true,
+		},
+		{
+			name: "generic role with repeated female self references",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "项目负责人", Description: "她负责程序复核。她只在书面权限内行动。"},
+			},
+			summary:   "许珩完成权限核对后，他可签发窄范围批复。",
+			wantIssue: true,
+		},
+		{
+			name: "correct female pronoun",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩完成权限核对后，她可签发窄范围批复。",
+		},
+		{
+			name: "female leads father is male",
+			characters: []domain.Character{
+				{Name: "方涛", Role: "女主的父亲"},
+			},
+			summary: "方涛完成权限核对后，他可签发窄范围批复。",
+		},
+		{
+			name: "lawyer for female client is not necessarily female",
+			characters: []domain.Character{
+				{Name: "方涛", Role: "女性客户的律师"},
+			},
+			summary: "方涛完成权限核对后，他可签发窄范围批复。",
+		},
+		{
+			name: "female person mentioned in male profile is not self gender evidence",
+			characters: []domain.Character{
+				{Name: "方涛", Role: "律师", Description: "他负责合同复核。他的客户是一位女性。"},
+			},
+			summary: "方涛完成权限核对后，他可签发窄范围批复。",
+		},
+		{
+			name: "other and other people are lexical compounds",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩核对其他材料，并允许他人另行申请复核。",
+		},
+		{
+			name: "unnamed duty officer is nearer referent",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩请值班员复核，他随后签收。",
+		},
+		{
+			name: "productive unnamed archivist title is nearer referent",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩请档案员复核，他随后签收。",
+		},
+		{
+			name: "productive unnamed auditor title is nearer referent",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩请审计师复核，他随后签收。",
+		},
+		{
+			name: "unnamed accountant is nearer referent",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+			},
+			summary: "许珩请会计复核，他随后签收。",
+		},
+		{
+			name: "nearer different character owns pronoun",
+			characters: []domain.Character{
+				{Name: "许珩", Role: "配角／女性项目负责人"},
+				{Name: "陈野", Role: "配角"},
+			},
+			summary: "许珩向陈野说明权限，陈野答复他可单方批准。",
+		},
+		{
+			name: "ambiguous character gender remains unchecked",
+			characters: []domain.Character{
+				{Name: "方宁", Role: "项目负责人", Description: "负责核对项目权限。"},
+			},
+			summary: "方宁完成权限核对后，他可签发批复。",
+		},
+		{
+			name: "single reference to another woman is insufficient evidence",
+			characters: []domain.Character{
+				{Name: "方宁", Role: "项目负责人", Description: "负责核对项目权限。她的同事负责归档。"},
+			},
+			summary: "方宁完成权限核对后，他可签发批复。",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := store.NewStore(t.TempDir())
+			if err := st.Init(); err != nil {
+				t.Fatalf("init store: %v", err)
+			}
+			if err := st.Characters.Save(tc.characters); err != nil {
+				t.Fatalf("save characters: %v", err)
+			}
+			var names []string
+			for _, character := range tc.characters {
+				names = append(names, character.Name)
+			}
+			if err := st.Outline.SaveOutline([]domain.OutlineEntry{{
+				Chapter: 1, Title: "开篇", CoreEvent: strings.Join(names, "与") + "进入程序",
+			}}); err != nil {
+				t.Fatalf("save outline: %v", err)
+			}
+			saveInitialWorldTickGateFixture(t, st, domain.WorldEvent{
+				TickID:            "v1-a1",
+				Chapter:           0,
+				Actors:            []string{tc.characters[0].Name},
+				Summary:           tc.summary,
+				VisibilityChapter: 1,
+			}, domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1})
+
+			joined := strings.Join(InitialWorldTickQualityIssues(st), "；")
+			gotIssue := strings.Contains(joined, "近邻子句中使用男性代词")
+			if gotIssue != tc.wantIssue {
+				t.Fatalf("male-pronoun issue=%v, want=%v; issues=%q", gotIssue, tc.wantIssue, joined)
 			}
 		})
 	}
@@ -343,6 +589,57 @@ func TestWorldTickForbiddenTopicsRequireExplicitProjectNegation(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("explicit negative topic %q not derived: %v", want, topics)
 		}
+	}
+}
+
+func TestWorldTickForbiddenTopicsDoNotFlattenContextualMethodBoundary(t *testing.T) {
+	topics := worldTickExtractExplicitNegativeTopics(
+		"禁止用单份材料、万能证人、公开活动、反派自白或舆论声量一夜解决作者、权属、补偿、债务与家庭创伤；禁止超自然、战力、伪骨科、豪门继承、将军、帝王或宫斗。",
+	)
+	joined := "|" + strings.Join(topics, "|") + "|"
+	for _, allowed := range []string{"作者", "权属", "补偿", "债务", "家庭创伤"} {
+		if strings.Contains(joined, "|"+allowed+"|") {
+			t.Fatalf("contextual protected subject %q must not become a forbidden topic: %v", allowed, topics)
+		}
+	}
+	for _, forbidden := range []string{"超自然", "战力", "伪骨科", "豪门继承", "将军", "帝王", "宫斗"} {
+		if !strings.Contains(joined, "|"+forbidden+"|") {
+			t.Fatalf("explicit forbidden topic %q not derived: %v", forbidden, topics)
+		}
+	}
+}
+
+func TestInitialWorldTickQualityIssuesKeepContextualSubjectsButRejectExplicitTopics(t *testing.T) {
+	st := newWorldTickBoundaryStore(t)
+	if err := st.Outline.SavePremise("禁止用单份材料一夜解决作者、权属、补偿、债务与家庭创伤；禁止超自然或伪骨科。"); err != nil {
+		t.Fatalf("save premise: %v", err)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{Version: rules.SnapshotVersion, Status: rules.StatusReady}); err != nil {
+		t.Fatalf("save user rules: %v", err)
+	}
+	if err := st.World.SaveBookWorld(domain.BookWorld{Version: 1, Factions: []domain.WorldFaction{{
+		ID: "review", Name: "复核组", Goal: "分别核验债务、权属、补偿与家庭创伤的证据边界",
+	}}}); err != nil {
+		t.Fatalf("save book world: %v", err)
+	}
+	saveInitialWorldTickGateFixture(t, st, domain.WorldEvent{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"林澈"},
+		Summary:           "复核组登记债务与补偿材料",
+		Consequence:       "另一渠道试图加入伪骨科叙事",
+		VisibilityChapter: 1,
+		VisibilityPath:    "正式复核通知",
+	}, domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1})
+
+	joined := strings.Join(InitialWorldTickQualityIssues(st), "；")
+	for _, allowed := range []string{"作者", "权属", "补偿", "债务", "家庭创伤"} {
+		if strings.Contains(joined, `明确禁题材/禁语 "`+allowed+`"`) {
+			t.Fatalf("contextual protected subject %q was rejected: %s", allowed, joined)
+		}
+	}
+	if !strings.Contains(joined, `world_event[we-000001].consequence`) || !strings.Contains(joined, `明确禁题材/禁语 "伪骨科"`) {
+		t.Fatalf("explicit forbidden topic was not rejected: %s", joined)
 	}
 }
 

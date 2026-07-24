@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,14 +58,21 @@ func (cs *CheckpointStore) loadFromDisk() {
 // Append 追加一条 checkpoint。
 // 幂等：相同 Scope + Step + Digest 历史上已存在则跳过写入，直接返回已有记录。
 func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
-	return cs.append(scope, step, artifact, digest, false, nil)
+	return cs.append(scope, step, artifact, digest, false, false, nil)
+}
+
+// AppendAlways appends a new causal epoch even when the immediately preceding
+// checkpoint has the same scope, step, artifact, and digest. Use this only
+// when an external host capability defines a distinct paid/mutating attempt.
+func (cs *CheckpointStore) AppendAlways(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
+	return cs.append(scope, step, artifact, digest, false, true, nil)
 }
 
 // AppendLatest 只把同 scope+step 的最新记录视为幂等命中。它用于 plan
 // 这类定义因果 epoch 的 checkpoint：A→B→A 必须追加新的 A epoch，不能返回
 // 历史上的第一个 A；但紧邻重试同一 A 仍应幂等。
 func (cs *CheckpointStore) AppendLatest(scope domain.Scope, step, artifact, digest string) (*domain.Checkpoint, error) {
-	return cs.append(scope, step, artifact, digest, true, nil)
+	return cs.append(scope, step, artifact, digest, true, false, nil)
 }
 
 // AppendLatestAcross treats an exact checkpoint as idempotent only when it is
@@ -80,10 +88,10 @@ func (cs *CheckpointStore) AppendLatestAcross(scope domain.Scope, step, artifact
 			stepSet[candidate] = struct{}{}
 		}
 	}
-	return cs.append(scope, step, artifact, digest, true, stepSet)
+	return cs.append(scope, step, artifact, digest, true, false, stepSet)
 }
 
-func (cs *CheckpointStore) append(scope domain.Scope, step, artifact, digest string, latestOnly bool, causalSteps map[string]struct{}) (*domain.Checkpoint, error) {
+func (cs *CheckpointStore) append(scope domain.Scope, step, artifact, digest string, latestOnly, always bool, causalSteps map[string]struct{}) (*domain.Checkpoint, error) {
 	checkpointProcessMu.Lock()
 	defer checkpointProcessMu.Unlock()
 	cs.io.mu.Lock()
@@ -101,7 +109,7 @@ func (cs *CheckpointStore) append(scope domain.Scope, step, artifact, digest str
 	}
 	cs.seqGen.Store(maxSeq)
 
-	if digest != "" {
+	if digest != "" && !always {
 		for i := len(cs.cache) - 1; i >= 0; i-- {
 			cp := cs.cache[i]
 			if !cp.Scope.Matches(scope) {
@@ -164,6 +172,20 @@ func (cs *CheckpointStore) AppendArtifact(scope domain.Scope, step, artifact str
 	}
 	sum := sha256.Sum256(data)
 	return cs.Append(scope, step, artifact, "sha256:"+hex.EncodeToString(sum[:]))
+}
+
+// AppendArtifactAlways is AppendAlways with a digest calculated from the
+// current artifact body.
+func (cs *CheckpointStore) AppendArtifactAlways(scope domain.Scope, step, artifact string) (*domain.Checkpoint, error) {
+	if artifact == "" {
+		return cs.AppendAlways(scope, step, "", "")
+	}
+	data, err := cs.io.ReadFile(artifact)
+	if err != nil {
+		return nil, fmt.Errorf("digest artifact %s: %w", artifact, err)
+	}
+	sum := sha256.Sum256(data)
+	return cs.AppendAlways(scope, step, artifact, "sha256:"+hex.EncodeToString(sum[:]))
 }
 
 // AppendArtifactLatest is AppendLatest with a digest calculated from artifact.
@@ -242,6 +264,85 @@ func (cs *CheckpointStore) All() []domain.Checkpoint {
 	out := make([]domain.Checkpoint, len(cs.cache))
 	copy(out, cs.cache)
 	return out
+}
+
+// AllStrict rereads the append-only journal without the recovery reader's
+// tolerance for malformed/truncated lines. Authorization and destructive
+// migration gates must use this view: missing evidence cannot be inferred
+// from a partially readable checkpoint file.
+func (cs *CheckpointStore) AllStrict() ([]domain.Checkpoint, error) {
+	checkpointProcessMu.Lock()
+	defer checkpointProcessMu.Unlock()
+	cs.io.mu.RLock()
+	defer cs.io.mu.RUnlock()
+	f, err := os.Open(cs.io.path(checkpointsFile))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var result []domain.Checkpoint
+	var previousSeq int64
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var cp domain.Checkpoint
+		if err := json.Unmarshal(line, &cp); err != nil {
+			return nil, fmt.Errorf("parse checkpoints.jsonl line %d: %w", lineNumber, err)
+		}
+		if cp.Seq <= previousSeq {
+			return nil, fmt.Errorf("checkpoints.jsonl line %d has non-increasing seq=%d", lineNumber, cp.Seq)
+		}
+		if err := validateStrictCheckpoint(cp); err != nil {
+			return nil, fmt.Errorf("checkpoints.jsonl line %d: %w", lineNumber, err)
+		}
+		previousSeq = cp.Seq
+		result = append(result, cp)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan checkpoints.jsonl: %w", err)
+	}
+	return result, nil
+}
+
+func validateStrictCheckpoint(cp domain.Checkpoint) error {
+	if strings.TrimSpace(cp.Step) == "" {
+		return fmt.Errorf("checkpoint step is empty")
+	}
+	if cp.OccurredAt.IsZero() {
+		return fmt.Errorf("checkpoint occurred_at is empty")
+	}
+	scope := cp.Scope
+	switch scope.Kind {
+	case domain.ScopeGlobal:
+		if scope.Chapter != 0 || scope.Volume != 0 || scope.Arc != 0 {
+			return fmt.Errorf("global checkpoint carries scoped coordinates")
+		}
+	case domain.ScopeChapter:
+		if scope.Chapter <= 0 || scope.Volume != 0 || scope.Arc != 0 {
+			return fmt.Errorf("chapter checkpoint has invalid coordinates")
+		}
+	case domain.ScopeArc:
+		if scope.Chapter != 0 || scope.Volume <= 0 || scope.Arc <= 0 {
+			return fmt.Errorf("arc checkpoint has invalid coordinates")
+		}
+	case domain.ScopeVolume:
+		if scope.Chapter != 0 || scope.Volume <= 0 || scope.Arc != 0 {
+			return fmt.Errorf("volume checkpoint has invalid coordinates")
+		}
+	default:
+		return fmt.Errorf("checkpoint has unknown scope kind %q", scope.Kind)
+	}
+	return nil
 }
 
 // Reset 清空 checkpoint 文件与 cache。仅在新建小说时使用。

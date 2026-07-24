@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // BookScaleRange is the mechanically enforceable part of compass.estimated_scale.
@@ -105,9 +106,220 @@ func OutlineAllArcSpanIssues(volumes []VolumeOutline) []OutlineContractIssue {
 var (
 	volumeScaleRangeRE  = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:卷|volumes?)`)
 	chapterScaleRangeRE = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:章|chapters?)`)
-	wordScaleRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(万)?\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(万)?\s*(?:字|words?)`)
-	storyTimeRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(?:年|years?)`)
+	wordScaleRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(万)?\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(万)?\s*(?:中文字|汉字|字|words?)`)
+	storyTimeRangeRE    = regexp.MustCompile(`(?i)(?:\d+(?:\.\d+)?\s*[-–—~～至到]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:年|years?|日|天|days?)`)
 )
+
+var (
+	totalWordScaleContextMarkers = []string{
+		"总字数", "全书字数", "正文字数", "全文字数", "目标字数", "总篇幅", "全书", "正文", "全文",
+		"total words", "total word count", "overall word count",
+	}
+	perChapterWordScaleContextMarkers = []string{
+		"单章", "每章", "章均", "每章节", "章节字数", "章节预算", "章预算", "字/章", "字／章",
+		"per chapter", "per-chapter", "words/chapter", "chapter words", "chapter budget",
+	}
+	perChapterWordScaleSuffixRE = regexp.MustCompile(`(?i)^(?:[/／]\s*(?:章|chapter)|每章|per\s+chapter|each\s+chapter)`)
+)
+
+var (
+	// perUnitChapterScaleContextMarkers flag a chapter range that describes a
+	// single arc or volume ("每弧 8-16 章" / "每卷 12-16 章") rather than the
+	// whole-book total. Such per-unit budgets must never be read as the book's
+	// chapter maximum, otherwise a legitimate multi-volume skeleton trips the
+	// estimated_scale ceiling (e.g. a 213-chapter book against a per-arc "16").
+	perUnitChapterScaleContextMarkers = []string{
+		"每弧", "单弧", "每个弧", "每一弧", "弧均", "本弧",
+		"每卷", "单卷", "每个卷", "每一卷", "卷均", "本卷", "每部", "单部",
+		"per arc", "per-arc", "each arc", "per volume", "per-volume", "each volume",
+	}
+	// totalChapterScaleContextMarkers flag the whole-book chapter total, which
+	// wins over any per-unit range regardless of field order.
+	totalChapterScaleContextMarkers = []string{
+		"全书", "全文", "全篇", "总共", "共计", "合计", "总章", "总计", "全部",
+		"total chapters", "chapters total", "overall",
+	}
+	perUnitChapterScaleSuffixRE = regexp.MustCompile(`(?i)^(?:[/／]\s*(?:卷|弧|volume|arc)|每卷|每弧|per\s+volume|per\s+arc)`)
+)
+
+// parseBookChapterScaleRange distinguishes the whole-book chapter total from a
+// per-arc or per-volume chapter budget declared in the same free-form
+// estimated_scale. Explicit total markers win regardless of field order; a lone
+// unlabelled range is still accepted for backward compatibility. Per-unit
+// ranges are dropped so they can never be mistaken for the book ceiling.
+func parseBookChapterScaleRange(value string) (int, int, error) {
+	indices := chapterScaleRangeRE.FindAllStringSubmatchIndex(value, -1)
+	type candidate struct {
+		min, max int
+		explicit bool
+	}
+	candidates := make([]candidate, 0, len(indices))
+	for _, index := range indices {
+		if len(index) != 6 {
+			continue
+		}
+		prefix := wordScalePrefix(value, index[0])
+		if lastMarkerIndexFold(prefix, perUnitChapterScaleContextMarkers) >= 0 ||
+			chapterScaleHasPerUnitSuffix(value, index[1]) {
+			continue
+		}
+		min, err := strconv.Atoi(value[index[2]:index[3]])
+		if err != nil {
+			return 0, 0, err
+		}
+		max, err := strconv.Atoi(value[index[4]:index[5]])
+		if err != nil {
+			return 0, 0, err
+		}
+		if min <= 0 || max < min {
+			return 0, 0, fmt.Errorf("estimated_scale has invalid chapter range %d-%d", min, max)
+		}
+		candidates = append(candidates, candidate{
+			min:      min,
+			max:      max,
+			explicit: lastMarkerIndexFold(prefix, totalChapterScaleContextMarkers) >= 0,
+		})
+	}
+	if len(candidates) == 0 {
+		return 0, 0, fmt.Errorf("estimated_scale missing chapter range")
+	}
+	preferred := make([]candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.explicit {
+			preferred = append(preferred, c)
+		}
+	}
+	if len(preferred) == 0 {
+		preferred = candidates
+	}
+	selected := preferred[0]
+	for _, c := range preferred[1:] {
+		if c.min != selected.min || c.max != selected.max {
+			return 0, 0, fmt.Errorf("estimated_scale has ambiguous total chapter ranges")
+		}
+	}
+	return selected.min, selected.max, nil
+}
+
+func chapterScaleHasPerUnitSuffix(value string, end int) bool {
+	const separators = "，,；;。.!！?？\n\r"
+	suffix := value[end:]
+	if right := strings.IndexAny(suffix, separators); right >= 0 {
+		suffix = suffix[:right]
+	}
+	suffix = strings.ToLower(strings.TrimLeft(suffix, " \t:：()（）"))
+	return perUnitChapterScaleSuffixRE.MatchString(suffix)
+}
+
+type bookWordScaleCandidate struct {
+	minWords int
+	maxWords int
+	explicit bool
+}
+
+// parseBookWordScaleRange distinguishes a whole-book word range from a
+// per-chapter budget in the same free-form estimated_scale. Explicit total
+// markers win regardless of field order; a lone unlabelled legacy range is
+// still accepted for backward compatibility.
+func parseBookWordScaleRange(value string) (int, int, bool, error) {
+	indices := wordScaleRangeRE.FindAllStringSubmatchIndex(value, -1)
+	candidates := make([]bookWordScaleCandidate, 0, len(indices))
+	for _, index := range indices {
+		if len(index) != 10 {
+			continue
+		}
+		prefix := wordScalePrefix(value, index[0])
+		totalMarkerAt := lastMarkerIndexFold(prefix, totalWordScaleContextMarkers)
+		perChapterMarkerAt := lastMarkerIndexFold(prefix, perChapterWordScaleContextMarkers)
+		if perChapterMarkerAt >= 0 || wordScaleHasPerChapterSuffix(value, index[1]) {
+			continue
+		}
+		group := func(n int) string {
+			start, end := index[n*2], index[n*2+1]
+			if start < 0 || end < 0 {
+				return ""
+			}
+			return value[start:end]
+		}
+		minValue, _ := strconv.ParseFloat(group(1), 64)
+		maxValue, _ := strconv.ParseFloat(group(3), 64)
+		minFactor, maxFactor := 1.0, 1.0
+		if group(2) != "" {
+			minFactor = 10000
+		}
+		if group(4) != "" {
+			maxFactor = 10000
+			// Chinese commonly elides the first unit in ranges such as
+			// “2.8—3万字”. Preserve that accepted spelling while also
+			// supporting the fully explicit “2.8万—3万字”.
+			if group(2) == "" && minValue < 1000 {
+				minFactor = maxFactor
+			}
+		}
+		candidate := bookWordScaleCandidate{
+			minWords: int(minValue*minFactor + 0.5),
+			maxWords: int(maxValue*maxFactor + 0.5),
+			explicit: totalMarkerAt >= 0,
+		}
+		if candidate.minWords <= 0 || candidate.maxWords < candidate.minWords {
+			return 0, 0, false, fmt.Errorf("estimated_scale has invalid word range")
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return 0, 0, false, nil
+	}
+
+	preferred := make([]bookWordScaleCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.explicit {
+			preferred = append(preferred, candidate)
+		}
+	}
+	if len(preferred) == 0 {
+		preferred = candidates
+	}
+	selected := preferred[0]
+	for _, candidate := range preferred[1:] {
+		if candidate.minWords != selected.minWords || candidate.maxWords != selected.maxWords {
+			return 0, 0, false, fmt.Errorf("estimated_scale has ambiguous total word ranges")
+		}
+	}
+	return selected.minWords, selected.maxWords, true, nil
+}
+
+func wordScalePrefix(value string, start int) string {
+	const separators = "，,；;。.!！?？\n\r"
+	left := strings.LastIndexAny(value[:start], separators)
+	if left < 0 {
+		left = 0
+	} else {
+		_, width := utf8.DecodeRuneInString(value[left:])
+		left += width
+	}
+	return strings.TrimSpace(value[left:start])
+}
+
+func lastMarkerIndexFold(value string, markers []string) int {
+	value = strings.ToLower(value)
+	last := -1
+	for _, marker := range markers {
+		if index := strings.LastIndex(value, strings.ToLower(marker)); index > last {
+			last = index
+		}
+	}
+	return last
+}
+
+func wordScaleHasPerChapterSuffix(value string, end int) bool {
+	const separators = "，,；;。.!！?？\n\r"
+	suffix := value[end:]
+	if right := strings.IndexAny(suffix, separators); right >= 0 {
+		suffix = suffix[:right]
+	}
+	suffix = strings.ToLower(strings.TrimLeft(suffix, " \t:：()（）"))
+	return perChapterWordScaleSuffixRE.MatchString(suffix)
+}
 
 // ParseBookScaleRange extracts volume and chapter bounds without tying the
 // pipeline to a title, genre, or a particular Chinese wording around them.
@@ -134,7 +346,7 @@ func ParseBookScaleRange(value string) (BookScaleRange, error) {
 	if err != nil {
 		return BookScaleRange{}, err
 	}
-	minChapters, maxChapters, err := parse(chapterScaleRangeRE, "chapter")
+	minChapters, maxChapters, err := parseBookChapterScaleRange(value)
 	if err != nil {
 		return BookScaleRange{}, err
 	}
@@ -185,27 +397,13 @@ func ResolveBookScaleTarget(value string, currentVolumes, currentChapters int) (
 			target.TargetChapters, OutlineAllMinArcChapters, target.TargetVolumes,
 		)
 	}
-	if m := wordScaleRangeRE.FindStringSubmatch(value); len(m) == 5 {
-		minValue, _ := strconv.ParseFloat(m[1], 64)
-		maxValue, _ := strconv.ParseFloat(m[3], 64)
-		minFactor, maxFactor := 1.0, 1.0
-		if m[2] != "" {
-			minFactor = 10000
-		}
-		if m[4] != "" {
-			maxFactor = 10000
-			// Chinese commonly elides the first unit in ranges such as
-			// “2.8—3万字”. Preserve that accepted spelling while also
-			// supporting the fully explicit “2.8万—3万字”.
-			if m[2] == "" && minValue < 1000 {
-				minFactor = maxFactor
-			}
-		}
-		target.MinWords = int(minValue*minFactor + 0.5)
-		target.MaxWords = int(maxValue*maxFactor + 0.5)
-		if target.MinWords <= 0 || target.MaxWords < target.MinWords {
-			return BookScaleTarget{}, fmt.Errorf("estimated_scale has invalid word range")
-		}
+	minWords, maxWords, hasWordRange, err := parseBookWordScaleRange(value)
+	if err != nil {
+		return BookScaleTarget{}, err
+	}
+	if hasWordRange {
+		target.MinWords = minWords
+		target.MaxWords = maxWords
 		target.TargetWords = (target.MinWords + target.MaxWords + 1) / 2
 		target.TargetWordsPerChapter = (target.TargetWords + target.TargetChapters/2) / target.TargetChapters
 		if target.TargetWordsPerChapter < 1500 || target.TargetWordsPerChapter > 5000 {

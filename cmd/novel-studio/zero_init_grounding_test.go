@@ -10,6 +10,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestZeroRelationshipTypeUsesPairEvidenceAndNegation(t *testing.T) {
@@ -44,6 +45,205 @@ func TestZeroRelationshipTypeUsesPairEvidenceAndNegation(t *testing.T) {
 		}
 		if c.Name != "沈知遥" && !strings.HasPrefix(potential, "none") {
 			t.Errorf("%s received false romance potential: %s", c.Name, potential)
+		}
+	}
+}
+
+func TestZeroRelationshipEmotionArcsPreserveExplicitFormerLovers(t *testing.T) {
+	characters := []domain.Character{
+		{Name: "林照微", Role: "主角／织物修复师", Description: "正文开篇时约三十岁。她与贺今棠二十一岁时相识相恋，九年前因真实价值冲突分离。"},
+		{Name: "贺今棠", Role: "主角／律师", Description: "正文开篇时约三十岁。她与林照微二十一岁时相识相恋，九年后重逢并重新判断能否复合。"},
+	}
+	project := zeroInitProject{
+		Characters:   characters,
+		FirstCast:    map[string]bool{"林照微": true, "贺今棠": true},
+		FirstChapter: domain.OutlineEntry{Chapter: 1, CoreEvent: "林照微与贺今棠九年后重逢。"},
+	}
+	arcs := zeroRelationshipEmotionArcs(project, nil)
+	if len(arcs) != 1 {
+		t.Fatalf("relationship arcs=%+v", arcs)
+	}
+	arc := arcs[0]
+	if arc.RelationshipType != zeroFormerLoversRelationship || strings.HasPrefix(arc.RomancePotential, "none") ||
+		strings.Contains(arc.IntimacyStage, "陌生") || !strings.Contains(arc.CurrentBond, "既往相恋") {
+		t.Fatalf("former lovers were flattened: %+v", arc)
+	}
+
+	negative := characters[1]
+	negative.Description = "正文开篇时约三十岁。她与林照微不是恋爱关系，不得发展恋爱或复合。"
+	if got := zeroRelationshipType(zeroInitProject{Characters: []domain.Character{characters[0], negative}}, negative); got == zeroFormerLoversRelationship || strings.Contains(got, "恋爱") {
+		t.Fatalf("negated relationship became romance: %s", got)
+	}
+}
+
+func TestZeroInitDualProtagonistRelationshipsAreReciprocalOwnedAndNeverSelf(t *testing.T) {
+	characters := []domain.Character{
+		{Name: "林照微", Role: "主角／独立织物修复师", Tier: "core", Description: "她与贺今棠二十一岁时相识相恋，九年前因真实价值冲突分离。"},
+		{Name: "贺今棠", Role: "主角／债务重整律师", Tier: "core", Description: "她与林照微二十一岁时相识相恋，九年后重逢并重新判断能否复合。"},
+	}
+	for _, character := range characters {
+		if !zeroIsProtagonist(character) {
+			t.Fatalf("slash-qualified protagonist role was not recognized: %+v", character)
+		}
+	}
+	if zeroIsProtagonist(domain.Character{Role: "主角的母亲"}) {
+		t.Fatal("protagonist relative was misclassified as protagonist")
+	}
+	project := zeroInitProject{
+		Characters:    characters,
+		FirstCast:     map[string]bool{"林照微": true, "贺今棠": true},
+		FirstMentions: map[string]int{"林照微": 1, "贺今棠": 1},
+		FirstChapter:  domain.OutlineEntry{Chapter: 1, CoreEvent: "林照微与贺今棠九年后重逢。"},
+	}
+	dynamics := zeroInitDynamics(project)
+	pairs := map[string]domain.CharacterRelationshipContract{}
+	for _, state := range dynamics.Characters {
+		for _, contract := range state.RelationshipContract {
+			if state.Character == contract.Counterpart {
+				t.Fatalf("self relationship generated: %+v", state)
+			}
+			pairs[state.Character+"→"+contract.Counterpart] = contract
+		}
+	}
+	for _, pair := range []string{"林照微→贺今棠", "贺今棠→林照微"} {
+		contract, ok := pairs[pair]
+		if !ok {
+			t.Fatalf("missing reciprocal former-lover contract %s: %+v", pair, pairs)
+		}
+		if !strings.Contains(contract.AllianceStatus, "既往恋人") || !strings.Contains(contract.Trust, "不因重逢自动恢复") {
+			t.Fatalf("former-lover boundary missing for %s: %+v", pair, contract)
+		}
+	}
+
+	raw, err := json.Marshal(zeroInitRelationshipState(project, dynamics.Characters))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flattened struct {
+		Version   int                                 `json:"version"`
+		Contracts []zeroInitOwnedRelationshipContract `json:"contracts"`
+	}
+	if err := json.Unmarshal(raw, &flattened); err != nil {
+		t.Fatal(err)
+	}
+	if flattened.Version != 2 || len(flattened.Contracts) != len(pairs) {
+		t.Fatalf("unexpected owned relationship projection: %s", raw)
+	}
+	for _, owned := range flattened.Contracts {
+		if owned.Character == "" || owned.Counterpart == "" || owned.Character == owned.Counterpart {
+			t.Fatalf("flattened relationship lost owner or became self-referential: %+v", owned)
+		}
+	}
+}
+
+func TestZeroInitialRelationshipStateGateRejectsLegacyOwnerlessProjection(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	characters := []domain.Character{
+		{Name: "林照微", Role: "主角／织物修复师", Tier: "core", Description: "她与贺今棠相恋后分离。"},
+		{Name: "贺今棠", Role: "主角／律师", Tier: "core", Description: "她与林照微相恋后分离，九年后重逢。"},
+	}
+	if err := st.Characters.Save(characters); err != nil {
+		t.Fatal(err)
+	}
+	project := zeroInitProject{
+		Characters:   characters,
+		FirstCast:    map[string]bool{"林照微": true, "贺今棠": true},
+		FirstChapter: domain.OutlineEntry{Chapter: 1, CoreEvent: "两人重逢。"},
+	}
+	dynamics := zeroInitDynamics(project)
+	if err := writeZeroJSON(filepath.Join(dir, "meta", "initial_character_dynamics.json"), dynamics, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeZeroJSON(filepath.Join(dir, "relationship_state.initial.json"), zeroInitRelationshipState(project, dynamics.Characters), true); err != nil {
+		t.Fatal(err)
+	}
+	if issues := zeroCheckInitialRelationshipState(dir); len(issues) != 0 {
+		t.Fatalf("valid owned reciprocal relationship state rejected: %v", issues)
+	}
+
+	var legacyContracts []domain.CharacterRelationshipContract
+	for _, state := range dynamics.Characters {
+		legacyContracts = append(legacyContracts, state.RelationshipContract...)
+	}
+	legacy := map[string]any{"version": 1, "contracts": legacyContracts}
+	if err := writeZeroJSON(filepath.Join(dir, "relationship_state.initial.json"), legacy, true); err != nil {
+		t.Fatal(err)
+	}
+	issues := strings.Join(zeroCheckInitialRelationshipState(dir), "\n")
+	for _, want := range []string{"版本过旧", "缺少 character owner"} {
+		if !strings.Contains(issues, want) {
+			t.Fatalf("legacy ownerless relationship state did not fail on %q: %s", want, issues)
+		}
+	}
+}
+
+func TestZeroVisualDesignUsesCompositeRoleCharacterAnchorsWithoutGenericPoverty(t *testing.T) {
+	project := zeroInitProject{Characters: []domain.Character{
+		{
+			Name: "林照微", Role: "主角／独立织物修复师",
+			Description: "她的固定外貌锚点是暖褐肤色、右眉尾浅痣、工作时利落束发、指尖常留淡靛染痕。",
+		},
+		{
+			Name: "贺今棠", Role: "主角／债务重整律师",
+			Description: "她的固定外貌锚点是清峭眉骨、右手虎口淡烫痕、克制衣色和习惯把衣领扣紧。主动卷起袖口只表现关系松动。",
+		},
+	}}
+	raw, err := json.Marshal(zeroVisualDesign(project, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{"暖褐肤色", "右眉尾浅痣", "利落束发", "淡靛染痕", "清峭眉骨", "虎口淡烫痕", "克制衣色", "衣领扣紧", "卷起袖口"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("visual design lost character-card anchor %q: %s", want, text)
+		}
+	}
+	for _, stale := range []string{"短发或便于行动", "口袋、袖口、鞋底能承载贫穷", "脸部疲惫但眼神"} {
+		if strings.Contains(text, stale) {
+			t.Fatalf("generic protagonist visual template contaminated composite role with %q: %s", stale, text)
+		}
+	}
+}
+
+func TestZeroWorldBackgroundPrefersActiveCoProtagonistRelationship(t *testing.T) {
+	project := zeroInitProject{
+		Characters: []domain.Character{
+			{Name: "林照微", Role: "主角／织物修复师", Tier: "core"},
+			{Name: "贺今棠", Role: "主角／律师", Tier: "core", Description: "她与林照微曾经相恋，九年后重逢。"},
+			{Name: "林素琴", Role: "重要配角／林照微的养母", Tier: "important"},
+		},
+		FirstCast: map[string]bool{"林照微": true, "贺今棠": true, "林素琴": true},
+		FirstChapter: domain.OutlineEntry{
+			Chapter: 1, CoreEvent: "林照微与贺今棠在旧样房重逢。", Scenes: []string{"旧样房"},
+		},
+	}
+	background := zeroGroundedWorldBackgroundPlan(project)
+	if !strings.Contains(background.Layers.RelationshipNetwork, "林照微 与 贺今棠") {
+		t.Fatalf("world relationship network did not prioritize active co-protagonist: %s", background.Layers.RelationshipNetwork)
+	}
+	if len(background.ConflictWeb) < 2 || len(background.ConflictWeb[1].Parties) < 2 || background.ConflictWeb[1].Parties[1] != "贺今棠" {
+		t.Fatalf("world conflict web did not preserve lead pair: %+v", background.ConflictWeb)
+	}
+}
+
+func TestZeroDialogueSceneBlueprintsAreGenderNeutral(t *testing.T) {
+	project := zeroInitProject{
+		Characters:   []domain.Character{{Name: "林照微", Role: "主角"}, {Name: "贺今棠", Role: "主角"}},
+		FirstCast:    map[string]bool{"林照微": true, "贺今棠": true},
+		FirstChapter: domain.OutlineEntry{Chapter: 1, CoreEvent: "两人在旧样房重逢。"},
+	}
+	blueprints := zeroDialogueSceneBlueprints(project, zeroInitDynamics(project).Characters)
+	raw, err := json.Marshal(blueprints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"他为什么能影响", "他此刻有自己的事", "他怕被绑定责任"} {
+		if strings.Contains(string(raw), stale) {
+			t.Fatalf("gendered template %q remains in %s", stale, raw)
 		}
 	}
 }
@@ -334,10 +534,54 @@ func TestZeroReadinessDetectsPositiveForbiddenTopicUse(t *testing.T) {
 	}
 }
 
-func TestPipelineInitialWorldTickOptionsPreserveUserRules(t *testing.T) {
+func TestPipelineInitialWorldTickOptionsAreStageBound(t *testing.T) {
 	opts := pipelineInitialWorldTickHeadlessOptions("internal stage")
-	if !opts.PreserveUserRules || !opts.StopAfterInitialWorldTick || opts.Prompt != "internal stage" {
+	if !opts.PreserveUserRules || !opts.StopAfterInitialWorldTick || !opts.DisableFlowRouter ||
+		opts.AllowChapterZeroFoundationRefresh || opts.FoundationRefreshTarget != "" || opts.Prompt != "internal stage" {
 		t.Fatalf("unsafe initial world tick options: %+v", opts)
+	}
+}
+
+func TestPipelineInitialWorldTickPromptMakesVisibilityAndGenderGuardsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const coreEvent = "林照微只提交独立风险告知，许珩保留四十八小时单方保护决定。"
+	const hook = "次日上午前，贺今棠必须完成书面披露。"
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Chapters: []domain.OutlineEntry{{
+				Chapter: 1, CoreEvent: coreEvent, Hook: hook,
+			}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := pipelineInitialWorldTickPrompt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"必须把下列合同整块逐字复制进 subagent task",
+		tools.InitialWorldTickNoPreemptToken,
+		coreEvent,
+		hook,
+		"chapter0 只设置第1章实际发生所需的条件",
+		"角色最早可见章节是逐字段硬边界",
+		"角色可以在镜头外提前行动",
+		"actors、location、summary、consequence、visibility_path",
+		"visibility_chapter 必须不早于其中任一角色的最早可见章节",
+		"不得提前点名或揭示较晚登场者",
+		"凡 role/description/arc 明确为女性或以“她”指代的角色",
+		"严禁用“他”指代",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("initial world tick prompt missing hard guard %q:\n%s", want, prompt)
+		}
 	}
 }
 

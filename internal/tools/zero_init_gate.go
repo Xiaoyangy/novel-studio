@@ -29,7 +29,7 @@ const zeroInitFreshnessGrace = 2 * time.Second
 // before the first chapter can be written. Keep the producer and every
 // consumer pinned to this single value so a legacy ready:true artifact cannot
 // bypass a newer prewriting contract.
-const ZeroInitReadinessSchemaVersion = 5
+const ZeroInitReadinessSchemaVersion = 7
 
 const zeroInitUserRulesDependency = "meta/user_rules.json"
 

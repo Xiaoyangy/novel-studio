@@ -3,6 +3,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -22,9 +25,14 @@ import (
 
 // SaveFoundationTool 保存基础设定（premise/outline/characters），Architect 专用。
 type SaveFoundationTool struct {
-	store           *store.Store
-	ragEmbedder     rag.Embedder
-	ragVectorWriter rag.VectorWriter
+	store                             *store.Store
+	ragEmbedder                       rag.Embedder
+	ragVectorWriter                   rag.VectorWriter
+	allowChapterZeroFoundationRefresh bool
+	allowedFoundationType             string
+	recordFoundationRefreshEpoch      bool
+	oneShotFoundationRefresh          bool
+	foundationRefreshConsumed         atomic.Bool
 }
 
 func NewSaveFoundationTool(store *store.Store) *SaveFoundationTool {
@@ -38,6 +46,33 @@ func (t *SaveFoundationTool) WithRAGEmbedder(embedder rag.Embedder) *SaveFoundat
 
 func (t *SaveFoundationTool) WithRAGVectorWriter(writer rag.VectorWriter) *SaveFoundationTool {
 	t.ragVectorWriter = writer
+	return t
+}
+
+// WithChapterZeroFoundationRefresh grants a process-local capability used only
+// by the explicit pipeline Architect refresh. The model cannot set this flag:
+// save_foundation still verifies the live foundation execution lease and the
+// absence of every chapter-generation artifact before replacing an outline in
+// PhaseWriting.
+func (t *SaveFoundationTool) WithChapterZeroFoundationRefresh(allow bool) *SaveFoundationTool {
+	t.allowChapterZeroFoundationRefresh = allow
+	return t
+}
+
+// WithFoundationTypeRestriction binds a refresh sidecar to one exact
+// save_foundation mutation. Empty preserves the ordinary Architect tool.
+func (t *SaveFoundationTool) WithFoundationTypeRestriction(kind string) *SaveFoundationTool {
+	t.allowedFoundationType = strings.TrimSpace(kind)
+	return t
+}
+
+func (t *SaveFoundationTool) WithFoundationRefreshEpoch(allow bool) *SaveFoundationTool {
+	t.recordFoundationRefreshEpoch = allow
+	return t
+}
+
+func (t *SaveFoundationTool) WithOneShotFoundationRefresh(allow bool) *SaveFoundationTool {
+	t.oneShotFoundationRefresh = allow
 	return t
 }
 
@@ -59,7 +94,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
 		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance）。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围，其中 x-y章 必须是全书总章数范围（严禁把“每弧/每卷 8-16 章”这类单元预算写成全书章数范围；如需注明可写“每弧8-16章”，但全书总章数必须另有独立的 x-y章 范围）；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance）。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / revise_arc / outline-all append_volume / volume_codex 时必传）")),
@@ -69,7 +104,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 	)
 }
 
-func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) (out json.RawMessage, returnErr error) {
 	if err := guardPipelineGlobalPlanningExecution(t.store, t.Name()); err != nil {
 		return nil, err
 	}
@@ -85,6 +120,24 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	if err := unmarshalToolArgs(args, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
 	}
+	if t.allowedFoundationType != "" && a.Type != t.allowedFoundationType {
+		return nil, fmt.Errorf(
+			"foundation refresh sidecar only allows save_foundation(type=%q); received %q: %w",
+			t.allowedFoundationType,
+			a.Type,
+			errs.ErrToolPrecondition,
+		)
+	}
+	if t.oneShotFoundationRefresh {
+		if !t.foundationRefreshConsumed.CompareAndSwap(false, true) {
+			return nil, fmt.Errorf("foundation refresh sidecar has already completed its one allowed mutation: %w", errs.ErrToolPrecondition)
+		}
+		defer func() {
+			if returnErr != nil {
+				t.foundationRefreshConsumed.Store(false)
+			}
+		}()
+	}
 	if err := guardOutlineAllFoundationType(t.store, a.Type, a.Scale); err != nil {
 		return nil, err
 	}
@@ -98,17 +151,47 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		default:
 			return nil, fmt.Errorf("invalid scale %q, expected short/mid/long: %w", a.Scale, errs.ErrToolArgs)
 		}
-		if err := t.store.RunMeta.SetPlanningTier(domain.PlanningTier(a.Scale)); err != nil {
-			return nil, fmt.Errorf("save planning tier: %w: %w", errs.ErrStoreWrite, err)
+		if t.allowedFoundationType != "" {
+			meta, err := t.store.RunMeta.Load()
+			if err != nil {
+				return nil, fmt.Errorf("load planning tier for exact foundation refresh: %w", err)
+			}
+			if meta == nil || meta.PlanningTier == "" || meta.PlanningTier != domain.PlanningTier(a.Scale) {
+				current := domain.PlanningTier("")
+				if meta != nil {
+					current = meta.PlanningTier
+				}
+				return nil, fmt.Errorf(
+					"exact foundation refresh cannot change planning tier from %q to %q: %w",
+					current,
+					a.Scale,
+					errs.ErrToolPrecondition,
+				)
+			}
 		}
 	}
 
 	result := map[string]any{"saved": true, "type": a.Type, "scale": a.Scale}
 
-	// 写作阶段禁止全量覆盖大纲，只允许增量操作（expand_arc / append_volume）
-	if (a.Type == "outline" || a.Type == "layered_outline") && t.isWriting() && !t.chapterZeroOutlineReplacementAuthorized() {
-		return nil, fmt.Errorf(
-			"写作阶段禁止使用 %s 全量覆盖大纲。请使用 expand_arc 展开骨架弧，或 append_volume 追加新卷: %w", a.Type, errs.ErrToolPrecondition)
+	// Any writing/canon evidence makes full outline replacement exceptional.
+	// Progress read failures and hidden draft/planning artifacts fail closed.
+	if a.Type == "outline" || a.Type == "layered_outline" {
+		requiresAuthority, inspectErr := t.outlineReplacementRequiresAuthorization()
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		if requiresAuthority && !t.chapterZeroOutlineReplacementAuthorized(a.Type) {
+			return nil, fmt.Errorf(
+				"写作或已有正史证据的项目禁止使用 %s 全量覆盖大纲。请使用 expand_arc/append_volume，或由宿主显式授权章零 refresh/rebase: %w",
+				a.Type,
+				errs.ErrToolPrecondition,
+			)
+		}
+	}
+	if a.Scale != "" && t.allowedFoundationType == "" {
+		if err := t.store.RunMeta.SetPlanningTier(domain.PlanningTier(a.Scale)); err != nil {
+			return nil, fmt.Errorf("save planning tier: %w: %w", errs.ErrStoreWrite, err)
+		}
 	}
 
 	decode := func(typeName string, out any) error {
@@ -426,6 +509,20 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	if _, err := t.store.Checkpoints.AppendArtifact(scope, a.Type, foundationArtifact(a.Type)); err != nil {
 		return nil, fmt.Errorf("checkpoint foundation %s: %w: %w", a.Type, errs.ErrStoreWrite, err)
 	}
+	if t.recordFoundationRefreshEpoch {
+		digest, err := FoundationRefreshArtifactsDigest(t.store.Dir(), a.Type)
+		if err != nil {
+			return nil, fmt.Errorf("digest foundation refresh %s: %w: %w", a.Type, errs.ErrStoreRead, err)
+		}
+		if _, err := t.store.Checkpoints.AppendAlways(
+			scope,
+			FoundationRefreshCheckpointStep(a.Type),
+			strings.Join(foundationRefreshArtifacts(a.Type), "+"),
+			digest,
+		); err != nil {
+			return nil, fmt.Errorf("checkpoint foundation refresh %s: %w: %w", a.Type, errs.ErrStoreWrite, err)
+		}
+	}
 	outlineAllMode, modeErr := outlineAllExecutionModeActive(t.store)
 	if modeErr != nil {
 		return nil, modeErr
@@ -523,11 +620,51 @@ func foundationArtifact(t string) string {
 		return "world_rules.json"
 	case "book_world":
 		return "book_world.json"
+	case "world_codex":
+		return "world_codex.json"
 	case "update_compass":
 		return "meta/compass.json"
 	default:
 		return ""
 	}
+}
+
+func FoundationRefreshCheckpointStep(kind string) string {
+	return "foundation_refresh:" + strings.TrimSpace(kind)
+}
+
+func foundationRefreshArtifacts(kind string) []string {
+	switch strings.TrimSpace(kind) {
+	case "layered_outline":
+		return []string{"layered_outline.json", "outline.json"}
+	case "premise", "characters", "world_rules", "book_world", "world_codex", "update_compass":
+		if artifact := foundationArtifact(kind); artifact != "" {
+			return []string{artifact}
+		}
+	}
+	return nil
+}
+
+// FoundationRefreshArtifactsDigest binds a successful refresh epoch to every
+// final artifact produced by that exact mutation. layered_outline includes the
+// synchronized flat outline, so a partial two-file save cannot satisfy it.
+func FoundationRefreshArtifactsDigest(dir, kind string) (string, error) {
+	artifacts := foundationRefreshArtifacts(kind)
+	if len(artifacts) == 0 {
+		return "", fmt.Errorf("unsupported foundation refresh type %q", kind)
+	}
+	h := sha256.New()
+	for _, rel := range artifacts {
+		raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", err
+		}
+		_, _ = h.Write([]byte(rel))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(raw)
+		_, _ = h.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // decodeFoundationJSON 解析 save_foundation 的 content 字段。严格解析失败时
@@ -851,14 +988,101 @@ func normalizeFoundationContent(raw json.RawMessage) (string, error) {
 	return string(raw), nil
 }
 
-func (t *SaveFoundationTool) isWriting() bool {
-	p, _ := t.store.Progress.Load()
-	return p != nil && p.Phase == domain.PhaseWriting
+func (t *SaveFoundationTool) outlineReplacementRequiresAuthorization() (bool, error) {
+	p, err := t.store.Progress.Load()
+	if err != nil {
+		return false, fmt.Errorf("load progress before outline replacement: %w: %w", errs.ErrStoreRead, err)
+	}
+	if p != nil && (p.Phase == domain.PhaseWriting || p.Phase == domain.PhaseComplete ||
+		p.LatestCompleted() != 0 || len(p.CompletedChapters) != 0 || p.TotalWordCount != 0 ||
+		len(p.ChapterWordCounts) != 0 || p.InProgressChapter > 0 || len(p.CompletedScenes) != 0 ||
+		len(p.PendingRewrites) != 0 || strings.TrimSpace(p.GenerationID) != "" ||
+		strings.TrimSpace(p.GenerationMode) != "" || p.ReopenedFromComplete ||
+		len(p.StrandHistory) != 0 || len(p.HookHistory) != 0) {
+		return true, nil
+	}
+	if err := t.store.ValidateOutlineAllChapterZeroWorkspace(); err != nil {
+		return true, nil
+	}
+	return false, nil
 }
 
-func (t *SaveFoundationTool) chapterZeroOutlineReplacementAuthorized() bool {
+func (t *SaveFoundationTool) chapterZeroOutlineReplacementAuthorized(kind string) bool {
+	if kind == "layered_outline" && t.chapterZeroFoundationRefreshAuthorized() {
+		return true
+	}
+	return t.chapterZeroRebaseOutlineReplacementAuthorized()
+}
+
+func (t *SaveFoundationTool) chapterZeroFoundationRefreshAuthorized() bool {
+	if !t.allowChapterZeroFoundationRefresh {
+		return false
+	}
+	if err := RequireChapterZeroFoundationRefreshState(t.store); err != nil {
+		return false
+	}
+	lock, err := t.store.Runtime.LoadPipelineExecution()
+	if err != nil || lock == nil || lock.Mode != domain.PipelineExecutionFoundation || lock.TargetChapter != 1 {
+		return false
+	}
+	if err := requireCurrentPipelineExecutionProcess(lock, "save_foundation chapter-zero Architect refresh"); err != nil {
+		return false
+	}
+	return true
+}
+
+// RequireChapterZeroFoundationRefreshState is the shared no-partial-write
+// preflight for an explicit Architect refresh. The pipeline calls it before
+// the first target sidecar; save_foundation repeats it immediately before the
+// only exceptional outline replacement.
+func RequireChapterZeroFoundationRefreshState(st *store.Store) error {
+	if st == nil {
+		return fmt.Errorf("chapter-zero foundation refresh requires a store: %w", errs.ErrToolPrecondition)
+	}
+	p, err := st.Progress.Load()
+	if err != nil {
+		return fmt.Errorf("load chapter-zero refresh progress: %w", err)
+	}
+	if p == nil || (p.Phase != domain.PhaseWriting && p.Phase != domain.PhasePremise && p.Phase != domain.PhaseOutline) ||
+		p.LatestCompleted() != 0 || len(p.CompletedChapters) != 0 || p.TotalWordCount != 0 || len(p.ChapterWordCounts) != 0 ||
+		len(p.PendingRewrites) != 0 || strings.TrimSpace(p.RewriteReason) != "" || strings.TrimSpace(p.GenerationID) != "" ||
+		strings.TrimSpace(p.GenerationMode) != "" || p.CurrentChapter < 0 || p.CurrentChapter > 1 || p.InProgressChapter < 0 ||
+		p.InProgressChapter > 1 || len(p.CompletedScenes) != 0 || p.ReopenedFromComplete || len(p.StrandHistory) != 0 ||
+		len(p.HookHistory) != 0 || (p.Flow != "" && p.Flow != domain.FlowWriting) {
+		return fmt.Errorf("foundation refresh requires chapter-zero progress with no canon, generation, rewrite, or history evidence: %w", errs.ErrToolPrecondition)
+	}
+	if !FoundationCoreComplete(st.Dir()) {
+		return fmt.Errorf("foundation refresh requires an existing complete foundation: %w", errs.ErrToolPrecondition)
+	}
+	if receipt, err := st.LoadOutlineAllExecutionReceipt(); err != nil {
+		return fmt.Errorf("load outline-all receipt before foundation refresh: %w", err)
+	} else if receipt != nil {
+		return fmt.Errorf("foundation refresh refuses a published or in-flight outline-all receipt: %w", errs.ErrToolPrecondition)
+	}
+	if active, err := st.ProjectedV2().LoadActiveGeneration(); err != nil {
+		return fmt.Errorf("load active planning generation before foundation refresh: %w", err)
+	} else if active != nil {
+		return fmt.Errorf("foundation refresh refuses an active sealed planning generation: %w", errs.ErrToolPrecondition)
+	}
+	for _, rel := range []string{
+		"meta/first_chapter_generation_readiness.json",
+		"meta/first_chapter_generation_readiness.md",
+	} {
+		if _, err := os.Lstat(filepath.Join(st.Dir(), filepath.FromSlash(rel))); err == nil {
+			return fmt.Errorf("foundation refresh refuses existing zero-init evidence at %s: %w", rel, errs.ErrToolPrecondition)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect zero-init evidence %s: %w", rel, err)
+		}
+	}
+	if err := st.ValidateOutlineAllChapterZeroWorkspace(); err != nil {
+		return fmt.Errorf("foundation refresh chapter-zero workspace: %w", err)
+	}
+	return nil
+}
+
+func (t *SaveFoundationTool) chapterZeroRebaseOutlineReplacementAuthorized() bool {
 	p, err := t.store.Progress.Load()
-	if err != nil || p == nil || p.LatestCompleted() != 0 || p.TotalWordCount != 0 || strings.TrimSpace(p.GenerationID) == "" {
+	if err != nil || p == nil || p.Phase != domain.PhaseWriting || p.LatestCompleted() != 0 || p.TotalWordCount != 0 || strings.TrimSpace(p.GenerationID) == "" {
 		return false
 	}
 	markerRaw, err := os.ReadFile(filepath.Join(t.store.Dir(), "meta", "all_chapter_rebase.json"))

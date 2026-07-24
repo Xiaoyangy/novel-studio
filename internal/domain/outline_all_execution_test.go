@@ -82,6 +82,16 @@ func TestOutlineAllExecutionReceiptDigestRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestOutlineAllExecutionReceiptRequiresGeneration(t *testing.T) {
+	receipt := validOutlineAllReceiptForTest(t)
+	receipt.GenerationID = ""
+	receipt.ReceiptDigest = ""
+	if _, err := SignOutlineAllExecutionReceipt(receipt); err == nil ||
+		!strings.Contains(err.Error(), "generation_id") {
+		t.Fatalf("outline-all receipt accepted an empty generation: %v", err)
+	}
+}
+
 func TestOutlineAllExecutionReceiptRequiresBoundedSingleAction(t *testing.T) {
 	receipt := validOutlineAllReceiptForTest(t)
 	receipt.PendingAction = &OutlineAllPendingAction{
@@ -164,5 +174,9 @@ func TestValidateOutlineAllChapterZeroProgress(t *testing.T) {
 	progress.CompletedChapters = []int{1}
 	if err := ValidateOutlineAllChapterZeroProgress(progress, receipt); err == nil {
 		t.Fatal("completed canon must close the chapter-zero execution window")
+	}
+	progress = &Progress{}
+	if err := ValidateOutlineAllChapterZeroProgress(progress, receipt); err == nil {
+		t.Fatal("chapter-zero progress without a generation was accepted")
 	}
 }

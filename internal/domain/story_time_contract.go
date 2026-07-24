@@ -64,6 +64,8 @@ type StoryTimeContract struct {
 type ParsedStoryScale struct {
 	ChapterMin       int
 	ChapterMax       int
+	DurationDaysMin  float64
+	DurationDaysMax  float64
 	DurationYearsMin float64
 	DurationYearsMax float64
 }
@@ -73,6 +75,8 @@ var (
 	storyChapterSingleRE   = regexp.MustCompile(`([0-9]+)\s*章`)
 	storyYearRangeRE       = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*年`)
 	storyYearSingleRE      = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年`)
+	storyDayRangeRE        = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
+	storyDaySingleRE       = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
 	storyArabicHalfYearRE  = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年半`)
 	storyChineseHalfYearRE = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年半`)
 	storyChineseYearRE     = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年`)
@@ -93,6 +97,16 @@ func ParseStoryScale(raw string) ParsedStoryScale {
 	}
 	if out.ChapterMin > out.ChapterMax {
 		out.ChapterMin, out.ChapterMax = out.ChapterMax, out.ChapterMin
+	}
+	if match := storyDayRangeRE.FindStringSubmatch(normalized); len(match) == 3 {
+		out.DurationDaysMin, _ = strconv.ParseFloat(match[1], 64)
+		out.DurationDaysMax, _ = strconv.ParseFloat(match[2], 64)
+	} else if match := storyDaySingleRE.FindStringSubmatch(normalized); len(match) == 2 {
+		out.DurationDaysMin, _ = strconv.ParseFloat(match[1], 64)
+		out.DurationDaysMax = out.DurationDaysMin
+	}
+	if out.DurationDaysMin > out.DurationDaysMax {
+		out.DurationDaysMin, out.DurationDaysMax = out.DurationDaysMax, out.DurationDaysMin
 	}
 	if match := storyYearRangeRE.FindStringSubmatch(normalized); len(match) == 3 {
 		out.DurationYearsMin, _ = strconv.ParseFloat(match[1], 64)
@@ -229,7 +243,12 @@ func DeriveStoryTimeContract(estimatedScale string, targetChapters int) (StoryTi
 		TargetChapters:       targetChapters,
 		SourceEstimatedScale: strings.TrimSpace(estimatedScale),
 	}
-	if parsed.DurationYearsMin > 0 && parsed.DurationYearsMax > 0 {
+	if parsed.DurationDaysMin > 0 && parsed.DurationDaysMax > 0 {
+		contract.Source = StoryTimeSourceCompassEstimatedScale
+		contract.DurationDaysMin = parsed.DurationDaysMin
+		contract.DurationDaysMax = parsed.DurationDaysMax
+		contract.NominalDaysPerChapter = ((contract.DurationDaysMin + contract.DurationDaysMax) / 2) / float64(targetChapters)
+	} else if parsed.DurationYearsMin > 0 && parsed.DurationYearsMax > 0 {
 		contract.Source = StoryTimeSourceCompassEstimatedScale
 		contract.DurationDaysMin = parsed.DurationYearsMin * StoryDaysPerYear
 		contract.DurationDaysMax = parsed.DurationYearsMax * StoryDaysPerYear

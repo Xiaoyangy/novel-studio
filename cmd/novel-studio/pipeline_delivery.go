@@ -879,7 +879,7 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		} else {
 			fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次恢复 Architect 补齐 foundation\n", run, maxArchitectRuns)
 		}
-		if err := headless.Run(cfg, bundle, headless.Options{Prompt: runPrompt, StopAfterFoundation: true}); err != nil {
+		if err := headless.Run(cfg, bundle, pipelineArchitectInitialHeadlessOptions(runPrompt)); err != nil {
 			return err
 		}
 	}
@@ -887,6 +887,14 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		return fmt.Errorf("architect 阶段运行 %d 次后 foundation 仍未齐：missing=%s", maxArchitectRuns, strings.Join(tools.FoundationCoreMissing(cfg.OutputDir), ", "))
 	}
 	return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+}
+
+func pipelineArchitectInitialHeadlessOptions(prompt string) headless.Options {
+	return headless.Options{
+		Prompt:              prompt,
+		StopAfterFoundation: true,
+		DisableFlowRouter:   true,
+	}
 }
 
 func pipelineReconcileExplicitPromptChapterWords(st *store.Store, prompt string) (bool, error) {
@@ -1071,11 +1079,17 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 	if err != nil {
 		return err
 	}
-	shortChapterZero, _ := pipelineArchitectShortChapterZero(cfg.OutputDir)
+	shortChapterZero, _, err := pipelineArchitectShortChapterZero(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
 	if shortChapterZero {
 		targets, err := pipelineArchitectShortSelectedTargets(requestedTarget)
 		if err != nil {
 			return err
+		}
+		if err := tools.RequireChapterZeroFoundationRefreshState(store.NewStore(cfg.OutputDir)); err != nil {
+			return fmt.Errorf("Architect 短篇刷新在任何 foundation 改写前被章零门禁拒绝；已存在 outline-all/zero-init/正文或 generation 时请使用显式全书 rebase 流程: %w", err)
 		}
 		for _, target := range targets {
 			const maxTargetAttempts = 3
@@ -1086,12 +1100,18 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "[pipeline:architect] 刷新 foundation %s（尝试 %d/%d）\n", target.Type, attempt, maxTargetAttempts)
-				if err := headless.Run(cfg, bundle, headless.Options{
-					Prompt:                    pipelineArchitectShortRefreshTargetPrompt(refreshPrompt, target),
-					PreserveUserRules:         true,
-					StopAfterFoundationChange: true,
-				}); err != nil {
-					return err
+				runErr := headless.Run(cfg, bundle, pipelineArchitectRefreshHeadlessOptions(
+					pipelineArchitectShortRefreshTargetPrompt(refreshPrompt, target),
+					target.Artifacts,
+					target.Type,
+					target.Type == "layered_outline",
+				))
+				if runErr != nil {
+					if errors.Is(runErr, headless.ErrFoundationChangeIncomplete) {
+						fmt.Fprintf(os.Stderr, "[pipeline:architect] %s 本轮未形成成功 refresh checkpoint，保留可安全证据后重试：%v\n", target.Type, runErr)
+						continue
+					}
+					return runErr
 				}
 				afterTarget, err := pipelineArchitectShortTargetRevision(cfg.OutputDir, target)
 				if err != nil {
@@ -1116,28 +1136,32 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 		}
 		return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
 	}
-	if strings.TrimSpace(requestedTarget) != "" {
-		return fmt.Errorf("--architect-target 只适用于第0章、3万字内的短篇 foundation 刷新")
+	return fmt.Errorf("--refresh-architect 当前只允许无 outline-all/zero-init/正文证据的第0章、16章以内项目；已进入长篇或下游阶段请使用显式 rebase 流程")
+}
+
+func pipelineArchitectRefreshHeadlessOptions(
+	prompt string,
+	artifacts []string,
+	foundationRefreshTarget string,
+	allowChapterZeroFoundationRefresh bool,
+) headless.Options {
+	checkpointKind := foundationRefreshTarget
+	if checkpointKind == "" {
+		checkpointKind = "layered_outline"
 	}
-	const maxRefreshRuns = 3
-	for run := 1; run <= maxRefreshRuns; run++ {
-		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次刷新 foundation\n", run, maxRefreshRuns)
-		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                    refreshPrompt,
-			PreserveUserRules:         true,
-			StopAfterFoundationChange: true,
-		}); err != nil {
-			return err
-		}
-		after, err := pipelineOpeningFoundationDigest(cfg.OutputDir)
-		if err != nil {
-			return err
-		}
-		if after != before {
-			return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
-		}
+	return headless.Options{
+		Prompt:                            prompt,
+		PreserveUserRules:                 true,
+		PreserveCheckpointsOnStart:        true,
+		DisableFlowRouter:                 true,
+		FoundationRefreshTarget:           foundationRefreshTarget,
+		RecordFoundationRefreshEpoch:      true,
+		OneShotFoundationRefresh:          true,
+		AllowChapterZeroFoundationRefresh: allowChapterZeroFoundationRefresh,
+		StopAfterFoundationChange:         true,
+		FoundationChangeArtifacts:         append([]string(nil), artifacts...),
+		FoundationChangeCheckpointStep:    tools.FoundationRefreshCheckpointStep(checkpointKind),
 	}
-	return fmt.Errorf("Architect 刷新 %d 次后开篇大纲指纹仍未变化", maxRefreshRuns)
 }
 
 type pipelineArchitectShortRefreshTarget struct {
@@ -1147,11 +1171,11 @@ type pipelineArchitectShortRefreshTarget struct {
 }
 
 var pipelineArchitectShortRefreshTargets = []pipelineArchitectShortRefreshTarget{
-	{Type: "premise", Description: "恢复一句话故事、旧案统一引擎、双女主关系、两次反转与终局方向", Artifacts: []string{"premise.md"}},
+	{Type: "premise", Description: "恢复本项目创作总令的一句话故事、题材统一引擎、主角关系、关键转折与终局方向", Artifacts: []string{"premise.md"}},
 	{Type: "characters", Description: "修复全部人物身份、关系、生死权限、欲望与当前行动边界", Artifacts: []string{"characters.json"}},
-	{Type: "world_rules", Description: "修复数据灰产旧案、两次指定反转、证据流转与现实处置硬规则", Artifacts: []string{"world_rules.json"}},
-	{Type: "book_world", Description: "修复组织、空间、经济利益与女性地址/路线数据灰产的同一世界引擎", Artifacts: []string{"book_world.json"}},
-	{Type: "world_codex", Description: "修复旧案机制、资料来源与现实制度细节；调用时必须带 change_reason=用户创作总令纠偏、change_evidence=本轮 prompt 的具体硬合同", Artifacts: []string{"world_codex.json"}},
+	{Type: "world_rules", Description: "修复本项目创作总令明确的因果硬规则、信息/证据/资源边界、关键转折公平性与现实处置约束", Artifacts: []string{"world_rules.json"}},
+	{Type: "book_world", Description: "修复本项目的组织、空间、社会关系、经济利益与材料/资源流转，使其服务同一题材引擎", Artifacts: []string{"book_world.json"}},
+	{Type: "world_codex", Description: "修复本项目历史机制、资料来源与现实制度细节；调用时必须带 change_reason=用户创作总令纠偏、change_evidence=本轮 prompt 的具体硬合同", Artifacts: []string{"world_codex.json"}},
 	{Type: "update_compass", Description: "修复 open_threads、non_negotiables、ending_direction 与明确规模", Artifacts: []string{"meta/compass.json"}},
 	{Type: "layered_outline", Description: "最后重做完整短篇章纲；一卷一弧覆盖全书并同步 flat outline", Artifacts: []string{"layered_outline.json", "outline.json"}},
 }
@@ -1246,8 +1270,10 @@ func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bun
 		}
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 Architect readiness 修复\n", run, maxRepairRuns)
 		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:            repairPrompt,
-			PreserveUserRules: true,
+			Prompt:                     repairPrompt,
+			PreserveUserRules:          true,
+			PreserveCheckpointsOnStart: true,
+			DisableFlowRouter:          true,
 		}); err != nil {
 			return err
 		}
@@ -1285,12 +1311,18 @@ func pipelineRepairArchitectCompass(opts cliOptions, cfg bootstrap.Config, bundl
 	const maxRuns = 2
 	for run := 1; run <= maxRuns; run++ {
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 compass 受限迁移\n", run, maxRuns)
-		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                    b.String(),
-			PreserveUserRules:         true,
-			StopAfterFoundationChange: true,
-		}); err != nil {
-			return err
+		runErr := headless.Run(cfg, bundle, pipelineArchitectRefreshHeadlessOptions(
+			b.String(),
+			[]string{"meta/compass.json"},
+			"update_compass",
+			false,
+		))
+		if runErr != nil {
+			if errors.Is(runErr, headless.ErrFoundationChangeIncomplete) {
+				cause = runErr
+				continue
+			}
+			return runErr
 		}
 		if pipelineArchitectCompassNeedsRepair(cfg.OutputDir) {
 			cause = fmt.Errorf("compass.non_negotiables 迁移后仍为空")
@@ -1479,7 +1511,10 @@ func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
 	if prompt == "" {
 		return "", fmt.Errorf("--refresh-architect 需要 --prompt/--prompt-file 说明本次重规划目标")
 	}
-	shortChapterZero, totalChapters := pipelineArchitectShortChapterZero(outputDir)
+	shortChapterZero, totalChapters, err := pipelineArchitectShortChapterZero(outputDir)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	if shortChapterZero {
 		fmt.Fprintf(&b, "[Pipeline Architect 章零短篇全书刷新阶段]\n这是尚未写正文的%d章短篇全书重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation。\n", totalChapters)
@@ -1509,13 +1544,16 @@ func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
 	return b.String(), nil
 }
 
-func pipelineArchitectShortChapterZero(outputDir string) (bool, int) {
+func pipelineArchitectShortChapterZero(outputDir string) (bool, int, error) {
 	progress, err := store.NewStore(outputDir).Progress.Load()
-	if err != nil || progress == nil || progress.TotalChapters <= 0 || progress.TotalChapters > 16 {
-		return false, 0
+	if err != nil {
+		return false, 0, fmt.Errorf("读取 Architect refresh progress 失败: %w", err)
+	}
+	if progress == nil || progress.TotalChapters <= 0 || progress.TotalChapters > 16 {
+		return false, 0, nil
 	}
 	return progress.LatestCompleted() == 0 && len(progress.PendingRewrites) == 0,
-		progress.TotalChapters
+		progress.TotalChapters, nil
 }
 
 func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
@@ -1680,7 +1718,10 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
-	prompt := pipelineInitialWorldTickPrompt(cfg.OutputDir)
+	prompt, err := pipelineInitialWorldTickPrompt(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
 	const maxWorldTickRuns = 3
 	for run := 1; run <= maxWorldTickRuns; run++ {
 		if err := tools.EnsureInitialWorldTickForChapterOne(store.NewStore(cfg.OutputDir)); err == nil {
@@ -1764,6 +1805,7 @@ func pipelineInitialWorldTickHeadlessOptions(prompt string) headless.Options {
 		Prompt:                    prompt,
 		StopAfterInitialWorldTick: true,
 		PreserveUserRules:         true,
+		DisableFlowRouter:         true,
 	}
 }
 
@@ -1786,13 +1828,22 @@ func pipelineResetInvalidInitialWorldTick(outputDir string) error {
 	return nil
 }
 
-func pipelineInitialWorldTickPrompt(outputDir string) string {
+func pipelineInitialWorldTickPrompt(outputDir string) (string, error) {
+	dispatchContract, err := tools.BuildInitialWorldTickDispatchContract(store.NewStore(outputDir))
+	if err != nil {
+		return "", fmt.Errorf("构建 initial world_tick 逐字转交合同: %w", err)
+	}
 	var b strings.Builder
 	b.WriteString("[Pipeline zero-init 初始 world_tick 阶段]\n")
 	b.WriteString("Architect foundation 与 zero-init readiness 已完成；本阶段只补齐第 1 章写作前的离屏世界信息流。\n")
 	b.WriteString("必须派 architect_long 调用 save_world_tick，为第 1 章前生成开局镜头外事件、可见路径、势力/角色 agenda 推进和信息回收路径。\n")
+	b.WriteString("Coordinator 派 architect_long 时，必须把下列合同整块逐字复制进 subagent task；不得摘要、改写、截断或只转交 marker。执行门会按当前 authoritative 第1章逐字验签。\n")
+	b.WriteString(dispatchContract.Block)
+	b.WriteString("\n")
 	b.WriteString("现有 meta/user_rules.json 是只读长期约束；严禁调用 save_user_rules，严禁用本阶段内部提示覆盖或改写用户规则。\n")
 	b.WriteString("硬约束：events.actors 与 faction_clock_updates.target 只能使用下方角色名、势力 id/name/aliases；工具返回任何 warnings 都不算通过。不得引入 premise、user_rules、world_rules 与冻结首弧没有授权的题材、人物、组织或机制。\n")
+	b.WriteString("角色最早可见章节是逐字段硬边界，不只是 actor 名单提示：角色可以在镜头外提前行动，但该角色的姓名、别名、身份或行动不得通过 actors、location、summary、consequence、visibility_path 在边界前进入主角可见信息；每条事件的 visibility_chapter 必须不早于其中任一角色的最早可见章节。若较晚登场者的离屏行动会影响第1章，只能由第1章已允许可见的角色承接程序后果，且不得提前点名或揭示较晚登场者。\n")
+	b.WriteString("人物资料中的性别与代词是 canon：凡 role/description/arc 明确为女性或以“她”指代的角色，所有事件字段必须继续使用“她”，严禁用“他”指代；“其他”“他人”等非指代该角色的词不受此句影响。\n")
 	if forbidden := pipelineWorldTickForbiddenTopics(outputDir); len(forbidden) > 0 {
 		b.WriteString("本书明确排除的题材元素：")
 		b.WriteString(strings.Join(forbidden, "、"))
@@ -1804,7 +1855,7 @@ func pipelineInitialWorldTickPrompt(outputDir string) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("完成初始 world_tick 后立即停止；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter，严禁进入正文写作。\n")
-	return b.String()
+	return b.String(), nil
 }
 
 func pipelineWorldTickCanonBrief(outputDir string) string {

@@ -3,6 +3,7 @@ package headless
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+var ErrFoundationChangeIncomplete = errors.New("foundation change incomplete")
 
 type Options struct {
 	Prompt                 string
@@ -39,8 +42,16 @@ type Options struct {
 	StopOnSealedConvergencePreconditionChapter int
 	StopAfterFoundation                        bool
 	StopAfterFoundationChange                  bool
+	FoundationChangeArtifacts                  []string
+	FoundationChangeCheckpointStep             string
 	StopAfterInitialWorldTick                  bool
 	PreserveUserRules                          bool
+	PreserveCheckpointsOnStart                 bool
+	DisableFlowRouter                          bool
+	AllowChapterZeroFoundationRefresh          bool
+	FoundationRefreshTarget                    string
+	RecordFoundationRefreshEpoch               bool
+	OneShotFoundationRefresh                   bool
 	SkipQueueReplay                            bool
 	DisableLiveRAG                             bool
 	// WriterSessionIdentity is an internal pipeline-only audit identity for a
@@ -72,7 +83,13 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		cfg.DisableLiveRAG = true
 	}
 	eng, err := host.NewWithOptions(cfg, bundle, host.NewOptions{
-		WriterSessionIdentity: opts.WriterSessionIdentity,
+		WriterSessionIdentity:             opts.WriterSessionIdentity,
+		PreserveCheckpointsOnStart:        opts.PreserveCheckpointsOnStart,
+		DisableFlowRouter:                 opts.DisableFlowRouter,
+		AllowChapterZeroFoundationRefresh: opts.AllowChapterZeroFoundationRefresh,
+		FoundationRefreshTarget:           opts.FoundationRefreshTarget,
+		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
+		OneShotFoundationRefresh:          opts.OneShotFoundationRefresh,
 	})
 	if err != nil {
 		return err
@@ -85,8 +102,14 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	}
 	eng.AskUser().SetHandler(newTerminalAskUser(stdin, stderr).handle)
 	foundationDigest := ""
+	foundationCheckpointSeq := int64(0)
 	if opts.StopAfterFoundationChange {
-		foundationDigest = foundationRevisionDigest(eng.Dir())
+		if err := validateFoundationChangeArtifacts(opts.FoundationChangeArtifacts); err != nil {
+			eng.Close()
+			return err
+		}
+		foundationDigest = foundationRevisionDigest(eng.Dir(), opts.FoundationChangeArtifacts)
+		foundationCheckpointSeq = latestFoundationCheckpointSeq(eng.Dir(), opts.FoundationChangeCheckpointStep)
 	}
 	rewriteCommitSeq := latestChapterCommitSeq(eng.Dir(), opts.StopAfterRewriteCommit)
 	planSeq := latestChapterPlanSeq(eng.Dir(), opts.StopAfterPlanChapter)
@@ -141,18 +164,21 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 			return fmt.Errorf("headless 模式需要 --prompt，或输出目录 %q 下已有可恢复会话", eng.Dir())
 		}
 		fmt.Fprintf(stderr, "headless 恢复: %s (%s)\n", eng.Dir(), label)
-		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
+		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
+	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
 }
 
-func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterGlobalReviewChapter int, initialGlobalReviewSeq int64, stopOnRenderReplanChapter, stopOnSealedConvergencePreconditionChapter int, stopAfterFoundation, stopAfterFoundationChange bool, initialFoundationDigest string, stopAfterInitialWorldTick bool, initialRenderDraftSeq int64) error {
+func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterGlobalReviewChapter int, initialGlobalReviewSeq int64, stopOnRenderReplanChapter, stopOnSealedConvergencePreconditionChapter int, stopAfterFoundation, stopAfterFoundationChange bool, foundationChangeArtifacts []string, foundationRefreshTarget, foundationChangeCheckpointStep string, initialFoundationCheckpointSeq int64, initialFoundationDigest string, stopAfterInitialWorldTick bool, initialRenderDraftSeq int64) error {
 	stopRequested := false
 	for {
 		select {
 		case ev, ok := <-eng.Events():
 			if !ok {
+				if stopAfterFoundationChange && !stopRequested {
+					return incompleteFoundationChangeError(eng.Dir(), foundationChangeArtifacts, foundationRefreshTarget, foundationChangeCheckpointStep, initialFoundationCheckpointSeq, initialFoundationDigest)
+				}
 				return nil
 			}
 			writeEvent(stderr, ev)
@@ -199,14 +225,18 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 				fmt.Fprintln(stderr, "[headless] Architect foundation 已齐，按 pipeline 阶段暂停")
 				eng.Abort()
 			}
-			if !stopRequested && stopAfterFoundationChange && shouldStopAfterFoundationChanged(eng.Dir(), initialFoundationDigest) {
+			if !stopRequested && stopAfterFoundationChange && shouldStopAfterFoundationChanged(eng.Dir(), foundationChangeArtifacts, foundationRefreshTarget, foundationChangeCheckpointStep, initialFoundationCheckpointSeq, initialFoundationDigest) {
 				stopRequested = true
 				fmt.Fprintln(stderr, "[headless] Architect foundation 已更新，按 pipeline 刷新阶段暂停")
 				eng.Abort()
 			}
-			if !stopRequested && stopAfterInitialWorldTick && shouldStopAfterInitialWorldTickReady(eng.Dir()) {
+			if !stopRequested && stopAfterInitialWorldTick && shouldStopAfterInitialWorldTickAttempted(eng.Dir()) {
 				stopRequested = true
-				fmt.Fprintln(stderr, "[headless] 初始 world_tick 已齐，按 pipeline 阶段暂停")
+				if shouldStopAfterInitialWorldTickReady(eng.Dir()) {
+					fmt.Fprintln(stderr, "[headless] 初始 world_tick 已齐，按 pipeline 阶段暂停")
+				} else {
+					fmt.Fprintln(stderr, "[headless] 初始 world_tick 尝试已落盘，交还 pipeline 做质量验收/重试")
+				}
 				eng.Abort()
 			}
 		case delta, ok := <-eng.Stream():
@@ -231,9 +261,18 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, sto
 			roundHasContent = true
 		case _, ok := <-eng.Done():
 			if !ok {
+				if stopAfterFoundationChange && !stopRequested {
+					return incompleteFoundationChangeError(eng.Dir(), foundationChangeArtifacts, foundationRefreshTarget, foundationChangeCheckpointStep, initialFoundationCheckpointSeq, initialFoundationDigest)
+				}
 				return nil
 			}
-			return drainPending(eng, stdout, stderr, roundHasContent)
+			if err := drainPending(eng, stdout, stderr, roundHasContent); err != nil {
+				return err
+			}
+			if stopAfterFoundationChange && !stopRequested {
+				return incompleteFoundationChangeError(eng.Dir(), foundationChangeArtifacts, foundationRefreshTarget, foundationChangeCheckpointStep, initialFoundationCheckpointSeq, initialFoundationDigest)
+			}
+			return nil
 		}
 	}
 }
@@ -362,21 +401,90 @@ func shouldStopAfterChapterPlan(dir string, chapter int, initialSeq int64) bool 
 	return chapter > 0 && latestChapterPlanSeq(dir, chapter) > initialSeq
 }
 
-func shouldStopAfterFoundationChanged(dir, initialDigest string) bool {
+func latestFoundationCheckpointSeq(dir, step string) int64 {
+	step = strings.TrimSpace(step)
+	if step == "" {
+		return 0
+	}
+	cp := store.NewStore(dir).Checkpoints.LatestByStep(domain.GlobalScope(), step)
+	if cp == nil {
+		return 0
+	}
+	return cp.Seq
+}
+
+func shouldStopAfterFoundationChanged(dir string, artifacts []string, refreshTarget, checkpointStep string, initialCheckpointSeq int64, initialDigest string) bool {
 	if initialDigest == "" || !tools.FoundationCoreComplete(dir) {
 		return false
 	}
-	current := foundationRevisionDigest(dir)
+	if strings.TrimSpace(checkpointStep) != "" {
+		checkpoint := store.NewStore(dir).Checkpoints.LatestByStep(domain.GlobalScope(), checkpointStep)
+		if checkpoint == nil || checkpoint.Seq <= initialCheckpointSeq {
+			return false
+		}
+		if strings.TrimSpace(refreshTarget) != "" {
+			currentDigest, err := tools.FoundationRefreshArtifactsDigest(dir, refreshTarget)
+			if err != nil || checkpoint.Digest != currentDigest {
+				return false
+			}
+		}
+	}
+	current := foundationRevisionDigest(dir, artifacts)
 	return current != "" && current != initialDigest
 }
 
-func foundationRevisionDigest(dir string) string {
+func incompleteFoundationChangeError(dir string, artifacts []string, refreshTarget, checkpointStep string, initialCheckpointSeq int64, initialDigest string) error {
+	if shouldStopAfterFoundationChanged(dir, artifacts, refreshTarget, checkpointStep, initialCheckpointSeq, initialDigest) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: Architect foundation refresh ended before a changed target and its successful %q checkpoint were both durable",
+		ErrFoundationChangeIncomplete,
+		strings.TrimSpace(checkpointStep),
+	)
+}
+
+var defaultFoundationRevisionArtifacts = []string{
+	"premise.md",
+	"characters.json",
+	"world_rules.json",
+	"book_world.json",
+	"world_codex.json",
+	"meta/compass.json",
+	"outline.json",
+	"layered_outline.json",
+}
+
+func validateFoundationChangeArtifacts(artifacts []string) error {
+	for _, rel := range artifacts {
+		clean := filepath.Clean(strings.TrimSpace(rel))
+		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid foundation change artifact %q", rel)
+		}
+	}
+	return nil
+}
+
+func foundationRevisionDigest(dir string, artifacts []string) string {
+	if len(artifacts) == 0 {
+		artifacts = defaultFoundationRevisionArtifacts
+	}
 	h := sha256.New()
-	for _, rel := range []string{"outline.json", "layered_outline.json"} {
-		raw, err := os.ReadFile(filepath.Join(dir, rel))
+	for _, rel := range artifacts {
+		path := filepath.Join(dir, filepath.FromSlash(rel))
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				_, _ = fmt.Fprintf(h, "%s\x00missing\x00", rel)
+				continue
+			}
+			return ""
+		}
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return ""
 		}
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00", rel, info.ModTime().UnixNano(), info.Size())
 		_, _ = h.Write(raw)
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -384,6 +492,24 @@ func foundationRevisionDigest(dir string) string {
 
 func shouldStopAfterInitialWorldTickReady(dir string) bool {
 	return tools.EnsureInitialWorldTickForChapterOne(store.NewStore(dir)) == nil
+}
+
+// shouldStopAfterInitialWorldTickAttempted reports that save_world_tick has
+// durably produced a substantive attempt. It deliberately does not run the
+// quality gate: the outer pipeline owns rejection/reset/retry, while headless
+// must yield before another agent (notably Writer) can be dispatched.
+func shouldStopAfterInitialWorldTickAttempted(dir string) bool {
+	st := store.NewStore(dir)
+	tick, err := st.WorldSim.LoadTick()
+	if err != nil || tick == nil {
+		return false
+	}
+	tickID := strings.TrimSpace(tick.TickID)
+	if tickID == "" || tickID == "v0-a0" || tick.EventCount <= 0 {
+		return false
+	}
+	events, err := st.WorldSim.LoadWorldEvents()
+	return err == nil && len(events) > 0
 }
 
 func shouldStopAfterChapter(dir string, chapter int) bool {

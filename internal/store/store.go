@@ -172,15 +172,7 @@ func (s *Store) ExpandArc(volumeIdx, arcIdx int, chapters []domain.OutlineEntry)
 	s.Progress.io.mu.Lock()
 	defer s.Progress.io.mu.Unlock()
 
-	p, err := s.Progress.loadUnlocked()
-	if err != nil {
-		return err
-	}
-	if p == nil {
-		p = &domain.Progress{}
-	}
-	p.TotalChapters = domain.TotalChapters(volumes)
-	return s.Progress.saveUnlocked(p)
+	return s.Progress.setTotalChaptersUnlocked(domain.TotalChapters(volumes))
 }
 
 // ReviseArc replaces one expanded arc in place. The OutlineStore validates
@@ -243,15 +235,7 @@ func (s *Store) appendVolume(vol domain.VolumeOutline, skeletonOnly bool) error 
 	s.Progress.io.mu.Lock()
 	defer s.Progress.io.mu.Unlock()
 
-	p, err := s.Progress.loadUnlocked()
-	if err != nil {
-		return err
-	}
-	if p == nil {
-		p = &domain.Progress{}
-	}
-	p.TotalChapters = domain.TotalChapters(volumes)
-	return s.Progress.saveUnlocked(p)
+	return s.Progress.setTotalChaptersUnlocked(domain.TotalChapters(volumes))
 }
 
 // ClearHandledSteer 原子性清除 PendingSteer 并重置 FlowSteering 状态

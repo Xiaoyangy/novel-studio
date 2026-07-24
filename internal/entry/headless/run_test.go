@@ -243,6 +243,9 @@ func TestShouldStopAfterInitialWorldTickRequiresSubstantiveEvents(t *testing.T) 
 	if shouldStopAfterInitialWorldTickReady(dir) {
 		t.Fatal("empty zero-init world_tick baseline must not stop the stage")
 	}
+	if shouldStopAfterInitialWorldTickAttempted(dir) {
+		t.Fatal("empty zero-init world_tick baseline must not count as an attempted tick")
+	}
 	if err := st.Characters.Save([]domain.Character{{Name: "县城商户", Role: "开篇群体角色"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -259,11 +262,75 @@ func TestShouldStopAfterInitialWorldTickRequiresSubstantiveEvents(t *testing.T) 
 	if shouldStopAfterInitialWorldTickReady(dir) {
 		t.Fatal("events without a substantive world_tick cursor must not stop the stage")
 	}
+	if shouldStopAfterInitialWorldTickAttempted(dir) {
+		t.Fatal("events without a substantive world_tick cursor must not count as a durable attempt")
+	}
 	if err := st.WorldSim.SaveTick(domain.WorldTick{TickID: "v1-a1", Volume: 1, Arc: 1, ThroughChapter: 0, EventCount: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if !shouldStopAfterInitialWorldTickReady(dir) {
 		t.Fatal("substantive world events should stop the stage")
+	}
+	if !shouldStopAfterInitialWorldTickAttempted(dir) {
+		t.Fatal("substantive world events should count as a durable attempt")
+	}
+}
+
+func TestShouldStopAfterInitialWorldTickAttemptedYieldsOnQualityFailure(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{
+		{Name: "林照微", Role: "女主"},
+		{Name: "沈漪", Role: "配角"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Title: "第一卷",
+		Arcs: []domain.ArcOutline{{
+			Index: 1,
+			Title: "第一弧",
+			Chapters: []domain.OutlineEntry{
+				{Chapter: 1, Title: "重逢", CoreEvent: "林照微收到风险通知"},
+				{Chapter: 2, Title: "披露", CoreEvent: "林照微核查材料"},
+				{Chapter: 3, Title: "复核", CoreEvent: "沈漪首次到场复核样本"},
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.WorldSim.AppendWorldEvents([]domain.WorldEvent{{
+		TickID:            "v1-a1",
+		Chapter:           0,
+		Actors:            []string{"沈漪"},
+		Summary:           "沈漪在开篇前完成样本复核。",
+		VisibilityChapter: 1,
+		VisibilityPath:    "复核记录",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WorldSim.SaveTick(domain.WorldTick{
+		TickID:         "v1-a1",
+		Volume:         1,
+		Arc:            1,
+		ThroughChapter: 0,
+		EventCount:     1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issues := strings.Join(tools.InitialWorldTickQualityIssues(st), "；")
+	if !strings.Contains(issues, "沈漪") || !strings.Contains(issues, "早于大纲首次可见第3章") {
+		t.Fatalf("fixture did not exercise the intended visibility-boundary failure: %s", issues)
+	}
+	if shouldStopAfterInitialWorldTickReady(dir) {
+		t.Fatal("tick that exposes 沈漪 before her chapter-3 boundary unexpectedly passed quality")
+	}
+	if !shouldStopAfterInitialWorldTickAttempted(dir) {
+		t.Fatal("durable tick must return control even when the quality gate rejects it")
 	}
 }
 
@@ -282,18 +349,75 @@ func TestShouldStopAfterFoundationChangedRequiresDigestChange(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	initial := foundationRevisionDigest(dir)
+	initial := foundationRevisionDigest(dir, []string{"outline.json"})
 	if initial == "" {
 		t.Fatal("expected initial foundation digest")
 	}
-	if shouldStopAfterFoundationChanged(dir, initial) {
+	if shouldStopAfterFoundationChanged(dir, []string{"outline.json"}, "", "", 0, initial) {
 		t.Fatal("unchanged foundation should not stop")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "outline.json"), []byte(`{"version":2}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !shouldStopAfterFoundationChanged(dir, initial) {
+	if !shouldStopAfterFoundationChanged(dir, []string{"outline.json"}, "", "", 0, initial) {
 		t.Fatal("changed foundation should stop")
+	}
+}
+
+func TestShouldStopAfterFoundationChangedRequiresNewTargetCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range defaultFoundationRevisionArtifacts {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"ready":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initialDigest := foundationRevisionDigest(dir, []string{"premise.md"})
+	initialSeq := latestFoundationCheckpointSeq(dir, "premise")
+	if err := os.WriteFile(filepath.Join(dir, "premise.md"), []byte("changed before checkpoint"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if shouldStopAfterFoundationChanged(dir, []string{"premise.md"}, "", "premise", initialSeq, initialDigest) {
+		t.Fatal("artifact-only partial write stopped the refresh before its checkpoint")
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.GlobalScope(), "premise", "premise.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldStopAfterFoundationChanged(dir, []string{"premise.md"}, "", "premise", initialSeq, initialDigest) {
+		t.Fatal("changed artifact plus new target checkpoint did not stop refresh")
+	}
+}
+
+func TestFoundationRevisionDigestTracksRequestedArtifactOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "premise.md"), []byte("old premise"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outline.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	initial := foundationRevisionDigest(dir, []string{"premise.md"})
+	if err := os.WriteFile(filepath.Join(dir, "outline.json"), []byte(`{"version":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := foundationRevisionDigest(dir, []string{"premise.md"}); got != initial {
+		t.Fatal("unrequested outline change altered premise-only stop digest")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "premise.md"), []byte("new premise"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := foundationRevisionDigest(dir, []string{"premise.md"}); got == initial {
+		t.Fatal("requested premise change did not alter stop digest")
+	}
+	if err := validateFoundationChangeArtifacts([]string{"../outside"}); err == nil {
+		t.Fatal("unsafe foundation change artifact was accepted")
 	}
 }
 

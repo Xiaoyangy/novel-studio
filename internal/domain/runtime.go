@@ -24,6 +24,8 @@ const (
 	FlowSteering  FlowState = "steering"
 )
 
+const GenerationModeSimulationRestartFromSeed = "simulation_restart_from_seed"
+
 // PlanningTier 表示作品规划的长度级别。
 type PlanningTier string
 

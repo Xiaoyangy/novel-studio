@@ -107,7 +107,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		if err := validatePipelineOutlineRepairLiveEntry(live); err != nil {
 			return fmt.Errorf("outline repair lock-before entry rejected: %w", err)
 		}
-	} else if err := validatePipelineOutlineAllEntry(live); err != nil {
+	} else if err := validatePipelineOutlineAllLiveEntry(live); err != nil {
 		return fmt.Errorf("outline-all lock-before entry rejected: %w", err)
 	}
 
@@ -126,10 +126,9 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			returnErr = fmt.Errorf("outline-all release live execution lock: %w", err)
 		}
 	}()
-	if err := validatePipelineOutlineAllEntry(live); err != nil {
+	if err := validatePipelineOutlineAllLiveEntry(live); err != nil {
 		return fmt.Errorf("outline-all lock-after entry rejected: %w", err)
 	}
-
 	compass, err := live.Outline.LoadCompass()
 	if err != nil || compass == nil {
 		return fmt.Errorf("outline-all requires compass: %w", err)
@@ -151,6 +150,14 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	)
 	if err != nil {
 		return fmt.Errorf("outline-all parse compass estimated_scale: %w", err)
+	}
+	if generationID, created, err := ensurePipelineOutlineAllGeneration(
+		live,
+		zeroSimulationGenerationID(time.Now().UTC().Format(time.RFC3339Nano)),
+	); err != nil {
+		return fmt.Errorf("outline-all chapter-zero generation rejected: %w", err)
+	} else if created {
+		fmt.Fprintf(os.Stderr, "[pipeline:outline-all] 已建立章零 generation %s\n", generationID)
 	}
 	sourceRoot, err := pipelineOutlineAllSourceSnapshotRoot(cfg.OutputDir)
 	if err != nil {
@@ -424,7 +431,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err := validatePipelineOutlineAllEntry(candidate); err != nil {
 		return fmt.Errorf("outline-all final candidate contains prose/canon: %w", err)
 	}
-	if err := validatePipelineOutlineAllEntry(live); err != nil {
+	if err := validatePipelineOutlineAllLiveEntry(live); err != nil {
 		return fmt.Errorf("outline-all live changed before publish: %w", err)
 	}
 	if currentSource, err := pipelineOutlineAllSourceSnapshotRoot(cfg.OutputDir); err != nil {
@@ -662,6 +669,10 @@ func ensurePipelineOutlineAllReceipt(
 	if err != nil || progress == nil {
 		return nil, fmt.Errorf("outline-all candidate progress missing: %w", err)
 	}
+	generationID := strings.TrimSpace(progress.GenerationID)
+	if generationID == "" || generationID != progress.GenerationID {
+		return nil, fmt.Errorf("outline-all candidate progress requires a canonical generation_id")
+	}
 	existing, err := st.LoadOutlineAllExecutionReceipt()
 	if err != nil {
 		return nil, err
@@ -671,7 +682,7 @@ func ensurePipelineOutlineAllReceipt(
 		receipt := domain.OutlineAllExecutionReceipt{
 			Version: domain.OutlineAllExecutionReceiptVersion, Mode: domain.OutlineAllExecutionMode,
 			Status: domain.OutlineAllExecutionBuilding, BaseCanonChapter: 0,
-			GenerationID: progress.GenerationID,
+			GenerationID: generationID,
 			WritingMode:  mode.Mode, WritingModeReceiptDigest: mode.ReceiptDigest,
 			CompassDigest: compassDigest, EstimatedScale: compass.EstimatedScale,
 			EndingDirection: compass.EndingDirection, NonNegotiables: append([]string(nil), compass.NonNegotiables...),
@@ -702,7 +713,8 @@ func ensurePipelineOutlineAllReceipt(
 		}
 		return &signed, nil
 	}
-	if existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
+	if existing.GenerationID != generationID ||
+		existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
 		existing.StableProgressRoot != stableProgressRoot || existing.FoundationContextRoot != foundationContextRoot ||
 		existing.AttemptID != attemptID || filepath.Clean(existing.CandidateDir) != filepath.Clean(candidateDir) ||
 		existing.CompassDigest != compassDigest || existing.ModelIdentityDigest != modelDigest ||

@@ -29,6 +29,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 // defaultPipelineStages 不含 cocreate：默认假设已有创作指令（--prompt/brainstorm.md）。
@@ -225,6 +226,9 @@ func runPipelineAlias(opts cliOptions, stages []string, prompt string, stageArgs
 }
 
 func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string, prompt string, stageArgs map[string][]string) (returnErr error) {
+	if flags.RefreshArchitect && !slices.Contains(stages, "architect") {
+		return fmt.Errorf("--refresh-architect 需要 --stages 包含 architect")
+	}
 	hasOutlineAll := slices.Contains(stages, "outline-all")
 	hasDownstream := pipelineStagesConsumePublishedOutlineAll(stages)
 	var invocationExclusiveRelease func() error
@@ -238,6 +242,14 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	outputDir, err := pipelineOutlineAllOutputDirBeforeLoad(opts)
 	if err != nil {
 		return err
+	}
+	if flags.RefreshArchitect {
+		if outputDir == "" {
+			return fmt.Errorf("--refresh-architect 需要可解析的项目输出目录")
+		}
+		if err := validateExplicitArchitectRefreshParameters(prompt, flags.ArchitectTarget); err != nil {
+			return err
+		}
 	}
 	if outputDir == "" {
 		if hasOutlineAll {
@@ -254,6 +266,12 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		if err := recoverAllDirectoryPublishesWithControlHeld(outputDir); err != nil {
 			_ = releaseExclusive()
 			return err
+		}
+		if flags.RefreshArchitect {
+			if err := validateExplicitArchitectRefreshState(outputDir); err != nil {
+				_ = releaseExclusive()
+				return err
+			}
 		}
 		if hasOutlineAll {
 			if err := ensurePipelineOutlineAllRequirement(outputDir); err != nil {
@@ -342,6 +360,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	state, err := loadOrInitPipelineState(statePath, stages, prompt, inputDigest, runIdentity, flags.Restart)
 	if err != nil {
 		return err
+	}
+	if invalidateExplicitArchitectRefresh(state, flags.RefreshArchitect) {
+		fmt.Fprintln(os.Stderr, "[pipeline] --refresh-architect 已使 Architect 及其下游完成证据失效，本次调用将强制重跑")
 	}
 	renderRecoveryPending, err := splitPipelineRenderRecoveryPending(cfg.OutputDir, state)
 	if err != nil {
@@ -524,6 +545,58 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "\n[pipeline] 全部阶段完成 ✓")
+	}
+	return nil
+}
+
+func invalidateExplicitArchitectRefresh(state *domain.PipelineState, refresh bool) bool {
+	if state == nil || !refresh {
+		return false
+	}
+	downstream := map[string]struct{}{
+		"architect": {}, "outline-all": {}, "zero-init": {}, "preplan": {},
+		"project-all": {}, "seal": {}, "promote": {}, "plan": {}, "render": {},
+		"write": {}, "review": {}, "rewrite": {}, "finalize": {}, "deliver": {},
+	}
+	changed := false
+	for _, stage := range state.Stages {
+		if _, isDownstream := downstream[stage]; !isDownstream || !state.Done(stage) {
+			continue
+		}
+		state.ClearDone(stage, domain.PipelineStageEvidence{
+			Stage:     stage,
+			Status:    "forced_refresh",
+			CheckedAt: time.Now(),
+			Message:   "explicit --refresh-architect invalidated Architect and downstream evidence",
+		})
+		changed = true
+	}
+	return changed
+}
+
+func validateExplicitArchitectRefreshParameters(prompt, target string) error {
+	if strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("--refresh-architect 需要 --prompt/--prompt-file 说明本次纠偏合同")
+	}
+	if _, err := pipelineArchitectShortSelectedTargets(target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateExplicitArchitectRefreshState(outputDir string) error {
+	if !tools.FoundationCoreComplete(outputDir) {
+		return fmt.Errorf("--refresh-architect 只用于已完成的 foundation；当前应先跑普通 architect 补齐缺失项")
+	}
+	shortChapterZero, _, err := pipelineArchitectShortChapterZero(outputDir)
+	if err != nil {
+		return err
+	}
+	if !shortChapterZero {
+		return fmt.Errorf("--refresh-architect 当前只允许第0章、16章以内且无下游正史的项目；其他项目请使用显式 rebase")
+	}
+	if err := tools.RequireChapterZeroFoundationRefreshState(store.NewStore(outputDir)); err != nil {
+		return fmt.Errorf("Architect refresh 在流水线完成证据失效前被章零门禁拒绝: %w", err)
 	}
 	return nil
 }

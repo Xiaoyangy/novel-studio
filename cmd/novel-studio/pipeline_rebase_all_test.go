@@ -221,6 +221,111 @@ func TestPipelineRebaseAllChaptersPreservesFrozenRAGAndClearsOldGenerationReceip
 	}
 }
 
+func TestPipelineRebaseAllChaptersArchivesLegacyChapterOneCursorBeforeReset(t *testing.T) {
+	live := seedZeroInitProject(t)
+	st := store.NewStore(live)
+	progress := &domain.Progress{
+		NovelName:         "legacy-router-cursor",
+		Phase:             domain.PhaseWriting,
+		Flow:              domain.FlowWriting,
+		CurrentChapter:    1,
+		InProgressChapter: 1,
+		TotalChapters:     1,
+	}
+	if err := st.Progress.Save(progress); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePipelineOutlineAllEntry(st); err == nil {
+		t.Fatal("ordinary outline-all accepted an ambiguous chapter-one cursor")
+	}
+
+	foundation := make(map[string][]byte)
+	for _, rel := range []string{
+		"premise.md",
+		"outline.json",
+		"characters.json",
+		"world_rules.json",
+		"book_world.json",
+		"world_codex.json",
+		"meta/compass.json",
+	} {
+		body, err := os.ReadFile(filepath.Join(live, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read foundation %s: %v", rel, err)
+		}
+		foundation[rel] = body
+	}
+	progressBefore, err := os.ReadFile(filepath.Join(live, "meta", "progress.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pipelineRebaseAllChapters(
+		rebaseAllTestOptions(t, pipelineRebaseRunRoot(live)),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var receipt pipelineAllChapterRebaseReceipt
+	if err := readPipelinePlanningJSON(
+		filepath.Join(live, "meta", "all_chapter_rebase.json"),
+		&receipt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	archivedProgress, err := os.ReadFile(receipt.PreviousProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archivedProgress) != string(progressBefore) {
+		t.Fatalf("rebase archive changed the ambiguous progress bytes:\narchive=%s\nsource=%s", archivedProgress, progressBefore)
+	}
+	archiveRoot, err := store.DirectoryContentRoot(receipt.ArchiveOutput)
+	if err != nil || archiveRoot != receipt.SourceRoot || archiveRoot != receipt.ArchiveRoot {
+		t.Fatalf("rebase archive is not the exact source tree: source=%s receipt=%s actual=%s err=%v",
+			receipt.SourceRoot, receipt.ArchiveRoot, archiveRoot, err)
+	}
+
+	rebased, err := store.NewStore(live).Progress.Load()
+	if err != nil || rebased == nil {
+		t.Fatalf("load rebased progress: progress=%+v err=%v", rebased, err)
+	}
+	if rebased.CurrentChapter != 0 || rebased.InProgressChapter != 0 ||
+		rebased.Phase != domain.PhaseInit || rebased.Flow != "" ||
+		rebased.NovelName != progress.NovelName ||
+		strings.TrimSpace(rebased.GenerationID) == "" || rebased.GenerationID != receipt.NewGenerationID {
+		t.Fatalf("rebase did not publish an unambiguous chapter-zero generation: progress=%+v receipt=%+v", rebased, receipt)
+	}
+	if err := validatePipelineOutlineAllEntry(store.NewStore(live)); err != nil {
+		t.Fatalf("rebased cursor is not a valid outline-all entry: %v", err)
+	}
+	for rel, want := range foundation {
+		got, err := os.ReadFile(filepath.Join(live, filepath.FromSlash(rel)))
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("rebase changed foundation %s: err=%v", rel, err)
+		}
+	}
+}
+
+func TestExplicitRebaseCandidateLoaderUsesPremiseTitleOutsideCanonicalOutputPath(t *testing.T) {
+	live := seedZeroInitProject(t)
+	st := store.NewStore(live)
+	if err := st.Outline.SavePremise("# 《旧纹有姓名》\n\n完整故事前提。\n"); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(t.TempDir(), ".canon-rebase", "rebase-test", "output")
+	if err := copyPipelineRenderCandidateTree(live, candidate); err != nil {
+		t.Fatal(err)
+	}
+	project, err := loadZeroInitProjectForExplicitRebaseCandidate(store.NewStore(candidate), candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Name != "旧纹有姓名" {
+		t.Fatalf("rebase candidate derived project name %q from its temporary path", project.Name)
+	}
+}
+
 func TestPipelineRebaseAllChaptersAllowsCompassNewerThanArchitectReadiness(t *testing.T) {
 	live := seedZeroInitProject(t)
 	st := store.NewStore(live)

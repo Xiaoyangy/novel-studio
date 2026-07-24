@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -93,8 +94,10 @@ func InitialWorldTickQualityIssues(st *store.Store) []string {
 
 	known, knownIssues := worldTickKnownActorSetWithIssues(st)
 	issues = append(issues, knownIssues...)
+	characterIdentities := worldTickCharacterGenderIdentityIndex(st)
 	firstVisible, boundaryIssues := worldTickCharacterFirstVisibleChaptersWithIssues(st)
 	issues = append(issues, boundaryIssues...)
+	issues = append(issues, worldTickChapterOneTimeAnchorIssues(st, events)...)
 	for _, event := range events {
 		reported := map[string]bool{}
 		if strings.TrimSpace(event.TickID) != strings.TrimSpace(tick.TickID) {
@@ -140,6 +143,7 @@ func InitialWorldTickQualityIssues(st *store.Store) []string {
 				issues = append(issues, worldTickVisibilityBoundaryIssue(event, boundary, reported)...)
 			}
 		}
+		issues = append(issues, worldTickFemaleActorPronounIssues(event, characterIdentities)...)
 	}
 
 	artifactTexts, textIssues := worldTickScannableArtifactTexts(st, events)
@@ -148,6 +152,86 @@ func InitialWorldTickQualityIssues(st *store.Store) []string {
 	issues = append(issues, forbiddenIssues...)
 	issues = append(issues, worldTickForbiddenContaminationIssues(artifactTexts, forbidden)...)
 	return issues
+}
+
+var worldTickExplicitDurationRE = regexp.MustCompile(`(?:[0-9０-９]+|[〇零一二三四五六七八九十百千万两]+)(?:个)?(?:小时|日|天|周|个月|月|年)`)
+
+var worldTickRelativeTimeAnchors = []string{
+	"次日上午", "次日下午", "次日清晨", "次日夜里", "次日", "翌日上午", "翌日下午", "翌日",
+	"当日上午", "当日下午", "当日清晨", "当日夜里", "当日", "当天", "当晚", "今夜", "今晚", "明早", "明日", "明天",
+}
+
+// worldTickChapterOneTimeAnchorIssues keeps explicit chapter-one clocks from
+// disappearing during the Coordinator -> Architect handoff. The initial tick
+// may leave the action pending, but it cannot silently replace a sealed
+// four-hour/next-morning deadline with an unbounded setup. Projects without an
+// explicit time expression are unaffected.
+func worldTickChapterOneTimeAnchorIssues(st *store.Store, events []domain.WorldEvent) []string {
+	outline, _ := worldTickAuthoritativeOutlineWithIssues(st)
+	if len(outline) == 0 {
+		return nil
+	}
+	chapterOne := outline[0]
+	source := strings.TrimSpace(chapterOne.CoreEvent + "\n" + chapterOne.Hook)
+	anchors := worldTickExtractChapterOneTimeAnchors(source)
+	if len(anchors) == 0 {
+		return nil
+	}
+	var visible strings.Builder
+	for _, event := range events {
+		if visible.Len() > 0 {
+			visible.WriteByte('\n')
+		}
+		for _, field := range worldTickVisibleEventTextFields(event) {
+			visible.WriteString(field.Text)
+			visible.WriteByte('\n')
+		}
+	}
+	corpus := visible.String()
+	var issues []string
+	for _, anchor := range anchors {
+		if !strings.Contains(corpus, anchor) {
+			issues = append(issues, fmt.Sprintf(
+				"initial world_tick 未保留第1章显式时间锚点 %q；必须以 pending/条件式事件承接，不能在转交中丢失或改写",
+				anchor,
+			))
+		}
+	}
+	return issues
+}
+
+func worldTickExtractChapterOneTimeAnchors(text string) []string {
+	seen := map[string]struct{}{}
+	var anchors []string
+	for _, anchor := range worldTickExplicitDurationRE.FindAllString(text, -1) {
+		anchor = strings.TrimSpace(anchor)
+		if anchor == "" {
+			continue
+		}
+		if _, ok := seen[anchor]; ok {
+			continue
+		}
+		seen[anchor] = struct{}{}
+		anchors = append(anchors, anchor)
+	}
+	for _, anchor := range worldTickRelativeTimeAnchors {
+		if !strings.Contains(text, anchor) {
+			continue
+		}
+		covered := false
+		for _, existing := range anchors {
+			if strings.Contains(existing, anchor) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		seen[anchor] = struct{}{}
+		anchors = append(anchors, anchor)
+	}
+	return anchors
 }
 
 func worldTickGenerationIssues(st *store.Store, tick domain.WorldTick) []string {
@@ -233,6 +317,290 @@ func worldTickNonEmptyTextFields(fields ...worldTickTextField) []worldTickTextFi
 type worldTickCharacterBoundary struct {
 	Character string
 	Chapter   int
+}
+
+const worldTickCharacterPronounLookbackRunes = 48
+
+type worldTickCharacterIdentitySurface struct {
+	Canonical string
+	Surface   []rune
+}
+
+type worldTickCharacterGenderIdentities struct {
+	BySurface      map[string]string
+	Surfaces       []worldTickCharacterIdentitySurface
+	ExplicitFemale map[string]struct{}
+}
+
+// worldTickCharacterGenderIdentityIndex derives gender only from explicit,
+// character-local evidence. Role labels such as "女性..."/"女主" are direct
+// evidence. For generic role labels, two sentence-leading "她" references and
+// no sentence-leading "他" reference are required, so a single mention of some
+// other woman in a character card cannot silently assign gender.
+func worldTickCharacterGenderIdentityIndex(st *store.Store) worldTickCharacterGenderIdentities {
+	index := worldTickCharacterGenderIdentities{
+		BySurface:      map[string]string{},
+		ExplicitFemale: map[string]struct{}{},
+	}
+	if st == nil {
+		return index
+	}
+	characters, err := st.Characters.Load()
+	if err != nil {
+		return index
+	}
+	ambiguous := map[string]struct{}{}
+	for _, character := range characters {
+		canonical := strings.TrimSpace(character.Name)
+		if canonical == "" {
+			continue
+		}
+		if worldTickCharacterExplicitlyFemale(character) {
+			index.ExplicitFemale[canonical] = struct{}{}
+		}
+		for _, surface := range append([]string{canonical}, character.Aliases...) {
+			surface = strings.TrimSpace(surface)
+			if utf8.RuneCountInString(surface) < 2 {
+				continue
+			}
+			if existing, ok := index.BySurface[surface]; ok && existing != canonical {
+				delete(index.BySurface, surface)
+				ambiguous[surface] = struct{}{}
+				continue
+			}
+			if _, collision := ambiguous[surface]; !collision {
+				index.BySurface[surface] = canonical
+			}
+		}
+	}
+	for surface, canonical := range index.BySurface {
+		index.Surfaces = append(index.Surfaces, worldTickCharacterIdentitySurface{
+			Canonical: canonical,
+			Surface:   []rune(surface),
+		})
+	}
+	sort.Slice(index.Surfaces, func(i, j int) bool {
+		if len(index.Surfaces[i].Surface) != len(index.Surfaces[j].Surface) {
+			return len(index.Surfaces[i].Surface) > len(index.Surfaces[j].Surface)
+		}
+		return index.Surfaces[i].Canonical < index.Surfaces[j].Canonical
+	})
+	return index
+}
+
+func worldTickCharacterExplicitlyFemale(character domain.Character) bool {
+	role := strings.ToLower(strings.TrimSpace(character.Role))
+	for _, segment := range strings.FieldsFunc(role, func(r rune) bool {
+		return strings.ContainsRune("／/、，,；;|：:", r)
+	}) {
+		segment = strings.TrimSpace(segment)
+		if strings.HasPrefix(segment, "女性") && !strings.Contains(segment, "的") {
+			return true
+		}
+		switch segment {
+		case "女主", "女主角", "女配", "女配角", "female lead", "female protagonist":
+			return true
+		}
+	}
+	profile := strings.TrimSpace(character.Description + "\n" + character.Arc)
+	// Free-standing phrases such as "他的客户是一位女性" describe somebody
+	// else and therefore cannot establish this character's gender. Accept an
+	// explicit declaration only when it is bound to the canonical name.
+	for _, marker := range []string{
+		character.Name + "性别为女",
+		character.Name + "性别：女",
+		character.Name + "性别:女",
+		character.Name + "明确为女性",
+		character.Name + "是女性",
+		character.Name + "是一名女性",
+		character.Name + "是一位女性",
+	} {
+		if strings.Contains(profile, marker) {
+			return true
+		}
+	}
+	femaleSubjects := worldTickSentenceLeadingPronounCount(profile, "她")
+	maleSubjects := worldTickSentenceLeadingPronounCount(profile, "他")
+	return femaleSubjects >= 2 && maleSubjects == 0
+}
+
+func worldTickSentenceLeadingPronounCount(text, pronoun string) int {
+	count := 0
+	for _, sentence := range strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune("。！？!?；;\n\r", r)
+	}) {
+		sentence = strings.TrimLeft(strings.TrimSpace(sentence), "　 　\t‘’“”\"'（）()【】[]—-：:")
+		if strings.HasPrefix(sentence, pronoun) {
+			count++
+		}
+	}
+	return count
+}
+
+func worldTickFemaleActorPronounIssues(event domain.WorldEvent, identities worldTickCharacterGenderIdentities) []string {
+	if len(identities.ExplicitFemale) == 0 || len(identities.Surfaces) == 0 {
+		return nil
+	}
+	femaleActors := map[string]struct{}{}
+	for _, actor := range event.Actors {
+		canonical, ok := identities.BySurface[strings.TrimSpace(actor)]
+		if !ok {
+			continue
+		}
+		if _, female := identities.ExplicitFemale[canonical]; female {
+			femaleActors[canonical] = struct{}{}
+		}
+	}
+	if len(femaleActors) == 0 {
+		return nil
+	}
+
+	var issues []string
+	for _, field := range worldTickVisibleEventTextFields(event) {
+		runes := []rune(field.Text)
+		reported := map[string]struct{}{}
+		for i := range runes {
+			if !worldTickIsLikelySelfActionMalePronoun(runes, i) {
+				continue
+			}
+			canonical, mentionEnd, ok := worldTickNearestCharacterBefore(runes, i, identities.Surfaces)
+			if !ok {
+				continue
+			}
+			if _, isFemaleActor := femaleActors[canonical]; !isFemaleActor {
+				continue
+			}
+			if worldTickHasCloserUnnamedPersonReferent(runes, mentionEnd, i) {
+				continue
+			}
+			if _, duplicate := reported[canonical]; duplicate {
+				continue
+			}
+			reported[canonical] = struct{}{}
+			issues = append(issues, fmt.Sprintf(
+				"world_tick 事件 %q 的 %s 在角色 %q 的近邻子句中使用男性代词“他”；角色册明确其为女性，请改用“她”或角色实名",
+				compactWorldTickIssue(event.Summary), field.Source, canonical,
+			))
+		}
+	}
+	return issues
+}
+
+func worldTickNearestCharacterBefore(text []rune, pronounIndex int, surfaces []worldTickCharacterIdentitySurface) (string, int, bool) {
+	start := pronounIndex - worldTickCharacterPronounLookbackRunes
+	if start < 0 {
+		start = 0
+	}
+	for i := pronounIndex - 1; i >= start; i-- {
+		if strings.ContainsRune("。！？!?；;\n\r", text[i]) {
+			start = i + 1
+			break
+		}
+	}
+	bestCanonical := ""
+	bestEnd := -1
+	bestLength := -1
+	for _, identity := range surfaces {
+		length := len(identity.Surface)
+		for i := start; i+length <= pronounIndex; i++ {
+			matched := true
+			for j := range identity.Surface {
+				if text[i+j] != identity.Surface[j] {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			end := i + length
+			if end > bestEnd || (end == bestEnd && length > bestLength) {
+				bestCanonical = identity.Canonical
+				bestEnd = end
+				bestLength = length
+			}
+		}
+	}
+	return bestCanonical, bestEnd, bestCanonical != ""
+}
+
+func worldTickIsLikelySelfActionMalePronoun(text []rune, index int) bool {
+	if !worldTickIsStandaloneMalePronoun(text, index) {
+		return false
+	}
+	tail := string(text[index+1:])
+	for _, prefix := range []string{
+		"可", "会", "将", "已", "已经", "仍", "还", "随后", "随即", "便", "就", "再", "才", "正", "正在",
+		"必须", "不能", "不得", "需要", "应", "应该", "未", "没有", "不", "先", "又", "也", "只",
+	} {
+		if strings.HasPrefix(tail, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func worldTickHasCloserUnnamedPersonReferent(text []rune, mentionEnd, pronounIndex int) bool {
+	if mentionEnd < 0 || mentionEnd >= pronounIndex || pronounIndex > len(text) {
+		return false
+	}
+	between := text[mentionEnd:pronounIndex]
+	for _, role := range []string{
+		"值班员", "复核员", "审核员", "管理员", "工作人员", "经办人", "负责人", "主管", "主任",
+		"律师", "医生", "警员", "职员", "工人", "员工", "同事", "助理", "秘书", "门卫", "保安", "司机", "记者", "编辑", "老师", "顾问", "代表", "人员", "会计",
+	} {
+		roleRunes := []rune(role)
+		for i := 0; i+len(roleRunes) <= len(between); i++ {
+			matched := true
+			for j := range roleRunes {
+				if between[i+j] != roleRunes[j] {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			next := i + len(roleRunes)
+			for next < len(between) && strings.ContainsRune(" \t\r\n　", between[next]) {
+				next++
+			}
+			if next >= len(between) || between[next] != '的' {
+				return true
+			}
+		}
+	}
+	// Chinese occupational nouns productively end in 员/师/官/者/士/生/手;
+	// a finite title list would miss ordinary variants such as 档案员 or 审计师.
+	// Treat such a noun as the nearer referent only when it is not itself inside
+	// a longer occupational suffix and is not a genitive modifier (人员的风险告知).
+	for i, r := range between {
+		if !strings.ContainsRune("员师官者士生手", r) {
+			continue
+		}
+		next := i + 1
+		for next < len(between) && strings.ContainsRune(" \t\r\n　", between[next]) {
+			next++
+		}
+		if next < len(between) && (between[next] == '的' || strings.ContainsRune("员师官者士生手", between[next])) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func worldTickIsStandaloneMalePronoun(text []rune, index int) bool {
+	if index < 0 || index >= len(text) || text[index] != '他' {
+		return false
+	}
+	if index > 0 && strings.ContainsRune("其吉利排维", text[index-1]) {
+		return false
+	}
+	if index+1 < len(text) && strings.ContainsRune("人们者日年处乡方国校物事项种类般杀律", text[index+1]) {
+		return false
+	}
+	return true
 }
 
 func worldTickVisibilityBoundaryIssue(event domain.WorldEvent, boundary worldTickCharacterBoundary, reported map[string]bool) []string {
@@ -616,6 +984,15 @@ func worldTickExtractExplicitNegativeTopics(text string) []string {
 				end = occurrences[i+1].Index
 			}
 			tail := clause[occurrence.Index+len(occurrence.Marker) : end]
+			// A semantic method boundary is not a lexical topic prohibition. For
+			// example, "禁止用单份材料……解决作者、权属、补偿和债务"
+			// forbids treating one source as dispositive; it does not forbid the
+			// story from mentioning the protected subjects after "解决". Flattening
+			// that sentence at list separators would turn core canon into false
+			// forbidden terms.
+			if worldTickNegativeTailIsContextualMethodRule(tail) {
+				continue
+			}
 			for _, candidate := range worldTickSplitNegativeTopicTail(tail) {
 				candidate = worldTickCleanNegativeTopic(candidate)
 				if !worldTickUsefulForbiddenTopic(candidate) {
@@ -631,6 +1008,32 @@ func worldTickExtractExplicitNegativeTopics(text string) []string {
 		}
 	}
 	return topics
+}
+
+func worldTickNegativeTailIsContextualMethodRule(tail string) bool {
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return false
+	}
+	for _, prefix := range []string{"把", "让"} {
+		if strings.HasPrefix(tail, prefix) {
+			return true
+		}
+	}
+	methodPrefix := false
+	for _, prefix := range []string{"用", "以", "通过", "依靠", "凭借", "将"} {
+		if strings.HasPrefix(tail, prefix) {
+			methodPrefix = true
+			break
+		}
+	}
+	if !methodPrefix {
+		return false
+	}
+	return worldTickContainsAny(tail,
+		"解决", "认定", "决定", "裁定", "修复", "完成", "证明", "替代", "换取", "交换",
+		"覆盖", "改写", "处理", "推进", "达成", "消除", "洗清", "抹平", "纠正", "等同", "成为",
+	)
 }
 
 type worldTickNegativeMarkerOccurrence struct {

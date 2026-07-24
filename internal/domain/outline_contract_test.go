@@ -30,6 +30,69 @@ func TestParseBookScaleRangeChineseAndEnglish(t *testing.T) {
 	}
 }
 
+func TestParseBookScaleRangeDistinguishesWholeBookChaptersFromPerArcBudget(t *testing.T) {
+	// A per-arc/per-volume chapter budget shares the same "X-Y章" spelling as
+	// the whole-book total. The whole-book total must win so a legitimate
+	// multi-volume skeleton is not measured against a single-arc ceiling.
+	for _, tc := range []struct {
+		value string
+		want  BookScaleRange
+	}{
+		{
+			value: "预计 6-7 卷，每弧 8-16 章，全书约 200-260 章，100-130 万字",
+			want:  BookScaleRange{MinVolumes: 6, MaxVolumes: 7, MinChapters: 200, MaxChapters: 260},
+		},
+		{
+			value: "6-7卷，每卷12-16章，共210-240章",
+			want:  BookScaleRange{MinVolumes: 6, MaxVolumes: 7, MinChapters: 210, MaxChapters: 240},
+		},
+		{
+			value: "预计 6-7 卷，约 320-420 章，100-130 万字；单弧 8-16 章",
+			want:  BookScaleRange{MinVolumes: 6, MaxVolumes: 7, MinChapters: 320, MaxChapters: 420},
+		},
+	} {
+		got, err := ParseBookScaleRange(tc.value)
+		if err != nil {
+			t.Fatalf("ParseBookScaleRange(%q): %v", tc.value, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParseBookScaleRange(%q) = %+v, want %+v", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestResolveBookScaleTargetAcceptsLargeSkeletonUnderWholeBookTotal(t *testing.T) {
+	// Regression: a 213-chapter skeleton previously tripped the ceiling because
+	// the per-arc "8-16 章" was read as the book maximum.
+	target, err := ResolveBookScaleTarget(
+		"预计 6-7 卷，每弧 8-16 章，全书约 200-260 章，100-130 万字",
+		0,
+		213,
+	)
+	if err != nil {
+		t.Fatalf("ResolveBookScaleTarget: %v", err)
+	}
+	if target.Range.MaxChapters != 260 || target.TargetChapters < 213 {
+		t.Fatalf("target=%+v", target)
+	}
+}
+
+func TestParseBookScaleRangeRejectsPerArcOnlyChapterScale(t *testing.T) {
+	// When only a per-arc budget is present the whole-book total is genuinely
+	// missing; fail with a clear message instead of adopting the arc ceiling.
+	_, err := ParseBookScaleRange("预计 6-7 卷，每弧 8-16 章，100-130 万字")
+	if err == nil || !strings.Contains(err.Error(), "missing chapter range") {
+		t.Fatalf("want missing chapter range error, got %v", err)
+	}
+}
+
+func TestParseBookScaleRangeRejectsAmbiguousWholeBookChapterRanges(t *testing.T) {
+	_, err := ParseBookScaleRange("6-7卷，200-260 章，300-360 章")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous total chapter ranges") {
+		t.Fatalf("want ambiguous chapter range error, got %v", err)
+	}
+}
+
 func TestResolveBookScaleTargetUsesFrozenMidpointAndWordBudget(t *testing.T) {
 	target, err := ResolveBookScaleTarget(
 		"\u9884\u8ba1100-130\u4e07\u5b57\uff0c\u7ea68-10\u5377\uff0c360-480\u7ae0\uff1b\u4e3b\u7ebf\u65f6\u95f4\u8de8\u5ea6\u7ea63.5-4\u5e74",
@@ -46,6 +109,16 @@ func TestResolveBookScaleTargetUsesFrozenMidpointAndWordBudget(t *testing.T) {
 	}
 }
 
+func TestResolveBookScaleTargetCapturesSingleDayStoryTimeHint(t *testing.T) {
+	target, err := ResolveBookScaleTarget("1-1卷，12-12章，总字数28000-30000字；主线时间跨度10日", 1, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.StoryTimeHint != "10日" {
+		t.Fatalf("story_time_hint=%q, want 10日", target.StoryTimeHint)
+	}
+}
+
 func TestResolveBookScaleTargetParsesChineseWanOnBothRangeBounds(t *testing.T) {
 	for _, scale := range []string{
 		"1-1卷，12-12章；正文2.8万—3万字",
@@ -59,6 +132,73 @@ func TestResolveBookScaleTargetParsesChineseWanOnBothRangeBounds(t *testing.T) {
 			target.TargetWords != 29000 || target.TargetWordsPerChapter != 2417 {
 			t.Fatalf("ResolveBookScaleTarget(%q) = %+v", scale, target)
 		}
+	}
+}
+
+func TestResolveBookScaleTargetDistinguishesTotalChineseWordsFromChapterBudget(t *testing.T) {
+	for _, scale := range []string{
+		"1-1卷、12-12章，总字数28000-30000中文字，单章动态预算2350-2500字",
+		"1-1卷、12-12章，单章动态预算2350-2500字，正文28000-30000汉字",
+	} {
+		target, err := ResolveBookScaleTarget(scale, 1, 12)
+		if err != nil {
+			t.Fatalf("ResolveBookScaleTarget(%q): %v", scale, err)
+		}
+		if target.MinWords != 28000 || target.MaxWords != 30000 ||
+			target.TargetWords != 29000 || target.TargetWordsPerChapter != 2417 {
+			t.Fatalf("ResolveBookScaleTarget(%q) = %+v", scale, target)
+		}
+	}
+}
+
+func TestResolveBookScaleTargetDoesNotTreatPerChapterBudgetAsBookTotal(t *testing.T) {
+	for _, scale := range []string{
+		"1-1卷、12-12章，单章动态预算2350-2500字",
+		"1-1卷、12-12章，预算2350-2500字/章",
+		"1-1卷、12-12章，预算2350-2500字 / 章",
+		"1-1卷、12-12章，每章正文2350-2500字",
+		"1-1卷、12-12章，单章正文字数2350-2500字",
+	} {
+		target, err := ResolveBookScaleTarget(scale, 1, 12)
+		if err != nil {
+			t.Fatalf("ResolveBookScaleTarget(%q): %v", scale, err)
+		}
+		if target.MinWords != 0 || target.MaxWords != 0 ||
+			target.TargetWords != 0 || target.TargetWordsPerChapter != 0 {
+			t.Fatalf("per-chapter budget was treated as whole-book range: %+v", target)
+		}
+	}
+}
+
+func TestWordScalePrefixAdvancesPastWholeUTF8Separator(t *testing.T) {
+	value := "甲，总字数28000-30000字"
+	match := wordScaleRangeRE.FindStringIndex(value)
+	if len(match) != 2 {
+		t.Fatalf("word range not found in %q", value)
+	}
+	if got := wordScalePrefix(value, match[0]); got != "总字数" {
+		t.Fatalf("wordScalePrefix() = %q, want %q", got, "总字数")
+	}
+}
+
+func TestResolveBookScaleTargetKeepsOneUnlabelledLegacyWordRange(t *testing.T) {
+	target, err := ResolveBookScaleTarget("1-1卷、12-12章，28000-30000字", 1, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.MinWords != 28000 || target.MaxWords != 30000 {
+		t.Fatalf("target=%+v", target)
+	}
+}
+
+func TestResolveBookScaleTargetRejectsAmbiguousBookWordRanges(t *testing.T) {
+	_, err := ResolveBookScaleTarget(
+		"1-1卷、12-12章，总字数28000-30000字，正文32000-34000字",
+		1,
+		12,
+	)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous total word ranges") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

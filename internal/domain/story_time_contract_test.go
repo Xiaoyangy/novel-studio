@@ -47,6 +47,26 @@ func TestDeriveStoryTimeContractFor420ChaptersAcrossThreeAndHalfToFourYears(t *t
 	}
 }
 
+func TestDeriveStoryTimeContractSupportsShortStoryDays(t *testing.T) {
+	contract, err := DeriveStoryTimeContract("1-1卷、12-12章；主线时间跨度10日", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contract.DurationDaysMin != 10 || contract.DurationDaysMax != 10 ||
+		math.Abs(contract.NominalDaysPerChapter-10.0/12.0) > 1e-9 {
+		t.Fatalf("short story time contract = %+v", contract)
+	}
+
+	ranged, err := DeriveStoryTimeContract("12章；全书故事跨度10-12天", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ranged.DurationDaysMin != 10 || ranged.DurationDaysMax != 12 ||
+		math.Abs(ranged.NominalDaysPerChapter-11.0/12.0) > 1e-9 {
+		t.Fatalf("ranged short story time contract = %+v", ranged)
+	}
+}
+
 func TestDeriveStoryTimeContractFallbackAndRangeGuard(t *testing.T) {
 	contract, err := DeriveStoryTimeContract("长篇多卷", 70)
 	if err != nil {

@@ -77,6 +77,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 			issues = append(issues, "drafts/01.zero_init.plan.json 不是有效 ChapterPlan JSON")
 		} else {
 			issues = append(issues, zeroValidateChapterPlan(plan)...)
+			issues = append(issues, zeroCheckExplicitRelationshipGrounding(dir, plan)...)
 		}
 	}
 	if ragStats.Enabled && ragStats.Chunks == 0 {
@@ -84,6 +85,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	}
 	// Task 051：initial_character_dynamics 必须覆盖 主角∪FirstCast∪core/important 全员（阻塞）。
 	issues = append(issues, zeroCheckDynamicsCoverage(dir)...)
+	issues = append(issues, zeroCheckInitialRelationshipState(dir)...)
 	issues = append(issues, zeroCheckStoryTimeContract(dir)...)
 	if _, err := tools.ValidateZeroInitUserRules(dir); err != nil {
 		issues = append(issues, fmt.Sprintf("user_rules 写前合同无效：%v", err))
@@ -109,6 +111,59 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		Path:             filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"),
 	}
 	return readiness
+}
+
+func zeroCheckExplicitRelationshipGrounding(dir string, plan domain.ChapterPlan) []string {
+	st := store.NewStore(dir)
+	characters, err := st.Characters.Load()
+	if err != nil || len(characters) == 0 {
+		return nil
+	}
+	project := zeroInitProject{Characters: characters}
+	primary := strings.TrimSpace(zeroProtagonist(characters).Name)
+	var issues []string
+	for _, character := range characters {
+		name := strings.TrimSpace(character.Name)
+		if name == "" || name == primary || zeroRelationshipType(project, character) != zeroFormerLoversRelationship {
+			continue
+		}
+		matched := false
+		for _, arc := range plan.CausalSimulation.RelationshipArcs {
+			if len(arc.Pair) < 2 || !zeroPairMatches(arc.Pair, primary, name) {
+				continue
+			}
+			matched = true
+			if arc.RelationshipType != zeroFormerLoversRelationship ||
+				strings.HasPrefix(strings.TrimSpace(arc.RomancePotential), "none") ||
+				strings.Contains(arc.IntimacyStage, "陌生") || strings.Contains(arc.IntimacyStage, "未相识") {
+				issues = append(issues, fmt.Sprintf(
+					"relationship_emotion_arcs[%s/%s] 抹除了 foundation 已确认的既往恋爱/分离历史",
+					primary, name,
+				))
+			}
+			break
+		}
+		if !matched {
+			issues = append(issues, fmt.Sprintf("relationship_emotion_arcs 缺少 foundation 已确认的既往恋人 %s/%s", primary, name))
+		}
+	}
+	if raw, err := json.Marshal(plan); err == nil {
+		text := string(raw)
+		for _, stale := range []string{"他为什么能影响", "他此刻有自己的事", "他怕被绑定责任"} {
+			if strings.Contains(text, stale) {
+				issues = append(issues, fmt.Sprintf("zero-init 对话模板含未按角色性别中立化的旧短语 %q", stale))
+			}
+		}
+	}
+	return issues
+}
+
+func zeroPairMatches(pair []string, left, right string) bool {
+	if len(pair) < 2 {
+		return false
+	}
+	a, b := strings.TrimSpace(pair[0]), strings.TrimSpace(pair[1])
+	return (a == left && b == right) || (a == right && b == left)
 }
 
 func zeroCheckPacingWordContract(dir string) []string {
@@ -316,6 +371,25 @@ func zeroCheckStoryTimeContract(dir string) []string {
 			contract.TargetChapters,
 			target,
 		))
+	}
+	if expectedTarget, expectedScale, bound, sourceErr := zeroCompletedOutlineAllTimeSource(st); sourceErr != nil {
+		issues = append(issues, "读取 outline-all 故事时间硬合同失败："+sourceErr.Error())
+	} else if bound {
+		expected, deriveErr := domain.DeriveStoryTimeContract(expectedScale, expectedTarget)
+		if deriveErr != nil {
+			issues = append(issues, "派生 outline-all 故事时间硬合同失败："+deriveErr.Error())
+		} else {
+			expected.Source = domain.StoryTimeSourceOutlineAll
+			expected, deriveErr = domain.FinalizeStoryTimeContract(expected)
+			if deriveErr != nil {
+				issues = append(issues, "封存 outline-all 故事时间硬合同失败："+deriveErr.Error())
+			} else if contract.CoreDigest != expected.CoreDigest {
+				issues = append(issues, fmt.Sprintf(
+					"story_time_contract 未兑现 sealed outline-all 时间硬合同：duration=%.3f-%.3f，期望 %.3f-%.3f",
+					contract.DurationDaysMin, contract.DurationDaysMax, expected.DurationDaysMin, expected.DurationDaysMax,
+				))
+			}
+		}
 	}
 	calendar, err := st.WorldSim.LoadStoryCalendar()
 	if err != nil {
@@ -1050,13 +1124,16 @@ func zeroCounterpartForCharacter(project zeroInitProject, c domain.Character) st
 }
 
 // zeroCounterpartsForCharacter 返回角色的零章关系契约对手集：
-//   - 非主角：契约对手是主角（单条）。
-//   - 主角：对手是关键配角集合——优先 FirstCast（第一章点名出场），
+//   - 非第一主角（含共同主角）：契约对手是第一主角（单条）。
+//   - 第一主角：对手是其他主角与关键配角集合——优先 FirstCast（第一章点名出场），
 //     再补 core/important 层配角，至多 5 个。主角是关系枢纽，不应因第一章
 //     大纲未点名配角而契约为空（旧单对手逻辑的缺陷）。
 func zeroCounterpartsForCharacter(project zeroInitProject, c domain.Character) []string {
-	if !zeroIsProtagonist(c) {
+	if !zeroIsPrimaryProtagonist(project, c) {
 		if cp := strings.TrimSpace(zeroProtagonist(project.Characters).Name); cp != "" {
+			if cp == strings.TrimSpace(c.Name) {
+				return nil
+			}
 			return []string{cp}
 		}
 		return nil
@@ -1073,11 +1150,15 @@ func zeroCounterpartsForCharacter(project zeroInitProject, c domain.Character) [
 		seen[name] = true
 		out = append(out, name)
 	}
-	// 第一优先：第一章点名出场的配角。
+	// 多主角故事先建立主角之间的有向契约。把所有“主角”都跳过会让
+	// 双女主/双男主的核心关系反而从零章状态里消失。
 	for _, other := range project.Characters {
 		if zeroIsProtagonist(other) {
-			continue
+			add(other.Name)
 		}
+	}
+	// 第一优先：第一章点名出场的配角。
+	for _, other := range project.Characters {
 		if project.FirstCast[strings.TrimSpace(other.Name)] {
 			add(other.Name)
 		}
@@ -1198,8 +1279,20 @@ func zeroIsProtagonist(c domain.Character) bool {
 		strings.Contains(role, "朋友") || strings.Contains(role, "闺蜜") {
 		return false
 	}
-	return role == "主角" ||
-		strings.Contains(role, "男主") ||
+	if role == "主角" {
+		return true
+	}
+	// 角色卡经常以“主角／职业”“主角：身份”保存；只接受精确“主角”
+	// 会让 zeroProtagonist 回退到首个角色，并为该角色生成 self counterpart。
+	for _, prefix := range []string{
+		"主角／", "主角/", "主角｜", "主角|", "主角·", "主角：", "主角:",
+		"主角—", "主角-", "主角（", "主角(",
+	} {
+		if strings.HasPrefix(role, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(role, "男主") ||
 		strings.Contains(role, "女主") ||
 		strings.Contains(role, "主人公") ||
 		strings.Contains(role, "protagonist")
@@ -1757,6 +1850,128 @@ func zeroCheckDynamicsCoverage(dir string) []string {
 		issues = append(issues, fmt.Sprintf("initial_character_dynamics.voice_logic 未覆盖全书推演所需角色：%s", strings.Join(missingVoice, "、")))
 	}
 	return issues
+}
+
+// zeroCheckInitialRelationshipState keeps the directional owner of every
+// relationship contract auditable. The dynamics document owns the canonical
+// per-character contracts; relationship_state.initial is its flattened,
+// model-facing projection and must preserve the owner instead of emitting an
+// ambiguous list of counterpart-only records.
+func zeroCheckInitialRelationshipState(dir string) []string {
+	st := store.NewStore(dir)
+	characters, err := st.Characters.Load()
+	if err != nil || len(characters) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(characters))
+	for _, character := range characters {
+		if name := strings.TrimSpace(character.Name); name != "" {
+			known[name] = true
+		}
+	}
+
+	dynamicsData, err := os.ReadFile(filepath.Join(dir, "meta", "initial_character_dynamics.json"))
+	if err != nil {
+		return nil // required/missing reports absence
+	}
+	var dynamics zeroInitCharacterDynamicsDoc
+	if err := json.Unmarshal(dynamicsData, &dynamics); err != nil {
+		return nil // zeroCheckDynamicsCoverage reports malformed dynamics
+	}
+
+	var issues []string
+	directional := map[string]domain.CharacterRelationshipContract{}
+	canonicalCounts := map[string]int{}
+	for _, state := range dynamics.Characters {
+		owner := strings.TrimSpace(state.Character)
+		for _, contract := range state.RelationshipContract {
+			counterpart := strings.TrimSpace(contract.Counterpart)
+			pairKey := owner + "\x00" + counterpart
+			if owner == "" {
+				issues = append(issues, "initial_character_dynamics.relationship_contract 缺少 character owner")
+			} else if !known[owner] {
+				issues = append(issues, fmt.Sprintf("initial_character_dynamics 含未知 relationship owner %s", owner))
+			}
+			if counterpart == "" {
+				issues = append(issues, fmt.Sprintf("initial_character_dynamics[%s] 含空 counterpart", owner))
+			}
+			if owner != "" && owner == counterpart {
+				issues = append(issues, fmt.Sprintf("initial_character_dynamics[%s] 含 self relationship contract", owner))
+			}
+			if counterpart != "" && !known[counterpart] {
+				issues = append(issues, fmt.Sprintf("initial_character_dynamics[%s] 指向未知 counterpart %s", owner, counterpart))
+			}
+			if _, exists := directional[pairKey]; exists {
+				issues = append(issues, fmt.Sprintf("initial_character_dynamics 含重复有向关系 %s→%s", owner, counterpart))
+			}
+			directional[pairKey] = contract
+			canonicalCounts[zeroOwnedRelationshipContractIdentity(owner, contract)]++
+		}
+	}
+
+	stateData, err := os.ReadFile(filepath.Join(dir, "relationship_state.initial.json"))
+	if err != nil {
+		return issues // required/missing reports absence
+	}
+	var flattened struct {
+		Version   int                                 `json:"version"`
+		Contracts []zeroInitOwnedRelationshipContract `json:"contracts"`
+	}
+	if err := json.Unmarshal(stateData, &flattened); err != nil {
+		return append(issues, "relationship_state.initial.json 不是有效 JSON")
+	}
+	if flattened.Version < 2 {
+		issues = append(issues, "relationship_state.initial.json 版本过旧，未保存 relationship contract owner")
+	}
+	projectedCounts := map[string]int{}
+	for _, owned := range flattened.Contracts {
+		owner := strings.TrimSpace(owned.Character)
+		counterpart := strings.TrimSpace(owned.Counterpart)
+		if owner == "" {
+			issues = append(issues, fmt.Sprintf("relationship_state.initial.contracts[%s] 缺少 character owner", counterpart))
+		} else if !known[owner] {
+			issues = append(issues, fmt.Sprintf("relationship_state.initial 含未知 relationship owner %s", owner))
+		}
+		if owner != "" && owner == counterpart {
+			issues = append(issues, fmt.Sprintf("relationship_state.initial 含 self relationship contract %s→%s", owner, counterpart))
+		}
+		projectedCounts[zeroOwnedRelationshipContractIdentity(owner, owned.CharacterRelationshipContract)]++
+	}
+	if len(canonicalCounts) != len(projectedCounts) {
+		issues = append(issues, "relationship_state.initial 与 initial_character_dynamics 的有向关系集合不一致")
+	} else {
+		for identity, count := range canonicalCounts {
+			if projectedCounts[identity] != count {
+				issues = append(issues, "relationship_state.initial 未逐项保留 initial_character_dynamics 的 owner 与契约内容")
+				break
+			}
+		}
+	}
+
+	primary := strings.TrimSpace(zeroProtagonist(characters).Name)
+	project := zeroInitProject{Characters: characters}
+	for _, character := range characters {
+		name := strings.TrimSpace(character.Name)
+		if name == "" || name == primary || zeroRelationshipType(project, character) != zeroFormerLoversRelationship {
+			continue
+		}
+		for _, pair := range [][2]string{{primary, name}, {name, primary}} {
+			contract, ok := directional[pair[0]+"\x00"+pair[1]]
+			if !ok {
+				issues = append(issues, fmt.Sprintf("既往恋人关系缺少双向初始契约 %s→%s", pair[0], pair[1]))
+				continue
+			}
+			if !strings.Contains(contract.AllianceStatus, "既往恋人") || !strings.Contains(contract.Trust, "不因重逢自动恢复") {
+				issues = append(issues, fmt.Sprintf("既往恋人初始契约 %s→%s 未保留分离与低信任边界", pair[0], pair[1]))
+			}
+		}
+	}
+	return issues
+}
+
+func zeroOwnedRelationshipContractIdentity(owner string, contract domain.CharacterRelationshipContract) string {
+	raw, _ := json.Marshal(contract)
+	return strings.TrimSpace(owner) + "\x00" + string(raw)
 }
 
 // zeroCheckTemplateHomogeneity Task 053：零章确定性模板的同质检测（warning）。

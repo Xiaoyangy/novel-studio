@@ -242,6 +242,7 @@ func sealedShortOutlineReceipt(t *testing.T, root string) domain.OutlineAllExecu
 		Mode:                     domain.OutlineAllExecutionMode,
 		Status:                   domain.OutlineAllExecutionBuilding,
 		BaseCanonChapter:         0,
+		GenerationID:             "short-word-generation",
 		WritingMode:              domain.WritingPipelineModeSealedTwoPassV2,
 		WritingModeReceiptDigest: digest("a"),
 		CompassDigest:            digest("b"),

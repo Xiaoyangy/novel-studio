@@ -1,10 +1,189 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
+
+func TestEnsureGenerationIfEmptyIsIdempotentAndPreservesUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "meta", "progress.json")
+	raw := []byte(`{"novel_name":"test","phase":"writing","current_chapter":0,"total_chapters":12,"completed_chapters":null,"total_word_count":0,"future_state":{"keep":true}}`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	progress, created, err := st.Progress.EnsureGenerationIfEmpty(
+		"generation-1",
+		domain.GenerationModeSimulationRestartFromSeed,
+	)
+	if err != nil || !created || progress == nil || progress.GenerationID != "generation-1" {
+		t.Fatalf("initialize generation: progress=%+v created=%v err=%v", progress, created, err)
+	}
+	afterFirst, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(afterFirst, &fields); err != nil {
+		t.Fatal(err)
+	}
+	var futureState map[string]bool
+	if err := json.Unmarshal(fields["future_state"], &futureState); err != nil || !futureState["keep"] {
+		t.Fatalf("unknown progress field changed: %s err=%v", fields["future_state"], err)
+	}
+
+	progress, created, err = st.Progress.EnsureGenerationIfEmpty(
+		"generation-2",
+		domain.GenerationModeSimulationRestartFromSeed,
+	)
+	if err != nil || created || progress == nil || progress.GenerationID != "generation-1" {
+		t.Fatalf("reuse generation: progress=%+v created=%v err=%v", progress, created, err)
+	}
+	afterSecond, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterFirst, afterSecond) {
+		t.Fatal("idempotent generation reuse rewrote progress")
+	}
+}
+
+func TestEnsureGenerationIfEmptyRejectsPartialLineageWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Save(&domain.Progress{GenerationID: "partial", TotalChapters: 12}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "meta", "progress.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Progress.EnsureGenerationIfEmpty(
+		"replacement",
+		domain.GenerationModeSimulationRestartFromSeed,
+	); err == nil {
+		t.Fatal("partially initialized generation was accepted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected partial generation mutated progress")
+	}
+}
+
+func TestEnsureGenerationIfEmptySerializesIndependentStores(t *testing.T) {
+	dir := t.TempDir()
+	firstStore := NewStore(dir)
+	secondStore := NewStore(dir)
+	if err := firstStore.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Progress.Init("concurrent", 12); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		progress *domain.Progress
+		created  bool
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for index, st := range []*Store{firstStore, secondStore} {
+		proposed := fmt.Sprintf("generation-%d", index+1)
+		go func() {
+			<-start
+			progress, created, err := st.Progress.EnsureGenerationIfEmpty(
+				proposed,
+				domain.GenerationModeSimulationRestartFromSeed,
+			)
+			results <- result{progress: progress, created: created, err: err}
+		}()
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil || first.progress == nil || second.progress == nil {
+		t.Fatalf("concurrent generation initialization failed: first=%+v second=%+v", first, second)
+	}
+	if first.created == second.created {
+		t.Fatalf("exactly one initializer must create the lineage: first=%+v second=%+v", first, second)
+	}
+	if first.progress.GenerationID != second.progress.GenerationID {
+		t.Fatalf("concurrent initializers returned different lineages: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestSetTotalChaptersPreservesUnknownProgressFields(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "meta", "progress.json")
+	raw := []byte(`{"novel_name":"test","phase":"init","current_chapter":0,"total_chapters":1,"completed_chapters":null,"total_word_count":0,"future_state":{"keep":true}}`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.SetTotalChapters(12); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(after, &fields); err != nil {
+		t.Fatal(err)
+	}
+	var total int
+	if err := json.Unmarshal(fields["total_chapters"], &total); err != nil || total != 12 {
+		t.Fatalf("total_chapters=%d err=%v", total, err)
+	}
+	var futureState map[string]bool
+	if err := json.Unmarshal(fields["future_state"], &futureState); err != nil || !futureState["keep"] {
+		t.Fatalf("unknown progress field changed: %s err=%v", fields["future_state"], err)
+	}
+}
+
+func TestSetTotalChaptersRejectsCorruptKnownFieldWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "meta", "progress.json")
+	before := []byte(`{"phase":"init","current_chapter":"corrupt","total_chapters":1}`)
+	if err := os.WriteFile(path, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.SetTotalChapters(12); err == nil {
+		t.Fatal("total_chapters update accepted a corrupt known progress field")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected total_chapters update mutated corrupt progress")
+	}
+}
 
 func TestSetFlow(t *testing.T) {
 	dir := t.TempDir()

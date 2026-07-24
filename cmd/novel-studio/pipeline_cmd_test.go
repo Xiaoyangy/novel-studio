@@ -1531,6 +1531,103 @@ func TestPipelineArchitectShortRefreshRunPromptPinsOneFoundationType(t *testing.
 	}
 }
 
+func TestPipelineArchitectShortRefreshTargetsStayProjectAgnostic(t *testing.T) {
+	forbidden := []string{
+		"数据灰产",
+		"女性地址",
+		"路线数据",
+		"两次指定反转",
+		"旧案统一引擎",
+	}
+	seen := map[string]bool{}
+	for _, target := range pipelineArchitectShortRefreshTargets {
+		if seen[target.Type] {
+			t.Fatalf("duplicate short refresh target %q", target.Type)
+		}
+		seen[target.Type] = true
+		if strings.TrimSpace(target.Description) == "" {
+			t.Fatalf("short refresh target %s has an empty description", target.Type)
+		}
+		for _, fragment := range forbidden {
+			if strings.Contains(target.Description, fragment) {
+				t.Fatalf("short refresh target %s leaked project-specific fragment %q: %s", target.Type, fragment, target.Description)
+			}
+		}
+	}
+	if len(seen) != 7 {
+		t.Fatalf("short refresh target inventory=%v, want 7 unique foundation targets", seen)
+	}
+}
+
+func TestPipelineArchitectRefreshHeadlessOptionsAreStageBound(t *testing.T) {
+	artifacts := []string{"premise.md"}
+	opts := pipelineArchitectRefreshHeadlessOptions("refresh", artifacts, "premise", false)
+	if opts.Prompt != "refresh" || !opts.PreserveUserRules || !opts.PreserveCheckpointsOnStart ||
+		!opts.DisableFlowRouter || opts.AllowChapterZeroFoundationRefresh || opts.FoundationRefreshTarget != "premise" ||
+		!opts.RecordFoundationRefreshEpoch || !opts.OneShotFoundationRefresh || !opts.StopAfterFoundationChange ||
+		opts.FoundationChangeCheckpointStep != tools.FoundationRefreshCheckpointStep("premise") ||
+		!slices.Equal(opts.FoundationChangeArtifacts, artifacts) {
+		t.Fatalf("Architect refresh headless options lost a safety boundary: %+v", opts)
+	}
+	artifacts[0] = "mutated.md"
+	if opts.FoundationChangeArtifacts[0] != "premise.md" {
+		t.Fatal("Architect refresh options retained a mutable artifact slice alias")
+	}
+	for _, target := range pipelineArchitectShortRefreshTargets {
+		targetOpts := pipelineArchitectRefreshHeadlessOptions("refresh", target.Artifacts, target.Type, target.Type == "layered_outline")
+		wantCapability := target.Type == "layered_outline"
+		if targetOpts.AllowChapterZeroFoundationRefresh != wantCapability || targetOpts.FoundationRefreshTarget != target.Type {
+			t.Fatalf("target %s options lost exact binding: %+v", target.Type, targetOpts)
+		}
+	}
+}
+
+func TestPipelineArchitectInitialHeadlessOptionsDisableWritingRouter(t *testing.T) {
+	opts := pipelineArchitectInitialHeadlessOptions("initialize foundation")
+	if opts.Prompt != "initialize foundation" || !opts.StopAfterFoundation || !opts.DisableFlowRouter {
+		t.Fatalf("initial Architect headless options lost the foundation-only boundary: %+v", opts)
+	}
+	if opts.StopAfterFoundationChange || opts.AllowChapterZeroFoundationRefresh ||
+		opts.FoundationRefreshTarget != "" || opts.OneShotFoundationRefresh {
+		t.Fatalf("initial Architect options unexpectedly acquired refresh capabilities: %+v", opts)
+	}
+}
+
+func TestInvalidateExplicitArchitectRefreshClearsDownstreamEvidence(t *testing.T) {
+	state := &domain.PipelineState{Stages: []string{"zero-init", "cocreate", "architect", "outline-all"}}
+	for _, stage := range state.Stages {
+		state.MarkDone(stage, domain.PipelineStageEvidence{Stage: stage, Status: "ok"})
+	}
+	if !invalidateExplicitArchitectRefresh(state, true) {
+		t.Fatal("explicit Architect refresh did not invalidate completed evidence")
+	}
+	if !state.Done("cocreate") {
+		t.Fatal("Architect refresh invalidated an upstream cocreate stage")
+	}
+	for _, stage := range []string{"architect", "outline-all", "zero-init"} {
+		if state.Done(stage) || state.Evidence[stage].Status != "forced_refresh" {
+			t.Fatalf("stage %s retained stale evidence: %+v", stage, state.Evidence[stage])
+		}
+	}
+}
+
+func TestArchitectRefreshRejectsMissingStageAndCorruptProgress(t *testing.T) {
+	if err := runPipelineWithStages(cliOptions{}, pipelineFlags{RefreshArchitect: true}, []string{"zero-init"}, "prompt", nil); err == nil || !strings.Contains(err.Error(), "包含 architect") {
+		t.Fatalf("refresh without architect stage was not rejected before setup: %v", err)
+	}
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta", "progress.json"), []byte(`{"phase":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pipelineArchitectShortChapterZero(dir); err == nil {
+		t.Fatal("corrupt progress silently downgraded into a broader Architect refresh mode")
+	}
+}
+
 func TestPipelineArchitectShortTargetSelectionAndRevision(t *testing.T) {
 	targets, err := pipelineArchitectShortSelectedTargets("book_world")
 	if err != nil {

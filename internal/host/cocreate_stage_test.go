@@ -222,6 +222,45 @@ func TestResetStartRuntimeStateClearsQueueAndCheckpoints(t *testing.T) {
 	}
 }
 
+func TestResetStartRuntimeStatePreservesCheckpointsWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runtime.AppendQueue(domain.RuntimeQueueItem{Category: "TOOL", Summary: "old loop"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.GlobalScope(), "premise", "premise.md", "digest-1"); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{store: st, preserveCheckpointsOnStart: true}
+	if err := h.resetStartRuntimeState(); err != nil {
+		t.Fatalf("resetStartRuntimeState: %v", err)
+	}
+	if items, err := st.Runtime.LoadQueue(); err != nil || len(items) != 0 {
+		t.Fatalf("runtime queue should still reset: %+v err=%v", items, err)
+	}
+	if _, err := st.Checkpoints.Append(domain.GlobalScope(), "characters", "characters.json", "digest-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	second := store.NewStore(dir)
+	if err := second.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Host{store: second, preserveCheckpointsOnStart: true}).resetStartRuntimeState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Checkpoints.Append(domain.GlobalScope(), "world_rules", "world_rules.json", "digest-3"); err != nil {
+		t.Fatal(err)
+	}
+	cps := store.NewStore(dir).Checkpoints.All()
+	if len(cps) != 3 || cps[0].Seq != 1 || cps[1].Seq != 2 || cps[2].Seq != 3 {
+		t.Fatalf("checkpoint journal was reset or lost sequence across refresh hosts: %+v", cps)
+	}
+}
+
 func TestBuildStoryStateSummary_NilStore(t *testing.T) {
 	if got := buildStoryStateSummary(nil); got != "" {
 		t.Errorf("nil store 应返回空串，得 %q", got)

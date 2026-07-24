@@ -66,9 +66,288 @@ func TestSaveFoundationStillBlocksWritingOutlineReplacementWithoutRebaseAuthorit
 		"scale":   "short",
 		"content": []map[string]any{{"chapter": 1, "title": "第一章", "core_event": "开局", "hook": "继续"}},
 	})
-	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "写作阶段禁止") {
+	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "禁止使用") {
 		t.Fatalf("ordinary writing outline replacement was not blocked: %v", err)
 	}
+}
+
+func TestSaveFoundationAllowsExplicitLockedChapterZeroArchitectRefresh(t *testing.T) {
+	dir := t.TempDir()
+	s := store.NewStore(dir)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Save(&domain.Progress{
+		Phase:             domain.PhaseWriting,
+		CurrentChapter:    1,
+		InProgressChapter: 1,
+		TotalChapters:     12,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedChapterZeroRefreshFoundation(t, s)
+	const owner = "architect-refresh-test"
+	if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+		Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+	args, _ := json.Marshal(map[string]any{
+		"type":  "layered_outline",
+		"scale": "short",
+		"content": []map[string]any{{
+			"index": 1, "title": "第一卷", "theme": "主题",
+			"arcs": []map[string]any{{
+				"index": 1, "title": "第一弧", "goal": "目标",
+				"chapters": []map[string]any{{"chapter": 1, "title": "第一章", "core_event": "开局", "hook": "继续"}},
+			}},
+		}},
+	})
+	tool := NewSaveFoundationTool(s).
+		WithChapterZeroFoundationRefresh(true).
+		WithFoundationTypeRestriction("layered_outline").
+		WithFoundationRefreshEpoch(true).
+		WithOneShotFoundationRefresh(true)
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("explicit locked chapter-zero refresh rejected: %v", err)
+	}
+	firstEpoch := s.Checkpoints.LatestByStep(domain.GlobalScope(), FoundationRefreshCheckpointStep("layered_outline"))
+	if firstEpoch == nil {
+		t.Fatal("explicit refresh did not append its causal epoch")
+	}
+	wantDigest, err := FoundationRefreshArtifactsDigest(s.Dir(), "layered_outline")
+	if err != nil || firstEpoch.Digest != wantDigest {
+		t.Fatalf("refresh epoch did not bind layered+flat artifacts: checkpoint=%+v want=%q err=%v", firstEpoch, wantDigest, err)
+	}
+	if _, err := tool.Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "already completed") {
+		t.Fatalf("same sidecar performed a second mutation: %v", err)
+	}
+	tool = NewSaveFoundationTool(s).
+		WithChapterZeroFoundationRefresh(true).
+		WithFoundationTypeRestriction("layered_outline").
+		WithFoundationRefreshEpoch(true).
+		WithOneShotFoundationRefresh(true)
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("same-body retry in a fresh sidecar rejected: %v", err)
+	}
+	secondEpoch := s.Checkpoints.LatestByStep(domain.GlobalScope(), FoundationRefreshCheckpointStep("layered_outline"))
+	if secondEpoch == nil || secondEpoch.Seq <= firstEpoch.Seq || secondEpoch.Digest != firstEpoch.Digest {
+		t.Fatalf("same-body refresh did not append a new causal epoch: first=%+v second=%+v", firstEpoch, secondEpoch)
+	}
+}
+
+func TestSaveFoundationChapterZeroRefreshCapabilityFailsClosed(t *testing.T) {
+	newStore := func(t *testing.T) *store.Store {
+		t.Helper()
+		s := store.NewStore(t.TempDir())
+		if err := s.Init(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Progress.Save(&domain.Progress{
+			Phase: domain.PhaseWriting, CurrentChapter: 1, TotalChapters: 12,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		seedChapterZeroRefreshFoundation(t, s)
+		return s
+	}
+	flatArgs, _ := json.Marshal(map[string]any{
+		"type": "outline", "scale": "short",
+		"content": []map[string]any{{"chapter": 1, "title": "第一章", "core_event": "开局", "hook": "继续"}},
+	})
+	layeredArgs, _ := json.Marshal(map[string]any{
+		"type": "layered_outline", "scale": "short",
+		"content": []map[string]any{{"index": 1, "title": "卷", "arcs": []map[string]any{{
+			"index": 1, "title": "弧", "chapters": []map[string]any{{"chapter": 1, "title": "章", "core_event": "事", "hook": "钩"}},
+		}}}},
+	})
+
+	t.Run("capability without foundation lock", func(t *testing.T) {
+		s := newStore(t)
+		if _, err := NewSaveFoundationTool(s).WithChapterZeroFoundationRefresh(true).Execute(context.Background(), layeredArgs); err == nil || !strings.Contains(err.Error(), "禁止使用") {
+			t.Fatalf("refresh capability escaped without a live foundation lock: %v", err)
+		}
+	})
+
+	t.Run("foundation lock without capability", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-lock-without-refresh-capability"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		if _, err := NewSaveFoundationTool(s).Execute(context.Background(), layeredArgs); err == nil || !strings.Contains(err.Error(), "禁止使用") {
+			t.Fatalf("foundation lock escaped without the process-local refresh capability: %v", err)
+		}
+	})
+
+	t.Run("capability does not authorize flat outline", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-refresh-flat-outline"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		if err := s.RunMeta.SetPlanningTier(domain.PlanningTierLong); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSaveFoundationTool(s).WithChapterZeroFoundationRefresh(true).Execute(context.Background(), flatArgs); err == nil || !strings.Contains(err.Error(), "禁止使用") {
+			t.Fatalf("refresh capability authorized a flat outline: %v", err)
+		}
+		meta, err := s.RunMeta.Load()
+		if err != nil || meta == nil || meta.PlanningTier != domain.PlanningTierLong {
+			t.Fatalf("rejected outline changed planning tier: %+v err=%v", meta, err)
+		}
+	})
+
+	t.Run("zero-init evidence blocks capability", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-refresh-after-zero-init"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		if err := os.WriteFile(filepath.Join(s.Dir(), "meta", "first_chapter_generation_readiness.json"), []byte(`{"ready":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSaveFoundationTool(s).WithChapterZeroFoundationRefresh(true).Execute(context.Background(), layeredArgs); err == nil || !strings.Contains(err.Error(), "禁止使用") {
+			t.Fatalf("refresh capability escaped after zero-init: %v", err)
+		}
+	})
+
+	t.Run("nested draft evidence blocks capability", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-refresh-with-nested-draft"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		path := filepath.Join(s.Dir(), "drafts", "nested", "01.plan.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"chapter":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSaveFoundationTool(s).WithChapterZeroFoundationRefresh(true).Execute(context.Background(), layeredArgs); err == nil || !strings.Contains(err.Error(), "禁止使用") {
+			t.Fatalf("refresh capability escaped nested draft evidence: %v", err)
+		}
+	})
+
+	t.Run("exact type restriction rejects another foundation mutation", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-refresh-exact-type"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		tool := NewSaveFoundationTool(s).
+			WithChapterZeroFoundationRefresh(true).
+			WithFoundationTypeRestriction("characters")
+		if _, err := tool.Execute(context.Background(), layeredArgs); err == nil || !strings.Contains(err.Error(), "only allows") {
+			t.Fatalf("exact foundation restriction accepted another type: %v", err)
+		}
+	})
+
+	t.Run("exact target cannot change planning tier", func(t *testing.T) {
+		s := newStore(t)
+		const owner = "foundation-refresh-scale-guard"
+		if err := s.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{
+			Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Runtime.ReleasePipelineExecution(owner) })
+		var payload map[string]any
+		if err := json.Unmarshal(layeredArgs, &payload); err != nil {
+			t.Fatal(err)
+		}
+		payload["scale"] = "long"
+		longArgs, _ := json.Marshal(payload)
+		tool := NewSaveFoundationTool(s).
+			WithChapterZeroFoundationRefresh(true).
+			WithFoundationTypeRestriction("layered_outline")
+		if _, err := tool.Execute(context.Background(), longArgs); err == nil || !strings.Contains(err.Error(), "cannot change planning tier") {
+			t.Fatalf("exact target changed planning tier: %v", err)
+		}
+		meta, err := s.RunMeta.Load()
+		if err != nil || meta == nil || meta.PlanningTier != domain.PlanningTierShort {
+			t.Fatalf("rejected target changed planning tier: %+v err=%v", meta, err)
+		}
+	})
+}
+
+func seedChapterZeroRefreshFoundation(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{
+		"premise.md":           "# 测试",
+		"characters.json":      `[{"name":"主角"}]`,
+		"world_rules.json":     `[{"name":"规则"}]`,
+		"book_world.json":      `{"name":"世界"}`,
+		"world_codex.json":     `{"version":1}`,
+		"meta/compass.json":    `{"ending_direction":"HE"}`,
+		"layered_outline.json": `[]`,
+	} {
+		path := filepath.Join(st.Dir(), filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSaveFoundationOutlineReplacementFailsClosedOnCorruptOrHiddenCanonState(t *testing.T) {
+	outlineArgs, _ := json.Marshal(map[string]any{
+		"type": "outline", "scale": "short",
+		"content": []map[string]any{{"chapter": 1, "title": "章", "core_event": "事", "hook": "钩"}},
+	})
+	t.Run("corrupt progress", func(t *testing.T) {
+		st := store.NewStore(t.TempDir())
+		if err := st.Init(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(st.Dir(), "meta", "progress.json"), []byte(`{"phase":`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSaveFoundationTool(st).Execute(context.Background(), outlineArgs); err == nil || !strings.Contains(err.Error(), "load progress before outline replacement") {
+			t.Fatalf("corrupt progress failed open: %v", err)
+		}
+	})
+	t.Run("planning phase with nested draft", func(t *testing.T) {
+		st := store.NewStore(t.TempDir())
+		if err := st.Init(); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Progress.Save(&domain.Progress{Phase: domain.PhaseOutline, CurrentChapter: 0}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(st.Dir(), "drafts", "nested", "01.draft.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("canon-like draft"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSaveFoundationTool(st).Execute(context.Background(), outlineArgs); err == nil || !strings.Contains(err.Error(), "禁止") {
+			t.Fatalf("planning phase with hidden draft failed open: %v", err)
+		}
+	})
 }
 
 func TestSaveFoundationPersistsPlanningTier(t *testing.T) {

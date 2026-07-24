@@ -202,7 +202,11 @@ type ApplyThinking func(role string, level agentcore.ThinkingLevel)
 // transcript without changing the logical agent name, tools, model role, flow
 // gates, or any normal writer invocation.
 type CoordinatorBuildOptions struct {
-	WriterSessionIdentity string
+	WriterSessionIdentity             string
+	AllowChapterZeroFoundationRefresh bool
+	FoundationRefreshTarget           string
+	RecordFoundationRefreshEpoch      bool
+	OneShotFoundationRefresh          bool
 }
 
 var subAgentSessionIdentityRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
@@ -318,7 +322,11 @@ func BuildCoordinatorWithOptions(
 	contextTool := tools.NewContextTool(store, bundle.References, resolvedStyle.ID).
 		WithConfiguredStyle(resolvedStyle.Body)
 	commitChapter := tools.NewCommitChapterTool(store)
-	saveFoundation := tools.NewSaveFoundationTool(store)
+	saveFoundation := tools.NewSaveFoundationTool(store).
+		WithChapterZeroFoundationRefresh(buildOpts.AllowChapterZeroFoundationRefresh).
+		WithFoundationTypeRestriction(buildOpts.FoundationRefreshTarget).
+		WithFoundationRefreshEpoch(buildOpts.RecordFoundationRefreshEpoch).
+		WithOneShotFoundationRefresh(buildOpts.OneShotFoundationRefresh)
 	saveReview := tools.NewSaveReviewTool(store)
 	if !cfg.DisableLiveRAG {
 		if qdrantClient, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
@@ -357,6 +365,12 @@ func BuildCoordinatorWithOptions(
 		// 短篇/不 tick 的项目不调用即无副作用。
 		tools.NewSaveWorldTickTool(store),
 		webResearch,
+	}
+	if strings.TrimSpace(buildOpts.FoundationRefreshTarget) != "" {
+		// An exact-target refresh is a mutation sidecar, not a general Architect
+		// session. Capability narrowing makes the prompt's one-read/one-save
+		// contract structural: no world tick, research, or craft mutation can run.
+		architectTools = []agentcore.Tool{contextTool, saveFoundation}
 	}
 	// 阶段拆分：推演（planner=writer）与正文渲染（drafter）各自独立上下文，
 	// 每阶段只拿本阶段所需上下文——planner 吃全量规划上下文产出完整计划落盘，
@@ -540,6 +554,7 @@ func BuildCoordinatorWithOptions(
 	architectStopGuardFactory := func(_, _ string) agentcore.StopGuard {
 		return reminder.NewArchitectStopGuard(store)
 	}
+	architectRefreshTarget := strings.TrimSpace(buildOpts.FoundationRefreshTarget)
 	architectThinking, _ := ResolveThinkingForModel(architectModel, roleThinking(cfg, "architect"))
 	architectShort := subagent.Config{
 		Name:               "architect_short",
@@ -553,24 +568,32 @@ func BuildCoordinatorWithOptions(
 		ToolsAreIdempotent: false,
 		OnMessage:          onMsg,
 		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
+			if architectRefreshTarget != "" {
+				return foundationRefreshShouldStopAfterToolResult(architectRefreshTarget, toolName, result)
+			}
 			r := decodeSaveFoundationResult(toolName, result)
 			return r.Type == "outline" && r.FoundationReady
 		},
 		StopGuardFactory: architectStopGuardFactory,
 	}
 	architectLong := subagent.Config{
-		Name:                "architect_long",
-		Description:         "长篇规划师：为连载型、可持续升级的故事生成分层设定与卷弧大纲",
-		Model:               architectModel,
-		SystemPrompt:        bundle.Prompts.ArchitectLong,
-		Tools:               architectTools,
-		MaxTurns:            cfg.ResolveMaxTurns("architect", 20),
-		MaxRetries:          subagentMaxRetries,
-		ThinkingLevel:       architectThinking,
-		ToolsAreIdempotent:  false,
-		OnMessage:           onMsg,
-		StopAfterToolResult: architectLongShouldStopAfterToolResult,
-		StopGuardFactory:    architectStopGuardFactory,
+		Name:               "architect_long",
+		Description:        "长篇规划师：为连载型、可持续升级的故事生成分层设定与卷弧大纲",
+		Model:              architectModel,
+		SystemPrompt:       bundle.Prompts.ArchitectLong,
+		Tools:              architectTools,
+		MaxTurns:           cfg.ResolveMaxTurns("architect", 20),
+		MaxRetries:         subagentMaxRetries,
+		ThinkingLevel:      architectThinking,
+		ToolsAreIdempotent: false,
+		OnMessage:          onMsg,
+		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
+			if architectRefreshTarget != "" {
+				return foundationRefreshShouldStopAfterToolResult(architectRefreshTarget, toolName, result)
+			}
+			return architectLongShouldStopAfterToolResult(toolName, result)
+		},
+		StopGuardFactory: architectStopGuardFactory,
 	}
 
 	plannerPrompt := bundle.Prompts.Planner
@@ -752,6 +775,8 @@ func BuildCoordinatorWithOptions(
 		// phase=complete 时硬拦截 subagent 派发，防止 Writer 死循环。
 		agentcore.WithToolGate(combineToolGates(
 			singleSubagentModeGate(),
+			foundationRefreshCoordinatorGate(buildOpts.FoundationRefreshTarget),
+			pipelineInitialWorldTickAgentGate(store),
 			pipelineRenderAgentGate(store),
 			pipelineOutlineAllAgentGate(store),
 			completePhaseGate(store),
@@ -789,6 +814,90 @@ func BuildCoordinatorWithOptions(
 	}
 
 	return agent, askUser, restore, coordinatorEngine, applyThinking
+}
+
+func foundationRefreshCoordinatorGate(target string) agentcore.ToolGate {
+	target = strings.TrimSpace(target)
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if target == "" {
+			return nil, nil
+		}
+		if req.Call.Name != "subagent" {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  "exact foundation refresh sidecar only allows Coordinator to dispatch architect_long",
+			}, nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil || args.Agent != "architect_long" {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  "exact foundation refresh sidecar requires subagent(agent=architect_long)",
+			}, nil
+		}
+		return nil, nil
+	}
+}
+
+// pipelineInitialWorldTickAgentGate narrows the world_tick execution lease at
+// the Coordinator boundary. The child tool guard already limits mutations to
+// save_world_tick; this gate additionally prevents every other Coordinator
+// capability from starting a provider session and binds the only authorized
+// architect_long task to the current authoritative chapter-one core/hook.
+// HARNESS-METADATA: name=pipeline_initial_world_tick_agent_gate class=business_logic note=初始world_tick只允许携带当前首章完整防抢跑合同的architect_long
+func pipelineInitialWorldTickAgentGate(st *store.Store) agentcore.ToolGate {
+	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
+		if st == nil {
+			return nil, nil
+		}
+		lock, err := st.Runtime.LoadPipelineExecution()
+		if err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  "无法验证 initial world_tick execution lock，拒绝派发 Coordinator capability：" + err.Error(),
+			}, nil
+		}
+		if lock == nil || lock.Mode != domain.PipelineExecutionWorldTick {
+			return nil, nil
+		}
+
+		contract, err := tools.BuildInitialWorldTickDispatchContract(st)
+		if err != nil {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason:  "world_tick execution lock 无法建立当前 authoritative chapter 1 dispatch contract：" + err.Error(),
+			}, nil
+		}
+		reject := func(reason string) *agentcore.GateDecision {
+			return &agentcore.GateDecision{
+				Allowed: false,
+				Reason: strings.TrimSpace(reason) +
+					"\n请仅重试 subagent(agent=architect_long)，并在 task 中原样携带以下当前完整合同：\n" + contract.Block,
+			}
+		}
+		if lock.TargetChapter != 1 {
+			return reject(fmt.Sprintf("initial world_tick execution lock 必须绑定第 1 章；收到 target_chapter=%d", lock.TargetChapter)), nil
+		}
+		if req.Call.Name != "subagent" {
+			return reject(fmt.Sprintf("world_tick execution lock 只允许 subagent(agent=architect_long)；收到 tool=%q", req.Call.Name)), nil
+		}
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if err := json.Unmarshal(req.Call.Args, &args); err != nil {
+			return reject("world_tick execution lock 无法解析 subagent(agent=architect_long) 参数：" + err.Error()), nil
+		}
+		if args.Agent != "architect_long" {
+			return reject(fmt.Sprintf("world_tick execution lock 只授权 architect_long；收到 agent=%q", args.Agent)), nil
+		}
+		if err := tools.ValidateInitialWorldTickDispatchTask(args.Task, contract); err != nil {
+			return reject("initial world_tick subagent task 合同无效或已漂移：" + err.Error()), nil
+		}
+		return nil, nil
+	}
 }
 
 // pipelineOutlineAllAgentGate closes the dedicated execution capability at
@@ -1199,6 +1308,11 @@ func decodeSaveFoundationResult(toolName string, result json.RawMessage) saveFou
 	var r saveFoundationResult
 	_ = json.Unmarshal(result, &r)
 	return r
+}
+
+func foundationRefreshShouldStopAfterToolResult(target, toolName string, result json.RawMessage) bool {
+	r := decodeSaveFoundationResult(toolName, result)
+	return strings.TrimSpace(target) != "" && r.Type == strings.TrimSpace(target)
 }
 
 func architectLongShouldStopAfterToolResult(toolName string, result json.RawMessage) bool {

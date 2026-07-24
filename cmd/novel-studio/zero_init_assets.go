@@ -91,7 +91,7 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 			force := fmt.Sprintf("与%s的信任、债务、亏欠、边界或信息差必须在行动中体现。", cp)
 			debt := "无新增债务、亏欠或承诺；第一章若发生帮助/交换必须入账并留下机会成本。"
 			relationshipForces = append(relationshipForces, force)
-			relationshipContracts = append(relationshipContracts, domain.CharacterRelationshipContract{
+			contract := domain.CharacterRelationshipContract{
 				Counterpart:       cp,
 				Trust:             "零章基线：未因正文事件新增信任。",
 				Debt:              debt,
@@ -105,7 +105,17 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 				BetrayalThreshold: "对方要求无证据承诺、隐瞒关键代价或夺走核心资源。",
 				HelpCondition:     "必须有可见证据、明确交换或情感压力触发。",
 				SourceChapter:     0,
-			})
+			}
+			if zeroRelationshipTypeForPair(project, c, cp) == zeroFormerLoversRelationship {
+				contract.Trust = "既往相恋与九年前分离均已确认；开篇信任受真实价值冲突损伤，不因重逢自动恢复。"
+				contract.Debt = "九年前的旧责与亏欠已经存在；第一章不得用职业接触、帮助或新承诺抵销。"
+				contract.Promise = "当前没有恋爱承诺；任何复合都须在责任承担与权力解除后重新选择。"
+				contract.SharedSecret = "只保留角色卡已确认的共同历史；未披露材料与对方离屏准备仍受知识边界约束。"
+				contract.BetrayalRecord = "角色卡确认九年前因价值选择分离；正文必须保留其不对称责任，不得改写成误会。"
+				contract.Dependency = "有历史情感牵引，但当前职业与经济保持独立，不能把旧亲密写成依赖或默认同意。"
+				contract.AllianceStatus = "既往恋人/分离后未复合；专业接触与感情选择分开记账。"
+			}
+			relationshipContracts = append(relationshipContracts, contract)
 		}
 	}
 	if !firstChapterActive {
@@ -225,17 +235,41 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 	}
 }
 
-func zeroCurrentCounterparts(project zeroInitProject, c domain.Character) []string {
-	if !zeroFirstChapterCharacterActive(project, c) {
-		return nil
+func zeroRelationshipTypeForPair(project zeroInitProject, c domain.Character, counterpart string) string {
+	primary := strings.TrimSpace(zeroProtagonist(project.Characters).Name)
+	character := strings.TrimSpace(c.Name)
+	counterpart = strings.TrimSpace(counterpart)
+	if character == "" || counterpart == "" || character == counterpart {
+		return ""
 	}
+	if counterpart == primary {
+		return zeroRelationshipType(project, c)
+	}
+	if character == primary {
+		for _, other := range project.Characters {
+			if zeroCharacterNameIs(other, counterpart) {
+				return zeroRelationshipType(project, other)
+			}
+		}
+	}
+	// zeroRelationshipType 的证据都以第一主角为关系中心；不能把某个角色
+	// 对第一主角的亲情/恋爱标签扩散到它与第三人的契约上。
+	return ""
+}
+
+func zeroCurrentCounterparts(project zeroInitProject, c domain.Character) []string {
+	active := zeroFirstChapterCharacterActive(project, c)
 	var out []string
 	for _, name := range zeroCounterpartsForCharacter(project, c) {
 		for _, other := range project.Characters {
-			if zeroCharacterNameIs(other, name) && zeroFirstChapterCharacterActive(project, other) {
-				out = append(out, strings.TrimSpace(other.Name))
-				break
+			if !zeroCharacterNameIs(other, name) {
+				continue
 			}
+			established := zeroEstablishedRelationshipType(zeroRelationshipTypeForPair(project, c, other.Name))
+			if (active && zeroFirstChapterCharacterActive(project, other)) || established {
+				out = append(out, strings.TrimSpace(other.Name))
+			}
+			break
 		}
 	}
 	return out
@@ -397,7 +431,7 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章核心压力")
 	modeReason := "第一章需要让角色围绕目标、责任、代价、执行条件或合作边界进行真实协商；若当前场景功能不同，正式计划必须据此改选对白模式。"
 	emotionalTemperature := "开局压住难堪、怀疑或不服气，随后因催促、误读、观望或责任分歧升温；不写成全程冷静。"
-	identityGrounding := fmt.Sprintf("通过称谓、外貌/衣着、职责、现场位置、既有关系或可见凭证说明%s是谁，以及他为什么能影响%s的选择。", counterpart, protagonist)
+	identityGrounding := fmt.Sprintf("通过称谓、外貌/衣着、职责、现场位置、既有关系或可见凭证说明%s是谁，以及对方为什么能影响%s的选择。", counterpart, protagonist)
 	beatDensity := "高压协商使用短动作拍但不能每句一拍；关系缓和处留出呼吸，流程信息用现场物件、他人反应或结果变化换挡。"
 	exitBeat := "用具体现场变化退出：物件或位置改变、有人加入/离开、一次交换成立、关系姿态变化；不用菜单选项或抽象金句收尾。"
 	return []domain.DialogueSceneBlueprint{{
@@ -443,7 +477,7 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 		MemoryBridge:                "只补读者理解这场对白所需的身份、前一幕、工作/生活处境和关系压力；禁止一次性灌完整背景、履历或世界观。",
 		IdentityGrounding:           identityGrounding,
 		DialogueObjective:           "用对白落成本章任务、交易、威胁、求助或规则第一次露面，并迫使主角下一步行动发生变化。",
-		InterlocutorAgenda:          fmt.Sprintf("%s不是等待被剧情收走的人，他此刻有自己的事、压力和隐瞒，开口是为了转移风险、索取帮助、完成职责或保住资源。", counterpart),
+		InterlocutorAgenda:          fmt.Sprintf("%s不是等待被剧情收走的人，对方此刻有自己的事、压力和隐瞒，开口是为了转移风险、索取帮助、完成职责或保住资源。", counterpart),
 		ProtagonistResponseStrategy: fmt.Sprintf("%s按当前信息量先核验称呼、费用、证据或对方意图；允许误听、按错、停顿、绕开姓名，不写成想明白后再行动。", protagonist),
 		ObjectiveTactics: []domain.DialogueObjectiveTactic{
 			{
@@ -476,7 +510,7 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 			{
 				Speaker:             protagonist,
 				SurfaceLineFunction: "短句核验、改口、敷衍或先保留承诺。",
-				HiddenSubtext:       "他怕被绑定责任，也怕不回应导致更坏后果。",
+				HiddenSubtext:       "害怕被绑定责任，也怕不回应导致更坏后果。",
 				NewInformation:      "暴露主角此刻不知道完整规则，只能抓住一个可验证细节。",
 				PowerMove:           "主角没有夺回全局主动权，只把对方给出的压力缩小成可确认的问题。",
 				ActionBeat:          "让身体反应先于判断：手停住、喉咙发紧、看错字、错按一次或把话吞回去。",
@@ -533,14 +567,24 @@ func zeroInitResourceLedger(project zeroInitProject) domain.ResourceLedger {
 	}
 }
 
+type zeroInitOwnedRelationshipContract struct {
+	Character string `json:"character"`
+	domain.CharacterRelationshipContract
+}
+
 func zeroInitRelationshipState(project zeroInitProject, states []domain.CharacterSimulationState) map[string]any {
-	var contracts []domain.CharacterRelationshipContract
+	var contracts []zeroInitOwnedRelationshipContract
 	for _, state := range states {
-		contracts = append(contracts, state.RelationshipContract...)
+		for _, contract := range state.RelationshipContract {
+			contracts = append(contracts, zeroInitOwnedRelationshipContract{
+				Character:                     strings.TrimSpace(state.Character),
+				CharacterRelationshipContract: contract,
+			})
+		}
 	}
 	policy := "第一章正文只能在这些基线之上新增信任、债务、亏欠、恐惧、承诺、依赖、误解或边界变化；新增后必须通过审阅/回填进入正式 relationship_state。"
 	return map[string]any{
-		"version":      1,
+		"version":      2,
 		"scope":        "zero_chapter_initial",
 		"chapter":      0,
 		"generated_at": project.GeneratedAt,
@@ -1023,7 +1067,7 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 		intimacyStage := zeroIntimacyStage(relType)
 		romancePotential := zeroRomancePotential(relType)
 		nextBeat := "下一次推进必须改变信任、亏欠、亲密、嫉妒、保护欲或权力位置之一。"
-		if !firstChapterActive {
+		if !firstChapterActive && !zeroEstablishedRelationshipType(relType) {
 			relType = "未建立/待首次互动"
 			currentBond = "尚未相识、联系或共同经历；零章不预设互信、亏欠、默契、暧昧或敌意。"
 			emotionalWant = "首次互动前不预写向对方索取的情感位置；只保留各自生活线的现实目标。"
@@ -1033,6 +1077,9 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 			intimacyStage = "未相识/未建立关系"
 			romancePotential = "none；零章不加载未来关系方向。"
 			nextBeat = "等首次互动发生后，再依据可见选择建立关系类型、信任与边界。"
+		} else if !firstChapterActive {
+			conflictTrigger = "既有关系对象尚未进入第一章现场；历史关系继续存在，但不能隔空获得本章新信息。"
+			nextBeat = "首次联系或重逢必须承认既有历史，同时以当下可见选择重新校准信任与边界。"
 		}
 		out = append(out, domain.RelationshipEmotionArc{
 			Pair:                         []string{protagonist.Name, c.Name},
@@ -1072,12 +1119,20 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 	return out
 }
 
+const zeroFormerLoversRelationship = "既往恋爱/分离重逢"
+
+func zeroEstablishedRelationshipType(relType string) bool {
+	return relType == "亲情" || relType == zeroFormerLoversRelationship
+}
+
 func zeroRelationshipType(project zeroInitProject, c domain.Character) string {
 	role := strings.TrimSpace(c.Role)
-	text := strings.Join([]string{role, zeroOpeningCharacterDescription(c)}, " ")
+	text := strings.Join([]string{role, c.Description, c.Arc}, " ")
 	switch {
-	case zeroContainsAny(role, "父亲", "母亲", "哥哥", "弟弟", "姐姐", "妹妹", "兄长", "家人", "亲属"):
+	case zeroContainsAny(role, "父亲", "母亲", "养父", "养母", "哥哥", "弟弟", "姐姐", "妹妹", "兄长", "家人", "亲属", "长辈"):
 		return "亲情"
+	case zeroFormerRomanceEvidence(project, c):
+		return zeroFormerLoversRelationship
 	case zeroHighConfidenceRomanceRole(role) || zeroDirectedRomanceEvidence(project, c):
 		return "恋爱/暧昧潜势"
 	case strings.Contains(text, "反派") || strings.Contains(text, "敌") || strings.Contains(text, "压迫"):
@@ -1106,24 +1161,32 @@ func zeroDirectedRomanceEvidence(project zeroInitProject, c domain.Character) bo
 	if primary == "" {
 		return false
 	}
-	text := zeroOpeningCharacterDescription(c)
+	text := strings.Join([]string{c.Description, c.Arc}, "\n")
 	for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
 		return strings.ContainsRune("。；！？!?\n", r)
 	}) {
 		clause = strings.TrimSpace(clause)
-		if clause == "" || !strings.Contains(clause, primary) || !zeroContainsAny(clause, "恋爱", "感情", "暧昧", "伴侣", "相爱") {
+		if clause == "" || !strings.Contains(clause, primary) || !zeroContainsAny(clause, "恋爱", "感情", "暧昧", "伴侣", "相爱", "相恋", "前任", "分手", "分离", "复合", "重逢") {
 			continue
 		}
-		if zeroContainsAny(clause, "不是", "并非", "不与", "不会与", "不能成为", "不承担", "无暧昧", "不是感情") {
+		if zeroContainsAny(clause, "不是", "并非", "不与", "不会与", "不能成为", "不承担", "无暧昧", "不是感情", "不是恋爱", "不得发展恋爱") {
 			continue
 		}
 		if zeroContainsAny(clause,
-			"与"+primary, "和"+primary, primary+"的恋爱", primary+"的感情", primary+"的暧昧", primary+"的伴侣",
+			"与"+primary, "和"+primary, primary+"的恋爱", primary+"的感情", primary+"的暧昧", primary+"的伴侣", primary+"相恋",
 		) {
 			return true
 		}
 	}
 	return false
+}
+
+func zeroFormerRomanceEvidence(project zeroInitProject, c domain.Character) bool {
+	if !zeroDirectedRomanceEvidence(project, c) {
+		return false
+	}
+	text := strings.Join([]string{c.Description, c.Arc}, " ")
+	return zeroContainsAny(text, "前任", "分手", "分离", "复合", "破镜重圆", "久别重逢", "重逢", "重新开始")
 }
 
 func zeroContainsAny(text string, candidates ...string) bool {
@@ -1141,6 +1204,8 @@ func zeroRelationshipBond(relType string) string {
 		return "爱与责任并存，保护欲、内疚和控制边界会互相冲突。"
 	case "恋爱/暧昧潜势":
 		return "吸引尚未等于信任，亲密必须通过共同风险、边界尊重和真实选择推进。"
+	case zeroFormerLoversRelationship:
+		return "既往相恋与分离均是已确认历史；旧亲密不自动恢复，重逢后的信任必须由当下责任、边界与自由选择重建。"
 	case "敌对/债务", "敌对/价值冲突":
 		return "恐惧、贪婪、羞辱或支配欲维系关系。"
 	case "职场对抗/价值冲突":
@@ -1153,6 +1218,9 @@ func zeroRelationshipBond(relType string) string {
 }
 
 func zeroIntimacyStage(relType string) string {
+	if relType == zeroFormerLoversRelationship {
+		return "久别重逢/低信任；承认历史亲密，但不得跳过旧伤、责任与重新选择。"
+	}
 	if relType == "恋爱/暧昧潜势" {
 		return "陌生/试探；不得跳到承诺或亲密无间。"
 	}
@@ -1163,6 +1231,9 @@ func zeroIntimacyStage(relType string) string {
 }
 
 func zeroRomancePotential(relationshipType string) string {
+	if relationshipType == zeroFormerLoversRelationship {
+		return "既往恋爱关系已确认；复合必须在旧责被正视、权力边界解除且双方重新自由选择后成立。"
+	}
 	if relationshipType == "恋爱/暧昧潜势" {
 		return "有恋爱/暧昧潜势：吸引必须来自价值冲突、共同风险、边界尊重和互相看见，不靠强行发糖。"
 	}
@@ -1175,7 +1246,7 @@ func zeroVisualDesign(project zeroInitProject, states []domain.CharacterSimulati
 		if c.Name == "" {
 			continue
 		}
-		statusWear := "第一章或首次出场时要有与处境相关的灰、汗、雨、皱、破损或疲惫痕迹。"
+		statusWear := "只加入由当前场景、职业动作和资源状态支持的整洁、褶皱、汗雨或磨损变化；不得默认贫穷、失业、破损或疲惫。"
 		changeRule := "外观随资源、权力、工作强度、亲密关系和生活阶段改变；不能每次出场都像静态设定图。"
 		out = append(out, domain.CharacterVisualDesign{
 			Character:       c.Name,
@@ -1236,18 +1307,18 @@ func zeroVisualSilhouette(c domain.Character) string {
 }
 
 func zeroVisualFaceHair(c domain.Character) string {
-	if zeroIsProtagonist(c) {
-		return "短发或便于行动的发型，脸部疲惫但眼神常在核验细节；不写成完美冷峻。"
+	if anchors := zeroVisualEvidenceClauses(c, "固定外貌", "外貌锚点", "肤色", "眉", "痣", "发型", "束发", "长发", "短发", "眼", "脸", "面容", "烫痕", "疤"); anchors != "" {
+		return "严格沿用角色卡已确认的面部与发型锚点：" + anchors + "；未确认的五官、发长与妆容不得由通用主角模板补写。"
 	}
 	if strings.Contains(c.Role, "反派") {
 		return "脸部特征要有可记忆的不对称、过度整洁或骨感阴影；发型服务压迫感。"
 	}
-	return "发型、发质和修整程度要反映生活状态、职业资源和情绪防御。"
+	return "发型、发质、肤色与面部特征只从角色卡或正文可见证据细化，并反映生活状态、职业资源和情绪防御。"
 }
 
 func zeroVisualClothing(c domain.Character) string {
-	if zeroIsProtagonist(c) {
-		return "旧外套/衬衫/便于行动的普通衣物，口袋、袖口、鞋底能承载贫穷、失业或奔波痕迹。"
+	if anchors := zeroVisualEvidenceClauses(c, "衣", "穿", "领", "袖", "服装", "衣色", "手套"); anchors != "" {
+		return "严格沿用角色卡已确认的穿着与动作锚点：" + anchors + "；服装磨损、品牌和阶层信号只能按本章事实增加。"
 	}
 	if strings.Contains(c.Role, "反派") {
 		return "过度干净、礼服化、制服化或与环境不合的衣物，制造不适感。"
@@ -1263,6 +1334,9 @@ func zeroVisualPalette(project zeroInitProject, c domain.Character) string {
 }
 
 func zeroVisualBodyLanguage(c domain.Character) string {
+	if anchors := zeroVisualEvidenceClauses(c, "手", "指尖", "领", "袖", "视线", "动作", "站姿", "步态"); anchors != "" {
+		return "身体语言从角色卡动作锚点起步：" + anchors + "；只让场景压力改变幅度，不改写锚点含义。"
+	}
 	if zeroIsProtagonist(c) {
 		return "先收手、看字、避开承诺性动作；压力大时动作会慢半拍或突然停住。"
 	}
@@ -1272,11 +1346,42 @@ func zeroVisualBodyLanguage(c domain.Character) string {
 	return "用站位、手部保护动作、眼神逃避或靠近距离显示关系和情绪。"
 }
 
+func zeroVisualEvidenceClauses(c domain.Character, markers ...string) string {
+	text := strings.TrimSpace(c.Description)
+	if text == "" {
+		return ""
+	}
+	var matched []string
+	seen := map[string]bool{}
+	for _, clause := range strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune("。；！？!?\n", r)
+	}) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || seen[clause] || !zeroContainsAny(clause, markers...) {
+			continue
+		}
+		seen[clause] = true
+		matched = append(matched, clause)
+		if len(matched) >= 3 {
+			break
+		}
+	}
+	return strings.Join(matched, "；")
+}
+
 func zeroGroundedWorldBackgroundPlan(project zeroInitProject) zeroWorldBackgroundPlan {
 	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
 	region := zeroFirstNonEmpty(zeroKnownCityName(project), "开局区域")
-	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
-	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), "开局关系对象")
+	primary := zeroProtagonist(project.Characters)
+	protagonist := zeroFirstNonEmpty(primary.Name, "主角")
+	counterpart := ""
+	for _, name := range zeroCurrentCounterparts(project, primary) {
+		if name = strings.TrimSpace(name); name != "" && name != strings.TrimSpace(primary.Name) {
+			counterpart = name
+			break
+		}
+	}
+	counterpart = zeroFirstNonEmpty(counterpart, zeroFirstActiveNonProtagonistName(project), "开局关系对象")
 	pressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Hook, project.FirstChapter.Title, "第一章核心压力")
 	ruleText := firstString(zeroWorldRuleTexts(project.WorldRules, 3))
 	if ruleText == "" {

@@ -1,10 +1,13 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
@@ -12,6 +15,13 @@ import (
 
 // ProgressStore 管理创作进度状态。
 type ProgressStore struct{ io *IO }
+
+const progressGenerationGuardPath = "meta/runtime/progress_generation.guard"
+
+// Store instances have independent IO mutexes. Pair a process mutex with
+// flock so generation initialization is one read-check-write transaction both
+// within this process and across independent novel-studio processes.
+var progressGenerationProcessMu sync.Mutex
 
 func NewProgressStore(io *IO) *ProgressStore { return &ProgressStore{io: io} }
 
@@ -75,7 +85,7 @@ func (s *ProgressStore) ResetForSimulationRestart(novelName string, totalChapter
 			Phase:          domain.PhaseInit,
 			TotalChapters:  totalChapters,
 			GenerationID:   generationID,
-			GenerationMode: "simulation_restart_from_seed",
+			GenerationMode: domain.GenerationModeSimulationRestartFromSeed,
 		}
 		if prev != nil && prev.Layered {
 			next.Layered = true
@@ -86,19 +96,128 @@ func (s *ProgressStore) ResetForSimulationRestart(novelName string, totalChapter
 	})
 }
 
-// SetTotalChapters 设定总章节数。
-func (s *ProgressStore) SetTotalChapters(n int) error {
-	return s.io.WithWriteLock(func() error {
-		p, err := s.loadUnlocked()
+// EnsureGenerationIfEmpty initializes one planning/writing lineage without
+// replacing an already-persisted lineage. Unknown progress fields are retained
+// so a newer writer cannot lose forward-compatible state when an older binary
+// establishes the chapter-zero generation.
+func (s *ProgressStore) EnsureGenerationIfEmpty(
+	proposedID string,
+	proposedMode string,
+) (*domain.Progress, bool, error) {
+	proposedID = strings.TrimSpace(proposedID)
+	proposedMode = strings.TrimSpace(proposedMode)
+	if proposedID == "" || proposedMode == "" {
+		return nil, false, fmt.Errorf("progress generation initialization requires id and mode")
+	}
+	progressGenerationProcessMu.Lock()
+	defer progressGenerationProcessMu.Unlock()
+	if err := os.MkdirAll(s.io.path("meta/runtime"), 0o755); err != nil {
+		return nil, false, err
+	}
+	guard, err := os.OpenFile(s.io.path(progressGenerationGuardPath), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = guard.Close() }()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = syscall.Flock(int(guard.Fd()), syscall.LOCK_UN) }()
+	var result domain.Progress
+	created := false
+	err = s.io.WithWriteLock(func() error {
+		raw, err := s.io.ReadFileUnlocked("meta/progress.json")
 		if err != nil {
 			return err
 		}
-		if p == nil {
-			p = &domain.Progress{}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return fmt.Errorf("parse progress generation state: %w", err)
 		}
-		p.TotalChapters = n
-		return s.saveUnlocked(p)
+		if fields == nil {
+			return fmt.Errorf("progress generation state must be a JSON object")
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return fmt.Errorf("decode progress generation state: %w", err)
+		}
+		currentID := strings.TrimSpace(result.GenerationID)
+		currentMode := strings.TrimSpace(result.GenerationMode)
+		if (currentID == "") != (currentMode == "") {
+			return fmt.Errorf("progress generation id/mode are only partially initialized")
+		}
+		if currentID != "" {
+			if result.GenerationID != currentID || result.GenerationMode != currentMode {
+				return fmt.Errorf("progress generation id/mode must be canonical non-whitespace values")
+			}
+			return nil
+		}
+		idRaw, err := json.Marshal(proposedID)
+		if err != nil {
+			return err
+		}
+		modeRaw, err := json.Marshal(proposedMode)
+		if err != nil {
+			return err
+		}
+		fields["generation_id"] = idRaw
+		fields["generation_mode"] = modeRaw
+		encoded, err := json.MarshalIndent(fields, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := s.io.WriteFileUnlocked("meta/progress.json", encoded); err != nil {
+			return err
+		}
+		result.GenerationID = proposedID
+		result.GenerationMode = proposedMode
+		created = true
+		return nil
 	})
+	if err != nil {
+		return nil, false, err
+	}
+	return &result, created, nil
+}
+
+// SetTotalChapters 设定总章节数。
+func (s *ProgressStore) SetTotalChapters(n int) error {
+	return s.io.WithWriteLock(func() error {
+		return s.setTotalChaptersUnlocked(n)
+	})
+}
+
+// setTotalChaptersUnlocked updates the sole outline-derived progress field
+// while retaining forward-compatible JSON fields unknown to this binary.
+// Callers must hold s.io.mu for writing.
+func (s *ProgressStore) setTotalChaptersUnlocked(n int) error {
+	raw, err := s.io.ReadFileUnlocked("meta/progress.json")
+	if os.IsNotExist(err) {
+		return s.saveUnlocked(&domain.Progress{TotalChapters: n})
+	}
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("parse progress total_chapters state: %w", err)
+	}
+	if fields == nil {
+		return fmt.Errorf("progress total_chapters state must be a JSON object")
+	}
+	var known domain.Progress
+	if err := json.Unmarshal(raw, &known); err != nil {
+		return fmt.Errorf("decode progress total_chapters state: %w", err)
+	}
+	totalRaw, err := json.Marshal(n)
+	if err != nil {
+		return err
+	}
+	fields["total_chapters"] = totalRaw
+	encoded, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return err
+	}
+	return s.io.WriteFileUnlocked("meta/progress.json", encoded)
 }
 
 // SetNovelName 设置作品书名，空值会被忽略。
