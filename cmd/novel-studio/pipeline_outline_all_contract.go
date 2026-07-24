@@ -114,6 +114,29 @@ func validatePipelineOutlineAllMutation(
 	beforeTotal := domain.TotalChapters(before)
 	afterTotal := domain.TotalChapters(after)
 	switch action.Type {
+	case domain.OutlineAllActionPlanStructure:
+		// plan_structure replaces the input seed with the model's full-book
+		// reservation skeleton: sequential real volumes, reservation-only arcs
+		// (positive span, no chapters, no contract refs), totals within range.
+		real := 0
+		for _, volume := range after {
+			if volume.Index <= 0 || len(volume.Arcs) == 0 {
+				continue
+			}
+			real++
+			if volume.Index != real {
+				return fmt.Errorf("plan_structure requires sequential 1-based volume indices; got %d at position %d", volume.Index, real)
+			}
+			for _, arc := range volume.Arcs {
+				if arc.IsExpanded() || arc.EstimatedChapters < domain.OutlineAllMinPlanArcChapters || len(arc.ContractRefs) != 0 {
+					return fmt.Errorf("plan_structure V%d requires reservation-only arcs", volume.Index)
+				}
+			}
+		}
+		plan := domain.DeriveOutlineAllStructurePlan(after)
+		if err := domain.ValidateOutlineAllStructurePlan(plan, target.Range); err != nil {
+			return fmt.Errorf("plan_structure invalid: %w", err)
+		}
 	case domain.OutlineAllActionAppendVolume:
 		if len(after) != len(before)+1 {
 			return fmt.Errorf("append_volume changed volume count by %d, want exactly 1", len(after)-len(before))
@@ -260,43 +283,21 @@ func outlineAllNextStructuralAction(
 	volumes []domain.VolumeOutline,
 	compass domain.StoryCompass,
 	target domain.BookScaleTarget,
+	planFrozen bool,
 ) (domain.OutlineAllPendingAction, bool, error) {
+	// Until the model's structure plan is frozen, the only structural action is
+	// plan_structure: the model authors the whole-book volume/arc reservation
+	// skeleton in one operation, choosing every volume and arc chapter count.
+	if !planFrozen {
+		return domain.OutlineAllPendingAction{Type: domain.OutlineAllActionPlanStructure}, true, nil
+	}
 	realVolumes := domain.RealVolumeCount(volumes)
 	total := domain.TotalChapters(volumes)
-	if realVolumes > target.TargetVolumes || total > target.TargetChapters {
-		return domain.OutlineAllPendingAction{}, false, fmt.Errorf("outline exceeds frozen target")
-	}
-	if realVolumes < target.TargetVolumes {
-		remainingVolumes := target.TargetVolumes - realVolumes
-		remainingChapters := target.TargetChapters - total
-		if remainingChapters < remainingVolumes {
-			return domain.OutlineAllPendingAction{}, false, fmt.Errorf("frozen target cannot allocate at least one chapter per remaining volume")
-		}
-		span := remainingChapters / remainingVolumes
-		if remainingChapters%remainingVolumes != 0 {
-			span++
-		}
-		arcSpans, err := domain.RecommendedOutlineAllArcSpans(span)
-		if err != nil {
-			return domain.OutlineAllPendingAction{}, false, err
-		}
-		nextIndex := 1
-		for _, volume := range volumes {
-			if volume.Index >= nextIndex {
-				nextIndex = volume.Index + 1
-			}
-		}
-		return domain.OutlineAllPendingAction{
-			Type: domain.OutlineAllActionAppendVolume, Volume: nextIndex,
-			ExpectedVolumeIndex: nextIndex, ExpectedChapterSpan: span,
-			ExpectedArcSpans: domain.FormatOutlineAllArcSpans(arcSpans),
-			FinalSkeleton:    remainingVolumes == 1,
-		}, true, nil
-	}
-	if total != target.TargetChapters {
+	// The frozen plan fixed both totals; the skeleton must match it exactly.
+	if realVolumes != target.TargetVolumes || total != target.TargetChapters {
 		return domain.OutlineAllPendingAction{}, false, fmt.Errorf(
-			"volume target reached with chapter total=%d, frozen target=%d; reservations cannot be renumbered",
-			total, target.TargetChapters,
+			"outline-all frozen plan mismatch: volumes=%d/%d chapters=%d/%d",
+			realVolumes, target.TargetVolumes, total, target.TargetChapters,
 		)
 	}
 	if issues := domain.StoryContractSkeletonIssues(volumes, compass, true); len(issues) > 0 {

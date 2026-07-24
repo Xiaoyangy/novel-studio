@@ -229,6 +229,9 @@ func outlineAllFinalAuthorization(prompt string) (string, error) {
 
 	var summary, target string
 	switch action.Type {
+	case domain.OutlineAllActionPlanStructure:
+		summary = fmt.Sprintf("operation=%d type=%s", action.Operation, action.Type)
+		target = "下一步且唯一写操作：save_foundation(type=\"plan_structure\", content=<完整全书 VolumeOutline 骨架数组>)。每卷含 index/title/theme 与有序 arcs；每弧含 index/title/goal 与 estimated_chapters（>=1，无上限，由你按剧情自定），chapters 必须为空。卷数与全书总章数必须落在 estimated_scale 声明的范围内。不得提供 volume/arc 参数，不得展开任何章节。"
 	case domain.OutlineAllActionAppendVolume:
 		summary = fmt.Sprintf(
 			"operation=%d type=%s volume=%d expected_chapter_span=%d expected_arc_spans=%s final_skeleton=%t",
@@ -301,7 +304,7 @@ func successfulOutlineAllSave(result json.RawMessage) bool {
 		return false
 	}
 	switch decoded.Type {
-	case "append_volume", "map_contracts", "expand_arc", "revise_arc":
+	case "plan_structure", "append_volume", "map_contracts", "expand_arc", "revise_arc":
 		return true
 	default:
 		return false

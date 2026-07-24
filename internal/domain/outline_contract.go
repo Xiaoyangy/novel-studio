@@ -34,11 +34,18 @@ type BookScaleTarget struct {
 }
 
 const (
-	// OutlineAllMinArcChapters and OutlineAllMaxArcChapters keep every
-	// reservation small enough for one reliable expand_arc response while
-	// retaining enough space for a real causal movement.
+	// OutlineAllMinArcChapters and OutlineAllMaxArcChapters describe the legacy
+	// deterministic arc partition (RecommendedOutlineAllArcSpans), still used as
+	// a delivery-side repair fallback. Model-allocated structure plans are no
+	// longer bound by them.
 	OutlineAllMinArcChapters = 8
 	OutlineAllMaxArcChapters = 16
+
+	// OutlineAllMinPlanArcChapters is the only hard floor on a model-chosen arc
+	// span in the full-book structure plan: an arc must reserve at least one
+	// chapter. There is deliberately no upper bound — expand_arc chunks long
+	// arcs across bounded model calls, so arc length is a story decision.
+	OutlineAllMinPlanArcChapters = 1
 )
 
 func FormatOutlineAllArcSpans(spans []int) string {
@@ -47,6 +54,28 @@ func FormatOutlineAllArcSpans(spans []int) string {
 		parts[i] = strconv.Itoa(span)
 	}
 	return strings.Join(parts, ",")
+}
+
+// ParseOutlineAllArcSpans inverts FormatOutlineAllArcSpans. Every span must be a
+// positive integer; the whole string must be non-empty.
+func ParseOutlineAllArcSpans(value string) ([]int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("outline-all arc spans are empty")
+	}
+	parts := strings.Split(value, ",")
+	spans := make([]int, 0, len(parts))
+	for _, part := range parts {
+		span, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("outline-all arc span %q is not an integer", part)
+		}
+		if span < OutlineAllMinPlanArcChapters {
+			return nil, fmt.Errorf("outline-all arc span %d is below the %d-chapter floor", span, OutlineAllMinPlanArcChapters)
+		}
+		spans = append(spans, span)
+	}
+	return spans, nil
 }
 
 // RecommendedOutlineAllArcSpans deterministically balances a volume across
@@ -75,9 +104,9 @@ func RecommendedOutlineAllArcSpans(total int) ([]int, error) {
 	return spans, nil
 }
 
-// OutlineAllArcSpanIssues validates both reservation and expanded arcs. It is
-// intentionally separate from the generic outline quality contract so legacy
-// short fiction can still use shorter arcs outside outline-all.
+// OutlineAllArcSpanIssues flags only structurally invalid arc reservations
+// (span below the one-chapter floor). Arc length is otherwise model-chosen with
+// no upper bound; long arcs are expanded in bounded chunks rather than rejected.
 func OutlineAllArcSpanIssues(volumes []VolumeOutline) []OutlineContractIssue {
 	var issues []OutlineContractIssue
 	for _, volume := range volumes {
@@ -86,10 +115,10 @@ func OutlineAllArcSpanIssues(volumes []VolumeOutline) []OutlineContractIssue {
 		}
 		for _, arc := range volume.Arcs {
 			span := arc.ChapterSpan()
-			if span < OutlineAllMinArcChapters || span > OutlineAllMaxArcChapters {
+			if span < OutlineAllMinPlanArcChapters {
 				issues = append(issues, OutlineContractIssue{
 					Code: "arc_span_out_of_bounds", Volume: volume.Index, Arc: arc.Index,
-					Message: fmt.Sprintf("arc span=%d; outline-all requires %d-%d chapters", span, OutlineAllMinArcChapters, OutlineAllMaxArcChapters),
+					Message: fmt.Sprintf("arc span=%d; outline-all requires at least %d chapter", span, OutlineAllMinPlanArcChapters),
 				})
 			}
 		}

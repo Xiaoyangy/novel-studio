@@ -1686,27 +1686,30 @@ func TestPipelineBookWordTotalIsHardAtDelivery(t *testing.T) {
 	}
 }
 
-func TestPipelineNormalizeOutlineAllArcSpansPreservesTwelveChapterContent(t *testing.T) {
+func TestPipelineNormalizeOutlineAllArcSpansLeavesModelAllocatedArcs(t *testing.T) {
 	dir := t.TempDir()
 	st := store.NewStore(dir)
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
-	var arcs []domain.ArcOutline
-	for arc := 1; arc <= 3; arc++ {
+	// Under model-allocated structure, arc length is a story decision with no
+	// upper bound and a one-chapter floor. A short 4-chapter arc and a long
+	// 30-chapter arc are both valid and must survive the delivery normalizer
+	// untouched (it only repairs genuinely invalid, sub-one-chapter spans).
+	chapter := 0
+	makeArc := func(index, span int) domain.ArcOutline {
 		var chapters []domain.OutlineEntry
-		for i := 1; i <= 4; i++ {
-			chapter := (arc-1)*4 + i
+		for i := 1; i <= span; i++ {
+			chapter++
 			chapters = append(chapters, domain.OutlineEntry{
 				Chapter: chapter, Title: fmt.Sprintf("第%d章", chapter),
 				CoreEvent: fmt.Sprintf("事件%d", chapter), Hook: fmt.Sprintf("钩子%d", chapter),
 				Scenes: []string{fmt.Sprintf("场景%d", chapter)},
 			})
 		}
-		arcs = append(arcs, domain.ArcOutline{
-			Index: arc, Title: fmt.Sprintf("旧弧%d", arc), Goal: fmt.Sprintf("目标%d", arc), Chapters: chapters,
-		})
+		return domain.ArcOutline{Index: index, Title: fmt.Sprintf("弧%d", index), Goal: fmt.Sprintf("目标%d", index), Chapters: chapters}
 	}
+	arcs := []domain.ArcOutline{makeArc(1, 4), makeArc(2, 30)}
 	before := domain.FlattenOutline([]domain.VolumeOutline{{Index: 1, Title: "全书", Arcs: arcs}})
 	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{Index: 1, Title: "全书", Arcs: arcs}}); err != nil {
 		t.Fatal(err)
@@ -1716,19 +1719,20 @@ func TestPipelineNormalizeOutlineAllArcSpansPreservesTwelveChapterContent(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
-		t.Fatal("expected three four-chapter arcs to be normalized")
+	if changed {
+		t.Fatal("model-allocated arc spans (4 and 30 chapters) must not be repartitioned")
 	}
 	afterVolumes, err := st.Outline.LoadLayeredOutline()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(afterVolumes) != 1 || len(afterVolumes[0].Arcs) != 1 || afterVolumes[0].Arcs[0].ChapterSpan() != 12 {
-		t.Fatalf("normalized outline = %+v, want one twelve-chapter arc", afterVolumes)
+	if len(afterVolumes) != 1 || len(afterVolumes[0].Arcs) != 2 ||
+		afterVolumes[0].Arcs[0].ChapterSpan() != 4 || afterVolumes[0].Arcs[1].ChapterSpan() != 30 {
+		t.Fatalf("normalizer changed model-allocated arcs = %+v", afterVolumes)
 	}
 	after := domain.FlattenOutline(afterVolumes)
 	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("chapter content changed during structural migration:\nbefore=%+v\nafter=%+v", before, after)
+		t.Fatalf("chapter content changed:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 

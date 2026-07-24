@@ -111,7 +111,7 @@ func TestOutlineAllPlannerExpandsReservationsBeforeRevisingThinExpandedArcs(t *t
 	compass := domain.StoryCompass{}
 	target := domain.BookScaleTarget{TargetVolumes: 2, TargetChapters: 28}
 
-	action, ok, err := outlineAllNextStructuralAction(volumes, compass, target)
+	action, ok, err := outlineAllNextStructuralAction(volumes, compass, target, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestOutlineAllPlannerExpandsReservationsBeforeRevisingThinExpandedArcs(t *t
 
 	volumes[0].Arcs[1].Chapters = makeChapters("V1A2", 8, 0)
 	volumes[0].Arcs[1].EstimatedChapters = 0
-	if action, ok, err = outlineAllNextStructuralAction(volumes, compass, target); err != nil || ok {
+	if action, ok, err = outlineAllNextStructuralAction(volumes, compass, target, true); err != nil || ok {
 		t.Fatalf("all reservations expanded: action=%+v ok=%v err=%v", action, ok, err)
 	}
 
@@ -139,6 +139,27 @@ func TestOutlineAllPlannerExpandsReservationsBeforeRevisingThinExpandedArcs(t *t
 	volumes[1].Arcs[0].Chapters = makeChapters("V2A1", 8, 0)
 	if action, ok = outlineAllNextRevisionAction(volumes, compass); ok {
 		t.Fatalf("fully repaired outline still requested revision: %+v", action)
+	}
+}
+
+func TestOutlineAllPlannerEmitsPlanStructureUntilFrozen(t *testing.T) {
+	compass := domain.StoryCompass{}
+	target := domain.BookScaleTarget{
+		Range:         domain.BookScaleRange{MinVolumes: 6, MaxVolumes: 7, MinChapters: 200, MaxChapters: 260},
+		TargetVolumes: 6, TargetChapters: 210,
+	}
+	// Before the model's plan is frozen the only structural action is
+	// plan_structure, regardless of any seed volumes.
+	action, ok, err := outlineAllNextStructuralAction(nil, compass, target, false)
+	if err != nil || !ok || action.Type != domain.OutlineAllActionPlanStructure {
+		t.Fatalf("want plan_structure, got action=%+v ok=%v err=%v", action, ok, err)
+	}
+	if action.Volume != 0 || action.ExpectedChapterSpan != 0 || action.ExpectedArcSpans != "" {
+		t.Fatalf("plan_structure action must carry no allocation fields: %+v", action)
+	}
+	// Once frozen, a skeleton that does not match the plan totals is a hard error.
+	if _, _, err := outlineAllNextStructuralAction(nil, compass, target, true); err == nil {
+		t.Fatal("frozen plan with an empty skeleton must mismatch the target")
 	}
 }
 

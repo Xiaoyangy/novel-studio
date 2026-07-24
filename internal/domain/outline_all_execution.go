@@ -9,7 +9,9 @@ import (
 )
 
 const (
-	OutlineAllExecutionReceiptVersion = 1
+	// Version 2 replaces the arithmetic volume/arc partition with a
+	// model-allocated, host-frozen StructurePlan (see plan_structure).
+	OutlineAllExecutionReceiptVersion = 2
 	OutlineAllExecutionMode           = "sealed_full_book_outline_v1"
 	OutlineAllIntentMarker            = "OUTLINE_ALL_INTENT "
 
@@ -63,10 +65,14 @@ func OutlineAllPendingActionEqual(a, b OutlineAllPendingAction) bool {
 type OutlineAllActionType string
 
 const (
-	OutlineAllActionAppendVolume OutlineAllActionType = "append_volume"
-	OutlineAllActionMapContracts OutlineAllActionType = "map_contracts"
-	OutlineAllActionExpandArc    OutlineAllActionType = "expand_arc"
-	OutlineAllActionReviseArc    OutlineAllActionType = "revise_arc"
+	// OutlineAllActionPlanStructure is the first operation: the model emits the
+	// whole-book volume/arc-span allocation, which the host freezes into the
+	// receipt and replays deterministically for every later operation.
+	OutlineAllActionPlanStructure OutlineAllActionType = "plan_structure"
+	OutlineAllActionAppendVolume  OutlineAllActionType = "append_volume"
+	OutlineAllActionMapContracts  OutlineAllActionType = "map_contracts"
+	OutlineAllActionExpandArc     OutlineAllActionType = "expand_arc"
+	OutlineAllActionReviseArc     OutlineAllActionType = "revise_arc"
 )
 
 // OutlineAllPendingAction is the single structural mutation authorized for
@@ -116,6 +122,7 @@ type OutlineAllExecutionReceipt struct {
 	MaxChapters                   int                      `json:"max_chapters"`
 	TargetVolumes                 int                      `json:"target_volumes"`
 	TargetChapters                int                      `json:"target_chapters"`
+	StructurePlan                 *OutlineAllStructurePlan `json:"structure_plan,omitempty"`
 	TargetWords                   int                      `json:"target_words"`
 	TargetWordsPerChapter         int                      `json:"target_words_per_chapter"`
 	StoryTimeHint                 string                   `json:"story_time_hint"`
@@ -299,6 +306,22 @@ func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) erro
 		receipt.TargetChapters < receipt.MinChapters || receipt.TargetChapters > receipt.MaxChapters {
 		return fmt.Errorf("outline-all execution receipt has invalid deterministic targets")
 	}
+	// Once the model's structure plan is frozen, the targets are its totals and
+	// must satisfy the estimated_scale range. Before plan_structure runs the
+	// targets are a provisional midpoint and the plan is absent.
+	if receipt.StructurePlan != nil {
+		scaleRange := BookScaleRange{
+			MinVolumes: receipt.MinVolumes, MaxVolumes: receipt.MaxVolumes,
+			MinChapters: receipt.MinChapters, MaxChapters: receipt.MaxChapters,
+		}
+		if err := ValidateOutlineAllStructurePlan(*receipt.StructurePlan, scaleRange); err != nil {
+			return fmt.Errorf("outline-all execution receipt structure plan invalid: %w", err)
+		}
+		if receipt.TargetVolumes != receipt.StructurePlan.TotalVolumes() ||
+			receipt.TargetChapters != receipt.StructurePlan.TotalChapters() {
+			return fmt.Errorf("outline-all execution receipt targets do not match the frozen structure plan")
+		}
+	}
 	if (receipt.TargetWords == 0) != (receipt.TargetWordsPerChapter == 0) ||
 		receipt.TargetWords < 0 || receipt.TargetWordsPerChapter < 0 {
 		return fmt.Errorf("outline-all optional word target must be absent or complete")
@@ -439,18 +462,30 @@ func ValidateOutlineAllPendingAction(action OutlineAllPendingAction) error {
 		return err
 	}
 	switch action.Type {
+	case OutlineAllActionPlanStructure:
+		if action.Volume != 0 || action.Arc != 0 || action.ExpectedVolumeIndex != 0 ||
+			action.ExpectedChapterSpan != 0 || action.ExpectedArcSpans != "" || action.FinalSkeleton {
+			return fmt.Errorf("plan_structure pending action carries no volume/arc/span; the model defines the allocation")
+		}
 	case OutlineAllActionAppendVolume:
 		if action.Volume <= 0 || action.ExpectedVolumeIndex <= 0 ||
 			action.Volume != action.ExpectedVolumeIndex || action.Arc != 0 ||
 			action.ExpectedChapterSpan <= 0 {
 			return fmt.Errorf("append_volume pending action requires the exact next volume and no arc")
 		}
-		spans, err := RecommendedOutlineAllArcSpans(action.ExpectedChapterSpan)
+		// Arc spans are sourced from the frozen model structure plan, not an
+		// arithmetic partition. Only require them to be positive and to sum to
+		// the volume's expected chapter span.
+		spans, err := ParseOutlineAllArcSpans(action.ExpectedArcSpans)
 		if err != nil {
-			return err
+			return fmt.Errorf("append_volume pending action expected_arc_spans invalid: %w", err)
 		}
-		if action.ExpectedArcSpans != FormatOutlineAllArcSpans(spans) {
-			return fmt.Errorf("append_volume pending action expected_arc_spans=%q want %q", action.ExpectedArcSpans, FormatOutlineAllArcSpans(spans))
+		total := 0
+		for _, span := range spans {
+			total += span
+		}
+		if total != action.ExpectedChapterSpan {
+			return fmt.Errorf("append_volume pending action arc spans sum %d != expected chapter span %d", total, action.ExpectedChapterSpan)
 		}
 	case OutlineAllActionMapContracts:
 		if action.Volume != 0 || action.Arc != 0 || action.ExpectedVolumeIndex != 0 ||

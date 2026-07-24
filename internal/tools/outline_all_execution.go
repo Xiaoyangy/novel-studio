@@ -45,6 +45,50 @@ func guardOutlineAllDynamicMaterialExecution(st *store.Store, tool string) error
 	return fmt.Errorf("outline_all frozen-input execution rejects dynamic tool %s; use the content-addressed context embedded by the host: %w", tool, errs.ErrToolPrecondition)
 }
 
+// validateOutlineAllPlanStructureContent checks the model-authored full-book
+// reservation skeleton written by plan_structure: every real volume holds only
+// reservation arcs (positive estimated_chapters, empty chapters, no contract
+// refs), sequential 1-based volume indices, and the volume/chapter totals fall
+// inside the frozen estimated_scale range.
+func validateOutlineAllPlanStructureContent(
+	st *store.Store,
+	volumes []domain.VolumeOutline,
+) error {
+	active, err := outlineAllExecutionModeActive(st)
+	if err != nil || !active {
+		return err
+	}
+	receipt, err := st.LoadOutlineAllExecutionReceipt()
+	if err != nil || receipt == nil || receipt.PendingAction == nil ||
+		receipt.PendingAction.Type != domain.OutlineAllActionPlanStructure {
+		return fmt.Errorf("outline_all plan_structure lost its pending receipt: %w", errs.ErrToolPrecondition)
+	}
+	real := 0
+	for _, volume := range volumes {
+		if volume.Index <= 0 || len(volume.Arcs) == 0 {
+			continue
+		}
+		real++
+		if volume.Index != real {
+			return fmt.Errorf("outline_all plan_structure requires sequential 1-based volume indices; got %d at position %d: %w", volume.Index, real, errs.ErrToolPrecondition)
+		}
+		for _, arc := range volume.Arcs {
+			if arc.IsExpanded() || arc.EstimatedChapters < domain.OutlineAllMinPlanArcChapters || len(arc.ContractRefs) != 0 {
+				return fmt.Errorf("outline_all plan_structure requires reservation-only arcs (estimated_chapters>=%d, empty chapters, no contract_refs): %w", domain.OutlineAllMinPlanArcChapters, errs.ErrToolPrecondition)
+			}
+		}
+	}
+	plan := domain.DeriveOutlineAllStructurePlan(volumes)
+	scaleRange := domain.BookScaleRange{
+		MinVolumes: receipt.MinVolumes, MaxVolumes: receipt.MaxVolumes,
+		MinChapters: receipt.MinChapters, MaxChapters: receipt.MaxChapters,
+	}
+	if err := domain.ValidateOutlineAllStructurePlan(plan, scaleRange); err != nil {
+		return fmt.Errorf("outline_all plan_structure: %w: %w", err, errs.ErrToolPrecondition)
+	}
+	return nil
+}
+
 func validateOutlineAllAppendVolumeContent(
 	st *store.Store,
 	volume domain.VolumeOutline,
@@ -244,12 +288,13 @@ func guardOutlineAllFoundationType(st *store.Store, kind, scale string) error {
 	if lock.ProcessID != os.Getpid() {
 		return fmt.Errorf("outline_all execution lock belongs to another process: %w", errs.ErrToolPrecondition)
 	}
-	if kind != string(domain.OutlineAllActionAppendVolume) &&
+	if kind != string(domain.OutlineAllActionPlanStructure) &&
+		kind != string(domain.OutlineAllActionAppendVolume) &&
 		kind != string(domain.OutlineAllActionMapContracts) &&
 		kind != string(domain.OutlineAllActionExpandArc) &&
 		kind != string(domain.OutlineAllActionReviseArc) {
 		return fmt.Errorf(
-			"outline_all execution lock rejects save_foundation type %q; only the exact pending append_volume/map_contracts/expand_arc/revise_arc mutation is allowed: %w",
+			"outline_all execution lock rejects save_foundation type %q; only the exact pending plan_structure/append_volume/map_contracts/expand_arc/revise_arc mutation is allowed: %w",
 			kind,
 			errs.ErrToolPrecondition,
 		)
@@ -288,11 +333,9 @@ func guardOutlineAllFoundationMutation(
 	actual.BeforeLayeredDigest = receipt.PendingAction.BeforeLayeredDigest
 	actual.FinalSkeleton = receipt.PendingAction.FinalSkeleton
 	if actual.Type == domain.OutlineAllActionAppendVolume {
-		spans, spanErr := domain.RecommendedOutlineAllArcSpans(actual.ExpectedChapterSpan)
-		if spanErr != nil {
-			return spanErr
-		}
-		actual.ExpectedArcSpans = domain.FormatOutlineAllArcSpans(spans)
+		// Arc spans are host-issued from the frozen structure plan, not an
+		// arithmetic partition; adopt the pending action's exact spans.
+		actual.ExpectedArcSpans = receipt.PendingAction.ExpectedArcSpans
 	}
 	authorized, err := AuthorizeChapterZeroOutlineAllPendingAction(st, &actual)
 	if err != nil {

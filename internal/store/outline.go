@@ -3,7 +3,6 @@ package store
 import (
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -502,21 +501,13 @@ func validateAppendVolume(existing []domain.VolumeOutline, vol domain.VolumeOutl
 		return fmt.Errorf("新卷的首弧必须包含详细章节")
 	}
 	if !requireExpandedFirstArc {
-		spans := make([]int, 0, len(vol.Arcs))
-		total := 0
+		// Arc spans are model-allocated (see plan_structure): each reservation
+		// only needs a positive chapter count, with no arithmetic partition and
+		// no upper bound imposed here.
 		for _, arc := range vol.Arcs {
-			if arc.IsExpanded() || arc.EstimatedChapters <= 0 {
+			if arc.IsExpanded() || arc.EstimatedChapters < domain.OutlineAllMinPlanArcChapters {
 				return fmt.Errorf("outline-all 骨架卷的每个弧必须只含正数 estimated_chapters 预留，不得提前展开")
 			}
-			spans = append(spans, arc.EstimatedChapters)
-			total += arc.EstimatedChapters
-		}
-		want, err := domain.RecommendedOutlineAllArcSpans(total)
-		if err != nil {
-			return err
-		}
-		if !slices.Equal(spans, want) {
-			return fmt.Errorf("outline-all 骨架卷弧跨度=%v，必须使用确定性单次展开分配=%v", spans, want)
 		}
 	}
 	return nil

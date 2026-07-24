@@ -332,6 +332,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			return err
 		}
 		if receipt.PendingAction != nil {
+			justCompleted := receipt.PendingAction.Type
 			receipt, err = recoverOrRunPipelineOutlineAllOperation(
 				candidateCfg, bundle, live, candidate, owner, *compass, target,
 				receipt, modelDigest, promptDigest,
@@ -339,13 +340,22 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			if err != nil {
 				return err
 			}
+			if justCompleted == domain.OutlineAllActionPlanStructure {
+				receipt, target, err = freezePipelineOutlineAllStructurePlan(candidate, receipt, target)
+				if err != nil {
+					return err
+				}
+			}
 			continue
+		}
+		if receipt.StructurePlan != nil {
+			target = applyFrozenStructurePlanTarget(target, receipt)
 		}
 		volumes, err := candidate.Outline.LoadLayeredOutline()
 		if err != nil {
 			return err
 		}
-		action, ok, err := outlineAllNextStructuralAction(volumes, *compass, target)
+		action, ok, err := outlineAllNextStructuralAction(volumes, *compass, target, receipt.StructurePlan != nil)
 		if err != nil {
 			return err
 		}
@@ -713,14 +723,17 @@ func ensurePipelineOutlineAllReceipt(
 		}
 		return &signed, nil
 	}
+	// TargetVolumes/TargetChapters (and the derived word-per-chapter) are now
+	// chosen by the model's frozen StructurePlan, not deterministically derived
+	// from inputs, so they are no longer part of the resume identity anchor. The
+	// input-derived scale range and every content-addressed root/digest still are.
 	if existing.GenerationID != generationID ||
 		existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
 		existing.StableProgressRoot != stableProgressRoot || existing.FoundationContextRoot != foundationContextRoot ||
 		existing.AttemptID != attemptID || filepath.Clean(existing.CandidateDir) != filepath.Clean(candidateDir) ||
 		existing.CompassDigest != compassDigest || existing.ModelIdentityDigest != modelDigest ||
-		existing.PromptProtocolDigest != promptDigest || existing.TargetVolumes != target.TargetVolumes ||
-		existing.TargetChapters != target.TargetChapters || existing.TargetWords != target.TargetWords ||
-		existing.TargetWordsPerChapter != target.TargetWordsPerChapter || existing.StoryTimeHint != target.StoryTimeHint {
+		existing.PromptProtocolDigest != promptDigest || existing.TargetWords != target.TargetWords ||
+		existing.StoryTimeHint != target.StoryTimeHint {
 		return nil, fmt.Errorf("outline-all recovered attempt identity drift; start a new deterministic attempt")
 	}
 	return st.UpdateOutlineAllExecutionReceipt(existing.ReceiptDigest, func(current *domain.OutlineAllExecutionReceipt) error {
@@ -730,6 +743,63 @@ func ensurePipelineOutlineAllReceipt(
 		current.UpdatedAt = time.Now().UTC()
 		return nil
 	})
+}
+
+// applyFrozenStructurePlanTarget overlays the model-chosen totals from a frozen
+// receipt onto the in-memory scale target so every later planner/validator sees
+// the plan's volume/chapter counts rather than the provisional midpoint.
+func applyFrozenStructurePlanTarget(target domain.BookScaleTarget, receipt *domain.OutlineAllExecutionReceipt) domain.BookScaleTarget {
+	target.TargetVolumes = receipt.TargetVolumes
+	target.TargetChapters = receipt.TargetChapters
+	target.TargetWords = receipt.TargetWords
+	target.TargetWordsPerChapter = receipt.TargetWordsPerChapter
+	return target
+}
+
+// freezePipelineOutlineAllStructurePlan captures the model's just-written
+// reservation skeleton as the receipt's immutable StructurePlan and rebinds the
+// deterministic targets to its totals. It is idempotent on resume.
+func freezePipelineOutlineAllStructurePlan(
+	st *store.Store,
+	receipt *domain.OutlineAllExecutionReceipt,
+	target domain.BookScaleTarget,
+) (*domain.OutlineAllExecutionReceipt, domain.BookScaleTarget, error) {
+	if receipt.StructurePlan != nil {
+		return receipt, applyFrozenStructurePlanTarget(target, receipt), nil
+	}
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		return receipt, target, err
+	}
+	plan := domain.DeriveOutlineAllStructurePlan(volumes)
+	if err := domain.ValidateOutlineAllStructurePlan(plan, target.Range); err != nil {
+		return receipt, target, fmt.Errorf("outline-all freeze structure plan: %w", err)
+	}
+	newVolumes := plan.TotalVolumes()
+	newChapters := plan.TotalChapters()
+	newWordsPerChapter := 0
+	if receipt.TargetWords > 0 {
+		newWordsPerChapter = (receipt.TargetWords + newChapters/2) / newChapters
+		if newWordsPerChapter < 1500 || newWordsPerChapter > 5000 {
+			return receipt, target, fmt.Errorf(
+				"outline-all structure plan chapter total %d implies %d words/chapter, outside the 1500-5000 budget",
+				newChapters, newWordsPerChapter,
+			)
+		}
+	}
+	updated, err := st.UpdateOutlineAllExecutionReceipt(receipt.ReceiptDigest, func(current *domain.OutlineAllExecutionReceipt) error {
+		frozen := plan
+		current.StructurePlan = &frozen
+		current.TargetVolumes = newVolumes
+		current.TargetChapters = newChapters
+		current.TargetWordsPerChapter = newWordsPerChapter
+		current.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
+		return receipt, target, err
+	}
+	return updated, applyFrozenStructurePlanTarget(target, updated), nil
 }
 
 func createPipelineOutlineAllOperationIntent(
@@ -959,11 +1029,17 @@ func pipelineOutlineAllOperationPrompt(
 	b.WriteString("以下 MODEL_VISIBLE_CONTEXT 由宿主按 intent.before_layered_digest 冻结：包含全书每个弧的卷题/主题/目标/跨度/合同、目标弧全部章节、相邻弧首尾边界、冻结设定、权威 brief 与静态 RAG 写作参考。完整 layered_outline 只以 digest 绑定，禁止调用 novel_context/craft_recall/web_research 或补入外来事实。\nMODEL_VISIBLE_CONTEXT:\n")
 	b.Write(visibleRaw)
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "冻结目标：%d 卷 / %d 章；本次 operation=%d。contract_refs 是结构回执，不得把 source 原句机械复制进 core_event/hook。\n", target.TargetVolumes, target.TargetChapters, action.Operation)
+	if action.Type == domain.OutlineAllActionPlanStructure {
+		fmt.Fprintf(&b, "本次 operation=%d：由你一次性规划全书骨架。卷数必须落在 [%d,%d]，全书总章数必须落在 [%d,%d]（来自 estimated_scale，不得越界）；每卷、每弧的章数由你按剧情自定。contract_refs 本阶段一律留空。\n", action.Operation, target.Range.MinVolumes, target.Range.MaxVolumes, target.Range.MinChapters, target.Range.MaxChapters)
+	} else {
+		fmt.Fprintf(&b, "冻结目标：%d 卷 / %d 章；本次 operation=%d。contract_refs 是结构回执，不得把 source 原句机械复制进 core_event/hook。\n", target.TargetVolumes, target.TargetChapters, action.Operation)
+	}
 	b.WriteString("指南针合同 registry（ref 对象必须逐字原样放入 contract_refs，source 只用于语义设计）：\n")
 	b.Write(registryJSON)
 	b.WriteString("\n")
 	switch action.Type {
+	case domain.OutlineAllActionPlanStructure:
+		fmt.Fprintf(&b, "只调用 save_foundation(type=\"plan_structure\", content=<完整全书 VolumeOutline 数组>)。每卷含 index（从 1 连续递增）/title/theme 与有序 arcs；每弧含 index/title/goal 与 estimated_chapters（>=%d，无上限，弧长由剧情决定），chapters 必须为 [] 且 contract_refs 必须为空。卷数落在 [%d,%d]，全书总章数落在 [%d,%d]。这是一次性搭建全书卷弧骨架，禁止展开任何章节；全书骨架齐全后会有独立 map_contracts 与逐弧 expand_arc 操作。\n", domain.OutlineAllMinPlanArcChapters, target.Range.MinVolumes, target.Range.MaxVolumes, target.Range.MinChapters, target.Range.MaxChapters)
 	case domain.OutlineAllActionAppendVolume:
 		fmt.Fprintf(&b, "只调用 save_foundation(type=\"append_volume\", volume=%d, content=<VolumeOutline>)。追加且只追加第 %d 卷，本卷总预留必须恰好 %d 章。弧数与顺序跨度必须逐项严格等于 [%s]；每弧必须 chapters=[] 且 estimated_chapters 为对应值（每弧硬限制 %d-%d 章），此阶段只搭完整卷弧骨架，禁止提前展开任何弧。\n", action.Volume, action.ExpectedVolumeIndex, action.ExpectedChapterSpan, action.ExpectedArcSpans, domain.OutlineAllMinArcChapters, domain.OutlineAllMaxArcChapters)
 		b.WriteString("本操作的所有 arc.contract_refs 必须为空；全书骨架齐全后会有独立 map_contracts 操作统一分配，禁止提前占用合同。\n")
