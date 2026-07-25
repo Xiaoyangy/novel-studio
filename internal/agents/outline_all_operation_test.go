@@ -339,6 +339,37 @@ MODEL_VISIBLE_CONTEXT:
 	}
 }
 
+func TestOutlineAllFinalAuthorizationPlanStructure(t *testing.T) {
+	action := domain.OutlineAllPendingAction{
+		Type:                domain.OutlineAllActionPlanStructure,
+		Operation:           1,
+		BeforeLayeredDigest: domain.PlanningV2DigestPrefix + strings.Repeat("d", 64),
+	}
+	marker, err := domain.FormatOutlineAllIntent(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := outlineAllFinalAuthorization("[PIPELINE OUTLINE-ALL / SINGLE MUTATION]\n" + marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, exact := range []string{
+		"operation=1 type=plan_structure",
+		`save_foundation(type="plan_structure"`,
+		"estimated_chapters",
+	} {
+		if !strings.Contains(got, exact) {
+			t.Fatalf("plan_structure authorization missing %q: %q", exact, got)
+		}
+	}
+	// The plan_structure authorization must not pin a single volume/arc target.
+	for _, leaked := range []string{"volume=", "arc=", "expected_chapter_span="} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("plan_structure authorization leaked a per-unit target %q: %q", leaked, got)
+		}
+	}
+}
+
 func TestRunOutlineAllOperationWithModelFailsClosedWithoutIntent(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
