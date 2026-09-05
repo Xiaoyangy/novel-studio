@@ -455,7 +455,7 @@ func copyProjectAllWorkspace(source, target string) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		return copyProjectAllFile(path, dst, info.Mode().Perm())
+		return copyProjectAllFileCopyOnWrite(path, dst, info.Mode().Perm(), slashRel)
 	})
 }
 
@@ -525,6 +525,25 @@ func copyProjectAllFile(source, target string, mode fs.FileMode) error {
 	}
 	ok = true
 	return nil
+}
+
+// copyProjectAllFileCopyOnWrite shares only the two large, atomically replaced
+// RAG snapshots. Store.SaveIndexState/SaveVectorStore publish through temp +
+// rename, so the first workspace mutation receives a fresh inode while the
+// source snapshot remains byte-for-byte immutable. Append-only logs and every
+// other project artifact still receive an ordinary copy.
+func copyProjectAllFileCopyOnWrite(source, target string, mode fs.FileMode, rel string) error {
+	if isRAGCopyOnWriteArtifact(rel) {
+		if err := os.Link(source, target); err == nil {
+			return nil
+		}
+	}
+	return copyProjectAllFile(source, target, mode)
+}
+
+func isRAGCopyOnWriteArtifact(rel string) bool {
+	rel = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(rel)), "./")
+	return rel == "meta/rag/index_state.json" || rel == "meta/rag/vector_store.json"
 }
 
 // materializeProjectAllOutline expands every reserved coarse slot only inside

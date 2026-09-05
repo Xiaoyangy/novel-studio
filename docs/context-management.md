@@ -466,13 +466,14 @@ Writer 与默认代码助手不同的地方：
 - `RAGChunk.context` 用于记录来源作品、章节、小节、题材、标签等局部上下文；老索引缺失该字段时会按 `source_path/source_kind/facet/metadata` 自动推导。
 - `RAGChunk.keywords` 用于本地轻量中文召回；老索引缺失时会从 context、summary、metadata 中自动提取。
 - Writer 路径的 `selected_memory.rag_recall` 使用混合降级链：Qdrant + BM25；Qdrant EOF/空结果时转本地 `vector_store.json` + BM25；embedding 失败时直接使用 BM25。trace strategy 使用 `*_v2` 标明实际路径。章节大纲、章节任务单、出场角色共同组成查询，短中文词和长短语同时参与打分。
-- `--pipeline` 启动时会确保本机 Qdrant；`write`/`deliver` 前运行 `ensurePipelineRAGReady`。chunk、模型、维度和本地向量一致时直接复用；Qdrant 丢库时从 `vector_store.json` 重放，不重新 embedding。
+- `--pipeline` 启动时会确保本机 Qdrant；`write`/`deliver` 前运行 `ensurePipelineRAGReady`。chunk、模型、维度和本地向量一致后，还会滚动读取 Qdrant 全集并核对每个 `chunk_id/hash`；Qdrant 丢库、串库或内容陈旧时从 `vector_store.json` 重放，不重新 embedding。实际召回也只接受同时存在于当前本地索引的 ID + hash。
 - 手动 `--build-rag` 默认从 `summaries/` + `chapters/` 回填已完成章节事实包；显式 `--backfill-chapters=false` 时才只重建项目资料索引。
 - 第一章正文未开写、foundation 已落盘时，可先运行 `--zero-init` 生成写前资产和更窄的白名单 RAG；它只索引 foundation 与零章推演资产，不回填旧章节、审稿或实验稿。
 - `save_foundation`、`commit_chapter`、`save_review`、`review-existing` 和 `rewrite-existing` 都通过 `UpsertRAGChunks` 增量替换同 `source_path` 的旧 chunk。相同 hash 来源直接 no-op；变化来源先完整 staging embedding，再删旧 point、批量写新 point，最后提交本地状态。失败写入 `meta/rag/pending_upserts.json` 等待下次重放。
 - `save_review` 会把历史审阅反馈同步进 `meta/writing_assets.json/md`：完整问题仍在 `reviews/`，可复用的写法建议会进入 `writing_engine.feedback` 和 `active_rules`。
 - `save_review(verdict=accept, scope=chapter)` 还会沉淀项目记忆：`chapter_progress`、`character_continuity`、`project_progress`、`evolution_report`、时间线、伏笔、关系、状态变化、资源账本、世界规则、本书世界、动态大纲、指南针、写法资产库和历史反馈都会作为 RAG artifact 更新；零章初始化资产存在时也会进入项目记忆，供第一章/后续审核追溯角色为什么这么判断。
-- RAG 只允许当前项目内来源：`prompt.md`、`input/`、`output/novel` 的设定/大纲/账本/摘要；`deconstruction-library/`、`对标/`、`data/reference-library/` 等参考库在构建和召回时都会被排除。
+- 事实 RAG 只允许当前项目内来源：`prompt.md`、`input/`、`output/novel` 的设定/大纲/账本/摘要。配置中明确白名单化的 `writing-techniques`、`novel_all` 和 `review-calibration` 作为共享设计库进入词法索引，只能由 `craft_recall` 按当前项目规则筛选，不进入事实向量或 `novel_context`；其他拆解库、对标目录和外部参考库仍被排除。
+- 全盘运维使用 `rag audit`（只读）和 `rag maintain --apply`（先备份再修复）。它们检查 schema、hash 清单、重复/孤儿/缺失向量、数值与维度、payload、pending、JSONL 和 receipt 可读性；只修正式目录，历史 generation 保持不可变，相同大快照可用安全硬链接去重。
 - `reference_pack.retrieval_trace` 输出 `strategy/query_terms/max_results/matches`，让 writer/editor 判断召回强弱和来源边界。
 - `rag_writing_guidelines` 是 RAG 使用边界：召回只提供本书已有证据、约束和沉淀事实，不得把弱召回写成本书事实。
 

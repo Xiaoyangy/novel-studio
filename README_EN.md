@@ -249,7 +249,11 @@ This proves provenance and controlled injection into planning. It does not mecha
 ```bash
 novel-studio --build-rag --dir data/runs/<book-name>/output/novel
 novel-studio --rag-ready --dir data/runs/<book-name>/output/novel
+novel-studio rag audit --root data/runs
+novel-studio rag maintain --root data/runs --apply
 ```
+
+`index_state.json` is the authoritative local retrieval set, `vector_store.json` is the recoverable vector source, and Qdrant is a rebuildable online cache. Readiness now scrolls the complete collection and verifies every `chunk_id` and content hash; runtime recall also rejects remote hits that do not belong to the active local index. Shared craft, benchmark and review-calibration material remains in the design-only BM25 channel instead of entering book-fact vectors. Full-tree maintenance writes `data/runs/rag-maintenance-report.json` and a lightweight per-book health summary consumed by the dashboard.
 
 ## Models and deployment
 
@@ -302,7 +306,9 @@ In the table below, `<RUN>` means `data/runs/<book-name>`.
 | `novel-studio --pipeline --dir <RUN> --stages render --refresh-render-input` | Refresh model/provider/prompt bindings for a sealed chapter that has no durable candidate evidence |
 | `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | For eligible short books only, run exact-book review and build the publication package after all chapters pass |
 | `novel-studio --build-rag --dir <RUN>/output/novel` | Build the project RAG index |
-| `novel-studio --rag-ready --dir <RUN>/output/novel` | Validate embedding and vector state |
+| `novel-studio --rag-ready --dir <RUN>/output/novel` | Validate the local index, vectors and exact Qdrant contents |
+| `novel-studio rag audit --root data/runs` | Read-only audit of canonical and historical RAG snapshots |
+| `novel-studio rag maintain --root data/runs --apply` | Back up and repair canonical indexes, then deduplicate identical snapshots |
 | `novel-studio service open` | Open the dashboard |
 | `novel-studio --diag --dir <RUN>` | Generate diagnostics without advancing production state |
 | `novel-studio --check` | Check provider, model and fallback configuration |

@@ -150,6 +150,19 @@ func TestBuildLocalRAGIndexRejectsExplicitReferenceSource(t *testing.T) {
 	}
 }
 
+func TestDisplayRAGSourcePathIsStableAcrossInvocationDirectories(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "run", "output", "novel")
+	projectSource := filepath.Join(outputDir, "world_rules.md")
+	sharedSource := filepath.Join(root, "checkout", "deconstruction-library", "writing-techniques", "dialogue.md")
+	if got := displayRAGSourcePath(projectSource, outputDir); got != "project/output/novel/world_rules.md" {
+		t.Fatalf("project source path=%q", got)
+	}
+	if got := displayRAGSourcePath(sharedSource, outputDir); got != "shared/deconstruction-library/writing-techniques/dialogue.md" {
+		t.Fatalf("shared source path=%q", got)
+	}
+}
+
 func TestRefreshAutoRAGCollectionForOutputDirRekeysAutoCollection(t *testing.T) {
 	oldDir := filepath.Join(t.TempDir(), "output", "novel")
 	newDir := filepath.Join(t.TempDir(), "data", "runs", "鬼城", "output", "novel")
@@ -392,6 +405,28 @@ func TestEnsureDefaultRAGIndexResanitizesWhenProjectForbiddenPhrasesChange(t *te
 	}
 	if after.SanitizedDigest == before.SanitizedDigest {
 		t.Fatal("sanitization digest did not bind changed project forbidden phrases")
+	}
+}
+
+func TestProjectContaminationSanitizerKeepsSharedDesignCorpus(t *testing.T) {
+	outputDir := t.TempDir()
+	st := store.NewStore(outputDir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UserRules.Save(&rules.Snapshot{Structured: rules.Structured{ForbiddenPhrases: []string{"导师"}}}); err != nil {
+		t.Fatal(err)
+	}
+	design := rag.NormalizeChunk(domain.RAGChunk{
+		ID: "shared-method", SourcePath: "shared/deconstruction-library/writing-techniques/character.md",
+		SourceKind: rag.CraftSourceKind, Text: "导师角色的场景功能需要通过选择体现。",
+	})
+	fact := rag.NormalizeChunk(domain.RAGChunk{
+		ID: "book-fact", SourcePath: "summaries/01.json", SourceKind: "chapter_summary_facts", Text: "导师已经抵达本书现场。",
+	})
+	state := &domain.RAGIndexState{Chunks: []domain.RAGChunk{design, fact}}
+	if removed := sanitizeRAGIndexState(st, state); removed != 1 || len(state.Chunks) != 1 || state.Chunks[0].ID != design.ID {
+		t.Fatalf("shared design corpus should survive storage sanitation: removed=%d chunks=%+v", removed, state.Chunks)
 	}
 }
 

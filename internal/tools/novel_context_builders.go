@@ -2193,6 +2193,8 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 		return nil, nil
 	}
 	facetHints := recallFacetHints(state)
+	ragState, ragStateErr := t.store.RAG.LoadIndexStateReadOnly()
+	trustedFactHashes := activeRAGFactHashes(ragState)
 	scoredByID := make(map[string]*ragScored)
 	addScore := func(chunk domain.RAGChunk, score float64, reasons ...string) {
 		if score <= 0 {
@@ -2207,6 +2209,13 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 		if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
 			return
 		}
+		// A remote collection is only a cache of this local, content-addressed
+		// index. Requiring both ID and hash here prevents a same-sized stale or
+		// cross-project Qdrant collection from injecting foreign facts after the
+		// startup readiness check has completed.
+		if wantHash, trusted := trustedFactHashes[chunk.ID]; !trusted || wantHash != chunk.Hash {
+			return
+		}
 		if existing, ok := scoredByID[chunk.ID]; ok {
 			existing.score += score
 			existing.reasons = uniqueStrings(append(existing.reasons, reasons...))
@@ -2218,7 +2227,6 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 	// BM25 词法通道：与向量召回互补（专名、门牌、条款编号等精确词命中）。
 	// 向量路径做加性混合，无 embedder 时作为 fallback 的主干排序信号。
 	bm25Query := ragQueryEmbeddingText(focus, queryFields, terms)
-	ragState, ragStateErr := t.store.RAG.LoadIndexStateReadOnly()
 	addBM25 := func() bool {
 		if ragStateErr != nil || ragState == nil || len(ragState.Chunks) == 0 {
 			return false
@@ -2246,10 +2254,11 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 				cancelSearch()
 				if searchErr == nil {
 					qdrantState = "empty"
+					acceptedBefore := len(scoredByID)
 					for _, hit := range hits {
 						addScore(hit.Point.Chunk, hit.Score*3.5, fmt.Sprintf("qdrant:%.3f", hit.Score))
 					}
-					if len(hits) > 0 {
+					if len(scoredByID) > acceptedBefore {
 						strategy := "qdrant_vector_engine_v2"
 						if addBM25() {
 							strategy = "qdrant_bm25_hybrid_v2"
@@ -2263,10 +2272,11 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 
 			if vectorStore, err := t.store.RAG.LoadVectorStoreReadOnly(); err == nil && vectorStore != nil && len(vectorStore.Points) > 0 {
 				localHits := rag.SearchVectorStoreWithOptions(vectorStore, queryVector, maxRAGRecallResults*3, rag.VectorSearchOptions{ExcludeDesignOnly: true})
+				acceptedBefore := len(scoredByID)
 				for _, hit := range localHits {
 					addScore(hit.Point.Chunk, hit.Score*3.0, fmt.Sprintf("vector:%.3f", hit.Score))
 				}
-				if len(localHits) > 0 {
+				if len(scoredByID) > acceptedBefore {
 					strategy := "local_vector_bm25_hybrid_v2"
 					if qdrantState == "error" {
 						strategy = "qdrant_error_local_vector_bm25_fallback_v2"
@@ -2355,6 +2365,21 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 		strategy = "local_bm25_keyword_hybrid_v1"
 	}
 	return finishRAGRecall(scoredByID, focus, terms, strategy)
+}
+
+func activeRAGFactHashes(state *domain.RAGIndexState) map[string]string {
+	trusted := map[string]string{}
+	if state == nil {
+		return trusted
+	}
+	for _, chunk := range state.Chunks {
+		chunk = rag.NormalizeChunk(chunk)
+		if chunk.ID == "" || chunk.Hash == "" || rag.IsForbiddenChunk(chunk) || rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			continue
+		}
+		trusted[chunk.ID] = chunk.Hash
+	}
+	return trusted
 }
 
 // searchNovelFactVectors asks capable vector stores to isolate the active

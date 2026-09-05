@@ -156,11 +156,18 @@ func ragReadyPipeline(opts cliOptions, args []string) error {
 		if clientEnabled {
 			countCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			count, countErr := client.Count(countCtx, true)
-			if countErr != nil {
-				return countErr
+			if vectorStore == nil {
+				return fmt.Errorf("Qdrant 已启用但本地 vector_store 不存在，无法做内容级核验")
 			}
-			report["qdrant_points"] = count
+			verification, verifyErr := client.VerifyPointSet(countCtx, vectorStore.Points)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !verification.Exact() {
+				return fmt.Errorf("Qdrant 内容级核验失败: %+v", verification)
+			}
+			report["qdrant_points"] = verification.Actual
+			report["qdrant_content_verified"] = true
 		}
 	}
 	if probeChapter > 0 {
@@ -273,34 +280,32 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 		return err
 	}
 	st := store.NewStore(absDir)
-	if err := st.RAG.SaveIndexState(result.State); err != nil {
-		return err
-	}
 	backfilled := 0
 	if flags.BackfillChapters {
-		backfilled, err = backfillChapterRAG(absDir, flags.BackfillStart, flags.BackfillEnd)
+		var changed bool
+		backfilled, changed, err = mergeChapterRAGState(absDir, st, &result.State, flags.BackfillStart, flags.BackfillEnd)
 		if err != nil {
 			return err
 		}
-		if state, err := st.RAG.LoadIndexState(); err == nil && state != nil {
-			result.State = *state
-		} else if err != nil {
-			return err
+		if changed {
+			result.State.UpdatedAt = time.Now().Format(time.RFC3339)
 		}
 	}
 	if pending, err := st.RAG.LoadPendingUpserts(); err != nil {
 		return err
 	} else if pending != nil && len(pending.Chunks) > 0 {
 		mergePendingRAGState(st, &result.State, pending.Chunks)
-		if err := st.RAG.SaveIndexState(result.State); err != nil {
-			return err
-		}
 		fmt.Fprintf(os.Stderr, "[build-rag] 已合并待回填 RAG chunks=%d\n", len(pending.Chunks))
 	}
-	if removed, err := sanitizeExistingRAGVectorStore(st, &result.State); err != nil {
+	existingVectorStore, err := st.RAG.LoadVectorStore()
+	if err != nil {
 		return err
-	} else if removed > 0 {
-		fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", removed)
+	}
+	if existingVectorStore != nil {
+		removed, _ := sanitizeRAGVectorStore(st, existingVectorStore, &result.State)
+		if removed > 0 {
+			fmt.Fprintf(os.Stderr, "[build-rag] 已移除旧 RAG 向量点=%d\n", removed)
+		}
 	}
 	vectorEmbedded := 0
 	vectorWritten := 0
@@ -315,14 +320,23 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 		result.State = embeddingResult.State
 		vectorEmbedded = embeddingResult.Embedded
 		vectorWritten = embeddingResult.Written
-		if err := st.RAG.SaveVectorStore(vectorStore); err != nil {
-			return err
-		}
-		if err := st.RAG.SaveIndexState(result.State); err != nil {
+		existingVectorStore = &vectorStore
+	}
+	result.State.SchemaVersion = domain.CurrentRAGIndexSchemaVersion
+	result.State.ChunkHashes = rebuildRAGChunkHashList(result.State.Chunks)
+	result.State.SanitizedDigest = ragIndexSanitizationDigest(st, &result.State)
+	result.State.UpdatedAt = time.Now().Format(time.RFC3339)
+	// vector_store is staged/published before index_state, which is the durable
+	// commit marker used by readiness recovery. No new lexical state is exposed
+	// while embedding is still running.
+	if existingVectorStore != nil {
+		if err := st.RAG.SaveVectorStore(*existingVectorStore); err != nil {
 			return err
 		}
 	}
-	resetRAGTrace(absDir)
+	if err := st.RAG.SaveIndexState(result.State); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "[build-rag] 已写入 %s\n", filepath.Join(absDir, "meta", "rag", "index_state.json"))
 	fmt.Fprintf(os.Stderr, "[build-rag] 来源文件 %d 个，chunks=%d，跳过重复=%d\n", result.Files, len(result.State.Chunks), result.SkippedDup)
 	if flags.BackfillChapters {
@@ -335,6 +349,7 @@ func buildRAGPipeline(opts cliOptions, args []string) error {
 	if err := st.RAG.ClearPendingUpserts(); err != nil {
 		return err
 	}
+	archiveRAGTrace(absDir)
 	fmt.Fprintf(os.Stdout, "%s\n", filepath.Join(absDir, "meta", "rag", "index_state.md"))
 
 	if flags.ProbeChapter > 0 {
@@ -539,7 +554,7 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 		}
 		remoteReady := false
 		if err := client.EnsureCollection(qdrantCtx, existingVectorStore.Config.VectorDimension); err == nil {
-			if count, countErr := client.Count(qdrantCtx, true); countErr == nil && count == expectedPoints {
+			if verification, verifyErr := client.VerifyPointSet(qdrantCtx, existingVectorStore.Points); verifyErr == nil && verification.Exact() {
 				remoteReady = true
 			}
 		}
@@ -1031,12 +1046,12 @@ func restoreQdrantFromLocalVectorStore(ctx context.Context, cfg bootstrap.Config
 	if _, err := rag.WriteVectorPoints(ctx, client, points, writeCfg); err != nil {
 		return fmt.Errorf("从本地向量恢复 Qdrant: %w", err)
 	}
-	count, err := client.Count(ctx, true)
+	verification, err := client.VerifyPointSet(ctx, vectorStore.Points)
 	if err != nil {
-		return fmt.Errorf("验证恢复后的 Qdrant 点数: %w", err)
+		return fmt.Errorf("验证恢复后的 Qdrant 内容: %w", err)
 	}
-	if count != expected {
-		return fmt.Errorf("恢复后的 Qdrant 点数不一致: got=%d want=%d", count, expected)
+	if !verification.Exact() || verification.Expected != expected {
+		return fmt.Errorf("恢复后的 Qdrant 内容不一致: %+v", verification)
 	}
 	return nil
 }
@@ -1779,14 +1794,26 @@ func summarizeRAGText(text string, limit int) string {
 }
 
 func displayRAGSourcePath(path, outputDir string) string {
-	if cwd, err := os.Getwd(); err == nil {
-		if rel, err := filepath.Rel(cwd, path); err == nil && !strings.HasPrefix(rel, "..") {
-			return filepath.ToSlash(rel)
+	path = cleanAbsRAGPath(path)
+	if outputDir != "" {
+		projectRoot := ragProjectRoot(outputDir)
+		if rel, err := filepath.Rel(projectRoot, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(filepath.Join("project", rel))
 		}
 	}
-	if outputDir != "" {
-		if rel, err := filepath.Rel(outputDir, path); err == nil && !strings.HasPrefix(rel, "..") {
-			return filepath.ToSlash(filepath.Join("output/novel", rel))
+	// Shared design libraries are allowed outside the run directory. Strip the
+	// machine-specific prefix at their stable corpus boundary so invoking the
+	// same build from Finder, another cwd or a relocated checkout produces the
+	// same chunk IDs and hashes.
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for index, part := range parts {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "writing-techniques", "novel_all", "review-calibration":
+			start := index
+			if index > 0 && strings.EqualFold(parts[index-1], "deconstruction-library") {
+				start = index - 1
+			}
+			return "shared/" + strings.Join(parts[start:], "/")
 		}
 	}
 	return filepath.ToSlash(path)
@@ -1887,6 +1914,13 @@ func ragChunkHasProjectContamination(st *store.Store, chunk domain.RAGChunk) boo
 	if st == nil {
 		return false
 	}
+	// Shared craft/benchmark/calibration chunks are a reusable corpus, not book
+	// facts. Project forbidden phrases are applied when craft_recall selects a
+	// result; applying them while persisting the shared corpus made broad terms
+	// such as “古代” or “导师” delete thousands of unrelated method cards.
+	if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+		return false
+	}
 	metadata := ""
 	if len(chunk.Metadata) > 0 {
 		if data, err := json.Marshal(chunk.Metadata); err == nil {
@@ -1898,20 +1932,23 @@ func ragChunkHasProjectContamination(st *store.Store, chunk domain.RAGChunk) boo
 }
 
 func resetRAGTrace(outputDir string) {
-	_ = os.Remove(filepath.Join(outputDir, "meta", "rag", "retrieval_trace.jsonl"))
+	archiveRAGTrace(outputDir)
+}
+
+func archiveRAGTrace(outputDir string) {
+	source := filepath.Join(outputDir, "meta", "rag", "retrieval_trace.jsonl")
+	if _, err := os.Stat(source); err != nil {
+		return
+	}
+	history := filepath.Join(outputDir, "meta", "rag", "history")
+	if err := os.MkdirAll(history, 0o755); err != nil {
+		return
+	}
+	target := filepath.Join(history, "retrieval_trace-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".jsonl")
+	_ = os.Rename(source, target)
 }
 
 func backfillChapterRAG(outputDir string, start, end int) (int, error) {
-	if start <= 0 {
-		start = 1
-	}
-	chapters, err := discoverGeneratedChapters(outputDir, start, end)
-	if err != nil {
-		return 0, err
-	}
-	if len(chapters) == 0 {
-		return 0, nil
-	}
 	st := store.NewStore(outputDir)
 	state, err := st.RAG.LoadIndexState()
 	if err != nil {
@@ -1919,6 +1956,30 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 	}
 	if state == nil {
 		state = &domain.RAGIndexState{SchemaVersion: domain.CurrentRAGIndexSchemaVersion, Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
+	}
+	count, changed, err := mergeChapterRAGState(outputDir, st, state, start, end)
+	if err != nil {
+		return 0, err
+	}
+	if !changed {
+		return count, nil
+	}
+	if err := st.RAG.SaveIndexState(*state); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func mergeChapterRAGState(outputDir string, st *store.Store, state *domain.RAGIndexState, start, end int) (int, bool, error) {
+	if start <= 0 {
+		start = 1
+	}
+	chapters, err := discoverGeneratedChapters(outputDir, start, end)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(chapters) == 0 {
+		return 0, false, nil
 	}
 	beforeSanitizedDigest := state.SanitizedDigest
 	changed := sanitizeRAGIndexState(st, state) > 0 || state.SanitizedDigest != beforeSanitizedDigest
@@ -1928,10 +1989,10 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 	for _, chapter := range chapters {
 		sum, err := st.Summaries.LoadSummary(chapter)
 		if err != nil {
-			return 0, fmt.Errorf("读取第 %d 章摘要失败: %w", chapter, err)
+			return 0, false, fmt.Errorf("读取第 %d 章摘要失败: %w", chapter, err)
 		}
 		if sum == nil {
-			return 0, fmt.Errorf("第 %d 章缺少 summaries/%02d.json，无法沉淀章节事实包", chapter, chapter)
+			return 0, false, fmt.Errorf("第 %d 章缺少 summaries/%02d.json，无法沉淀章节事实包", chapter, chapter)
 		}
 		chunk := rag.NormalizeChunk(chunkFromChapterSummary(*sum))
 		sourcePath := chapterRAGSourcePath(chapter)
@@ -1959,15 +2020,12 @@ func backfillChapterRAG(outputDir string, start, end int) (int, error) {
 		changed = true
 	}
 	if !changed {
-		return len(chapters), nil
+		return len(chapters), false, nil
 	}
 	state.ChunkHashes = rebuildLocalRAGChunkHashes(state.Chunks)
 	state.SanitizedDigest = ragIndexSanitizationDigest(st, state)
 	state.UpdatedAt = time.Now().Format(time.RFC3339)
-	if err := st.RAG.SaveIndexState(*state); err != nil {
-		return 0, err
-	}
-	return len(chapters), nil
+	return len(chapters), true, nil
 }
 
 func discoverGeneratedChapters(outputDir string, start, end int) ([]int, error) {

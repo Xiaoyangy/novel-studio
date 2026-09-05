@@ -506,6 +506,10 @@ class DashboardDataTest(unittest.TestCase):
             "# RAG 索引状态\n\n- Collection：demo\n- Chunk 数：12345\n- 更新时间：2026-07-10T10:00:00+08:00\n",
             encoding="utf-8",
         )
+        (rag_dir / "health.json").write_text(json.dumps({
+            "version": "rag-health.v1", "healthy": True, "fact_chunks": 321,
+            "vector_points": 321, "pending_chunks": 0, "issues": {},
+        }), encoding="utf-8")
 
         data = server.rag_index_summary(self.nd)
 
@@ -514,6 +518,9 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["provider"], "codex")
         self.assertEqual(data["model"], "qwen-test")
         self.assertEqual(data["store"], "qdrant")
+        self.assertTrue(data["health"])
+        self.assertEqual(data["fact_chunks"], 321)
+        self.assertEqual(data["vector_points"], 321)
 
 
 if __name__ == "__main__":

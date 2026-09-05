@@ -416,6 +416,12 @@ func chunkPayload(chunk domain.RAGChunk) map[string]any {
 	return payload
 }
 
+// PayloadForChunk returns a fresh, normalized payload for persistence audits,
+// local recovery and remote replay. Callers may mutate the returned map.
+func PayloadForChunk(chunk domain.RAGChunk) map[string]any {
+	return chunkPayload(NormalizeChunk(chunk))
+}
+
 func isReservedChunkPayloadKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "source_path", "source_kind", "facet", "hash", "parent_id", "context", "summary", "keywords", "chunk_id", "chunk":

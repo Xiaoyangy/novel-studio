@@ -35,6 +35,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "skills" {
 		os.Exit(runSkillsCommand(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "rag" {
+		os.Exit(runRAGCommand(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "list" || os.Args[1] == "novels") {
 		os.Exit(runNovelsListCommand(os.Args[2:]))
 	}
@@ -410,7 +413,7 @@ func loadPrompt(opts cliOptions) (string, error) {
 func hasAnySubcommand(argv []string) bool {
 	for _, a := range argv {
 		switch a {
-		case "service", "doctor", "skills", "--review-existing", "--rewrite-existing", "--draft-ai-judge",
+		case "service", "doctor", "skills", "rag", "--review-existing", "--rewrite-existing", "--draft-ai-judge",
 			"--check", "--diag", "--simulate", "--import-sim", "--steer",
 			"--cocreate", "--pipeline", "--architect-check", "--writing-assets", "--refresh-progress", "--build-rag", "--rag-ready", "--zero-init":
 			return true
@@ -477,6 +480,8 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio --refresh-progress [--dir d]  # 回填章节推进/人物变化/下一章计划台账")
 	fmt.Fprintln(w, "  novel-studio --build-rag [--dir d]         # 构建本书 RAG 索引并可探测召回")
 	fmt.Fprintln(w, "  novel-studio --rag-ready [--dir d]         # 只修复/验证 RAG，不启动写作")
+	fmt.Fprintln(w, "  novel-studio rag audit [--root data/runs] # 审计全部主索引和历史 RAG 快照")
+	fmt.Fprintln(w, "  novel-studio rag maintain --apply         # 备份、整理主索引并压缩重复快照")
 	fmt.Fprintln(w, "  novel-studio --architect-check [--dir d]   # 检查 Architect foundation，通过后才允许 zero-init")
 	fmt.Fprintln(w, "  novel-studio --zero-init [--dir d]         # 新书第一章前的角色/关系/资源推演资产")
 	fmt.Fprintln(w, "  novel-studio eval inspect --cases evals/cases/harness # Harness 检查既有项目产物")

@@ -288,3 +288,24 @@ func TestUpsertRAGChunksDropsConfiguredProjectContaminationChunks(t *testing.T) 
 		t.Fatalf("expected only clean chunk, got %+v", state.Chunks)
 	}
 }
+
+func TestUpsertRAGChunksKeepsSharedDesignCorpusForRuntimeFiltering(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	saveTestProjectContaminationTerms(t, s, "导师")
+	if err := UpsertRAGChunks(context.Background(), s, nil, nil, []domain.RAGChunk{
+		{
+			ID: "shared-method", SourcePath: "shared/deconstruction-library/writing-techniques/character.md",
+			SourceKind: rag.CraftSourceKind, Text: "导师角色也需要通过选择呈现场景功能。",
+		},
+		{ID: "book-fact", SourcePath: "summaries/01.json", SourceKind: "chapter_summary_facts", Text: "导师抵达现场。"},
+	}, domain.RAGIndexConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.RAG.LoadIndexState()
+	if err != nil || state == nil || len(state.Chunks) != 1 || state.Chunks[0].ID != "shared-method" {
+		t.Fatalf("shared design corpus was removed before runtime filtering: state=%+v err=%v", state, err)
+	}
+}

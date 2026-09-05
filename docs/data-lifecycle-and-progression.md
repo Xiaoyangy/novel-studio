@@ -113,18 +113,18 @@ flowchart TD
 - `Host.New` 和 `--pipeline` 启动都会调用 `bootstrap.EnsureRAGQdrant`。
 - embedding 启用时，默认使用本机 Qdrant：`http://127.0.0.1:6333`，容器名 `novel-studio-qdrant`。
 - `docker-compose.yml` 也提供 `qdrant` 服务，适合显式 `docker compose up`。
-- `pipelineWrite` 与交付阶段在执行前调用 `ensurePipelineRAGReady`：先迁移/校验 schema、回填已生成章节摘要并处理 `pending_upserts.json`；已有本地向量可复用时只校验或恢复 Qdrant，不重新 embedding。
+- `pipelineWrite` 与交付阶段在执行前调用 `ensurePipelineRAGReady`：先迁移/校验 schema、回填已生成章节摘要并处理 `pending_upserts.json`；已有本地向量可复用时，滚动读取 Qdrant 全部 points，逐项核对 `chunk_id` 与内容 hash。完全一致则复用，否则从本地向量重放，不重新 embedding。
 - 如果 embedding 未启用，系统仍使用本地关键词 RAG，不强制启动向量链路。
 
 ### 4.2 召回顺序
 
 `novel_context` 的召回顺序是：
 
-1. Qdrant 向量 + BM25 混合召回。
+1. Qdrant 向量 + BM25 混合召回；远端命中必须同时以 ID 和 hash 存在于当前 `index_state.json`，否则丢弃。
 2. Qdrant 错误或空结果时，`meta/rag/vector_store.json` 本地向量 + BM25。
 3. embedding 错误或向量不可用时，`meta/rag/index_state.json` 的缓存 BM25 / 关键词召回。
 
-每次召回会写 `meta/rag/retrieval_trace.jsonl`，记录 query、strategy、命中来源、分数和 reason，便于判断召回强弱。
+每次召回会写 `meta/rag/retrieval_trace.jsonl`，记录 query、strategy、命中来源、分数和 reason，便于判断召回强弱。全量重建不再删除旧 trace，而是移入 `meta/rag/history/retrieval_trace-<UTC>.jsonl`。
 
 ### 4.3 Upsert 规则
 
@@ -222,7 +222,7 @@ go run ./cmd/novel-studio --diag
 1. 配置加载成功，`output_dir` 已确定。
 2. Qdrant 按配置可启动或可连接；失败时 pipeline 直接报错。
 3. `ensureDefaultRAGIndex` 只索引当前项目内 `prompt.md`、`input/` 和 `output/novel`；手动 `--build-rag` 默认还会从 `summaries/` + `chapters/` 回填已完成章节事实，避免重建索引时丢失 `chapter_summary_facts`。第一章开写前可先跑 `--zero-init`，它使用更窄的白名单，只索引 foundation 和零章写前资产，不回填旧章节、审稿或实验稿。
-4. embedding 启用时，`ensurePipelineRAGReady` 必须证明当前 schema/chunk/model/dimension/向量数值一致，并保证 Qdrant 点数正确；允许从本地 vector fallback 恢复 Qdrant。
+4. embedding 启用时，`ensurePipelineRAGReady` 必须证明当前 schema/chunk/model/dimension/向量数值一致，并保证 Qdrant 的 ID、内容 hash 和点数完全正确；允许从本地 vector fallback 恢复 Qdrant。
 5. 已有进度时，优先恢复，不用新 prompt 重开。
 6. `pending_rewrites` 非空时，先走返工，不开新章。
 
@@ -230,6 +230,8 @@ go run ./cmd/novel-studio --diag
 
 ```bash
 go run ./cmd/novel-studio --build-rag --with-embeddings --probe-chapter 1
+go run ./cmd/novel-studio rag audit --root data/runs
+go run ./cmd/novel-studio rag maintain --root data/runs --apply
 go run ./cmd/novel-studio --diag
 go run ./cmd/novel-studio --refresh-progress
 curl -s http://127.0.0.1:6333/collections

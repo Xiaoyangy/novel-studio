@@ -225,6 +225,11 @@ def rag_index_summary(nd: Path) -> dict:
             prefix = f.read(8192)
     except OSError:
         prefix = ""
+    try:
+        with open(nd / "meta" / "rag" / "health.json", encoding="utf-8") as f:
+            health = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        health = {}
 
     def md_value(label: str) -> str:
         match = re.search(rf"^-\s*{re.escape(label)}[：:]\s*(.+?)\s*$", md, re.M)
@@ -256,6 +261,12 @@ def rag_index_summary(nd: Path) -> dict:
         "retrievals": line_count(nd / "meta" / "rag" / "retrieval_trace.jsonl"),
         "craft_recalls": line_count(nd / "meta" / "rag" / "craft_recall_log.jsonl"),
         "facets": facets,
+        "health": health.get("healthy"),
+        "health_checked_at": health.get("checked_at", ""),
+        "health_issues": health.get("issues", {}),
+        "fact_chunks": health.get("fact_chunks", 0),
+        "vector_points": health.get("vector_points", 0),
+        "pending_chunks": health.get("pending_chunks", 0),
     }
 
 

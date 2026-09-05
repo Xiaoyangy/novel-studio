@@ -1,6 +1,8 @@
 package store
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -50,5 +52,40 @@ func TestRAGReadOnlyCachesInvalidateAfterSave(t *testing.T) {
 	}
 	if v1 != v2 {
 		t.Fatal("unchanged vector store should reuse the read-only snapshot")
+	}
+}
+
+func TestClearPendingUpsertsInvalidatesHealthOnlyWhenStateChanged(t *testing.T) {
+	root := t.TempDir()
+	st := NewStore(root)
+	if err := st.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	healthPath := filepath.Join(root, "meta", "rag", "health.json")
+	if err := os.MkdirAll(filepath.Dir(healthPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHealth := func() {
+		t.Helper()
+		if err := os.WriteFile(healthPath, []byte(`{"healthy":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHealth()
+	if err := st.RAG.ClearPendingUpserts(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(healthPath); err != nil {
+		t.Fatalf("no-op clear must preserve current health snapshot: %v", err)
+	}
+	if err := st.RAG.SavePendingUpserts(domain.RAGPendingUpserts{Chunks: []domain.RAGChunk{{ID: "pending"}}}); err != nil {
+		t.Fatal(err)
+	}
+	writeHealth()
+	if err := st.RAG.ClearPendingUpserts(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(healthPath); !os.IsNotExist(err) {
+		t.Fatalf("clearing durable pending state must invalidate health, err=%v", err)
 	}
 }

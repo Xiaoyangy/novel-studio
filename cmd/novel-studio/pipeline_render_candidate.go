@@ -2448,9 +2448,10 @@ func copyPipelineRenderCandidateTree(source, target string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("render candidate refuses non-regular file %s", path)
 		}
-		// Never hard-link a candidate: the writer and review stages update many
-		// append-only ledgers, and a shared inode would violate canon isolation.
-		return copyProjectAllFile(path, dst, info.Mode().Perm())
+		// Append-only ledgers always receive fresh inodes. The two large RAG
+		// snapshots are the narrow exception: their stores use atomic replacement,
+		// which gives the candidate copy-on-write isolation on first mutation.
+		return copyProjectAllFileCopyOnWrite(path, dst, info.Mode().Perm(), filepath.ToSlash(rel))
 	})
 }
 

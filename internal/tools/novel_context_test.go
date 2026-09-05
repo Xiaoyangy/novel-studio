@@ -3567,6 +3567,13 @@ func TestContextToolVectorRecallPrefiltersDesignOnlyBeforeTopK(t *testing.T) {
 		Point: domain.RAGVectorPoint{ID: fact.ID, Chunk: fact},
 		Score: 0.7,
 	})
+	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
+		SchemaVersion: domain.CurrentRAGIndexSchemaVersion,
+		Chunks:        []domain.RAGChunk{fact},
+		ChunkHashes:   []string{fact.Hash},
+	}); err != nil {
+		t.Fatalf("SaveIndexState: %v", err)
+	}
 	searcher := &contextFactPrefilterSearcher{ranked: ranked}
 	tool := NewContextTool(s, References{}, "default").
 		WithRAGEmbedder(contextTestEmbedder{}).
@@ -3583,7 +3590,7 @@ func TestContextToolVectorRecallPrefiltersDesignOnlyBeforeTopK(t *testing.T) {
 	if len(items) != 1 || items[0].Key != fact.ID {
 		t.Fatalf("rank-19 fact should be recalled after design-only prefilter: %+v", items)
 	}
-	if trace == nil || trace.Strategy != "qdrant_vector_engine_v2" {
+	if trace == nil || trace.Strategy != "qdrant_bm25_hybrid_v2" {
 		t.Fatalf("unexpected retrieval trace: %+v", trace)
 	}
 }
@@ -3611,6 +3618,14 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 		Summary:    "租约、账单、资产收益要连续推进。",
 		Text:       "语义召回命中夜租商铺的资产链。",
 	})
+	foreignSameID := rag.NormalizeChunk(domain.RAGChunk{
+		ID:         qdrantChunk.ID,
+		SourcePath: "project/other-book/world.md",
+		SourceKind: "note",
+		Facet:      "plot",
+		Summary:    "另一项目里内容不同但 ID 相同的陈旧点。",
+		Text:       "不允许通过当前项目的内容寻址边界。",
+	})
 	if err := s.RAG.SaveIndexState(domain.RAGIndexState{
 		Config: domain.RAGIndexConfig{Collection: "local_keyword"},
 		Chunks: []domain.RAGChunk{
@@ -3630,10 +3645,10 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 	}
 	tool := NewContextTool(s, References{}, "default").
 		WithRAGEmbedder(contextTestEmbedder{}).
-		WithRAGVectorSearcher(contextTestSearcher{hits: []rag.VectorSearchHit{{
-			Point: domain.RAGVectorPoint{ID: qdrantChunk.ID, Chunk: qdrantChunk},
-			Score: 0.92,
-		}}})
+		WithRAGVectorSearcher(contextTestSearcher{hits: []rag.VectorSearchHit{
+			{Point: domain.RAGVectorPoint{ID: foreignSameID.ID, Chunk: foreignSameID}, Score: 0.99},
+			{Point: domain.RAGVectorPoint{ID: qdrantChunk.ID, Chunk: qdrantChunk}, Score: 0.92},
+		}})
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"chapter":1}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -3656,6 +3671,11 @@ func TestContextToolRAGRecallPrefersQdrantVectorHits(t *testing.T) {
 	for _, item := range payload.Selected.RAG[1:] {
 		if item.Key == payload.Selected.RAG[0].Key {
 			t.Fatalf("duplicate hit in hybrid recall: %+v", payload.Selected.RAG)
+		}
+	}
+	for _, item := range payload.Selected.RAG {
+		if strings.Contains(item.Summary, "另一项目") {
+			t.Fatalf("same-ID foreign hash crossed the active index guard: %+v", payload.Selected.RAG)
 		}
 	}
 	if payload.ReferencePack.Trace.Strategy != "qdrant_bm25_hybrid_v2" {

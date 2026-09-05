@@ -291,6 +291,9 @@ func isProjectContaminatedRAGChunk(st *store.Store, chunk domain.RAGChunk) bool 
 	if st == nil {
 		return false
 	}
+	if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+		return false
+	}
 	text := strings.Join([]string{chunk.Text, chunk.Summary, chunk.Context, strings.Join(chunk.Keywords, " ")}, "\n")
 	return len(ProjectContaminationViolations(st, text)) > 0
 }

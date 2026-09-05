@@ -153,16 +153,10 @@ func startLocalQdrantBinary(bin string, cfg QdrantServiceConfig) error {
 		_ = logFile.Close()
 		return err
 	}
-	cmd := exec.Command(bin)
+	cmd := newLocalQdrantCommand(bin, cfg)
 	cmd.Stdin = nullFile
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(),
-		"QDRANT__SERVICE__HTTP_PORT="+qdrantHTTPPort(cfg.URL),
-		"QDRANT__SERVICE__GRPC_PORT="+qdrantGRPCPort(cfg.URL),
-		"QDRANT__STORAGE__STORAGE_PATH="+cfg.StorageDir,
-		"QDRANT__TELEMETRY_DISABLED=true",
-	)
 	detachQdrantCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = nullFile.Close()
@@ -176,6 +170,21 @@ func startLocalQdrantBinary(bin string, cfg QdrantServiceConfig) error {
 	}
 	_ = nullFile.Close()
 	return logFile.Close()
+}
+
+func newLocalQdrantCommand(bin string, cfg QdrantServiceConfig) *exec.Cmd {
+	cmd := exec.Command(bin)
+	// Qdrant writes process-local marker files (for example
+	// .qdrant-initialized). Keep those operational artifacts beside its durable
+	// storage instead of polluting whichever repository launched the CLI.
+	cmd.Dir = cfg.StorageDir
+	cmd.Env = append(os.Environ(),
+		"QDRANT__SERVICE__HTTP_PORT="+qdrantHTTPPort(cfg.URL),
+		"QDRANT__SERVICE__GRPC_PORT="+qdrantGRPCPort(cfg.URL),
+		"QDRANT__STORAGE__STORAGE_PATH="+cfg.StorageDir,
+		"QDRANT__TELEMETRY_DISABLED=true",
+	)
+	return cmd
 }
 
 func containerExists(ctx context.Context, name string) bool {

@@ -59,6 +59,25 @@ type QdrantClient struct {
 	vectorDim int
 }
 
+// QdrantPointSetVerification is a content-level comparison between the local
+// recovery source and a remote collection. A point count alone is insufficient:
+// two projects can have the same number of vectors while containing completely
+// different chunks.
+type QdrantPointSetVerification struct {
+	Expected       int `json:"expected"`
+	Actual         int `json:"actual"`
+	Matched        int `json:"matched"`
+	Missing        int `json:"missing"`
+	Unexpected     int `json:"unexpected"`
+	HashMismatched int `json:"hash_mismatched"`
+	DuplicateIDs   int `json:"duplicate_ids"`
+}
+
+func (v QdrantPointSetVerification) Exact() bool {
+	return v.Expected == v.Actual && v.Matched == v.Expected &&
+		v.Missing == 0 && v.Unexpected == 0 && v.HashMismatched == 0 && v.DuplicateIDs == 0
+}
+
 func NewQdrantClient(cfg QdrantClientConfig) (*QdrantClient, error) {
 	cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 	cfg.Collection = strings.TrimSpace(cfg.Collection)
@@ -267,6 +286,101 @@ func (c *QdrantClient) Count(ctx context.Context, exact bool) (int, error) {
 		return 0, err
 	}
 	return out.Result.Count, nil
+}
+
+// VerifyPointSet scrolls the complete collection without vectors and compares
+// the trusted chunk_id/hash payload against the local vector store. Qdrant's
+// scroll endpoint is used instead of a similarity query so every point is
+// checked deterministically, including points that would never enter top-k.
+func (c *QdrantClient) VerifyPointSet(ctx context.Context, points []domain.RAGVectorPoint) (QdrantPointSetVerification, error) {
+	expected := make(map[string]string, len(points))
+	for _, point := range points {
+		id := strings.TrimSpace(point.ID)
+		if id == "" {
+			id = strings.TrimSpace(point.Chunk.ID)
+		}
+		hash := strings.TrimSpace(point.Hash)
+		if hash == "" {
+			hash = strings.TrimSpace(point.Chunk.Hash)
+		}
+		if id == "" || hash == "" {
+			return QdrantPointSetVerification{}, fmt.Errorf("local qdrant verification point is missing id or hash")
+		}
+		if prior, exists := expected[id]; exists && prior != hash {
+			return QdrantPointSetVerification{}, fmt.Errorf("local qdrant verification has conflicting point id %s", id)
+		}
+		expected[id] = hash
+	}
+	report := QdrantPointSetVerification{Expected: len(expected)}
+	actual := make(map[string]string, len(expected))
+	var offset any
+	seenOffsets := map[string]struct{}{}
+	for {
+		body := map[string]any{
+			"limit":        256,
+			"with_payload": []string{"chunk_id", "hash"},
+			"with_vector":  false,
+		}
+		if offset != nil {
+			body["offset"] = offset
+		}
+		var out struct {
+			Result struct {
+				Points []struct {
+					ID      any            `json:"id"`
+					Payload map[string]any `json:"payload"`
+				} `json:"points"`
+				NextPageOffset any `json:"next_page_offset"`
+			} `json:"result"`
+		}
+		if err := c.doJSON(ctx, http.MethodPost, c.collectionPath()+"/points/scroll", body, &out, http.StatusOK); err != nil {
+			return report, err
+		}
+		for _, item := range out.Result.Points {
+			report.Actual++
+			id := stringFromPayload(item.Payload, "chunk_id")
+			if id == "" {
+				id = fmt.Sprint(item.ID)
+			}
+			hash := stringFromPayload(item.Payload, "hash")
+			if _, duplicate := actual[id]; duplicate {
+				report.DuplicateIDs++
+				continue
+			}
+			actual[id] = hash
+		}
+		if out.Result.NextPageOffset == nil {
+			break
+		}
+		offsetKey, err := json.Marshal(out.Result.NextPageOffset)
+		if err != nil {
+			return report, fmt.Errorf("encode qdrant scroll offset: %w", err)
+		}
+		key := string(offsetKey)
+		if _, repeated := seenOffsets[key]; repeated {
+			return report, fmt.Errorf("qdrant scroll returned repeated offset %s", key)
+		}
+		seenOffsets[key] = struct{}{}
+		offset = out.Result.NextPageOffset
+	}
+	for id, wantHash := range expected {
+		gotHash, exists := actual[id]
+		if !exists {
+			report.Missing++
+			continue
+		}
+		if gotHash != wantHash {
+			report.HashMismatched++
+			continue
+		}
+		report.Matched++
+	}
+	for id := range actual {
+		if _, exists := expected[id]; !exists {
+			report.Unexpected++
+		}
+	}
+	return report, nil
 }
 
 func (c *QdrantClient) DeleteSourcePath(ctx context.Context, sourcePath string) error {

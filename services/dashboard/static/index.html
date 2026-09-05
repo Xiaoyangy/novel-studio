@@ -995,7 +995,8 @@ function renderOverview(d) {
       <div class="panel">
         <div class="kv"><span class="k">资产覆盖</span><span><b>${assets.ready ?? d.assets_ready}/${assets.total ?? d.assets_total}</b> 项核心资产就绪</span></div>
         <div class="asset-grid">${assetItems}</div>
-        <div class="kv" style="margin-top:10px"><span class="k">RAG 引擎</span><span>${rag.ready ? `<b>${fmtNum(rag.chunks)}</b> chunks · ${esc(rag.store || "—")} / ${esc(rag.provider || "—")} / ${esc(rag.model || "—")} · 检索 ${rag.retrievals || 0} 次 · 写法召回 ${rag.craft_recalls || 0} 次` : "尚未建立索引"}</span></div>
+        <div class="kv" style="margin-top:10px"><span class="k">RAG 引擎</span><span>${rag.ready ? `<b>${fmtNum(rag.chunks)}</b> chunks · ${esc(rag.store || "—")} / ${esc(rag.provider || "—")} / ${esc(rag.model || "—")} · 检索 ${rag.retrievals || 0} 次 · 写法召回 ${rag.craft_recalls || 0} 次${rag.health == null ? "" : rag.health ? ' · <span class="tag ok">完整性通过</span>' : ' · <span class="tag rewrite">需要整理</span>'}` : "尚未建立索引"}</span></div>
+        ${rag.health == null ? "" : `<div class="kv"><span class="k">RAG 完整性</span><span>事实 ${fmtNum(rag.fact_chunks)} · 向量 ${fmtNum(rag.vector_points)} · pending ${fmtNum(rag.pending_chunks)}${Object.keys(rag.health_issues || {}).length ? ` · ${esc(Object.entries(rag.health_issues).map(([k,v]) => k + "=" + v).join("；"))}` : " · 本地索引/向量一致"}</span></div>`}
         <div class="kv"><span class="k">章节沉淀</span><span>人物状态 ${sediment.character_stage_files || 0} · 配角经历 ${sediment.side_journey_files || 0} · 世界增量 ${sediment.world_delta_files || 0} · 世界事件 ${sediment.world_events || 0} · 交付快照 ${sediment.delivery_snapshots || 0}</span></div>
       </div>
     </div>

@@ -294,6 +294,52 @@ func TestQdrantClientRejectsExistingDimensionMismatch(t *testing.T) {
 	}
 }
 
+func TestQdrantClientVerifyPointSetScrollsAndChecksHashes(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/collections/verify_collection/points/scroll" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode scroll body: %v", err)
+		}
+		if body["with_vector"] != false {
+			t.Fatalf("verification must not download vectors: %+v", body)
+		}
+		calls++
+		if calls == 1 {
+			if _, exists := body["offset"]; exists {
+				t.Fatalf("first scroll unexpectedly had offset: %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"result":{"points":[{"id":"remote-a","payload":{"chunk_id":"a","hash":"hash-a"}}],"next_page_offset":"remote-a"}}`))
+			return
+		}
+		if body["offset"] != "remote-a" {
+			t.Fatalf("second scroll offset=%v", body["offset"])
+		}
+		_, _ = w.Write([]byte(`{"result":{"points":[{"id":"remote-b","payload":{"chunk_id":"b","hash":"wrong-hash"}}],"next_page_offset":null}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewQdrantClient(QdrantClientConfig{URL: server.URL, Collection: "verify_collection"})
+	if err != nil {
+		t.Fatalf("NewQdrantClient: %v", err)
+	}
+	report, err := client.VerifyPointSet(context.Background(), []domain.RAGVectorPoint{
+		{ID: "a", Hash: "hash-a"},
+		{ID: "b", Hash: "hash-b"},
+		{ID: "missing", Hash: "hash-missing"},
+	})
+	if err != nil {
+		t.Fatalf("VerifyPointSet: %v", err)
+	}
+	if report.Exact() || report.Expected != 3 || report.Actual != 2 || report.Matched != 1 ||
+		report.Missing != 1 || report.HashMismatched != 1 || calls != 2 {
+		t.Fatalf("unexpected verification: %+v calls=%d", report, calls)
+	}
+}
+
 func TestCollectionNameIsStableAndSafe(t *testing.T) {
 	got := CollectionName("Novel Studio", "/tmp/她的第二算法/output/novel")
 	if got != CollectionName("Novel Studio", "/tmp/她的第二算法/output/novel") {

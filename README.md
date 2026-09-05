@@ -272,9 +272,17 @@ BM25 / embedding / Qdrant 命中
 # 构建或刷新项目索引
 novel-studio --build-rag --dir data/runs/<书名>/output/novel
 
-# 修复并验证 RAG / embedding / vector store 状态
+# 修复并验证单本书的 RAG / embedding / vector store / Qdrant 内容
 novel-studio --rag-ready --dir data/runs/<书名>/output/novel
+
+# 只读审计全部正式、投影、候选和归档快照
+novel-studio rag audit --root data/runs
+
+# 为正式索引创建可恢复备份、修复一致性并去重相同快照
+novel-studio rag maintain --root data/runs --apply
 ```
+
+`index_state.json` 是本地检索事实的权威清单，`vector_store.json` 是可恢复向量源，Qdrant 是可重建的在线缓存。写作前检查会滚动读取整个 collection，并逐项核对 `chunk_id` 与内容 hash；召回时还会再次拒绝不在当前本地索引中的远端命中。共享写法、对标和审核校准资料只走设计层 BM25，不会混入本书事实向量。全盘整理结果会写入 `data/runs/rag-maintenance-report.json`，每本书的轻量健康摘要会显示在 Dashboard。
 
 ## 模型与部署
 
@@ -327,7 +335,9 @@ Compose 构建默认使用 `https://goproxy.cn,direct`，海外或企业网络�
 | `novel-studio --pipeline --dir <RUN> --stages render --refresh-render-input` | 仅为尚未开始且没有 durable candidate evidence 的 sealed 章节刷新 model / provider / prompt 绑定 |
 | `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | 仅对满足全局终审范围的短篇，在逐章通过后执行 exact-book 终审并生成出版包 |
 | `novel-studio --build-rag --dir <RUN>/output/novel` | 构建项目 RAG 索引 |
-| `novel-studio --rag-ready --dir <RUN>/output/novel` | 验证 embedding 与向量状态 |
+| `novel-studio --rag-ready --dir <RUN>/output/novel` | 验证本地索引、embedding、向量与 Qdrant 内容一致性 |
+| `novel-studio rag audit --root data/runs` | 只读审计全部 RAG 正式与历史快照 |
+| `novel-studio rag maintain --root data/runs --apply` | 备份并修复正式索引，去重相同历史快照 |
 | `novel-studio service open` | 打开进度看板 |
 | `novel-studio --diag --dir <RUN>` | 生成诊断报告，不推进小说生产状态 |
 | `novel-studio --check` | 检查 provider、model 与 fallback 配置 |

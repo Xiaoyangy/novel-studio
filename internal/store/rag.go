@@ -173,6 +173,7 @@ func (s *RAGStore) SaveIndexState(state domain.RAGIndexState) error {
 		s.indexCache = nil
 		s.indexStamp = ragFileStamp{}
 		s.cacheMu.Unlock()
+		_ = s.io.RemoveFile("meta/rag/health.json")
 	}
 	return err
 }
@@ -228,6 +229,7 @@ func (s *RAGStore) SaveVectorStore(state domain.RAGVectorStore) error {
 		s.vectorCache = nil
 		s.vectorStamp = ragFileStamp{}
 		s.cacheMu.Unlock()
+		_ = s.io.RemoveFile("meta/rag/health.json")
 	}
 	return err
 }
@@ -288,11 +290,28 @@ func (s *RAGStore) LoadPendingUpserts() (*domain.RAGPendingUpserts, error) {
 }
 
 func (s *RAGStore) SavePendingUpserts(pending domain.RAGPendingUpserts) error {
-	return s.io.WriteJSON("meta/rag/pending_upserts.json", pending)
+	if err := s.io.WriteJSON("meta/rag/pending_upserts.json", pending); err != nil {
+		return err
+	}
+	_ = s.io.RemoveFile("meta/rag/health.json")
+	return nil
 }
 
 func (s *RAGStore) ClearPendingUpserts() error {
-	return s.io.RemoveFile("meta/rag/pending_upserts.json")
+	return s.io.WithWriteLock(func() error {
+		_, statErr := os.Stat(s.io.path("meta/rag/pending_upserts.json"))
+		existed := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if err := s.io.RemoveFileUnlocked("meta/rag/pending_upserts.json"); err != nil {
+			return err
+		}
+		if existed {
+			return s.io.RemoveFileUnlocked("meta/rag/health.json")
+		}
+		return nil
+	})
 }
 
 func (s *RAGStore) AppendTrace(trace domain.RetrievalTrace) error {
