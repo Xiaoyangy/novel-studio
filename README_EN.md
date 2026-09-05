@@ -1,382 +1,410 @@
 <div align="center">
 
-<img src="docs/assets/novel-studio-hero.jpg" alt="novel-studio hero image showing character relationships and a story timeline above an open book" width="100%">
+<img src="docs/assets/novel-studio-hero.jpg" alt="novel-studio: an open book surrounded by character relationships and a story timeline" width="100%">
 
-# novel-studio — Open-source, local-first AI novel engine
+# novel-studio
 
-**Simulate the world. Plan the arc. Render only what the viewpoint character can truly see.**
+**An open-source, local-first, recoverable AI engine for long-form fiction.**
 
-Project files and orchestration state stay on your machine; generation can use local models or remote APIs.
+Simulate the world and its characters, seal the chapter plan, then render only the causality the point-of-view character can actually perceive.
 
 [![GitHub Stars](https://img.shields.io/github/stars/Xiaoyangy/novel-studio?style=flat&logo=github&color=E3B341)](https://github.com/Xiaoyangy/novel-studio)
 [![Release](https://img.shields.io/github/v/release/Xiaoyangy/novel-studio?logo=github)](https://github.com/Xiaoyangy/novel-studio/releases/latest)
+[![CI](https://github.com/Xiaoyangy/novel-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Xiaoyangy/novel-studio/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.25.5-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20WSL2-supported-555)](#requirements)
 [![License](https://img.shields.io/github/license/Xiaoyangy/novel-studio)](LICENSE)
 
 [简体中文](README.md) · [English](README_EN.md)
 
-[Quick start](#quick-start) · [Why novel-studio?](#why-novel-studio) · [Runtime dashboard](#runtime-dashboard) · [Workflow](#from-world-to-prose) · [RAG](#rag-that-can-be-traced) · [Docs](#documentation-and-community)
+[Quick start](#quick-start) · [Pipeline](#production-pipeline) · [Character Agents](#independent-character-agents) · [RAG](#rag-and-context) · [Configuration](#models-and-deployment) · [Troubleshooting](#troubleshooting)
 
 </div>
 
 ---
 
-novel-studio is an open-source production system for **AI-assisted long-form fiction, web novels, short books and serialized storytelling**. It turns outlines, character continuity, world state, retrieval memory, prose review and revision into a durable pipeline instead of leaving them inside a chat transcript.
+novel-studio is designed for novels, serialized fiction, complete short books, and story-production teams. It turns outlines, character state, world state, RAG, reviews, and rewrites from fragile chat history into a local, verifiable, recoverable production pipeline.
 
-It is not a wrapper around “continue this paragraph.” The engine freezes a full-book navigation outline, simulates every chapter in the current arc, seals that causal chain, and only then renders and reviews prose one chapter at a time. Hidden world state stays outside the viewpoint character's knowledge.
+It is not a “continue the previous paragraph” chat wrapper, nor a WYSIWYG desktop editor. The system freezes the book-wide navigation first, then lets important characters make independent decisions inside the current arc. Only after those consequences are arbitrated and the arc is sealed does it render and review prose chapter by chapter. Only accepted prose and observed outcomes become canon.
 
-## Why novel-studio?
+## Core capabilities
 
-Generating a plausible page is easy. Keeping motives, knowledge, resources and off-screen causality coherent across many chapters is a different problem.
-
-| Long-form problem | How novel-studio handles it |
+| Problem | How novel-studio handles it |
 |---|---|
-| Characters only react when the protagonist appears | Every character has goals, pressure, resources, knowledge and independent off-screen actions |
-| The outline says one thing and the prose improvises another | Full-book navigation is frozen first; world simulation, POV planning, capacity and cross-chapter obligations are sealed before prose |
-| RAG returns a lot but influences little | A retrieval hit must become a sourced fact anchor or craft method inside the sealed render packet |
-| Characters know future facts or hidden secrets | World state and POV-visible state are separate, with mechanical first-appearance, knowledge and reveal boundaries |
-| Review and publication refer to different drafts | The candidate transaction binds both the plan digest and body SHA; review, acceptance and delivery must preserve that identity |
-| A long provider call fails and the run starts over | Pipeline stages, arc planning, candidate prose, review, publication and RAG use checkpoints and receipts |
-| Retries silently burn budget | Each sealed candidate has a durable prose-realization budget and fails before the provider when exhausted |
-
-### Highlights
-
-| Capability | What it means |
-|---|---|
-| 🌍 Multi-agent world simulation | Character decisions, relationships, knowledge, resources and off-screen actions produce the next causal state |
-| 🧭 Full-book orientation, arc-sized production | Freeze volume/arc/chapter navigation, then “plan one arc, render one arc”; review remains chapter-scoped |
-| 🧠 Long-term RAG memory | Separate channels for canon facts, writing craft, references and review calibration; BM25, embeddings and Qdrant are supported |
-| 🎭 Viewpoint projection | The Drafter receives only POV-visible facts, voice constraints, hard outcomes and a bounded set of writable beats |
-| 📖 Reader-first rendering | Sealed render makes one prose call and reports a reader-experience score; ordinary Writer paths may sample candidates, while anti-AI-voice and detector checks remain guardrails |
-| ✅ Exact-body quality loop | Deterministic gates, whole-chapter checks, an independent Reviewer, Editor and actual-state matching decide publication |
-| 🛟 Resumable execution | Recover from persisted evidence rather than trusting model narration or chat history |
-| 📊 Live observability | Inspect arc planning, chapters, characters, off-screen state, RAG, reviews, model calls, costs and errors |
-| 🔒 Local-first / self-hosted orchestration | Project files, indexes, prose and receipts stay in your own run directory; providers remain configurable |
+| Characters become irrational for plot convenience or know secrets too early | Important characters in the current arc have stable Agent identities, private observations, and structured memory; the World Arbiter may resolve outcomes but cannot rewrite intent |
+| The outline and prose drift apart | Book-wide chapter slots are frozen first; each arc then closes character decisions, cross-chapter causality, POV boundaries, and render capacity into immutable chapter contracts |
+| RAG retrieves plenty but the prose does not use it | Every hit is bound to an exact source and content digest, transformed into a fact anchor or craft method, and only then admitted to the sealed render packet |
+| Voice, facts, resources, and relationships drift over a long serialization | Accepted prose, continuity, relationships, resources, foreshadowing, and world changes are persisted as structured ledgers |
+| A rewrite is reviewed against the wrong body | Plans, candidates, reviews, actual deltas, and publication are bound to digests and the exact body SHA-256 |
+| A long run crashes and must start over | Pipeline phases, arc projections, draft candidates, reviews, and publication use checkpoints, leases, and idempotent recovery |
+| Repeated context and input tokens grow without control | Stage-specific minimal context, canonical de-duplication, event-driven activation, short-lived prefix caching, and configurable budgets bound the cost |
+| Production is a black box | The Dashboard shows arc planning, Character Agents, prose, RAG, usage, cost, errors, and recovery state without exposing raw chain-of-thought |
 
 ## Runtime dashboard
 
-![novel-studio dashboard showing chapter production, arc planning, review, RAG, model usage and runtime health](docs/assets/dashboard-overview-20260720.jpg)
+![novel-studio dashboard showing chapters, arc planning, review, RAG, model usage, and runtime state](docs/assets/dashboard-overview-20260720.jpg)
 
 <details>
-<summary><strong>Character and off-screen world views</strong></summary>
+<summary><strong>See character and off-screen world views</strong></summary>
 
-![novel-studio character simulation with goals, pressure, knowledge boundaries, relationships and growth](docs/assets/dashboard-characters-20260710.webp)
+![novel-studio character view showing profiles, pressure, knowledge boundaries, relationships, and arcs](docs/assets/dashboard-characters-20260710.webp)
 
-![novel-studio off-screen world simulation with independent actions, faction clocks, social mood and information flow](docs/assets/dashboard-offscreen-20260710.webp)
+![novel-studio off-screen world view showing independent actions, faction clocks, social mood, and information flow](docs/assets/dashboard-offscreen-20260710.webp)
 
 </details>
 
-The dashboard cross-checks prose, progress, sealed planning, reviews, RAG, checkpoints and runtime events. A frozen outline, a formally planned arc, an active prose chapter and accepted canon are reported as different states. These screenshots show production state and evidence, not a prose-quality sample.
+The Dashboard is a read-only production control plane. It distinguishes a frozen book outline, a formally planned arc, a chapter being rendered, and accepted prose instead of collapsing them into one misleading progress number.
 
 ## Quick start
 
 ### Requirements
 
-- Native macOS or Linux. Use WSL2 on Windows; do not use the native Windows ZIP from an older Release.
-- Release installs do not require a local Go toolchain. Source builds require Go 1.25.5 or newer; the current stable Go 1.27.1 is recommended.
-- At least one configured text-model provider. For production, route `roles.reviewer` independently to DeepSeek.
-- Python 3.9+ for the dashboard. Dashboard sources are embedded in the CLI, so Release installs no longer require a source checkout. Embeddings and Qdrant are optional and config-driven.
-- “Local-first” does not automatically mean fully offline. That also depends on text, embedding and vector providers, plus whether the run invokes `web_research` or another network-dependent setup step.
+- macOS or Linux. On Windows, use WSL2.
+- Release binaries do not require Go. Running from source requires Go 1.25.5, as declared by `go.mod`, or a compatible newer toolchain.
+- At least one working text-model provider.
+- Python 3.9+ for the Dashboard. Its web assets are embedded in the CLI, so a source checkout is not required beside a Release binary.
+- Embeddings and Qdrant are optional enhancements. A run is fully offline only when every active model and retrieval component is local and no network tool is invoked.
 
 ### 1. Install
 
-This README documents current `main`. Most users should choose the stable Release; use a source checkout for development or unreleased main-branch features. Choose one path.
+Most users should install the stable Release:
 
 ```bash
-# Option A (recommended): stable Release with SHA-256 verification
 curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
 ```
 
+The installer selects a writable destination, verifies SHA-256, and prints a `PATH` fix when needed.
+
+Use the current `main` branch when you need unreleased features:
+
 ```bash
-# Option B: current main from source
 git clone https://github.com/Xiaoyangy/novel-studio.git
 cd novel-studio
 ./scripts/run-local.sh doctor
 ```
 
-If the installer reports that its destination is not on `PATH`, run the exact `export PATH=...` line it prints. Source mode needs no pre-build; `scripts/run-local.sh` always executes the current checkout.
+Source mode needs no separate build step: `scripts/run-local.sh` always runs the current checkout. You can replace `novel-studio` in the commands below with `./scripts/run-local.sh`.
 
-### 2. Diagnose, configure, then verify providers
+### 2. Diagnose and configure models
 
 ```bash
 novel-studio doctor
-```
-
-`doctor` makes no model calls and does not alter project data. It checks the platform, writable workspace, effective config, Python/embedded dashboard, optional Qdrant runtime, and source-build tools, then prints actionable fixes. In source mode, replace `novel-studio` below with `./scripts/run-local.sh`.
-
-```bash
 novel-studio
-```
-
-The first-run wizard configures only the default generation route. For production, add `providers.deepseek` and `roles.reviewer` as shown in [config.example.jsonc](config.example.jsonc), keeping raw-body review independent from generation. Then run:
-
-```bash
 novel-studio --check
 ```
 
-Global configuration lives at `~/.novel-studio/config.json`. A project-local `./.novel-studio/config.json` can override it. `--check` verifies configured routes. The standalone `--draft-ai-judge` command requires the effective reviewer provider and model to be DeepSeek. Normal review records a configuration warning for a non-DeepSeek route and does not block solely on provider identity; the review verdict and other gates still decide acceptance.
+- `doctor` does not call a model or advance project state. It checks the platform, directories, configuration, Dashboard, and optional RAG dependencies.
+- Running `novel-studio` directly starts the first-run configuration wizard.
+- `--check` sends a minimal real request to validate provider, model, and fallback routing.
+
+Global configuration lives at `~/.novel-studio/config.json`; `./.novel-studio/config.json` overrides it for one project. See [config.example.jsonc](config.example.jsonc) for every field. In production, route `roles.reviewer` independently to DeepSeek. The dedicated `--draft-ai-judge` command verifies that the effective Reviewer really is a DeepSeek route.
 
 ### 3. Start a book
 
 ```bash
 novel-studio --pipeline --new-novel \
-  --prompt "Create a 12-chapter urban mystery with two female leads. Freeze character knowledge boundaries, arc payoffs and the ending in the outline before drafting."
+  --prompt "Write a complete 12-chapter dual-protagonist urban mystery, 2,000–2,500 Chinese characters per chapter; freeze character boundaries and ending payoffs in the outline first."
 ```
 
-For serious projects, keep the full creative contract in a file:
+For a long-running project, keep the creative contract in a file:
 
 ```bash
 novel-studio --pipeline --new-novel --prompt-file prompt.md
 ```
 
-This creates the project and enters a **bounded, resumable** pipeline. It does not ask one endless model context to blindly write an entire book. A normal invocation advances only legal stages and accepts at most the next prose chapter.
+New projects are written under `data/runs/<book>`. One pipeline invocation advances only the currently legal phase and at most the next chapter's render-and-accept cycle. It does not place an entire book inside one unbounded conversation.
 
-### 4. Resume
-
-```bash
-novel-studio --pipeline --dir data/runs/<book-name>
-```
-
-Repeat the same command until every arc and chapter has been accepted. The pipeline resumes from durable evidence rather than rerunning completed work. Do not edit `progress.json` by hand, and do not run two writing pipelines for the same book.
-
-### 5. Finalize and deliver an eligible short book
-
-The default stages do not include whole-book review. After the final chapter and terminal-arc receipt are present, run:
+### 4. Resume, inspect, and deliver
 
 ```bash
-novel-studio --pipeline --dir data/runs/<book-name> \
-  --stages finalize,deliver
-```
+# Resume from durable evidence
+novel-studio --pipeline --dir data/runs/<book>
 
-Eligible short books produce `output/novel/正文.md`, whole-book review artifacts and a publication package. A long-form project's current terminal state is its complete chapter-acceptance chain; this is not presented as an exact-book review.
-
-### 6. Open the dashboard
-
-```bash
+# Open the read-only Dashboard
 novel-studio service open
+
+# Produce diagnostics without advancing the novel
+novel-studio --diag --dir data/runs/<book>
 ```
 
-`service open` starts the embedded dashboard in the background when needed, then opens the browser. Default URL: [http://127.0.0.1:8765/](http://127.0.0.1:8765/). To watch server logs in the foreground, run `novel-studio service start` in a separate terminal. Release and source installs use the same dashboard sources.
+Repeat the same pipeline command to continue arc by arc and chapter by chapter. Never run two pipelines for the same book at once, and do not hand-edit progress, candidate directories, transaction directories, or runtime receipts.
 
-> **Path guide:** pipeline and `--diag` use `data/runs/<book-name>`; RAG commands use `data/runs/<book-name>/output/novel`; the dashboard scans `data/runs/` under the current workspace, while pipeline-launched dashboards bind to the active book's runs root automatically.
+For an eligible short book, run exact-book final review after the last chapter and final arc receipts exist:
 
-## From world to prose
+```bash
+novel-studio --pipeline --dir data/runs/<book> --stages finalize,deliver
+```
+
+This produces `output/novel/正文.md`, the whole-book review, and a publication package. Long-form projects currently end with a complete chapter-level acceptance chain; the system does not mislabel that as an exact-book final review.
+
+> **Path rule:** pipeline and `--diag` expect `data/runs/<book>`; `--build-rag` and `--rag-ready` expect its `output/novel` directory; the Dashboard scans `data/runs/` in the current workspace by default.
+
+## Production pipeline
 
 ```mermaid
 flowchart LR
-    P["Idea / Prompt"] --> B["Brainstorm"]
-    B --> A["Architect"]
-    A --> O["Freeze full-book outline"]
-    O --> Z["Zero-init"]
-    Z --> AP["Simulate every chapter<br/>in the current arc"]
-    AP --> S["Seal arc"]
-    S --> R["Render one chapter"]
-    R --> Q["Exact-body review"]
-    Q -->|more chapters in arc| R
-    Q -->|arc accepted| C["Arc completion"]
-    C -->|more arcs| AP
-    C -->|long-form terminal arc| F["Chapter acceptance chain complete"]
-    C -->|eligible short book| SF["Finalize + Deliver"]
+    I["Idea / Prompt"] --> B["Brainstorm"]
+    B --> A["Architect<br/>world + book outline"]
+    A --> Z["Zero-init<br/>initial state"]
+    Z --> C["Current-arc Character Agents<br/>parallel decisions"]
+    C --> W["World Arbiter<br/>resolved outcomes"]
+    W --> P["Planner<br/>POV chapter plans"]
+    P --> S["Seal current arc"]
+    S --> M["Promote next chapter"]
+    M --> D["Drafter<br/>chapter render"]
+    D --> R["Exact-body Review"]
+    R -->|accepted| K["Accepted Canon"]
+    R -->|rejected| D
+    K -->|more chapters in arc| M
+    K -->|next arc| C
 ```
 
-The important boundaries are:
+Five hard boundaries keep recovery and quality compatible:
 
-1. **Freeze the full-book outline first.** It gives global navigation but is not yet a formal plan for every chapter.
-2. **Simulate one arc, render one arc.** Every chapter in the current arc gets character decisions, causal transitions, POV boundaries, obligations and prose capacity before sealing.
-3. **Render and review chapter by chapter.** Each invocation promotes the next immutable chapter bundle and creates prose in an isolated candidate workspace.
-4. **Publish only accepted evidence.** The candidate enters canon only when exact-body review and actual-state change match the sealed plan.
-5. **Finish the arc before the next arc.** Missing acceptance receipts or body-hash drift block progression. Exact-book finalization and publication packages currently apply only to projects that satisfy the short-book global-review contract; they are not a long-form whole-book review claim.
+1. **Freeze book navigation first.** Volumes, arcs, and chapter slots define global direction but do not pretend to be formal chapter plans.
+2. **Plan one complete arc at a time.** Character choices, cross-chapter consequences, POV visibility, and render capacity must close before sealing.
+3. **Produce prose chapter by chapter.** Each run promotes only the next sealed bundle; draft and review work stays in an isolated candidate directory.
+4. **Only accepted bodies become canon.** Rejected drafts retain diagnostics but cannot contaminate live canon or canonical character memory.
+5. **Complete the arc before opening the next one.** Missing chapters, receipts, mismatched state roots, or body-SHA drift fail closed.
 
-Arc-sized planning captures multi-chapter cause and effect. Chapter-sized rendering keeps prose quality, cost and revision bounded. See the [Project-All arc architecture](docs/project-all-architecture.md) for generation, bundle, obligation, promotion and recovery contracts.
+| Role | Responsibility |
+|---|---|
+| Coordinator | Finds the currently legal phase and dispatches tools; it does not replace specialist Agents |
+| Architect | Builds the premise, cast, world, and book map; creates a successor generation when a hard contract becomes infeasible |
+| Character Agent | Chooses from a private observation packet without seeing future outline material or another character's secrets |
+| World Arbiter | Resolves time, place, resources, knowledge, rules, and collisions; it decides outcomes without modifying intent |
+| Writer / Planner | Builds POV chapter plans from final arbitration; soft plot can be recomputed, hard contracts cannot be bypassed |
+| Drafter | Consumes only the immutable render packet and turns planned events into prose |
+| Editor / Reviewer | Evaluate the same exact body for structure, continuity, reader experience, and independent raw-prose quality |
 
-## Prose quality loop
+See [Project-All arc architecture](docs/project-all-architecture.md) and the [production and operations reference](README-TECHNICAL.md) for generation, bundle, promotion, outcome, and recovery details.
 
-```text
-sealed plan + exact frozen render context
-                  ↓
-      typed preflight + one-shot permit
-                  ↓
-            isolated draft
-                  ↓
- deterministic gates + hard consistency
-                  ↓
-           candidate commit
-                  ↓
- whole-chapter local checks + Editor + independent raw-body Reviewer
-                  ↓
- actual-delta match + journaled publication
+## Independent Character Agents
+
+New projects enable `character-agent-protocol.v1` by default:
+
+- Protagonists keep stable Agent identities across the book; renames and aliases do not create new identities.
+- Protagonists, core characters, and important supporting characters in the current arc activate on events. Crowds and decorative characters remain group simulations.
+- Each Agent sees only its profile, goals, resources, relationships, commitments, known facts, and accepted memory.
+- Proposals run concurrently with a default cap of four. There is no eight-character limit; larger casts are batched automatically.
+- The Arbiter may return minimal conflict information once to only the affected characters. If the second round still cannot close, planning stops.
+- When character choices break a soft outline, the Planner recomputes it. If a hard contract becomes infeasible, the Architect creates a successor generation.
+- Projected memory stays inside its generation. Only accepted events that the character actually perceived are promoted to canonical long-term memory.
+- The system stores structured choices, concise reasons, constraints, outcomes, and usage—not raw chain-of-thought.
+
+These defaults apply when a role does not override them; `character` and `world_arbiter` otherwise inherit the Writer model:
+
+```json
+{
+  "character_agents": {
+    "protocol": "v1",
+    "scope": "active_core",
+    "activation": "event_driven",
+    "max_concurrency": 4,
+    "max_revision_rounds": 1
+  }
+}
 ```
 
-Every accepted chapter must answer four questions:
+## RAG and context
 
-- **Are the facts correct?** Amounts, time, place, authorization, knowledge and causal order must match the sealed plan.
-- **Does the story work?** Goal, resistance, action, turn, relationship movement, reader reward and hook must be supported.
-- **Does the prose read like fiction?** The pipeline checks for report-like exposition, repetitive rhythm, dialogue-as-data-transfer and metadata leakage.
-- **Was this exact body reviewed?** Review, consistency, commit, acceptance and delivery must bind the same body SHA, while the candidate transaction also binds the correct plan digest.
-
-Prose is written for readers, not for detectors. The engine computes a deterministic **reader-experience score** (scene concreteness, live dialogue, sentence-rhythm variety, POV presence and forward pull; higher reads better). Ordinary non-sealed Writer/Drafter paths may use it during three-candidate selection; sealed render intentionally makes one prose-provider call and reports the score in review and the dashboard. It stays a soft signal: it steers prose toward readers, while anti-AI-voice and external detection remain guardrails — passing them is the floor, not the point.
-
-Third-party detector websites remain optional, user-supplied spot checks. novel-studio does not operate those sites and does not block production when no external score is reported. See the [external detector protocol](docs/external-detector-protocol.md).
-
-## RAG that can be traced
-
-novel-studio uses retrieval-augmented generation as a provenance path, not a raw context dump:
+RAG is not a mechanism for dumping similar passages into the Drafter's prompt. It is a traceable, verifiable, minimal evidence pipeline:
 
 ```text
 BM25 / embedding / Qdrant hit
               ↓
- exact source ref + content-addressed receipt
+exact source ref + content-addressed receipt
               ↓
- Planner converts it into a chapter fact or craft method
+Planner converts it into a fact anchor or craft method
               ↓
- sealed render packet
+sealed render packet
               ↓
- Drafter receives the smallest POV-safe input
+Drafter reads only the authorized minimum
 ```
 
-| Retrieval channel | Purpose |
+| Data layer | Content and boundary |
 |---|---|
-| Canon facts | World rules, character state, chapter facts, resources, relationships and foreshadowing |
-| Writing craft | Dialogue, scene construction, pacing, genre methods and craft cards |
-| Reference material | Isolated structural samples and reference-work analysis |
-| Review calibration | Readability, AIGC signals, platform feedback and revision history |
-
-Each arc generation freezes its own `rag_snapshot_root`. The Drafter cannot read raw hits or query live Qdrant during rendering; only transformed, sourced and sealed inputs cross that boundary.
-
-This proves provenance and controlled injection into planning. It does not mechanically prove that every soft fact anchor or craft suggestion changed the final prose.
+| Book facts | World rules, character state, chapter facts, relationships, resources, and foreshadowing; eligible for the fact vector index |
+| Shared craft | Dialogue, scene, pacing, genre, benchmark, and review material; methods only, never canon |
+| Local authority | `meta/rag/index_state.json` is the index manifest; `vector_store.json` is the recoverable vector source |
+| Online cache | Qdrant provides low-latency retrieval but cannot overwrite local authority; mismatched content is rebuilt |
+| Retrieval audit | Queries, strategies, hits, reasons, and receipts remain available for replay and verification |
 
 ```bash
-novel-studio --build-rag --dir data/runs/<book-name>/output/novel
-novel-studio --rag-ready --dir data/runs/<book-name>/output/novel
+# Build or refresh one book's index
+novel-studio --build-rag --dir data/runs/<book>/output/novel
+
+# Repair and verify embeddings, local vectors, and Qdrant
+novel-studio --rag-ready --dir data/runs/<book>/output/novel
+
+# Read-only audit of canonical, projected, candidate, and archived snapshots
 novel-studio rag audit --root data/runs
+
+# Back up first, then repair canonical indexes and de-duplicate identical snapshots
 novel-studio rag maintain --root data/runs --apply
 ```
 
-`index_state.json` is the authoritative local retrieval set, `vector_store.json` is the recoverable vector source, and Qdrant is a rebuildable online cache. Readiness now scrolls the complete collection and verifies every `chunk_id` and content hash; runtime recall also rejects remote hits that do not belong to the active local index. Shared craft, benchmark and review-calibration material remains in the design-only BM25 channel instead of entering book-fact vectors. Full-tree maintenance writes `data/runs/rag-maintenance-report.json` and a lightweight per-book health summary consumed by the dashboard.
+Every arc projection freezes its own `rag_snapshot_root`. The Drafter never sees raw hits or connects to live Qdrant during rendering. See the [RAG lifecycle audit](docs/design-audits/rag-full-lifecycle-audit-20260905.md) for creation, retrieval, cross-project isolation, maintenance, and the full stored-data review.
+
+### Token and execution efficiency
+
+- Focused profiles retain canonical context only; exact root-level mirrors are removed before the first budget check.
+- Outline, character, and other foundation data is reused within one `novel_context` call instead of being read and parsed repeatedly.
+- Chinese restore packets use CJK-aware token estimates and remain valid UTF-8 and JSON after truncation.
+- Important characters call a model only when appearance, information, deadline, resource, relationship, or commitment events activate them. Sleeping characters cost no model call.
+- Multi-turn Agents use short-lived prefix caching. The official OpenAI endpoint receives an opaque routing hash that contains no project path or character name.
+- Arbitrary OpenAI-compatible relays do not receive proprietary cache parameters by default. Opt in with `"prompt_cache_params": true` under provider `extra` only after verifying relay support.
+- The Dashboard and usage ledger track input, output, cache read/write, and cost by role. `budget.book_usd` can set a per-book warning and stop line.
+
+See [context management](docs/context-management.md) for compaction, restore packs, and context receipts.
+
+## Prose quality and consistency
+
+Every chapter must answer four questions:
+
+- **Are the facts correct?** Amounts, counts, time, place, authorization, knowledge, and causality must match the sealed plan.
+- **Does the story work?** Goals, resistance, actions, turns, relationship movement, reader payoff, and forward pull must be present.
+- **Does it read like fiction?** Process-report prose, over-explanation, repetitive rhythm, dialogue conveyor belts, and metadata leakage are rejected.
+- **Was the right body reviewed?** Drafter, Editor, Reviewer, consistency, commit, and delivery evidence must bind the same body SHA.
+
+Configured style changes only voice, narrative distance, syntax, rhythm, imagery, paragraphing, and dialogue texture. It cannot alter events, decisions, facts, state, or POV knowledge. Accepted prose also feeds serial style memory that detects unnecessary repeated phrases, exact sentence reuse, and structurally identical openings or endings while excluding canonical names and chapter titles.
+
+A candidate is atomically published only after deterministic gates, the Editor, the independent Reviewer, actual state changes, and the plan contract agree. External human detectors remain optional user-supplied spot checks; novel-studio does not operate them or block on unknown results. See the [writing and review workflow](docs/writing-review-workflow.md) and [external detector protocol](docs/external-detector-protocol.md).
 
 ## Models and deployment
 
-Roles can use different providers, models and reasoning effort. Adapters currently cover OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Qwen, GLM, Grok, MiniMax, Mimo, Ollama, Bedrock, OpenAI-compatible gateways and the local Codex CLI. Adapter support does not mean every current model release has been tested in every production role.
+Each role can select its own provider, model, reasoning effort, and fallbacks. Adapters currently cover OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Qwen, GLM, Grok, MiniMax, Mimo, Ollama, Bedrock, OpenAI-compatible relays, and the local Codex CLI. Adapter support does not imply that every model version has been production-validated in every role.
 
-| Configuration | Purpose |
+| Configuration key | Purpose |
 |---|---|
-| `providers` | Credentials, protocol, base URL, model and extra parameters |
-| `roles` | Coordinator, Architect, Writer (shared by World Simulator and Planner), Drafter, Editor and Reviewer routing |
-| `context_window` | Real context limits and compaction policy |
-| `rag.embedding` | Remote embeddings or local GGUF embeddings |
-| `rag.qdrant` | Qdrant address, collection and startup behavior |
-| `budget` | Per-book cost warnings and hard stops |
+| `provider` / `model` | Default text model |
+| `providers` | Credentials, protocol, base URL, model list, and provider extras |
+| `roles` | Independent routing for Coordinator, Architect, Writer, Character, World Arbiter, Drafter, Editor, and Reviewer |
+| `character_agents` | Activation scope, concurrency, and conflict revision rounds |
+| `context_window` | The real window for a custom model or an earlier compaction ceiling |
+| `rag.embedding` / `rag.qdrant` | Embedding and vector retrieval |
+| `budget` | Per-book cost warning and hard stop |
 | `notify` | Desktop or custom notifications |
 
-All multi-turn agents enable short-lived prefix caching. Providers with block-cache support cache the stable system/tools prefix and the latest tool result; the official OpenAI endpoint receives an opaque hashed routing key. Arbitrary OpenAI-compatible gateways do not receive proprietary cache parameters by default, which avoids failures on strict relays. If a relay is known to forward them, opt in with `"prompt_cache_params": true` in that provider's `extra` object.
+**Local-first does not mean offline by default.** Project files and orchestration state stay on your machine; whether prose leaves it depends on the configured provider. Even with local text models, embeddings, and Qdrant, tools such as `web_research` may still use the network. Never commit real API keys; prefer `api_key_env`.
 
-Project state stays local. For production, route the raw-body `reviewer` independently to DeepSeek; other roles remain independently configurable. A run is fully offline only when every active role and retrieval service is local and no stage invokes `web_research` or another network-dependent setup step. Never commit real API keys.
-
-Docker users should create writable config and workspace directories, then use one-shot Compose runs for the same workflow:
+Docker quick start:
 
 ```bash
 mkdir -p config workspace
-docker compose run --rm novel-studio             # first-time setup
+docker compose run --rm novel-studio
 docker compose run --rm novel-studio doctor --dir /workspace
 docker compose run --rm novel-studio --check
 ```
 
-Compose builds default to `https://goproxy.cn,direct`; set `GOPROXY` before building to use an enterprise or regional proxy. To serve the dashboard from the container, run `docker compose run --rm --service-ports novel-studio service start --host 0.0.0.0`, then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When the Compose Qdrant service is enabled, set `rag.qdrant.url` to `http://qdrant:6333`, not the container's own `127.0.0.1`.
+To start the Dashboard from Compose:
 
-## Who is it for?
+```bash
+docker compose run --rm --service-ports novel-studio service start --host 0.0.0.0
+```
 
-- Authors building dozens to hundreds of chapters of serialized fiction or web novels.
-- Story teams that need durable character state, knowledge boundaries, relationships, resources and payoff tracking.
-- Developers who want a self-hosted AI writing workflow with explicit models, RAG, cost and project files.
-- Engineers studying multi-agent storytelling, world simulation, context governance and resumable agent pipelines.
-- Content studios that need planning, prose and chapter review, plus exact-book finalization and publication packages for eligible short books.
-
-novel-studio is currently a CLI-centered production engine, not a drag-and-drop desktop editor. It does not promise a perfect million-word book from one unattended prompt. Long-running projects are the design target; this is not a claim that a completed million-word book has passed production-quality validation. Final quality still depends on the creative contract, models, source material, review standards, budget and author sampling.
+Then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When using the Compose Qdrant service, set `rag.qdrant.url` to `http://qdrant:6333`.
 
 ## Common commands
 
-In the table below, `<RUN>` means `data/runs/<book-name>`.
+`<RUN>` means `data/runs/<book>` below.
 
 | Command | Purpose |
 |---|---|
-| `novel-studio doctor` | Check local prerequisites and print fixes without calling a model |
-| `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the pipeline |
-| `novel-studio --pipeline --dir <RUN>` | Resume the next legal step |
-| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Simulate and seal the current arc without prose |
-| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal,promote,render` | Verify the sealed arc, then render and review the next chapter |
-| `novel-studio --pipeline --dir <RUN> --stages render --refresh-render-input` | Refresh model/provider/prompt bindings for a sealed chapter that has no durable candidate evidence |
-| `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | For eligible short books only, run exact-book review and build the publication package after all chapters pass |
+| `novel-studio doctor [--dir <RUN>]` | Check the environment without calling a model |
+| `novel-studio --check` | Verify provider, model, and fallback connectivity |
+| `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the full workflow |
+| `novel-studio --pipeline --dir <RUN>` | Resume from trusted evidence |
+| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Formally project and seal the current arc without writing prose |
+| `novel-studio --pipeline --dir <RUN> --stages promote,render` | Render and review the next sealed chapter bundle |
+| `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | Run whole-book review and delivery for an eligible short book |
 | `novel-studio --build-rag --dir <RUN>/output/novel` | Build the project RAG index |
-| `novel-studio --rag-ready --dir <RUN>/output/novel` | Validate the local index, vectors and exact Qdrant contents |
-| `novel-studio rag audit --root data/runs` | Read-only audit of canonical and historical RAG snapshots |
-| `novel-studio rag maintain --root data/runs --apply` | Back up and repair canonical indexes, then deduplicate identical snapshots |
-| `novel-studio service open` | Open the dashboard |
-| `novel-studio --diag --dir <RUN>` | Generate diagnostics without advancing production state |
-| `novel-studio --check` | Check provider, model and fallback configuration |
+| `novel-studio --rag-ready --dir <RUN>/output/novel` | Verify and recover RAG and Qdrant |
+| `novel-studio rag audit --root data/runs` | Read-only audit of every RAG snapshot |
+| `novel-studio rag maintain --root data/runs --apply` | Back up, repair, and de-duplicate canonical indexes |
+| `novel-studio service open` | Start or open the Dashboard |
+| `novel-studio --diag --dir <RUN>` | Produce diagnostics without advancing project state |
+| `novel-studio --version` | Print the installed version |
+| `novel-studio update [version]` | Update a Release installation |
 
-Advanced rebase, outline repair, successor-generation, slow-run diagnostics, the full output tree and execution receipts live in the [production reference](README-TECHNICAL.md).
+Use `novel-studio --pipeline --help`, `novel-studio service --help`, and `novel-studio rag --help` for all options. Advanced rebase, outline repair, successor generation, and slow-run diagnostics live in the [production and operations reference](README-TECHNICAL.md).
 
-## Documentation and community
+## Project data
 
-Most deep technical references are currently Chinese-first. This English README covers the supported workflow and operational boundaries without implying that the full documentation set has already been translated.
+```text
+data/runs/<book>/
+├── brainstorm.md
+├── prompt.md                         # optional stable creative contract
+├── archives/                         # recoverable pre-rebase archives
+└── output/
+    ├── .render-candidates/           # isolated candidates, rejections, diagnostics
+    ├── .render-transactions/         # immutable phase receipts
+    └── novel/
+        ├── premise.md
+        ├── characters.json
+        ├── layered_outline.json
+        ├── world_rules.json
+        ├── chapters/                 # accepted prose
+        ├── reviews/                  # exact-body review evidence
+        ├── 正文.md                   # whole text after short-book finalize
+        └── meta/
+            ├── character_agents/     # registry, observations, decisions, arbitration, memory
+            ├── rag/                  # index, vectors, traces, receipts, health
+            └── ...                   # progress, world state, planning, publication receipts
+```
 
-| Document | Topic |
+Durable artifacts—not chat history, a model's claims, or one progress number—are the source of truth.
+
+## Troubleshooting
+
+| Symptom | What to do |
 |---|---|
-| [中文 README](README.md) | Chinese project overview and quick start |
-| [Production reference](README-TECHNICAL.md) | Full operational contracts, recovery, commands and output layout (Chinese) |
-| [System architecture](docs/architecture.md) | Host, Agent, Tools, Store and context topology |
-| [Project-All arc architecture](docs/project-all-architecture.md) | Arc planning, sealing, chapter acceptance and next-arc unlock |
-| [Design-stage workflow](docs/design-stage-workflow.md) | Architect, outline-all and zero-init |
-| [Context management](docs/context-management.md) | Stage-aware compaction, receipts and recovery packets |
-| [Data lifecycle](docs/data-lifecycle-and-progression.md) | Chapter, character, world and progression ledgers |
-| [Writing and review workflow](docs/writing-review-workflow.md) | Draft, review, rewrite, commit and delivery |
-| [Evaluation system](docs/evaluation-system.md) | Cases, metrics and regressions |
-| [Observability](docs/observability.md) | Events, usage, traces and diagnostics |
+| `novel-studio: command not found` | Run the `export PATH=...` line printed by the installer, or invoke the installed absolute path |
+| You do not know what the machine is missing | Run `novel-studio doctor` first; it does not call a model |
+| Configuration validates but the model is unavailable | Run `novel-studio --check`; verify provider key, model, base URL, quota, and role fallbacks |
+| The Release lacks a README feature | This README describes current `main`; upgrade the Release or run source through `./scripts/run-local.sh` |
+| A pipeline was interrupted or appears stuck | Repeat the exact pipeline command; inspect checkpoints through `service open` or `--diag`; do not edit receipts |
+| RAG has no hits or Qdrant differs | Run `--build-rag`, then `--rag-ready`; use the read-only `rag audit` before full maintenance |
+| The Dashboard does not open | Run `novel-studio service status`; use `service start` when foreground logs are needed |
+| The book reports an execution lock | Confirm that no other pipeline is active; follow diagnostics after a crash instead of deleting lock files |
 
-Found a bug or have a production use case? Open a [GitHub Issue](https://github.com/Xiaoyangy/novel-studio/issues). Pipeline changes should include the intended boundary and regression coverage.
+If the problem remains, open a [GitHub Issue](https://github.com/Xiaoyangy/novel-studio/issues) with the version, platform, command, and redacted `--diag` output. Never attach API keys or prose you are not authorized to share.
 
-### Roadmap
+## Scope and limitations
 
-- Smaller onboarding templates and reproducible example books.
-- Public benchmarks for long-form continuity, RAG grounding and prose quality.
-- Broader English documentation and cross-platform installation.
-- Richer dashboard diagnostics and human-confirmation workflows.
+Good fits:
 
-## FAQ
+- Authors writing dozens or hundreds of chapters who need durable character, relationship, resource, foreshadowing, and knowledge continuity.
+- Developers and content teams who want control over models, RAG, cost, and local project files.
+- Engineers researching multi-Agent writing, world simulation, long-context governance, and recoverable pipelines.
 
-<details>
-<summary><strong>Is novel-studio an AI novel generator or a writing assistant?</strong></summary>
+Current limits:
 
-Both, but “AI novel production engine” is more precise. Brainstorming, world design, full-book outlining, arc simulation, chapter prose and review share one resumable data contract. Eligible short books may also use exact-book finalization and delivery.
+- This is not a drag-and-drop desktop editor, and it does not promise a perfect million-character novel from one unattended prompt.
+- Million-character continuity is an architectural target, not a claim of public production validation on a finished million-character book.
+- Final quality still depends on the creative contract, model capability, RAG material, review thresholds, budget, and author inspection.
+- Exact-book finalization is currently available only to short projects that satisfy its review contract; long-form work uses chapter and arc acceptance chains.
 
-</details>
+## Documentation
 
-<details>
-<summary><strong>Can it write a million-word novel with one click?</strong></summary>
-
-No. It is designed for long-running fiction through repeated, bounded arc and chapter calls; it does not claim that a completed million-word production sample has already passed quality validation. Quality, speed and cost still depend on models, genre, the creative contract, RAG and review requirements.
-
-</details>
-
-<details>
-<summary><strong>Does it really use RAG?</strong></summary>
-
-Yes. It supports BM25, embeddings, local vector artifacts and Qdrant. Retrievals must pass through exact references, receipts and Planner transformation before entering a sealed render packet; raw hits do not go to the prose model.
-
-</details>
-
-<details>
-<summary><strong>Can I use local models or run fully offline?</strong></summary>
-
-You can configure Ollama, a local OpenAI-compatible endpoint, local GGUF embeddings and self-hosted Qdrant. A run is fully offline only when every active role and retrieval component is local and no stage invokes `web_research` or another network-dependent setup step.
-
-</details>
+| Document | Contents |
+|---|---|
+| [Production and operations](README-TECHNICAL.md) | Execution locks, receipts, recovery, rebase, outline repair, commands, and the full output tree |
+| [System architecture](docs/architecture.md) | Host, Agent, Tools, Store, and context topology |
+| [Project-All arc architecture](docs/project-all-architecture.md) | Current-arc projection, sealing, chapter acceptance, and next-arc unlock |
+| [Design-stage workflow](docs/design-stage-workflow.md) | Architect, outline-all, and zero-init |
+| [Context management](docs/context-management.md) | Stage compaction, restore packs, and context receipts |
+| [Data lifecycle](docs/data-lifecycle-and-progression.md) | Chapters, characters, world state, and progression ledgers |
+| [Writing and review](docs/writing-review-workflow.md) | Draft, review, rewrite, commit, and delivery |
+| [RAG lifecycle audit](docs/design-audits/rag-full-lifecycle-audit-20260905.md) | Creation, retrieval, isolation, maintenance, and stored-data review |
+| [Evaluation system](docs/evaluation-system.md) | Test cases, metrics, and regression |
+| [Observability](docs/observability.md) | Events, usage, traces, and diagnostics |
 
 ## Development
 
 ```bash
 go test -count=1 ./...
+go test -race ./internal/agents ./internal/agents/ctxpack ./internal/tools ./internal/store ./services/dashboard
 go vet ./...
 go build -o /tmp/novel-studio ./cmd/novel-studio
 
@@ -387,12 +415,14 @@ python3 -m unittest services.dashboard.test_server -v
 git diff --check
 ```
 
+Changes to pipeline, storage contracts, or recovery paths must include regression tests. Issues and pull requests are welcome on [GitHub](https://github.com/Xiaoyangy/novel-studio/issues).
+
 ## License
 
 [Apache License 2.0](LICENSE)
 
 <div align="center">
 
-If this project helps, please [⭐ Star the repository](https://github.com/Xiaoyangy/novel-studio), [open an issue](https://github.com/Xiaoyangy/novel-studio/issues), or share your experience.
+If novel-studio helps you, consider [⭐ starring the repository](https://github.com/Xiaoyangy/novel-studio), [opening an issue](https://github.com/Xiaoyangy/novel-studio/issues), or sharing your experience.
 
 </div>
