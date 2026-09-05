@@ -1,6 +1,9 @@
 package bootstrap
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestConfigResolveReasoningEffort(t *testing.T) {
 	cfg := Config{
@@ -35,6 +38,18 @@ func TestConfigResolveReasoningEffort(t *testing.T) {
 	}
 	if got := empty.ResolveReasoningEffort("writer"); got != "xhigh" {
 		t.Errorf("空默认下 writer 覆盖应生效，得 %q", got)
+	}
+}
+
+func TestCharacterAgentDefaultsAndConcurrencyLimit(t *testing.T) {
+	cfg := Config{Provider: "local", ModelName: "model", Providers: map[string]ProviderConfig{"local": {Type: "openai", APIKey: "test"}}}
+	cfg.FillDefaults()
+	if !cfg.CharacterAgentsEnabled() || cfg.CharacterAgents.Protocol != "v1" || cfg.CharacterAgents.Scope != "active_core" || cfg.CharacterAgents.Activation != "event_driven" || cfg.CharacterAgents.MaxConcurrency != 4 || cfg.CharacterAgents.MaxRevisionRounds != 1 {
+		t.Fatalf("unexpected character-agent defaults: %+v", cfg.CharacterAgents)
+	}
+	cfg.CharacterAgents.MaxConcurrency = 5
+	if err := cfg.ValidateBase(); err == nil || !strings.Contains(err.Error(), "max_concurrency") {
+		t.Fatalf("character-agent concurrency above four was not rejected precisely: %v", err)
 	}
 }
 

@@ -149,6 +149,7 @@ func buildPipelineProjectedChapterBundle(
 		PreviousBundleDigest:     previousBundleDigest,
 		ProjectedPreStateRoot:    preStateRoot,
 		ChapterWorldSimulation:   simulation,
+		CharacterAgentEvidence:   artifacts.CharacterAgentEvidence,
 		ChapterPlan:              plan,
 		FormalWorldSimulation:    pipelineFormalWorldSimulationV2(simulation),
 		POVPlan:                  pipelinePOVPlanV2(simulation, plan),

@@ -110,6 +110,10 @@ var knownRoles = map[string]bool{
 	"coordinator": true,
 	"architect":   true,
 	"writer":      true,
+	// character 为所有独立角色 Agent 的共享模型角色；world_arbiter 只
+	// 裁决行动可行性与结果。两者未配置时都继承 writer。
+	"character":     true,
+	"world_arbiter": true,
 	// drafter：正文渲染角色。未配置时完整继承 writer，保持老配置行为不变；
 	// 显式配置后可让推演继续走 writer，而正文改用另一模型。
 	"drafter": true,
@@ -170,6 +174,23 @@ type Config struct {
 	// RAG 语义检索配置。缺省只使用本地 keyword RAG；启用 embedding 后，
 	// --build-rag 会生成本地向量索引，novel_context 会优先做向量召回。
 	RAG RAGConfig `json:"rag,omitzero"`
+
+	// CharacterAgents controls the independent per-character decision protocol.
+	// New configurations default to v1; a sealed legacy planning generation is
+	// still pinned by its own generation identity until its arc boundary.
+	CharacterAgents CharacterAgentsConfig `json:"character_agents,omitzero"`
+}
+
+type CharacterAgentsConfig struct {
+	Protocol          string `json:"protocol,omitempty"`   // v1 / legacy
+	Scope             string `json:"scope,omitempty"`      // active_core
+	Activation        string `json:"activation,omitempty"` // event_driven
+	MaxConcurrency    int    `json:"max_concurrency,omitempty"`
+	MaxRevisionRounds int    `json:"max_revision_rounds,omitempty"`
+}
+
+func (c Config) CharacterAgentsEnabled() bool {
+	return c.CharacterAgents.Protocol != "legacy"
 }
 
 type RAGConfig struct {
@@ -296,7 +317,7 @@ func (c *Config) ValidateBase() error {
 			return err
 		}
 		if !knownRoles[role] {
-			return fmt.Errorf("unknown role %q in roles config (valid: coordinator/architect/writer/drafter/editor/reviewer): %w", role, errs.ErrConfig)
+			return fmt.Errorf("unknown role %q in roles config (valid: coordinator/architect/writer/character/world_arbiter/drafter/editor/reviewer): %w", role, errs.ErrConfig)
 		}
 		if rc.Provider == "" || rc.Model == "" {
 			return fmt.Errorf("role %q must have both provider and model: %w", role, errs.ErrConfig)
@@ -327,6 +348,25 @@ func (c *Config) ValidateBase() error {
 				return err
 			}
 		}
+	}
+
+	// 校验预算政策
+	switch c.CharacterAgents.Protocol {
+	case "", "v1", "legacy":
+	default:
+		return fmt.Errorf("character_agents.protocol must be v1 or legacy: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.Scope != "" && c.CharacterAgents.Scope != "active_core" {
+		return fmt.Errorf("character_agents.scope must be active_core: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.Activation != "" && c.CharacterAgents.Activation != "event_driven" {
+		return fmt.Errorf("character_agents.activation must be event_driven: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.MaxConcurrency < 0 || c.CharacterAgents.MaxConcurrency > 4 {
+		return fmt.Errorf("character_agents.max_concurrency must be in 1..4 when set: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.MaxRevisionRounds < 0 || c.CharacterAgents.MaxRevisionRounds > 1 {
+		return fmt.Errorf("character_agents.max_revision_rounds must be 0 or 1: %w", errs.ErrConfig)
 	}
 
 	// 校验预算政策
@@ -409,6 +449,21 @@ func (c *Config) FillDefaults() {
 	if c.Style == "" {
 		c.Style = "default"
 	}
+	if c.CharacterAgents.Protocol == "" {
+		c.CharacterAgents.Protocol = "v1"
+	}
+	if c.CharacterAgents.Scope == "" {
+		c.CharacterAgents.Scope = "active_core"
+	}
+	if c.CharacterAgents.Activation == "" {
+		c.CharacterAgents.Activation = "event_driven"
+	}
+	if c.CharacterAgents.MaxConcurrency <= 0 {
+		c.CharacterAgents.MaxConcurrency = 4
+	}
+	if c.CharacterAgents.MaxRevisionRounds == 0 && c.CharacterAgents.Protocol != "legacy" {
+		c.CharacterAgents.MaxRevisionRounds = 1
+	}
 	if c.Budget.Enabled() && c.Budget.WarnRatio == 0 {
 		c.Budget.WarnRatio = 0.8
 	}
@@ -480,7 +535,7 @@ func (c Config) ResolveContextWindow(modelName string) (int, ContextWindowSource
 
 // ResolveReasoningEffort 返回某角色生效的推理强度原始串（off/low/medium/high/xhigh/max/ultra 或空）。
 // 优先级：角色级 Roles[role].ReasoningEffort → 顶层默认 ReasoningEffort → ""（不覆盖，沿用模型/provider 默认）。
-// drafter/draft_finalizer 未显式配置时先回落 writer；world_simulator 始终使用 writer。
+// drafter/draft_finalizer、character/world_arbiter 未显式配置时先回落 writer；world_simulator 始终使用 writer。
 // role 为空或 "default" 时直接取顶层默认。值的合法性由 agents.ParseThinkingLevel 把关。
 func (c Config) ResolveReasoningEffort(role string) string {
 	if role != "" && role != "default" {
@@ -504,6 +559,9 @@ func (c Config) ResolveMaxTurns(role string, def int) int {
 // resolveWritingRole 只处理写作阶段的内部别名。drafter 一旦有显式配置就
 // 独立生效；否则 drafter 与 draft_finalizer 继承 writer 的 reasoning/max_turns。
 func (c Config) resolveWritingRole(role string) string {
+	if strings.HasPrefix(role, "character_") {
+		role = "character"
+	}
 	switch role {
 	case "world_simulator":
 		return "writer"
@@ -512,6 +570,11 @@ func (c Config) resolveWritingRole(role string) string {
 	}
 	if role == "drafter" {
 		if _, configured := c.Roles["drafter"]; !configured {
+			return "writer"
+		}
+	}
+	if role == "character" || role == "world_arbiter" {
+		if _, configured := c.Roles[role]; !configured {
 			return "writer"
 		}
 	}

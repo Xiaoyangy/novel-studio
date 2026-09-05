@@ -136,6 +136,9 @@ func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
 
 // resolveRoleAlias 解析内部 agent 别名和可选角色的继承链（fallbacks 同规则）。
 func resolveRoleAlias(ms *ModelSet, role string) string {
+	if strings.HasPrefix(role, "character_") {
+		role = "character"
+	}
 	switch role {
 	case "world_simulator":
 		return "writer"
@@ -150,6 +153,11 @@ func resolveRoleAlias(ms *ModelSet, role string) string {
 	if role == "reviewer" {
 		if _, ok := ms.models[role]; !ok {
 			return "editor"
+		}
+	}
+	if role == "character" || role == "world_arbiter" {
+		if _, ok := ms.models[role]; !ok {
+			return "writer"
 		}
 	}
 	return role
@@ -321,7 +329,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 }
 
 func createOptionsForRole(role string) modelCreateOptions {
-	if role == "writer" || role == "drafter" {
+	if role == "writer" || role == "drafter" || role == "character" {
 		return modelCreateOptions{temperature: writerDefaultTemperature}
 	}
 	return modelCreateOptions{}

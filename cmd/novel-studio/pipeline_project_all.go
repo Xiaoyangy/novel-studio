@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,38 @@ type pipelineProjectAllIdentity struct {
 // current arc in a shadow workspace and publishes only projected,
 // non-canonical bundles. It never writes a chapter body and never crosses into
 // the next arc before every chapter in this one has been rendered and accepted.
-func pipelineProjectAll(opts cliOptions, flags pipelineFlags) (returnErr error) {
+func pipelineProjectAll(opts cliOptions, flags pipelineFlags) error {
+	const maxArchitectSuccessors = 3
+	currentFlags := flags
+	for successorCount := 0; ; successorCount++ {
+		err := pipelineProjectAllOnce(opts, currentFlags)
+		if err == nil {
+			return nil
+		}
+		var conflict *agents.CharacterAgentHardContractConflictError
+		if !errors.As(err, &conflict) {
+			return err
+		}
+		if successorCount >= maxArchitectSuccessors {
+			return fmt.Errorf("project-all exceeded %d Architect successor generations: %w", maxArchitectSuccessors, err)
+		}
+		cfg, _, loadErr := loadCfgBundle(opts)
+		if loadErr != nil {
+			return loadErr
+		}
+		live := store.NewStore(cfg.OutputDir)
+		if saveErr := live.CharacterAgents.SaveSuccessorPlan(conflict.SuccessorPlan, true); saveErr != nil {
+			return fmt.Errorf("project-all persist Architect successor plan: %w", saveErr)
+		}
+		fmt.Fprintf(os.Stderr, "[pipeline:project-all] 第 %d 章角色选择与硬合同冲突；Architect 已生成 successor plan %s，自动开始新 generation\n", conflict.Chapter, conflict.SuccessorPlan.Digest)
+		// The successor has a distinct generation/workspace identity, so it does
+		// not need destructive restart cleanup. An explicit user restart applies
+		// only to the first attempt in this invocation.
+		currentFlags.Restart = false
+	}
+}
+
+func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr error) {
 	_, releaseControl, err := acquirePublishedOutlineAllStageForInvocation(opts)
 	if err != nil {
 		return fmt.Errorf("project-all requires published outline-all: %w", err)
@@ -266,14 +298,17 @@ func pipelineProjectAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			workspace,
 			chapter,
 			planningContext.ContextDigest,
+			identity.Generation.CharacterAgentProtocol,
 			agents.ProjectedArcBoundary{
-				Volume:          identity.Arc.Volume,
-				Arc:             identity.Arc.Arc,
-				Title:           identity.Arc.Title,
-				Goal:            identity.Arc.Goal,
-				FirstChapter:    identity.Arc.FirstChapter,
-				LastChapter:     identity.Arc.LastChapter,
-				BookLastChapter: identity.Arc.BookLastChapter,
+				Volume:           identity.Arc.Volume,
+				Arc:              identity.Arc.Arc,
+				Title:            identity.Arc.Title,
+				Goal:             identity.Arc.Goal,
+				BaseCanonChapter: identity.Generation.BaseCanonChapter,
+				BaseCanonRoot:    identity.Generation.BaseCanonRoot,
+				FirstChapter:     identity.Arc.FirstChapter,
+				LastChapter:      identity.Arc.LastChapter,
+				BookLastChapter:  identity.Arc.BookLastChapter,
 			},
 		)
 		if err != nil {
@@ -428,6 +463,21 @@ func buildPipelineProjectAllIdentity(
 	if err != nil {
 		return identity, err
 	}
+	var successorPlan *domain.CharacterAgentSuccessorPlan
+	if candidate, loadErr := st.CharacterAgents.LoadCurrentSuccessorPlan(); loadErr != nil {
+		return identity, fmt.Errorf("project-all 读取角色 Agent successor plan: %w", loadErr)
+	} else if candidate != nil &&
+		candidate.BaseCanonChapter == baseChapter &&
+		candidate.ArcFirstChapter == first &&
+		candidate.ArcLastChapter == last &&
+		candidate.BookLastChapter == bookLast {
+		successorPlan = candidate
+		stableOutlineRoot = pipelineProjectAllDigest(struct {
+			Version         string `json:"version"`
+			BaseOutlineRoot string `json:"base_outline_root"`
+			SuccessorDigest string `json:"successor_digest"`
+		}{"character-agent-successor-outline.v1", stableOutlineRoot, candidate.Digest})
+	}
 	foundationSnapshotRoot, err := pipelineProjectAllFoundationSnapshotRoot(cfg.OutputDir)
 	if err != nil {
 		return identity, err
@@ -446,6 +496,13 @@ func buildPipelineProjectAllIdentity(
 	if err != nil {
 		return identity, err
 	}
+	if successorPlan != nil {
+		dependencyRoot = pipelineProjectAllDigest(struct {
+			Version            string `json:"version"`
+			BaseDependencyRoot string `json:"base_dependency_root"`
+			SuccessorDigest    string `json:"successor_digest"`
+		}{"character-agent-successor-dependency.v1", dependencyRoot, successorPlan.Digest})
+	}
 	seedRoot, err := domain.ComputePlanningSeedContractRootV2(pipelineProjectAllSeedContract)
 	if err != nil {
 		return identity, err
@@ -453,6 +510,9 @@ func buildPipelineProjectAllIdentity(
 	attemptNonce, err := loadPipelineProjectAllAttemptNonce(cfg.OutputDir)
 	if err != nil {
 		return identity, err
+	}
+	if successorPlan != nil {
+		attemptNonce = strings.TrimSpace(attemptNonce + "|" + successorPlan.Digest)
 	}
 	generationID, err := domain.DerivePlanningGenerationAttemptV2ID(
 		baseCanonRoot,
@@ -556,6 +616,7 @@ func buildPipelineProjectAllIdentity(
 		ProjectionScope:        domain.PlanningProjectionScopeArcV2,
 		ScopeID:                scopeID,
 		BookHorizonChapter:     bookLast,
+		CharacterAgentProtocol: domain.CharacterAgentDecisionProtocolVersion,
 		Status:                 domain.PlanningGenerationBuildingV2,
 		BaseCanonChapter:       baseChapter,
 		BaseCanonRoot:          baseCanonRoot,
@@ -570,6 +631,9 @@ func buildPipelineProjectAllIdentity(
 		ProjectedChapterCount:  0,
 		ObligationRegistryRoot: registry.RegistryRoot,
 		CreatedAt:              now,
+	}
+	if !cfg.CharacterAgentsEnabled() {
+		generation.CharacterAgentProtocol = "legacy"
 	}
 	generation.GenerationDigest, err = domain.ComputePlanningGenerationV2Digest(generation)
 	if err != nil {
@@ -907,6 +971,7 @@ func validatePipelineProjectAllGenerationIdentity(
 		got.ProjectionScope != want.ProjectionScope ||
 		got.ScopeID != want.ScopeID ||
 		got.BookHorizonChapter != want.BookHorizonChapter ||
+		got.CharacterAgentProtocol != want.CharacterAgentProtocol ||
 		got.BaseCanonChapter != want.BaseCanonChapter ||
 		got.BaseCanonRoot != want.BaseCanonRoot ||
 		got.BaseStateRoot != want.BaseStateRoot ||

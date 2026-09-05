@@ -347,15 +347,17 @@ func TestSealedConvergencePlanningProfileCompactsFutureAndProjectedHistory(t *te
 	}
 }
 
-func TestSealedConvergenceCriticalPacketUsesBoundedNinetySixKiBOverflow(t *testing.T) {
+func TestSealedConvergenceCriticalPacketUsesBoundedPlanningHardBudgetOverflow(t *testing.T) {
 	diagnostics := map[string]any{
 		"issue_classes":  []string{"local_structure:blocking"},
 		"revision_focus": []string{"重组场景阻力并让选择产生可见代价"},
 	}
 	// current_chapter_outline is task authority and therefore intentionally not
-	// silently trimmed. This live-shaped packet proves the special path has a
-	// bounded 96 KiB ceiling without reopening the broad full profile.
-	currentCore := strings.Repeat("当前章不可变事件边界", 2500)
+	// silently trimmed. This live-shaped packet proves the special path is bounded
+	// by the planning hard budget (224 KiB) without reopening the broad full
+	// profile. The filler is sized so the retained authority overshoots the soft
+	// budget yet stays under the hard ceiling.
+	currentCore := strings.Repeat("当前章不可变事件边界", 6500)
 	result := map[string]any{
 		"sealed_convergence_replan_context": map[string]any{
 			"version":     sealedConvergenceAuthorityOverlayVersion,
@@ -385,7 +387,7 @@ func TestSealedConvergenceCriticalPacketUsesBoundedNinetySixKiBOverflow(t *testi
 		t.Fatal(err)
 	}
 	if len(raw) <= contextBudget(5, "planning") || len(raw) > contextHardBudget(5, "planning") {
-		t.Fatalf("sealed overflow bytes=%d, want (65536,98304]", len(raw))
+		t.Fatalf("sealed overflow bytes=%d, want (%d,%d]", len(raw), contextBudget(5, "planning"), contextHardBudget(5, "planning"))
 	}
 	text := string(raw)
 	for _, required := range []string{

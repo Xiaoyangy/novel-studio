@@ -337,6 +337,9 @@ func (t *SaveReviewTool) Execute(ctx context.Context, args json.RawMessage) (jso
 		if ledger != nil {
 			nextPlan = ledger.NextPlan
 		}
+		if err := t.store.PromoteReviewedCharacterAgentMemory(r.Chapter, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return nil, fmt.Errorf("promote accepted character-agent memory: %w", err)
+		}
 	}
 
 	// 追加 checkpoint

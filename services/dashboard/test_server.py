@@ -224,6 +224,74 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["working"]["step"], "rag")
         self.assertEqual(data["working"]["last_step"], "RAG 重建")
 
+    def test_character_agent_dashboard_exposes_status_not_private_context(self):
+        self.write_json("meta/character_agents/registry.json", {
+            "version": "character-agent-registry.v1",
+            "registry_root": "sha256:registry",
+            "entries": [{
+                "agent_id": "ca_lin", "character": "林默", "tier": "core",
+                "status": "active", "last_activated_chapter": 3, "memory_version": 2,
+            }],
+        })
+        self.write_json("meta/character_agents/memory/ca_lin.json", {
+            "last_accepted_chapter": 2,
+            "facts": [{"text": "不得出现在看板的私有记忆"}],
+        })
+        evidence = {
+            "evidence_root": "sha256:evidence", "chapter": 3,
+            "activation": {"entries": [{
+                "agent_id": "ca_lin", "character": "林默", "tier": "core",
+                "state": "active", "reasons": ["scene_appearance"],
+            }]},
+            "proposals": [{
+                "agent_id": "ca_lin", "round": 1, "decision": "带走证据",
+                "intended_action": "从后门离开", "decision_reason": "不得暴露的私有理由",
+            }],
+            "arbitrations": [{
+                "round": 1,
+                "resolutions": [{
+                    "agent_id": "ca_lin", "character": "林默", "outcome": "success",
+                    "immediate_result": "安全离开",
+                }],
+                "conflicts": [],
+            }],
+            "usage": [{
+                "agent_id": "ca_lin", "character": "林默", "chapter": 3,
+                "round": 1, "input": 120, "output": 30, "cost_usd": 0.01,
+            }],
+        }
+        self.write_json("meta/planning/v2/.building/pg2_test/chapters/0003.bundle.json", {
+            "character_agent_evidence": evidence,
+        })
+        successor_digest = "sha256:" + "a" * 64
+        self.write_json("meta/character_agents/successors/current.json", {
+            "version": "character-agent-successor-plan.v1",
+            "parent_generation_id": "pg2_test",
+            "plan_digest": successor_digest,
+        })
+        self.write_json(f"meta/character_agents/successors/pg2_test/{'a' * 64}.json", {
+            "digest": successor_digest,
+            "trigger_chapter": 3,
+            "hard_contract_conflicts": ["证据必须保留"],
+            "architect_summary": "改走备用交付路线。",
+            "revised_chapters": [{"core_event": "不得泄漏的未来软大纲"}],
+        })
+
+        payload = server.character_agent_payload(self.nd)
+
+        self.assertEqual(len(payload["characters"]), 1)
+        row = payload["characters"][0]
+        self.assertEqual(row["recent_decision"], "带走证据")
+        self.assertEqual(row["arbitration_result"], "安全离开")
+        self.assertEqual(row["memory_chapter"], 2)
+        self.assertEqual(row["cost_usd"], 0.01)
+        self.assertEqual(payload["successor_generation"]["trigger_chapter"], 3)
+        self.assertNotIn("revised_chapters", payload["successor_generation"])
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("不得出现在看板的私有记忆", serialized)
+        self.assertNotIn("不得暴露的私有理由", serialized)
+        self.assertNotIn("不得泄漏的未来软大纲", serialized)
+
     def test_chapter_zero_planning_lease_is_not_presented_as_active_prose(self):
         now = datetime.now().astimezone()
         self.write_json("meta/progress.json", {

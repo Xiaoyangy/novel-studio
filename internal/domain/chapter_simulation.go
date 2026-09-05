@@ -5,19 +5,36 @@ import "time"
 // ChapterWorldSimulation is the prewriting source of truth for one chapter.
 // The world advances first; the POV plan is derived from ProtagonistProjection.
 type ChapterWorldSimulation struct {
-	Version               int                           `json:"version"`
-	SimulationID          string                        `json:"simulation_id"`
-	Chapter               int                           `json:"chapter"`
-	GenerationID          string                        `json:"generation_id,omitempty"`
-	BaseTickID            string                        `json:"base_tick_id,omitempty"`
-	TimeWindow            string                        `json:"time_window"`
-	CharacterDecisions    []CharacterWorldDecision      `json:"character_decisions"`
-	ProtagonistProjection ProtagonistDecisionProjection `json:"protagonist_projection"`
-	RewriteSource         *ChapterRewriteSource         `json:"rewrite_source,omitempty"`
-	RewriteFactCoverage   []ChapterRewriteFactCoverage  `json:"rewrite_fact_coverage,omitempty"`
-	AuthorityReceipt      *SimulationAuthorityReceipt   `json:"authority_receipt,omitempty"`
-	GeneratedAt           string                        `json:"generated_at,omitempty"`
-	Sources               []string                      `json:"sources,omitempty"`
+	Version                int                            `json:"version"`
+	SimulationID           string                         `json:"simulation_id"`
+	Chapter                int                            `json:"chapter"`
+	GenerationID           string                         `json:"generation_id,omitempty"`
+	BaseTickID             string                         `json:"base_tick_id,omitempty"`
+	TimeWindow             string                         `json:"time_window"`
+	CharacterDecisions     []CharacterWorldDecision       `json:"character_decisions"`
+	ProtagonistProjection  ProtagonistDecisionProjection  `json:"protagonist_projection"`
+	RewriteSource          *ChapterRewriteSource          `json:"rewrite_source,omitempty"`
+	RewriteFactCoverage    []ChapterRewriteFactCoverage   `json:"rewrite_fact_coverage,omitempty"`
+	AuthorityReceipt       *SimulationAuthorityReceipt    `json:"authority_receipt,omitempty"`
+	CharacterAgentProtocol *CharacterAgentProtocolReceipt `json:"character_agent_protocol,omitempty"`
+	GeneratedAt            string                         `json:"generated_at,omitempty"`
+	Sources                []string                       `json:"sources,omitempty"`
+}
+
+// CharacterAgentProtocolReceipt binds a v2 simulation to the independent
+// character observations/proposals and the world-arbiter result that produced
+// its backward-compatible CharacterDecisions projection.
+type CharacterAgentProtocolReceipt struct {
+	Version            string   `json:"version"`
+	RegistryRoot       string   `json:"registry_root"`
+	StimulusDigest     string   `json:"stimulus_digest"`
+	ActivationDigest   string   `json:"activation_digest"`
+	ObservationDigests []string `json:"observation_digests"`
+	ProposalDigests    []string `json:"proposal_digests"`
+	ArbitrationRound   int      `json:"arbitration_round"`
+	ArbitrationDigest  string   `json:"arbitration_digest"`
+	MemoryRoots        []string `json:"memory_roots,omitempty"`
+	ProtocolDigest     string   `json:"protocol_digest"`
 }
 
 const (

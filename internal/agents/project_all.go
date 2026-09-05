@@ -23,13 +23,14 @@ import (
 // isolated project-all workspace. Callers package them into a non-canonical v2
 // bundle; this runner never writes to the live novel output.
 type ProjectedChapterArtifacts struct {
-	WorldSimulation       *domain.ChapterWorldSimulation
-	Plan                  *domain.ChapterPlan
-	PlanCheckpoint        *domain.Checkpoint
-	RAGFactReceipt        *domain.RAGFactReceipt
-	CraftRecallReceipt    *domain.CraftRecallReceipt
-	PlanningContextDigest string
-	RenderContext         json.RawMessage
+	WorldSimulation        *domain.ChapterWorldSimulation
+	CharacterAgentEvidence *domain.CharacterAgentEvidenceBundle
+	Plan                   *domain.ChapterPlan
+	PlanCheckpoint         *domain.Checkpoint
+	RAGFactReceipt         *domain.RAGFactReceipt
+	CraftRecallReceipt     *domain.CraftRecallReceipt
+	PlanningContextDigest  string
+	RenderContext          json.RawMessage
 }
 
 // ProjectedArcBoundary makes the host-selected arc transaction visible to the
@@ -37,13 +38,15 @@ type ProjectedChapterArtifacts struct {
 // orientation, but neither agent may formally plan a chapter outside this
 // boundary during the current generation.
 type ProjectedArcBoundary struct {
-	Volume          int
-	Arc             int
-	Title           string
-	Goal            string
-	FirstChapter    int
-	LastChapter     int
-	BookLastChapter int
+	Volume           int
+	Arc              int
+	Title            string
+	Goal             string
+	BaseCanonChapter int
+	BaseCanonRoot    string
+	FirstChapter     int
+	LastChapter      int
+	BookLastChapter  int
 }
 
 // A simulator turn is intentionally bounded, but every successful tool call
@@ -540,6 +543,7 @@ func RunProjectedChapterPlanning(
 	isolatedOutputDir string,
 	chapter int,
 	planningContextDigest string,
+	characterAgentProtocol string,
 	arcBoundary ProjectedArcBoundary,
 ) (_ *ProjectedChapterArtifacts, returnErr error) {
 	contextToken, err := domain.ProjectedPlanningContextSourceTokenV2(planningContextDigest)
@@ -554,6 +558,13 @@ func RunProjectedChapterPlanning(
 	}
 	cfg.OutputDir = isolatedOutputDir
 	cfg.DisableLiveRAG = true
+	if strings.TrimSpace(characterAgentProtocol) == domain.CharacterAgentDecisionProtocolVersion {
+		cfg.CharacterAgents.Protocol = "v1"
+	} else {
+		// Historical generations did not carry this field and therefore finish
+		// under their original monolithic simulation protocol.
+		cfg.CharacterAgents.Protocol = "legacy"
+	}
 	st := store.NewStore(isolatedOutputDir)
 	if err := st.Init(); err != nil {
 		return nil, fmt.Errorf("init project-all workspace: %w", err)
@@ -597,6 +608,20 @@ func RunProjectedChapterPlanning(
 	simulation, simulationCP, simulationErr := loadCurrentProjectedSimulation(st, chapter)
 	if simulationErr != nil {
 		return nil, simulationErr
+	}
+	if simulation == nil && cfg.CharacterAgentsEnabled() {
+		simulation, simulationCP, err = runCharacterAgentWorldSimulation(
+			ctx,
+			cfg,
+			st,
+			models,
+			contextTool,
+			chapter,
+			arcBoundary,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("project-all independent character agents chapter %d: %w", chapter, err)
+		}
 	}
 	if simulation == nil {
 		var lastSimulatorError string
@@ -928,14 +953,19 @@ func RunProjectedChapterPlanning(
 	if factReceipt == nil {
 		return nil, fmt.Errorf("project-all chapter %d did not persist an explicit RAG fact receipt", chapter)
 	}
+	characterAgentEvidence, err := loadCharacterAgentEvidence(st, *simulation)
+	if err != nil {
+		return nil, fmt.Errorf("project-all chapter %d load character-agent evidence: %w", chapter, err)
+	}
 	return &ProjectedChapterArtifacts{
-		WorldSimulation:       simulation,
-		Plan:                  plan,
-		PlanCheckpoint:        planCP,
-		RAGFactReceipt:        factReceipt,
-		CraftRecallReceipt:    craftReceipt,
-		PlanningContextDigest: strings.TrimSpace(planningContextDigest),
-		RenderContext:         renderContext,
+		WorldSimulation:        simulation,
+		CharacterAgentEvidence: characterAgentEvidence,
+		Plan:                   plan,
+		PlanCheckpoint:         planCP,
+		RAGFactReceipt:         factReceipt,
+		CraftRecallReceipt:     craftReceipt,
+		PlanningContextDigest:  strings.TrimSpace(planningContextDigest),
+		RenderContext:          renderContext,
 	}, nil
 }
 
@@ -963,13 +993,16 @@ func projectAllToolContractsDigest() string {
 		Name        string         `json:"name"`
 		Description string         `json:"description"`
 		Schema      map[string]any `json:"schema"`
-	}, 0, 5)
+	}, 0, 8)
 	for _, tool := range []projectAllModelToolProtocol{
 		tools.NewContextTool(nil, tools.References{}, ""),
 		tools.NewSimulateChapterWorldTool(nil),
 		tools.NewCraftRecallTool(nil),
 		tools.NewPlanStructureTool(nil),
 		tools.NewPlanDetailsTool(nil),
+		tools.NewSubmitCharacterDecisionTool(nil, domain.CharacterObservationPacket{}),
+		tools.NewResolveChapterWorldTool(nil, domain.WorldStimulusPacket{}, domain.CharacterAgentActivation{}, nil, "", nil, 1),
+		tools.NewSubmitCharacterAgentSuccessorPlanTool(nil, domain.CharacterAgentSuccessorPlan{}, nil),
 	} {
 		contracts = append(contracts, struct {
 			Name        string         `json:"name"`
@@ -1009,14 +1042,16 @@ func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
 		PlannerBoundary    string `json:"planner_boundary"`
 		ToolContracts      string `json:"tool_contracts"`
 		AuthorityPolicy    string `json:"authority_policy"`
+		CharacterProtocol  string `json:"character_protocol"`
 	}{
-		Version:            "project-all-agent-protocol.v2",
+		Version:            "project-all-agent-protocol.v3",
 		WorldSimulator:     worldSimulatorSystemPrompt,
 		SimulationBoundary: projectAllSimulationBoundary,
 		Planner:            plannerPrompt,
 		PlannerBoundary:    projectAllPlannerBoundary,
 		ToolContracts:      toolContracts,
 		AuthorityPolicy:    authorityPolicy,
+		CharacterProtocol:  CharacterAgentProtocolDigest(),
 	})
 	if err != nil {
 		return ""

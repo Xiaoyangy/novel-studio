@@ -631,6 +631,9 @@ func (t *UsageTracker) resolveCost(modelName string, u agentcore.Usage) (cost, s
 // agentRoleName 把 subagent 名字归一到 role 名。
 // architect_short/mid/long 都归到 architect；渲染和推演内部 agent 归到实际模型角色。
 func agentRoleName(agentName string) string {
+	if strings.HasPrefix(agentName, "character_") {
+		return "character"
+	}
 	if strings.HasPrefix(agentName, "architect_") {
 		return "architect"
 	}
@@ -639,6 +642,9 @@ func agentRoleName(agentName string) string {
 	}
 	if agentName == "world_simulator" {
 		return "writer"
+	}
+	if agentName == "world_arbiter" {
+		return "world_arbiter"
 	}
 	if agentName == "drafter" || agentName == "draft_finalizer" {
 		return "drafter"

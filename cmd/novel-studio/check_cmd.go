@@ -18,7 +18,7 @@ import (
 )
 
 // checkRoles 是参与自检的角色顺序；"default" 代表顶层默认模型。
-var checkRoles = []string{"default", "coordinator", "architect", "writer", "drafter", "editor", "reviewer"}
+var checkRoles = []string{"default", "coordinator", "architect", "writer", "character", "world_arbiter", "drafter", "editor", "reviewer"}
 
 type checkFlags struct {
 	Timeout  time.Duration

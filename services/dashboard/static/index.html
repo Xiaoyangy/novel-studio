@@ -947,6 +947,17 @@ function renderOverview(d) {
   const assetItems = (assets.items || []).map(a => `<div class="asset-item ${a.exists ? "ok" : ""}"><i></i><span title="${esc(a.path)}">${esc(a.label)}</span><code>${a.exists ? "ready" : "missing"}</code></div>`).join("");
   const rag = assets.rag || {}, sediment = assets.sediment || {};
   const formal = d.formal_planning || {};
+  const characterAgents = (d.character_agents || {}).characters || [];
+  const worldArbiterUsage = (d.character_agents || {}).world_arbiter_usage || {};
+  const characterSuccessor = (d.character_agents || {}).successor_generation;
+  const characterAgentRows = characterAgents.map(a => `<tr>
+    <td><b>${esc(a.character || a.agent_id)}</b><br><small style="color:var(--muted)">${esc(a.agent_name || a.agent_id)} · ${esc(a.tier || "—")}</small></td>
+    <td><span class="tag ${a.status === "active" ? "ok" : "pending"}">${a.status === "active" ? "活跃" : a.status === "retired" ? "退场" : "休眠"}</span><br><small>${(a.activation_reasons || []).map(esc).join("、") || "无本章触发"}</small></td>
+    <td>${a.last_activated_chapter ? `第 ${a.last_activated_chapter} 章` : "—"}<br><small>正式记忆至第 ${a.memory_chapter || 0} 章 · v${a.memory_version || 0}</small></td>
+    <td>${esc(a.recent_decision || "—")}${a.recent_action ? `<br><small>${esc(a.recent_action)}</small>` : ""}</td>
+    <td><span class="tag ${a.arbitration_outcome === "success" ? "ok" : a.arbitration_outcome === "blocked" ? "rewrite" : "pending"}">${esc(a.arbitration_outcome || "—")}</span>${a.arbitration_result ? `<br><small>${esc(a.arbitration_result)}</small>` : ""}<br><small>冲突 ${a.conflict_count || 0} · 修订 ${a.conflict_rounds || 0} 轮</small></td>
+    <td>${fmtMoney(a.cost_usd)}<br><small>${fmtNum(a.tokens_in)} / ${fmtNum(a.tokens_out)} tokens</small></td>
+  </tr>`).join("");
   const lastError = runtime.last_error;
   const lastEvent = runtime.last_event || {};
   const errorRecovered = lastError && lastEvent.time && new Date(lastEvent.time).getTime() > new Date(lastError.time || 0).getTime() && !lastEvent.failed;
@@ -991,6 +1002,12 @@ function renderOverview(d) {
     <div class="sec"><h3>章节状态（规划 ∪ 落盘）</h3>
       ${rows ? `<div class="table-wrap"><table><thead><tr><th>章</th><th>标题 / 规划事件</th><th>字数</th><th>状态</th><th>评审</th><th>返工</th><th>AI 门禁</th></tr></thead><tbody>${rows}</tbody></table></div>`
              : '<div class="loading">还没有规划或落盘的章节。</div>'}
+    </div>
+    <div class="sec"><h3>角色独立 Agent</h3>
+      ${characterAgentRows ? `<div class="table-wrap"><table><thead><tr><th>角色 / Agent</th><th>状态 / 激活原因</th><th>激活 / 记忆</th><th>最近选择</th><th>裁决</th><th>单角色成本</th></tr></thead><tbody>${characterAgentRows}</tbody></table></div>`
+                          : '<div class="loading">当前项目尚未生成角色 Agent 注册表；历史 generation 会继续按旧协议完成。</div>'}
+      ${worldArbiterUsage.tokens_in || worldArbiterUsage.tokens_out ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">World Arbiter 用量</span><span>${fmtMoney(worldArbiterUsage.cost_usd)} · ${fmtNum(worldArbiterUsage.tokens_in)} / ${fmtNum(worldArbiterUsage.tokens_out)} tokens</span></div></div>` : ""}
+      ${characterSuccessor ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">Successor generation</span><span><span class="tag rewrite">硬合同重排</span>　第 ${characterSuccessor.trigger_chapter} 章 · ${esc(characterSuccessor.plan_digest)}</span></div><div style="margin-top:6px">${esc(characterSuccessor.architect_summary || "")}</div><small style="color:var(--muted)">${(characterSuccessor.hard_contract_conflicts || []).map(esc).join("；")}</small></div>` : ""}
     </div>
     <div class="sec"><h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
       ${agentRows ? `<div class="table-wrap"><table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table></div>`

@@ -72,6 +72,12 @@ func TestModelSetDrafterAliasAndExplicitSelection(t *testing.T) {
 	if provider != "local" || model != "planner-model" {
 		t.Errorf("world_simulator selection = %s/%s, want writer model", provider, model)
 	}
+	for _, role := range []string{"character", "character_ca_1234", "world_arbiter"} {
+		provider, model, explicit := ms.CurrentSelection(role)
+		if provider != "local" || model != "planner-model" || !explicit {
+			t.Errorf("%s selection = %s/%s explicit=%v, want inherited writer model", role, provider, model, explicit)
+		}
+	}
 
 	explicit := base
 	explicit.Roles = map[string]RoleConfig{

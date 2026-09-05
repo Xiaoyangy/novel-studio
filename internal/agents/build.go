@@ -31,6 +31,9 @@ import (
 // architect_short / architect_long 都共用同一个 architect role 配置。
 // 跟 host.agentRoleName 同义，因为 build 与 host 互不依赖故各持一份。
 func agentToRole(name string) string {
+	if strings.HasPrefix(name, "character_") {
+		return "character"
+	}
 	if strings.HasPrefix(name, "architect_") {
 		return "architect"
 	}
@@ -40,6 +43,9 @@ func agentToRole(name string) string {
 	if name == "world_simulator" {
 		// 全角色世界推演仍属于 writer，不跟随正文渲染模型。
 		return "writer"
+	}
+	if name == "world_arbiter" {
+		return "world_arbiter"
 	}
 	if name == "drafter" || name == "draft_finalizer" {
 		return "drafter"
@@ -394,6 +400,15 @@ func BuildCoordinatorWithOptions(
 		contextTool,
 		tools.NewSimulateChapterWorldTool(store),
 	}
+	worldSimulatorPrompt := worldSimulatorSystemPrompt
+	worldSimulatorDescription := "全角色世界推演修复器：只补角色决定、蝴蝶效应、返工事实覆盖和主视角投影，不生成 POV plan"
+	worldSimulatorMaxTurns := cappedMaxTurns(cfg.ResolveMaxTurns("writer", 16), 16)
+	if cfg.CharacterAgentsEnabled() {
+		worldSimulatorTools = []agentcore.Tool{newCharacterAgentSimulationFacade(cfg, store, models, contextTool)}
+		worldSimulatorPrompt = characterAgentCoordinatorPrompt
+		worldSimulatorDescription = "角色 Agent 调度器：触发独立角色决策与 World Arbiter 裁决，不替角色决定"
+		worldSimulatorMaxTurns = cappedMaxTurns(cfg.ResolveMaxTurns("writer", 4), 4)
+	}
 	drafterTools := frozenRenderTools([]agentcore.Tool{
 		contextTool,
 		readChapter,
@@ -663,11 +678,11 @@ func BuildCoordinatorWithOptions(
 	}
 	worldSimulator := subagent.Config{
 		Name:                "world_simulator",
-		Description:         "全角色世界推演修复器：只补角色决定、蝴蝶效应、返工事实覆盖和主视角投影，不生成 POV plan",
+		Description:         worldSimulatorDescription,
 		Model:               writerModel,
-		SystemPrompt:        worldSimulatorSystemPrompt,
+		SystemPrompt:        worldSimulatorPrompt,
 		Tools:               worldSimulatorTools,
-		MaxTurns:            cappedMaxTurns(cfg.ResolveMaxTurns("writer", 16), 16),
+		MaxTurns:            worldSimulatorMaxTurns,
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
 		ToolsAreIdempotent:  false,

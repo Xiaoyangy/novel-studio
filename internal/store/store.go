@@ -12,28 +12,29 @@ import (
 type Store struct {
 	dir string
 
-	Progress       *ProgressStore
-	Outline        *OutlineStore
-	Drafts         *DraftStore
-	Summaries      *SummaryStore
-	RunMeta        *RunMetaStore
-	UserRules      *UserRulesStore
-	Signals        *SignalStore
-	Runtime        *RuntimeStore
-	Characters     *CharacterStore
-	Cast           *CastStore
-	World          *WorldStore
-	WritingAssets  *WritingAssetStore
-	ResourceLedger *ResourceLedgerStore
-	RAG            *RAGStore
-	Checkpoints    *CheckpointStore
-	Sessions       *SessionStore
-	Usage          *UsageStore
-	Simulation     *SimulationStore
-	Planning       *PlanningStore
-	AIVoice        *AIVoiceStore
-	Methodology    *MethodologyStore
-	WorldSim       *WorldSimStore
+	Progress        *ProgressStore
+	Outline         *OutlineStore
+	Drafts          *DraftStore
+	Summaries       *SummaryStore
+	RunMeta         *RunMetaStore
+	UserRules       *UserRulesStore
+	Signals         *SignalStore
+	Runtime         *RuntimeStore
+	Characters      *CharacterStore
+	Cast            *CastStore
+	World           *WorldStore
+	WritingAssets   *WritingAssetStore
+	ResourceLedger  *ResourceLedgerStore
+	RAG             *RAGStore
+	Checkpoints     *CheckpointStore
+	Sessions        *SessionStore
+	Usage           *UsageStore
+	Simulation      *SimulationStore
+	Planning        *PlanningStore
+	AIVoice         *AIVoiceStore
+	Methodology     *MethodologyStore
+	WorldSim        *WorldSimStore
+	CharacterAgents *CharacterAgentStore
 
 	crossMu sync.Mutex // 保护跨域原子操作
 }
@@ -43,29 +44,30 @@ func NewStore(dir string) *Store {
 	io := newIO(dir)
 	outline := NewOutlineStore(io)
 	return &Store{
-		dir:            dir,
-		Progress:       NewProgressStore(newIO(dir)),
-		Outline:        outline,
-		Drafts:         NewDraftStore(newIO(dir)),
-		Summaries:      NewSummaryStore(newIO(dir), outline),
-		RunMeta:        NewRunMetaStore(newIO(dir)),
-		UserRules:      NewUserRulesStore(newIO(dir)),
-		Signals:        NewSignalStore(newIO(dir)),
-		Runtime:        NewRuntimeStore(newIO(dir)),
-		Characters:     NewCharacterStore(newIO(dir), outline),
-		Cast:           NewCastStore(newIO(dir)),
-		World:          NewWorldStore(newIO(dir)),
-		WritingAssets:  NewWritingAssetStore(newIO(dir)),
-		ResourceLedger: NewResourceLedgerStore(newIO(dir)),
-		RAG:            NewRAGStore(newIO(dir)),
-		Checkpoints:    NewCheckpointStore(io),
-		Sessions:       NewSessionStore(newIO(dir)),
-		Usage:          NewUsageStore(newIO(dir)),
-		Simulation:     NewSimulationStore(newIO(dir)),
-		Planning:       NewPlanningStore(newIO(dir)),
-		AIVoice:        NewAIVoiceStore(newIO(dir)),
-		Methodology:    NewMethodologyStore(newIO(dir)),
-		WorldSim:       NewWorldSimStore(newIO(dir)),
+		dir:             dir,
+		Progress:        NewProgressStore(newIO(dir)),
+		Outline:         outline,
+		Drafts:          NewDraftStore(newIO(dir)),
+		Summaries:       NewSummaryStore(newIO(dir), outline),
+		RunMeta:         NewRunMetaStore(newIO(dir)),
+		UserRules:       NewUserRulesStore(newIO(dir)),
+		Signals:         NewSignalStore(newIO(dir)),
+		Runtime:         NewRuntimeStore(newIO(dir)),
+		Characters:      NewCharacterStore(newIO(dir), outline),
+		Cast:            NewCastStore(newIO(dir)),
+		World:           NewWorldStore(newIO(dir)),
+		WritingAssets:   NewWritingAssetStore(newIO(dir)),
+		ResourceLedger:  NewResourceLedgerStore(newIO(dir)),
+		RAG:             NewRAGStore(newIO(dir)),
+		Checkpoints:     NewCheckpointStore(io),
+		Sessions:        NewSessionStore(newIO(dir)),
+		Usage:           NewUsageStore(newIO(dir)),
+		Simulation:      NewSimulationStore(newIO(dir)),
+		Planning:        NewPlanningStore(newIO(dir)),
+		AIVoice:         NewAIVoiceStore(newIO(dir)),
+		Methodology:     NewMethodologyStore(newIO(dir)),
+		WorldSim:        NewWorldSimStore(newIO(dir)),
+		CharacterAgents: NewCharacterAgentStore(newIO(dir)),
 	}
 }
 
@@ -151,6 +153,7 @@ func (s *Store) Init() error {
 		"chapters", "summaries", "drafts", "reviews", "meta", "meta/rag", "meta/runtime", "meta/runtime/tasks", "meta/sessions", "meta/sessions/agents",
 		"meta/chapter_metrics", "meta/sampling", "meta/characters", "meta/side_character_journeys", "meta/character_stage", "meta/chapter_world_deltas",
 		"meta/planning", "meta/planning/volumes", "meta/planning/chapters",
+		"meta/character_agents", "meta/character_agents/memory", "meta/character_agents/projected",
 	})
 }
 

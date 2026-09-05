@@ -1232,6 +1232,9 @@ func acceptPipelineSealedRenderOutcome(
 		if digestErr != nil || recoveredDigest != actualDigest {
 			return nil, fmt.Errorf("sealed render recovery outcome actual delta 与当前独立证据不一致")
 		}
+		if err := st.PromoteAcceptedCharacterAgentMemory(binding.Bundle, *binding.Outcome); err != nil {
+			return nil, fmt.Errorf("sealed render recovery promote character memory: %w", err)
+		}
 		return binding.Outcome, nil
 	}
 	actualPostStateRoot, err := domain.DeriveProjectedPostStateRootV2(
@@ -1277,6 +1280,9 @@ func acceptPipelineSealedRenderOutcome(
 	}
 	if _, err := st.ProjectedV2().AcceptOutcome(*cursor, outcome); err != nil {
 		return nil, fmt.Errorf("sealed render 发布 actual outcome/cursor: %w", err)
+	}
+	if err := st.PromoteAcceptedCharacterAgentMemory(binding.Bundle, outcome); err != nil {
+		return nil, fmt.Errorf("sealed render promote accepted character memory: %w", err)
 	}
 	return &outcome, nil
 }

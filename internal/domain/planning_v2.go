@@ -73,6 +73,7 @@ type PlanningGenerationV2 struct {
 	ProjectionScope        PlanningProjectionScopeV2  `json:"projection_scope,omitempty"`
 	ScopeID                string                     `json:"scope_id,omitempty"`
 	BookHorizonChapter     int                        `json:"book_horizon_chapter,omitempty"`
+	CharacterAgentProtocol string                     `json:"character_agent_protocol,omitempty"`
 	Status                 PlanningGenerationStatusV2 `json:"status"`
 	BaseCanonChapter       int                        `json:"base_canon_chapter"`
 	BaseCanonRoot          string                     `json:"base_canon_root"`
@@ -317,33 +318,34 @@ type ProjectedPlanningContextV2 struct {
 }
 
 type ProjectedChapterBundle struct {
-	Version                  string                  `json:"version"`
-	GenerationID             string                  `json:"generation_id"`
-	Chapter                  int                     `json:"chapter"`
-	Authority                string                  `json:"authority"`
-	State                    string                  `json:"state"`
-	ProjectionLevel          string                  `json:"projection_level"`
-	PreviousBundleDigest     string                  `json:"previous_bundle_digest"`
-	ProjectedPreStateRoot    string                  `json:"projected_pre_state_root"`
-	ChapterWorldSimulation   ChapterWorldSimulation  `json:"chapter_world_simulation"`
-	ChapterPlan              ChapterPlan             `json:"chapter_plan"`
-	FormalWorldSimulation    FormalWorldSimulationV2 `json:"formal_world_simulation"`
-	POVPlan                  POVPlanV2               `json:"pov_plan"`
-	HardRenderContract       HardRenderContractV2    `json:"hard_render_contract"`
-	SourceBindings           []SourceBindingV2       `json:"source_bindings"`
-	RAGFactReceipt           *RAGFactReceipt         `json:"rag_fact_receipt,omitempty"`
-	RAGFactReceiptDigest     string                  `json:"rag_fact_receipt_digest,omitempty"`
-	CraftRecallReceipt       *CraftRecallReceipt     `json:"craft_recall_receipt,omitempty"`
-	CraftRecallReceiptDigest string                  `json:"craft_recall_receipt_digest,omitempty"`
-	PlanningContextDigest    string                  `json:"planning_context_digest"`
-	RenderContext            json.RawMessage         `json:"render_context"`
-	RenderContextSHA256      string                  `json:"render_context_sha256"`
-	ObligationsConsumed      []string                `json:"obligations_consumed"`
-	ObligationsCreated       []string                `json:"obligations_created"`
-	ObligationsCarried       []string                `json:"obligations_carried"`
-	ProjectedDelta           ProjectedDelta          `json:"projected_delta"`
-	ProjectedPostStateRoot   string                  `json:"projected_post_state_root"`
-	BundleDigest             string                  `json:"bundle_digest"`
+	Version                  string                        `json:"version"`
+	GenerationID             string                        `json:"generation_id"`
+	Chapter                  int                           `json:"chapter"`
+	Authority                string                        `json:"authority"`
+	State                    string                        `json:"state"`
+	ProjectionLevel          string                        `json:"projection_level"`
+	PreviousBundleDigest     string                        `json:"previous_bundle_digest"`
+	ProjectedPreStateRoot    string                        `json:"projected_pre_state_root"`
+	ChapterWorldSimulation   ChapterWorldSimulation        `json:"chapter_world_simulation"`
+	CharacterAgentEvidence   *CharacterAgentEvidenceBundle `json:"character_agent_evidence,omitempty"`
+	ChapterPlan              ChapterPlan                   `json:"chapter_plan"`
+	FormalWorldSimulation    FormalWorldSimulationV2       `json:"formal_world_simulation"`
+	POVPlan                  POVPlanV2                     `json:"pov_plan"`
+	HardRenderContract       HardRenderContractV2          `json:"hard_render_contract"`
+	SourceBindings           []SourceBindingV2             `json:"source_bindings"`
+	RAGFactReceipt           *RAGFactReceipt               `json:"rag_fact_receipt,omitempty"`
+	RAGFactReceiptDigest     string                        `json:"rag_fact_receipt_digest,omitempty"`
+	CraftRecallReceipt       *CraftRecallReceipt           `json:"craft_recall_receipt,omitempty"`
+	CraftRecallReceiptDigest string                        `json:"craft_recall_receipt_digest,omitempty"`
+	PlanningContextDigest    string                        `json:"planning_context_digest"`
+	RenderContext            json.RawMessage               `json:"render_context"`
+	RenderContextSHA256      string                        `json:"render_context_sha256"`
+	ObligationsConsumed      []string                      `json:"obligations_consumed"`
+	ObligationsCreated       []string                      `json:"obligations_created"`
+	ObligationsCarried       []string                      `json:"obligations_carried"`
+	ProjectedDelta           ProjectedDelta                `json:"projected_delta"`
+	ProjectedPostStateRoot   string                        `json:"projected_post_state_root"`
+	BundleDigest             string                        `json:"bundle_digest"`
 }
 
 type ObligationKindV2 string
@@ -771,6 +773,9 @@ func ValidatePlanningGenerationV2(g PlanningGenerationV2) error {
 	}
 	if g.ParentGenerationID != "" && !strings.HasPrefix(g.ParentGenerationID, PlanningGenerationIDPrefix) {
 		return fmt.Errorf("planning generation v2: parent_generation_id must start with %q", PlanningGenerationIDPrefix)
+	}
+	if g.CharacterAgentProtocol != "" && g.CharacterAgentProtocol != "legacy" && g.CharacterAgentProtocol != CharacterAgentDecisionProtocolVersion {
+		return fmt.Errorf("planning generation v2: unsupported character_agent_protocol %q", g.CharacterAgentProtocol)
 	}
 	if err := validatePlanningProjectionScopeV2(
 		g.ProjectionScope,
@@ -2020,6 +2025,65 @@ func ValidateProjectedChapterBundle(bundle ProjectedChapterBundle) error {
 		strings.TrimSpace(sim.TimeWindow) == "" || len(sim.CharacterDecisions) == 0 {
 		return fmt.Errorf("projected chapter bundle v2: full chapter simulation/plan identity is incomplete")
 	}
+	if sim.Version >= 2 {
+		if sim.CharacterAgentProtocol == nil || bundle.CharacterAgentEvidence == nil {
+			return fmt.Errorf("projected chapter bundle v2: simulation v2 requires sealed character-agent evidence")
+		}
+		if err := ValidateCharacterAgentEvidenceBundle(*bundle.CharacterAgentEvidence); err != nil {
+			return fmt.Errorf("projected chapter bundle v2: character-agent evidence: %w", err)
+		}
+		evidence := *bundle.CharacterAgentEvidence
+		receipt := sim.CharacterAgentProtocol
+		if evidence.GenerationID != bundle.GenerationID || evidence.Chapter != bundle.Chapter ||
+			evidence.Registry.RegistryRoot != receipt.RegistryRoot ||
+			evidence.Stimulus.Digest != receipt.StimulusDigest ||
+			evidence.Activation.Digest != receipt.ActivationDigest ||
+			evidence.ProtocolDigest != receipt.ProtocolDigest {
+			return fmt.Errorf("projected chapter bundle v2: character-agent evidence identity does not match simulation receipt")
+		}
+		finalArbitration := evidence.Arbitrations[len(evidence.Arbitrations)-1]
+		if finalArbitration.Round != receipt.ArbitrationRound || finalArbitration.Digest != receipt.ArbitrationDigest {
+			return fmt.Errorf("projected chapter bundle v2: character-agent final arbitration does not match simulation receipt")
+		}
+		latest := make(map[string]CharacterDecisionProposal)
+		for _, proposal := range evidence.Proposals {
+			if proposal.Round <= finalArbitration.Round {
+				if current, ok := latest[proposal.AgentID]; !ok || proposal.Round > current.Round {
+					latest[proposal.AgentID] = proposal
+				}
+			}
+		}
+		latestProposals := make([]CharacterDecisionProposal, 0, len(latest))
+		proposalDigests := make([]string, 0, len(latest))
+		observationDigests := make([]string, 0, len(latest))
+		for _, proposal := range latest {
+			latestProposals = append(latestProposals, proposal)
+			proposalDigests = append(proposalDigests, proposal.Digest)
+			observationDigests = append(observationDigests, proposal.ObservationDigest)
+		}
+		if !sameV2Strings(normalizeV2Strings(proposalDigests), normalizeV2Strings(receipt.ProposalDigests)) ||
+			!sameV2Strings(normalizeV2Strings(observationDigests), normalizeV2Strings(receipt.ObservationDigests)) ||
+			!sameV2Strings(evidence.MemoryRoots, normalizeV2Strings(receipt.MemoryRoots)) {
+			return fmt.Errorf("projected chapter bundle v2: character-agent proposal, observation or memory roots do not match simulation receipt")
+		}
+		decisions, err := finalArbitration.CharacterDecisions(latestProposals)
+		if err != nil {
+			return fmt.Errorf("projected chapter bundle v2: rebuild character decisions: %w", err)
+		}
+		decisionDigest, err := DeterministicPlanningHash(decisions)
+		if err != nil {
+			return err
+		}
+		simulationDecisionDigest, err := DeterministicPlanningHash(sim.CharacterDecisions)
+		if err != nil {
+			return err
+		}
+		if decisionDigest != simulationDecisionDigest || sim.ProtagonistProjection.ChosenDecision != finalArbitration.ProtagonistProjection.ChosenDecision {
+			return fmt.Errorf("projected chapter bundle v2: simulation decisions differ from sealed arbitration")
+		}
+	} else if bundle.CharacterAgentEvidence != nil {
+		return fmt.Errorf("projected chapter bundle v2: legacy simulation cannot carry character-agent evidence")
+	}
 	projection := sim.ProtagonistProjection
 	if strings.TrimSpace(projection.Protagonist) == "" ||
 		len(projection.AvailableOptions) < 2 ||
@@ -2264,6 +2328,11 @@ func planningV2RenderContextProhibitedKeys() map[string]struct{} {
 		"formal_world_simulation",
 		"chapter_world_simulation",
 		"character_decisions",
+		"character_agent_protocol",
+		"character_agent_evidence",
+		"character_observation_packet",
+		"character_decision_proposal",
+		"world_arbitration_receipt",
 		"locked_character_decisions",
 		"hidden_pressures",
 		"offscreen_states",

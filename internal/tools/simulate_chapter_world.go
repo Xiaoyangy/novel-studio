@@ -922,6 +922,11 @@ func rewriteFactCoverageIntegrityGaps(expected []string, actual []domain.Chapter
 func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulation) []string {
 	var gaps []string
 	sim.CharacterDecisions = canonicalizeCharacterWorldDecisions(s, sim.CharacterDecisions)
+	if sim.Version >= 2 {
+		if err := validateStoredCharacterAgentProtocol(s, sim); err != nil {
+			gaps = append(gaps, "character-agent protocol invalid: "+err.Error())
+		}
+	}
 	// Legacy/imported simulations historically used caller-chosen IDs. New
 	// project-all receipts are content-addressed and must remain so on every
 	// read; live artifact checkpoints separately protect legacy files.
@@ -971,7 +976,7 @@ func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulatio
 		}
 		gaps = append(gaps, simulationDecisionKnowledgeGaps(decision)...)
 	}
-	for _, name := range requiredDossierCharacterNames(s, sim.Chapter) {
+	for _, name := range requiredCharacterDecisionNames(s, sim) {
 		if _, ok := present[name]; !ok {
 			gaps = append(gaps, "missing character decision: "+name)
 		}
@@ -1069,6 +1074,9 @@ func storedSimulationCharacterAuthorityGap(s *store.Store, sim domain.ChapterWor
 	if s == nil || strings.TrimSpace(sim.SimulationID) == "" || len(sim.CharacterDecisions) == 0 {
 		return ""
 	}
+	if sim.Version >= 2 && sim.CharacterAgentProtocol != nil {
+		return ""
+	}
 	if sim.AuthorityReceipt != nil {
 		if err := validateStoredSimulationAuthorityReceipt(s, sim); err != nil {
 			return "stored project-all authority receipt invalid: " + err.Error()
@@ -1079,6 +1087,22 @@ func storedSimulationCharacterAuthorityGap(s *store.Store, sim domain.ChapterWor
 		return "stored simulation authority contract invalid: " + err.Error()
 	}
 	return ""
+}
+
+func requiredCharacterDecisionNames(s *store.Store, sim domain.ChapterWorldSimulation) []string {
+	if sim.Version >= 2 && sim.CharacterAgentProtocol != nil && s != nil {
+		activation, err := s.CharacterAgents.LoadActivation(sim.GenerationID, sim.Chapter)
+		if err == nil && activation != nil && activation.Digest == sim.CharacterAgentProtocol.ActivationDigest {
+			var names []string
+			for _, entry := range activation.Entries {
+				if entry.State == domain.CharacterAgentActive {
+					names = append(names, entry.Character)
+				}
+			}
+			return names
+		}
+	}
+	return requiredDossierCharacterNames(s, sim.Chapter)
 }
 
 type simulationDecisionTextField struct {

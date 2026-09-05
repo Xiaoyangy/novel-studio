@@ -83,7 +83,7 @@ func preparePipelineProjectAllWorkspace(
 	if err := sanitizePipelineProjectAllWorkspace(workspace); err != nil {
 		return "", err
 	}
-	if err := materializeProjectAllOutline(liveOutputDir, workspace); err != nil {
+	if err := materializeProjectAllOutline(liveOutputDir, workspace, generationID, baseChapter); err != nil {
 		return "", err
 	}
 	st := store.NewStore(workspace)
@@ -287,6 +287,7 @@ func pipelineProjectAllFoundationSnapshotRoot(outputDir string) (string, error) 
 		"meta/chapter_progress.json",
 		"meta/project_progress.json",
 		"meta/character_continuity.json",
+		"meta/character_agents/registry.json",
 		"meta/evolution_report.json",
 		"meta/world_events.jsonl",
 		"meta/world_tick.json",
@@ -321,6 +322,7 @@ func pipelineProjectAllFoundationSnapshotRoot(outputDir string) (string, error) 
 		extensions map[string]bool
 	}{
 		{path: "meta/characters", extensions: map[string]bool{".json": true}},
+		{path: "meta/character_agents/memory", extensions: map[string]bool{".json": true}},
 		{path: "meta/volume_codex", extensions: map[string]bool{".json": true}},
 		{path: "meta/snapshots", extensions: map[string]bool{".json": true}},
 		{path: "meta/character_stage", extensions: map[string]bool{".json": true}},
@@ -399,6 +401,7 @@ func sanitizePipelineProjectAllWorkspace(workspace string) error {
 		filepath.Join("meta", "scene_dynamics"),
 		filepath.Join("meta", "delivery_snapshots"),
 		filepath.Join("meta", "rewrite_recovery"),
+		filepath.Join("meta", "character_agents", "projected"),
 	} {
 		if err := os.RemoveAll(filepath.Join(workspace, rel)); err != nil {
 			return fmt.Errorf("sanitize project-all workspace %s: %w", rel, err)
@@ -528,7 +531,7 @@ func copyProjectAllFile(source, target string, mode fs.FileMode) error {
 // the isolated workspace. The source is the stable v1 preplan payload for that
 // exact global chapter number; project-all still has to turn every slot into a
 // full world simulation + POV plan before seal.
-func materializeProjectAllOutline(liveOutputDir, workspace string) error {
+func materializeProjectAllOutline(liveOutputDir, workspace, generationID string, baseChapter int) error {
 	live := store.NewStore(liveOutputDir)
 	shadow := store.NewStore(workspace)
 	volumes, err := live.Outline.LoadLayeredOutline()
@@ -580,8 +583,37 @@ func materializeProjectAllOutline(liveOutputDir, workspace string) error {
 			cursor += span
 		}
 	}
+	if successor, loadErr := live.CharacterAgents.LoadCurrentSuccessorPlan(); loadErr != nil {
+		return fmt.Errorf("load character-agent successor outline: %w", loadErr)
+	} else if successor != nil && successor.BaseCanonChapter == baseChapter {
+		revisions := make(map[int]domain.OutlineEntry, len(successor.RevisedChapters))
+		for _, entry := range successor.RevisedChapters {
+			revisions[entry.Chapter] = entry
+		}
+		cursor = 1
+		applied := 0
+		for vi := range volumes {
+			for ai := range volumes[vi].Arcs {
+				for ci := range volumes[vi].Arcs[ai].Chapters {
+					chapter := cursor + ci
+					if replacement, ok := revisions[chapter]; ok {
+						replacement.Chapter = chapter
+						volumes[vi].Arcs[ai].Chapters[ci] = replacement
+						applied++
+					}
+				}
+				cursor += len(volumes[vi].Arcs[ai].Chapters)
+			}
+		}
+		if applied != len(revisions) {
+			return fmt.Errorf("generation %s character-agent successor outline applied %d/%d chapters", generationID, applied, len(revisions))
+		}
+	}
 	if err := shadow.Outline.SaveLayeredOutline(volumes); err != nil {
 		return fmt.Errorf("save project-all expanded outline: %w", err)
+	}
+	if err := shadow.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
+		return fmt.Errorf("save project-all expanded flat outline: %w", err)
 	}
 	return nil
 }

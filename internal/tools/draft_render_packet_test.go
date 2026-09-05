@@ -1547,8 +1547,11 @@ func TestCompactReadyPlanningProjectAllStateKeepsLastTwoReceiptOnlyTransitions(t
 
 func TestReadyPlanningProfileCompactsTerminalOutlineMirrorsBeforeBudget(t *testing.T) {
 	const currentBoundary = "00:35—00:37内侧开门；00:37—00:38唯一外侧纠正；00:38—00:40警方控制；程野留在外围；00:40后只转入医疗。"
-	refs := make([]domain.StoryContractRef, 0, 22)
-	for i := 0; i < 22; i++ {
+	// The removed structural receipts (terminal contract refs, mirrored into four
+	// copies before compaction) are the overflow lever: enough of them to overshoot
+	// the planning soft budget, all of which the ready-planning profile strips.
+	refs := make([]domain.StoryContractRef, 0, 44)
+	for i := 0; i < 44; i++ {
 		refs = append(refs, domain.StoryContractRef{
 			ID:                   "terminal-receipt",
 			Kind:                 "non_negotiable",
@@ -1602,7 +1605,7 @@ func TestReadyPlanningProfileCompactsTerminalOutlineMirrorsBeforeBudget(t *testi
 		t.Fatalf("ready planning context should converge after mirror compaction: %v", err)
 	}
 	if len(raw) > contextBudget(11, "planning") {
-		t.Fatalf("ready planning result exceeded 64 KiB: %d", len(raw))
+		t.Fatalf("ready planning result exceeded planning budget %d: %d", contextBudget(11, "planning"), len(raw))
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {

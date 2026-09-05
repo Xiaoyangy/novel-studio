@@ -1072,6 +1072,200 @@ def summarize_run(run: Path) -> dict:
     }
 
 
+def character_agent_payload(nd: Path) -> dict:
+    """Public dashboard projection of character-agent evidence.
+
+    Observation packets, private memories and decision reasons never leave the
+    server-side files. The UI receives only activation reasons, the submitted
+    choice/action, the arbiter's public result, memory chapter and usage.
+    """
+    registry = read_json(nd / "meta" / "character_agents" / "registry.json") or {}
+    rows = {}
+    for entry in registry.get("entries") or []:
+        if not isinstance(entry, dict) or not entry.get("agent_id"):
+            continue
+        rows[entry["agent_id"]] = {
+            "agent_id": entry["agent_id"],
+            "agent_name": entry.get("agent_name") or f"character_{entry['agent_id']}",
+            "character": entry.get("character") or "",
+            "tier": entry.get("tier") or "",
+            "status": entry.get("status") or "sleeping",
+            "last_activated_chapter": entry.get("last_activated_chapter") or 0,
+            "memory_version": entry.get("memory_version") or 0,
+            "memory_chapter": 0,
+            "activation_reasons": [],
+            "recent_decision": "",
+            "recent_action": "",
+            "arbitration_outcome": "",
+            "arbitration_result": "",
+            "conflict_rounds": 0,
+            "conflict_count": 0,
+            "cost_usd": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "_latest_chapter": -1,
+        }
+        memory = read_json(nd / "meta" / "character_agents" / "memory" / f"{entry['agent_id']}.json") or {}
+        rows[entry["agent_id"]]["memory_chapter"] = memory.get("last_accepted_chapter") or 0
+
+    seen_evidence = set()
+    seen_usage = set()
+    arbiter_usage = {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0}
+
+    def ensure_row(agent_id, character="", tier=""):
+        if not agent_id:
+            return None
+        if agent_id not in rows:
+            rows[agent_id] = {
+                "agent_id": agent_id, "character": character or "", "tier": tier or "",
+                "agent_name": f"character_{agent_id}",
+                "status": "sleeping", "last_activated_chapter": 0, "memory_version": 0,
+                "memory_chapter": 0, "activation_reasons": [], "recent_decision": "",
+                "recent_action": "", "arbitration_outcome": "", "arbitration_result": "",
+                "conflict_rounds": 0, "conflict_count": 0, "cost_usd": 0.0,
+                "tokens_in": 0, "tokens_out": 0, "_latest_chapter": -1,
+            }
+        return rows[agent_id]
+
+    def add_usage(item):
+        if not isinstance(item, dict):
+            return
+        agent_id = item.get("agent_id") or ""
+        key = (item.get("generation_id"), item.get("role"), agent_id, item.get("chapter"), item.get("round"), item.get("input"),
+               item.get("output"), item.get("cost_usd"))
+        if not agent_id or key in seen_usage:
+            return
+        seen_usage.add(key)
+        if item.get("role") == "world_arbiter" or agent_id == "world_arbiter":
+            arbiter_usage["tokens_in"] += int(item.get("input") or 0)
+            arbiter_usage["tokens_out"] += int(item.get("output") or 0)
+            arbiter_usage["cost_usd"] += float(item.get("cost_usd") or 0.0)
+            return
+        row = ensure_row(agent_id, item.get("character") or "")
+        row["tokens_in"] += int(item.get("input") or 0)
+        row["tokens_out"] += int(item.get("output") or 0)
+        row["cost_usd"] += float(item.get("cost_usd") or 0.0)
+
+    def ingest(evidence):
+        if not isinstance(evidence, dict):
+            return
+        root = evidence.get("evidence_root") or ""
+        if root and root in seen_evidence:
+            return
+        if root:
+            seen_evidence.add(root)
+        chapter = int(evidence.get("chapter") or 0)
+        for entry in (evidence.get("registry") or {}).get("entries") or []:
+            if isinstance(entry, dict):
+                row = ensure_row(entry.get("agent_id"), entry.get("character"), entry.get("tier"))
+                if row is not None and entry.get("agent_name"):
+                    row["agent_name"] = entry["agent_name"]
+        activation = evidence.get("activation") or {}
+        activation_by_agent = {}
+        for entry in activation.get("entries") or []:
+            if not isinstance(entry, dict) or not entry.get("agent_id"):
+                continue
+            activation_by_agent[entry["agent_id"]] = entry
+            row = ensure_row(entry["agent_id"], entry.get("character"), entry.get("tier"))
+            if chapter >= row["_latest_chapter"]:
+                row["status"] = entry.get("state") or row["status"]
+                row["activation_reasons"] = [clip(x, 80) for x in (entry.get("reasons") or [])][:8]
+                if entry.get("state") == "active":
+                    row["last_activated_chapter"] = max(row["last_activated_chapter"], chapter)
+        proposals = {}
+        for proposal in evidence.get("proposals") or []:
+            if not isinstance(proposal, dict) or not proposal.get("agent_id"):
+                continue
+            current = proposals.get(proposal["agent_id"])
+            if current is None or int(proposal.get("round") or 0) > int(current.get("round") or 0):
+                proposals[proposal["agent_id"]] = proposal
+        arbitrations = [x for x in (evidence.get("arbitrations") or []) if isinstance(x, dict)]
+        arbitrations.sort(key=lambda x: int(x.get("round") or 0))
+        final = arbitrations[-1] if arbitrations else {}
+        conflicts = [x for a in arbitrations for x in (a.get("conflicts") or []) if isinstance(x, dict)]
+        for resolution in final.get("resolutions") or []:
+            if not isinstance(resolution, dict) or not resolution.get("agent_id"):
+                continue
+            agent_id = resolution["agent_id"]
+            row = ensure_row(agent_id, resolution.get("character") or "")
+            proposal = proposals.get(agent_id) or {}
+            if chapter >= row["_latest_chapter"]:
+                row["_latest_chapter"] = chapter
+                row["recent_decision"] = clip(proposal.get("decision"), 180)
+                row["recent_action"] = clip(proposal.get("intended_action"), 180)
+                row["arbitration_outcome"] = resolution.get("outcome") or ""
+                row["arbitration_result"] = clip(resolution.get("immediate_result"), 220)
+                row["conflict_rounds"] = max(0, int(final.get("round") or 1) - 1)
+                row["conflict_count"] = sum(
+                    1 for conflict in conflicts if agent_id in (conflict.get("affected_agent_ids") or [])
+                )
+        for item in evidence.get("usage") or []:
+            add_usage(item)
+
+    planning_root = nd / "meta" / "planning" / "v2"
+    if planning_root.is_dir():
+        for path in planning_root.rglob("*.bundle.json"):
+            bundle = read_json(path) or {}
+            ingest(bundle.get("character_agent_evidence"))
+
+    projected_root = nd / "meta" / "character_agents" / "projected"
+    if projected_root.is_dir():
+        for chapter_dir in projected_root.glob("*/chapters/*"):
+            activation = read_json(chapter_dir / "activation.json")
+            if not isinstance(activation, dict):
+                continue
+            arbitration_paths = sorted(chapter_dir.glob("arbitration-round-*.json"))
+            arbitrations = [read_json(path) for path in arbitration_paths]
+            proposals = []
+            for path in sorted((chapter_dir / "proposals").glob("round-*/*.json")):
+                proposal = read_json(path)
+                if isinstance(proposal, dict):
+                    proposals.append(proposal)
+            ingest({
+                "chapter": activation.get("chapter") or 0,
+                "activation": activation,
+                "proposals": proposals,
+                "arbitrations": [x for x in arbitrations if isinstance(x, dict)],
+            })
+    for item in read_jsonl_tail(nd / "meta" / "character_agents" / "usage.jsonl", 10000):
+        add_usage(item)
+
+    public_rows = []
+    for row in rows.values():
+        row.pop("_latest_chapter", None)
+        row["cost_usd"] = round(row["cost_usd"], 4)
+        public_rows.append(row)
+    public_rows.sort(key=lambda row: (0 if row["tier"] == "core" else 1, row["character"], row["agent_id"]))
+    successor_public = None
+    successor_pointer = read_json(nd / "meta" / "character_agents" / "successors" / "current.json") or {}
+    parent_generation = successor_pointer.get("parent_generation_id") or ""
+    successor_digest = successor_pointer.get("plan_digest") or ""
+    if parent_generation and successor_digest.startswith("sha256:"):
+        successor = read_json(
+            nd / "meta" / "character_agents" / "successors" / parent_generation /
+            f"{successor_digest.removeprefix('sha256:')}.json"
+        ) or {}
+        if successor.get("digest") == successor_digest:
+            successor_public = {
+                "parent_generation_id": parent_generation,
+                "plan_digest": successor_digest,
+                "trigger_chapter": successor.get("trigger_chapter") or 0,
+                "hard_contract_conflicts": [clip(x, 180) for x in (successor.get("hard_contract_conflicts") or [])],
+                "architect_summary": clip(successor.get("architect_summary"), 240),
+            }
+    return {
+        "version": registry.get("version") or "",
+        "registry_root": registry.get("registry_root") or "",
+        "characters": public_rows,
+        "world_arbiter_usage": {
+            "cost_usd": round(arbiter_usage["cost_usd"], 4),
+            "tokens_in": arbiter_usage["tokens_in"],
+            "tokens_out": arbiter_usage["tokens_out"],
+        },
+        "successor_generation": successor_public,
+    }
+
+
 def run_detail(run: Path) -> dict:
     nd = novel_dir(run)
     base = summarize_run(run)
@@ -1139,6 +1333,7 @@ def run_detail(run: Path) -> dict:
         "deliveries": deliveries,
         "position": position,
         "assets": assets,
+        "character_agents": character_agent_payload(nd),
         "log": log_tail(nd),
     })
     return base
