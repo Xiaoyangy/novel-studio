@@ -48,7 +48,7 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 
 func TestProjectAllPlanningProtocolDigestKeepsRuntimeRecoveryOutOfIdentity(t *testing.T) {
 	const plannerFixture = "planner-protocol-fixture.v1"
-	const want = "729dd2683e00b831da5691fb8201acd452f56821aecad463c739bc3b02e6a672"
+	const want = "f285334bc78f9f51d274f1a1efb9e5ab36c7dddc28c4f754fc236b2903fc911e"
 	if got := ProjectAllPlanningProtocolDigest(plannerFixture); got != want {
 		t.Fatalf("project-all planning protocol digest changed: got %s want %s", got, want)
 	}

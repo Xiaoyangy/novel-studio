@@ -17,7 +17,7 @@ import (
 	buildversion "github.com/chenhongyang/novel-studio/internal/version"
 )
 
-const architectReadinessSchemaVersion = 1
+const architectReadinessSchemaVersion = 2
 const architectFreshnessGrace = 2 * time.Second
 
 type architectCheckFlags struct {
@@ -25,15 +25,17 @@ type architectCheckFlags struct {
 }
 
 type architectReadiness struct {
-	Ready            bool           `json:"ready"`
-	SchemaVersion    int            `json:"schema_version"`
-	GeneratorVersion string         `json:"generator_version,omitempty"`
-	Missing          []string       `json:"missing,omitempty"`
-	Issues           []string       `json:"issues,omitempty"`
-	Warnings         []string       `json:"warnings,omitempty"`
-	Stats            map[string]int `json:"stats,omitempty"`
-	GeneratedAt      string         `json:"generated_at,omitempty"`
-	Path             string         `json:"path,omitempty"`
+	Ready                bool                         `json:"ready"`
+	SchemaVersion        int                          `json:"schema_version"`
+	GeneratorVersion     string                       `json:"generator_version,omitempty"`
+	Missing              []string                     `json:"missing,omitempty"`
+	Issues               []string                     `json:"issues,omitempty"`
+	Warnings             []string                     `json:"warnings,omitempty"`
+	Stats                map[string]int               `json:"stats,omitempty"`
+	WorldCoherenceDigest string                       `json:"world_coherence_digest,omitempty"`
+	GeneratedAt          string                       `json:"generated_at,omitempty"`
+	Path                 string                       `json:"path,omitempty"`
+	WorldCoherence       *domain.WorldCoherenceReport `json:"-"`
 }
 
 var architectFoundationFreshnessFiles = []string{
@@ -151,6 +153,7 @@ func assessArchitectReadiness(dir string) architectReadiness {
 	chars, _ := st.Characters.Load()
 	rules, _ := st.World.LoadWorldRules()
 	world, _ := st.World.LoadBookWorld()
+	codex, _ := st.LoadWorldCodex()
 	compass, _ := st.Outline.LoadCompass()
 
 	stats["outline_chapters"] = len(outline)
@@ -200,12 +203,6 @@ func assessArchitectReadiness(dir string) architectReadiness {
 		if len(world.Places) == 0 || len(world.Factions) == 0 {
 			warnings = append(warnings, "book_world.json places/factions 偏少：zero-init 可用空间与势力压力会偏弱")
 		}
-		if clockIssues := architectFactionClockIssues(world); len(clockIssues) > 0 {
-			issues = append(issues, clockIssues...)
-		}
-		if relationIssues := world.ValidateFactionRelations(); len(relationIssues) > 0 {
-			issues = append(issues, relationIssues...)
-		}
 	}
 	if compass == nil || strings.TrimSpace(compass.EndingDirection) == "" || len(compass.OpenThreads) == 0 {
 		issues = append(issues, "meta/compass.json 缺少终局方向或开放长线")
@@ -241,22 +238,46 @@ func assessArchitectReadiness(dir string) architectReadiness {
 		warnings = append(warnings, "core/important 角色少于 5 人：长篇互动和配角助攻空间会偏窄")
 	}
 
-	if codexIssues := architectWorldCodexIssues(filepath.Join(dir, "world_codex.json")); len(codexIssues) > 0 {
-		issues = append(issues, codexIssues...)
-	}
+	coherence := domain.AuditWorldCoherence(rules, codex, world)
+	issues = appendUniqueArchitectMessages(issues, coherence.BlockingIssues()...)
+	warnings = appendUniqueArchitectMessages(warnings, coherence.Warnings()...)
+	stats["world_codex_sections"] = coherence.Stats.CodexSections
+	stats["world_mechanisms"] = coherence.Stats.Mechanisms
+	stats["world_counterfactual_tests"] = coherence.Stats.CounterfactualTests
+	stats["book_world_connected_components"] = coherence.Stats.ConnectedComponents
 
 	readiness := architectReadiness{
-		Ready:            len(missing) == 0 && len(issues) == 0,
-		SchemaVersion:    architectReadinessSchemaVersion,
-		GeneratorVersion: buildversion.Resolve(buildversion.Info{Version: version}).Version,
-		Missing:          missing,
-		Issues:           issues,
-		Warnings:         warnings,
-		Stats:            stats,
-		GeneratedAt:      time.Now().Format(time.RFC3339),
-		Path:             filepath.Join(dir, "meta", "architect_readiness.md"),
+		Ready:                len(missing) == 0 && len(issues) == 0,
+		SchemaVersion:        architectReadinessSchemaVersion,
+		GeneratorVersion:     buildversion.Resolve(buildversion.Info{Version: version}).Version,
+		Missing:              missing,
+		Issues:               issues,
+		Warnings:             warnings,
+		Stats:                stats,
+		WorldCoherenceDigest: coherence.ReportDigest,
+		GeneratedAt:          time.Now().Format(time.RFC3339),
+		Path:                 filepath.Join(dir, "meta", "architect_readiness.md"),
+		WorldCoherence:       &coherence,
 	}
 	return readiness
+}
+
+func appendUniqueArchitectMessages(dst []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(values))
+	for _, value := range dst {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		dst = append(dst, value)
+	}
+	return dst
 }
 
 func architectFactionClockIssues(world *domain.BookWorld) []string {
@@ -388,6 +409,20 @@ func writeArchitectReadiness(dir string, readiness architectReadiness) error {
 	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
 		return err
 	}
+	if readiness.WorldCoherence == nil {
+		st := store.NewStore(dir)
+		rules, _ := st.World.LoadWorldRules()
+		world, _ := st.World.LoadBookWorld()
+		codex, _ := st.LoadWorldCodex()
+		report := domain.AuditWorldCoherence(rules, codex, world)
+		readiness.WorldCoherence = &report
+	}
+	if readiness.WorldCoherence != nil {
+		if err := store.NewStore(dir).SaveWorldCoherenceReport(*readiness.WorldCoherence); err != nil {
+			return fmt.Errorf("write world coherence report: %w", err)
+		}
+		readiness.WorldCoherenceDigest = readiness.WorldCoherence.ReportDigest
+	}
 	data, err := json.MarshalIndent(readiness, "", "  ")
 	if err != nil {
 		return err
@@ -421,7 +456,8 @@ func writeArchitectReadiness(dir string, readiness architectReadiness) error {
 		fmt.Fprintf(&b, "\n## Stats\n\n")
 		keys := []string{
 			"volumes", "layered_total_chapters", "outline_chapters", "characters",
-			"world_rules", "book_world_places", "book_world_factions", "book_world_faction_clocks", "book_world_routes",
+			"world_rules", "world_codex_sections", "world_mechanisms", "world_counterfactual_tests",
+			"book_world_places", "book_world_factions", "book_world_faction_clocks", "book_world_routes", "book_world_connected_components",
 		}
 		for _, key := range keys {
 			if v, ok := readiness.Stats[key]; ok {
@@ -447,6 +483,26 @@ func architectReadinessState(dir string) (bool, string) {
 	}
 	if !r.Ready {
 		return false, fmt.Sprintf("Architect 未通过（missing=%d issues=%d warnings=%d，详见 meta/architect_readiness.md）", len(r.Missing), len(r.Issues), len(r.Warnings))
+	}
+	st := store.NewStore(dir)
+	report, err := st.LoadWorldCoherenceReport()
+	if err != nil || report == nil {
+		return false, "meta/world_coherence_report.json 不存在或不可读；请重跑 --architect-check"
+	}
+	if strings.TrimSpace(r.WorldCoherenceDigest) == "" || r.WorldCoherenceDigest != report.ReportDigest {
+		return false, "architect_readiness 与 world_coherence_report 摘要不一致；请重跑 --architect-check"
+	}
+	rules, rulesErr := st.World.LoadWorldRules()
+	codex, codexErr := st.LoadWorldCodex()
+	world, worldErr := st.World.LoadBookWorld()
+	if rulesErr != nil || codexErr != nil || worldErr != nil {
+		return false, "世界源文件不可读，无法复核 world_coherence_report"
+	}
+	if err := domain.VerifyWorldCoherenceReport(*report, rules, codex, world); err != nil {
+		return false, fmt.Sprintf("world_coherence_report 已失效或被修改：%v；请重跑 --architect-check", err)
+	}
+	if !report.Ready {
+		return false, "world_coherence_report ready=false；请修正世界设定后重跑 --architect-check"
 	}
 	generatedAt, err := time.Parse(time.RFC3339, r.GeneratedAt)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
 func TestArchitectChapterRangeFromPremiseIgnoresBeatRanges(t *testing.T) {
@@ -100,10 +101,32 @@ func TestArchitectReadinessRejectsDanglingFactionRelations(t *testing.T) {
 }
 
 func TestArchitectReadinessUsesLayeredOutlineAsFreshnessAuthority(t *testing.T) {
-	dir := t.TempDir()
-	writeArchitectCheckFile(t, dir, "layered_outline.json", `[{"index":1,"arcs":[]}]`)
-	writeArchitectCheckFile(t, dir, "outline.json", `[{"chapter":1,"title":"derived"}]`)
-	generatedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	dir := seedZeroInitProject(t)
+	writeArchitectCheckFile(t, dir, "layered_outline.json", `[{
+  "index": 1,
+  "title": "鬼城账本",
+  "stage_goal": "江烬确认红账不是普通欠费",
+  "arcs": [{
+    "index": 1,
+    "title": "午夜欠费",
+    "goal": "核验鬼城的第一条债务规则",
+    "chapters": [{
+      "chapter": 1,
+      "title": "午夜欠费单",
+      "core_event": "江烬收到鬼城入住欠费单，被迫核验第一条规则。",
+      "hook": "欠费单上的妹妹姓名多出一笔红账。"
+    }]
+  }]
+}]`)
+	writeArchitectCheckFile(t, dir, "outline.json", `[{
+  "chapter": 1,
+  "title": "午夜欠费单",
+  "core_event": "江烬收到鬼城入住欠费单，被迫核验第一条规则。",
+  "hook": "欠费单上的妹妹姓名多出一笔红账。"
+}]`)
+	// Place the receipt just after the fixture writes so unrelated foundation
+	// mtimes cannot obscure the layered-vs-flat freshness assertion below.
+	generatedAt := time.Now().UTC().Add(architectFreshnessGrace + time.Second).Truncate(time.Millisecond)
 	before := generatedAt.Add(-10 * time.Second)
 	if err := os.Chtimes(
 		filepath.Join(dir, "layered_outline.json"),
@@ -112,11 +135,12 @@ func TestArchitectReadinessUsesLayeredOutlineAsFreshnessAuthority(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeArchitectReadiness(dir, architectReadiness{
-		Ready:         true,
-		SchemaVersion: architectReadinessSchemaVersion,
-		GeneratedAt:   generatedAt.Format(time.RFC3339),
-	}); err != nil {
+	readiness := assessArchitectReadiness(dir)
+	if !readiness.Ready {
+		t.Fatalf("fixture not architect ready: %+v", readiness.Issues)
+	}
+	readiness.GeneratedAt = generatedAt.Format(time.RFC3339)
+	if err := writeArchitectReadiness(dir, readiness); err != nil {
 		t.Fatal(err)
 	}
 	after := generatedAt.Add(10 * time.Second)
@@ -140,6 +164,84 @@ func TestArchitectReadinessUsesLayeredOutlineAsFreshnessAuthority(t *testing.T) 
 	}
 	if ok, _ := architectReadinessState(dir); ok {
 		t.Fatal("authored layered outline change did not invalidate readiness")
+	}
+}
+
+func TestArchitectReadinessAllowsWorldTickClockProgressButRejectsAuthoredWorldDrift(t *testing.T) {
+	dir := seedZeroInitProject(t)
+	st := store.NewStore(dir)
+	world, err := st.World.LoadBookWorld()
+	if err != nil || world == nil {
+		t.Fatalf("load book world: world=%+v err=%v", world, err)
+	}
+	world.Factions[0].Clock.Progress++
+	if err := st.World.SaveBookWorld(*world); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := architectReadinessState(dir); !ok {
+		t.Fatalf("world tick clock progress invalidated authored-world proof: %s", reason)
+	}
+
+	world.Factions[0].Goal += "，并垄断新凭证"
+	if err := st.World.SaveBookWorld(*world); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := architectReadinessState(dir); ok || !strings.Contains(reason, "source digest") {
+		t.Fatalf("authored BookWorld drift was not rejected: ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestArchitectCheckPipelinePersistsV2WorldCoherenceProof(t *testing.T) {
+	dir := seedZeroInitProject(t) // also keeps the legacy-v1 readiness path covered.
+	st := store.NewStore(dir)
+
+	world, err := st.World.LoadBookWorld()
+	if err != nil || world == nil {
+		t.Fatalf("load book world: world=%+v err=%v", world, err)
+	}
+	world.Version = domain.CurrentBookWorldSchemaVersion
+	world.Routes = []domain.WorldRoute{{
+		From: "old_block", To: "corner_store", Description: "步行穿过夜间街巷", Risk: "封路时延迟半日", TravelDays: 0.1,
+	}}
+	world.Factions[0].Resources = []string{"欠费名册", "催收凭证"}
+	world.Factions[0].Relations = []domain.FactionRelation{{Target: "residents", Kind: "pressures"}}
+	world.Factions[1].Resources = []string{"邻里消息", "互助人情"}
+	world.Factions[1].Relations = []domain.FactionRelation{{Target: "debt_rule", Kind: "resists"}}
+	if err := st.World.SaveBookWorld(*world); err != nil {
+		t.Fatal(err)
+	}
+
+	codex := zeroInitTestWorldCodex()
+	codex.SchemaVersion = domain.CurrentWorldCodexSchemaVersion
+	for i := range codex.AbilityTiers {
+		codex.AbilityTiers[i].Cost = "每次核验都会消耗可追踪的时间或凭证"
+	}
+	codex.SkillDomains[0].Constraints = []string{"必须接触账单或有效副本"}
+	codex.WeaponCategories[0].Constraints = []string{"现实器物不能改写契约"}
+	codex.EquipmentCategories[0].Constraints = []string{"凭证必须能核验来源"}
+	codex.Mechanisms = []domain.CodexMechanism{{
+		ID: "debt_verification", Name: "债务核验", Visibility: "formal",
+		SectionRefs: []string{"mechanism_structure"}, ActorScope: []string{"持有账单或有效副本的人"},
+		Trigger: "有人对欠费提出异议", Preconditions: []string{"能接触可核验凭证"},
+		Inputs: []string{"账单或有效副本"}, Costs: []string{"耗费半日并暴露核验意图"},
+		Effects: []string{"确认债务有效性或登记争议"}, FailureModes: []string{"无凭证时核验被阻断"},
+		Observability: []string{"登记者与在场持有人可看到回执"}, Timing: "半日后生效",
+	}}
+	codex.CounterfactualTests = []domain.CodexCounterfactualProbe{{
+		ID: "debt_without_receipt", Given: []string{"角色只有传闻，没有账单或副本"},
+		Action: "要求免除债务", ExpectedOutcome: "核验被阻断并保留原债务状态",
+		ForbiddenOutcome: "为了推进剧情直接免债", MechanismRefs: []string{"debt_verification"},
+	}}
+	if err := st.SaveWorldCodex(codex); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := architectCheckPipeline(cliOptions{}, []string{"--dir", dir}); err != nil {
+		t.Fatalf("architect check command failed: %v", err)
+	}
+	report, err := st.LoadWorldCoherenceReport()
+	if err != nil || report == nil || !report.Ready || report.ReportDigest == "" {
+		t.Fatalf("v2 coherence proof not persisted: report=%+v err=%v", report, err)
 	}
 }
 

@@ -98,6 +98,7 @@ type WorldFoundation struct {
 	StoryStart           StoryStart            `json:"story_start"`
 	IronLaws             []WorldIronLaw        `json:"iron_laws"`
 	RuleChangeConditions []RuleChangeCondition `json:"rule_change_conditions,omitempty"`
+	MechanismRefs        []string              `json:"mechanism_refs,omitempty"`
 	PastTimeline         []PastTimelineEvent   `json:"past_timeline,omitempty"`
 	CityBaseline         []LocationBaseline    `json:"city_baseline,omitempty"`
 	KnowledgePolicy      string                `json:"knowledge_policy,omitempty"`

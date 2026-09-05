@@ -104,6 +104,8 @@ func verifyPipelineArchitectStage(outputDir string, evidence domain.PipelineStag
 	for _, rel := range []string{
 		filepath.Join("meta", "architect_readiness.json"),
 		filepath.Join("meta", "architect_readiness.md"),
+		filepath.Join("meta", "world_coherence_report.json"),
+		filepath.Join("meta", "world_coherence_report.md"),
 	} {
 		if nonEmptyFile(filepath.Join(outputDir, rel)) {
 			evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(rel))

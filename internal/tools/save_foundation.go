@@ -78,7 +78,7 @@ func (t *SaveFoundationTool) WithOneShotFoundationRefresh(allow bool) *SaveFound
 
 func (t *SaveFoundationTool) Name() string { return "save_foundation" }
 func (t *SaveFoundationTool) Description() string {
-	return "保存小说基础设定（premise/outline/characters/world_rules/book_world/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / book_world / plan_structure / append_volume / map_contracts / expand_arc / revise_arc / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。plan_structure 只在 outline-all chapter0 receipt 下一次性写入全书卷弧预留骨架（每卷 index/title/theme + 每弧 index/title/goal/estimated_chapters；每弧 estimated_chapters 由模型按剧情自定，>=1 且无上限，chapters 必须为空），卷数与全书总章数须落在 estimated_scale 范围内；map_contracts 只在 outline-all chapter0 receipt 下为完整弧集分配结构化终局/长线回执；expand_arc 展开骨架弧的详细章节（需 volume + arc）；revise_arc 只能在 outline-all chapter0 receipt 下原位替换已展开弧，严禁改变 span；append_volume 追加新卷；update_compass 更新终局方向；complete_book 宣告全书完结。scale 可选，仅允许 short / mid / long。"
+	return "保存小说基础设定（premise/outline/characters/world_rules/world_codex/book_world/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / world_codex / book_world / volume_codex / plan_structure / append_volume / map_contracts / expand_arc / revise_arc / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。plan_structure 只在 outline-all chapter0 receipt 下一次性写入全书卷弧预留骨架（每卷 index/title/theme + 每弧 index/title/goal/estimated_chapters；每弧 estimated_chapters 由模型按剧情自定，>=1 且无上限，chapters 必须为空），卷数与全书总章数须落在 estimated_scale 范围内；map_contracts 只在 outline-all chapter0 receipt 下为完整弧集分配结构化终局/长线回执；expand_arc 展开骨架弧的详细章节（需 volume + arc）；revise_arc 只能在 outline-all chapter0 receipt 下原位替换已展开弧，严禁改变 span；append_volume 追加新卷；update_compass 更新终局方向；complete_book 宣告全书完结。scale 可选，仅允许 short / mid / long。"
 }
 func (t *SaveFoundationTool) Label() string { return "保存设定" }
 
@@ -94,7 +94,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
 		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围，其中 x-y章 必须是全书总章数范围（严禁把“每弧/每卷 8-16 章”这类单元预算写成全书章数范围；如需注明可写“每弧8-16章”，但全书总章数必须另有独立的 x-y章 范围）；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。book_world 的 faction 必须带 clock（{segments, progress, consequence, pace}，Blades 式势力进度钟），也可带 aliases（后续 save_world_tick 的自然称呼/组织简称必须能落到此处）、stance（对主角立场）/ internal_tension（内部矛盾）/ core_values；relation.target 必须指向已存在 faction 的 id/name/aliases，不得悬空；relation 可带 conflict_type（种族/权力/法律/经济/信仰/资源）与 conflict_state（open_war/cold_war/truce/hidden_hostility/alliance）。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围，其中 x-y章 必须是全书总章数范围（严禁把“每弧/每卷 8-16 章”这类单元预算写成全书章数范围；如需注明可写“每弧8-16章”，但全书总章数必须另有独立的 x-y章 范围）；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。world_codex v2 必须包含 mechanisms（visibility、触发、前置、输入、代价、结果、失败模式、可观测性、时间、section_refs）与 counterfactual_tests；每条机制都要被探针引用。book_world v2 的每个 faction 必须带有限 resources 和 clock（{segments, progress, consequence, pace}），多个势力至少有一条 relation；route.from/to 必须命中 place id/name，主要路线必须有 travel_days>0 和 risk；place.factions 与 relation.target 必须命中势力 id/name/aliases。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / revise_arc / outline-all append_volume / volume_codex 时必传）")),
@@ -280,6 +280,25 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("book_world", &world); err != nil {
 			return nil, err
 		}
+		if world.Version == 0 {
+			world.Version = domain.CurrentBookWorldSchemaVersion
+		}
+		if err := domain.ValidateBookWorldV2(world); err != nil {
+			return nil, fmt.Errorf("book_world 未通过可推敲性校验: %w: %w", err, errs.ErrToolPrecondition)
+		}
+		if codex, loadErr := t.store.LoadWorldCodex(); loadErr != nil {
+			return nil, fmt.Errorf("load world_codex for book_world audit: %w", loadErr)
+		} else if codex != nil {
+			rules, rulesErr := t.store.World.LoadWorldRules()
+			if rulesErr != nil {
+				return nil, fmt.Errorf("load world_rules for book_world audit: %w", rulesErr)
+			}
+			report := domain.AuditWorldCoherence(rules, codex, &world)
+			if issues := report.BlockingIssues(); len(issues) > 0 {
+				return nil, fmt.Errorf("book_world 与既有世界法典无法闭合：%s: %w", strings.Join(issues, "；"), errs.ErrToolPrecondition)
+			}
+			result["world_coherence_digest"] = report.ReportDigest
+		}
 		if err := t.store.World.SaveBookWorld(world); err != nil {
 			return nil, fmt.Errorf("save book_world: %w: %w", errs.ErrStoreWrite, err)
 		}
@@ -292,6 +311,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		// 归一化成约定数组形状，避免逐字段报错重发 14KB 的收敛循环。
 		if err := decodeFoundationJSON("world_codex", normalizeWorldCodexContent(content), &codex); err != nil {
 			return nil, err
+		}
+		if codex.SchemaVersion == 0 {
+			codex.SchemaVersion = domain.CurrentWorldCodexSchemaVersion
 		}
 		if err := t.saveWorldCodex(&codex, a.ChangeReason, a.ChangeEvidence); err != nil {
 			return nil, err
@@ -526,7 +548,7 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		result["last_updated"] = compass.LastUpdated
 
 	default:
-		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/book_world/plan_structure/append_volume/map_contracts/expand_arc/revise_arc/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
+		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/world_codex/book_world/volume_codex/plan_structure/append_volume/map_contracts/expand_arc/revise_arc/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
 	}
 
 	// checkpoint
@@ -536,7 +558,15 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	} else if a.Type == "append_volume" {
 		scope = domain.GlobalScope()
 	}
-	if _, err := t.store.Checkpoints.AppendArtifact(scope, a.Type, foundationArtifact(a.Type)); err != nil {
+	checkpointArtifact := foundationArtifact(a.Type)
+	if a.Type == "volume_codex" {
+		volume, ok := result["volume"].(int)
+		if !ok || volume <= 0 {
+			return nil, fmt.Errorf("checkpoint volume_codex: missing resolved volume: %w", errs.ErrStoreWrite)
+		}
+		checkpointArtifact = fmt.Sprintf("meta/volume_codex/v%02d.json", volume)
+	}
+	if _, err := t.store.Checkpoints.AppendArtifact(scope, a.Type, checkpointArtifact); err != nil {
 		return nil, fmt.Errorf("checkpoint foundation %s: %w: %w", a.Type, errs.ErrStoreWrite, err)
 	}
 	if t.recordFoundationRefreshEpoch {
@@ -605,7 +635,7 @@ func foundationRAGChunks(kind, content string) []domain.RAGChunk {
 	switch kind {
 	case "characters":
 		facet = "character"
-	case "world_rules", "book_world":
+	case "world_rules", "world_codex", "book_world":
 		facet = "world"
 	case "update_compass":
 		facet = "plot"
@@ -743,12 +773,17 @@ var worldCodexArrayFields = map[string]string{
 	"weapon_categories":    "name",
 	"equipment_categories": "name",
 	"sections":             "key",
+	"mechanisms":           "id",
+	"counterfactual_tests": "id",
 }
 
 // worldCodexListItemFields 元素内约定为 []string 的键；模型常给单个字符串。
 var worldCodexListItemFields = map[string]bool{
 	"constraints": true, "traits": true, "grades": true,
 	"aliases": true, "samples": true, "rules": true,
+	"section_refs": true, "actor_scope": true, "preconditions": true,
+	"inputs": true, "costs": true, "effects": true, "failure_modes": true,
+	"observability": true, "given": true, "mechanism_refs": true,
 }
 
 // normalizeWorldCodexContent 在严格解析前对 world_codex 内容做确定性形状归一化：
@@ -882,12 +917,15 @@ func foundationShapeHint(typeName string) string {
 		keys = append(keys, sec.Key)
 	}
 	return "\nworld_codex 结构模板（字段名必须完全一致）：" +
-		`{"ability_tiers":[{"order":1,"name":"…","magnitude":"…","limits":"…","promotion":"…","cost":"…"}],` +
+		fmt.Sprintf(`{"schema_version":%d,`, domain.CurrentWorldCodexSchemaVersion) +
+		`"ability_tiers":[{"order":1,"name":"…","magnitude":"…","limits":"…","promotion":"…","cost":"…"}],` +
 		`"skill_domains":[{"name":"…","description":"…","tier_binding":"…","constraints":["…"]}],` +
 		`"races":[{"name":"…","description":"…","constraints":["…"]}],` +
 		`"weapon_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…"}],` +
 		`"equipment_categories":[同 weapon_categories 结构],` +
 		`"sections":[{"key":"…","content":"…","rules":["…"]} 或 {"key":"…","not_applicable":true,"reason":"…"}],` +
+		`"mechanisms":[{"id":"…","name":"…","visibility":"formal","section_refs":["mechanism_structure"],"actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…"}],` +
+		`"counterfactual_tests":[{"id":"…","given":["…"],"action":"…","expected_outcome":"…","forbidden_outcome":"…","mechanism_refs":["…"]}],` +
 		`"immutability_policy":"…"}` +
 		"；sections 是数组且必须覆盖全部 16 个 key：" + strings.Join(keys, ", ")
 }
@@ -1177,6 +1215,9 @@ func (t *SaveFoundationTool) dropWorldCodexDraft() {
 // sections 按 key 合并（来者覆盖同 key，新 key 追加）。
 func mergeWorldCodex(base, in *domain.WorldCodex) *domain.WorldCodex {
 	out := *base
+	if in.SchemaVersion > 0 {
+		out.SchemaVersion = in.SchemaVersion
+	}
 	if len(in.AbilityTiers) > 0 {
 		out.AbilityTiers = in.AbilityTiers
 	}
@@ -1191,6 +1232,12 @@ func mergeWorldCodex(base, in *domain.WorldCodex) *domain.WorldCodex {
 	}
 	if len(in.EquipmentCategories) > 0 {
 		out.EquipmentCategories = in.EquipmentCategories
+	}
+	if len(in.Mechanisms) > 0 {
+		out.Mechanisms = in.Mechanisms
+	}
+	if len(in.CounterfactualTests) > 0 {
+		out.CounterfactualTests = in.CounterfactualTests
 	}
 	if strings.TrimSpace(in.ImmutabilityPolicy) != "" {
 		out.ImmutabilityPolicy = in.ImmutabilityPolicy
@@ -1220,6 +1267,9 @@ func mergeWorldCodex(base, in *domain.WorldCodex) *domain.WorldCodex {
 // 必须带 change_reason + change_evidence，版本自增并落 change_log——世界硬设定
 // 不允许随写作漂移。
 func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReason, changeEvidence string) error {
+	if codex.SchemaVersion == 0 {
+		codex.SchemaVersion = domain.CurrentWorldCodexSchemaVersion
+	}
 	// 初建期增量合并：已有草稿时先并入本次提交（见 worldCodexDraftRel 注释）。
 	existingCodex, _ := t.store.LoadWorldCodex()
 	if existingCodex != nil && strings.TrimSpace(changeReason) == "" && strings.TrimSpace(changeEvidence) == "" {
@@ -1252,6 +1302,8 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 	require(len(codex.WeaponCategories) > 0, "weapon_categories（现代题材至少登记现实器械类并说明对诡异/超凡无效的边界）")
 	require(len(codex.EquipmentCategories) > 0, "equipment_categories")
 	require(strings.TrimSpace(codex.ImmutabilityPolicy) != "", "immutability_policy")
+	require(len(codex.Mechanisms) > 0, "mechanisms（触发/前置/代价/结果/失败/可见性/时间）")
+	require(len(codex.CounterfactualTests) > 0, "counterfactual_tests（每条机制至少被一个探针覆盖）")
 
 	// 覆盖清单：每个世界维度要么有内容，要么显式 not_applicable + 理由。
 	sectionByKey := map[string]domain.CodexSection{}
@@ -1279,6 +1331,21 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 		}
 		return fmt.Errorf("world_codex 不完整，缺少：%s：世界必须像真实世界一样自洽，每个维度要么设定、要么显式 not_applicable+理由: %w%s",
 			strings.Join(missing, ", "), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
+	}
+	if err := domain.ValidateWorldCodexV2(*codex); err != nil {
+		return fmt.Errorf("world_codex 未通过操作合同校验: %w: %w%s", err, errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
+	}
+	if world, worldErr := t.store.World.LoadBookWorld(); worldErr != nil {
+		return fmt.Errorf("load book_world for world_codex audit: %w: %w", errs.ErrStoreRead, worldErr)
+	} else if world != nil {
+		rules, rulesErr := t.store.World.LoadWorldRules()
+		if rulesErr != nil {
+			return fmt.Errorf("load world_rules for world_codex audit: %w: %w", errs.ErrStoreRead, rulesErr)
+		}
+		report := domain.AuditWorldCoherence(rules, codex, world)
+		if issues := report.BlockingIssues(); len(issues) > 0 {
+			return fmt.Errorf("world_codex 与既有本书世界无法闭合：%s: %w", strings.Join(issues, "；"), errs.ErrToolPrecondition)
+		}
 	}
 
 	existing, err := t.store.LoadWorldCodex()
@@ -1369,6 +1436,8 @@ func diffWorldCodexFields(old *domain.WorldCodex, next *domain.WorldCodex) []str
 	add("weapon_categories", marshal(old.WeaponCategories) != marshal(next.WeaponCategories))
 	add("equipment_categories", marshal(old.EquipmentCategories) != marshal(next.EquipmentCategories))
 	add("sections", marshal(old.Sections) != marshal(next.Sections))
+	add("mechanisms", marshal(old.Mechanisms) != marshal(next.Mechanisms))
+	add("counterfactual_tests", marshal(old.CounterfactualTests) != marshal(next.CounterfactualTests))
 	if len(fields) == 0 {
 		fields = append(fields, "metadata_only")
 	}

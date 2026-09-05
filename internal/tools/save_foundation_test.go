@@ -857,10 +857,13 @@ func TestSaveFoundationBookWorld(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{
 		"type": "book_world",
 		"content": map[string]any{
-			"name":     "灰雾城",
-			"summary":  "鬼市、便利店与医院构成前期地图。",
-			"places":   []map[string]any{{"id": "store", "name": "鬼便利店", "kind": "shop"}},
-			"factions": []map[string]any{{"id": "bank", "name": "阴司银行", "goal": "回收欠账"}},
+			"name":    "灰雾城",
+			"summary": "鬼市、便利店与医院构成前期地图。",
+			"places":  []map[string]any{{"id": "store", "name": "鬼便利店", "kind": "shop", "description": "欠账核验与资源交换的开局地点"}},
+			"factions": []map[string]any{{
+				"id": "bank", "name": "阴司银行", "goal": "回收欠账", "resources": []string{"账本", "审计权限"},
+				"clock": map[string]any{"segments": 6, "progress": 1, "consequence": "冻结逾期资产", "pace": "每弧一段"},
+			}},
 		},
 	})
 	if _, err := tool.Execute(context.Background(), args); err != nil {
@@ -870,8 +873,40 @@ func TestSaveFoundationBookWorld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBookWorld: %v", err)
 	}
-	if world == nil || len(world.Places) != 1 || len(world.Factions) != 1 {
+	if world == nil || world.Version != domain.CurrentBookWorldSchemaVersion || len(world.Places) != 1 || len(world.Factions) != 1 {
 		t.Fatalf("unexpected book_world: %+v", world)
+	}
+}
+
+func TestSaveFoundationBookWorldRejectsDanglingRoute(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"type": "book_world",
+		"content": map[string]any{
+			"version": 2,
+			"name":    "灰雾城",
+			"summary": "通行凭证决定角色能否抵达下一处资源点。",
+			"places": []map[string]any{
+				{"id": "gate", "name": "城门", "description": "凭证核验地点"},
+				{"id": "market", "name": "集市", "description": "资源交换地点"},
+			},
+			"routes": []map[string]any{{
+				"from": "gate", "to": "missing", "description": "步行通道", "travel_days": 0.1, "risk": "夜间关闭",
+			}},
+			"factions": []map[string]any{{
+				"id": "guards", "name": "守门人", "goal": "核验通行凭证", "resources": []string{"门锁", "登记簿"},
+				"clock": map[string]any{"segments": 4, "progress": 0, "consequence": "关闭城门", "pace": "每次违规推进一段"},
+			}},
+		},
+	})
+	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("expected dangling route rejection, got %v", err)
+	}
+	if world, err := s.World.LoadBookWorld(); err != nil || world != nil {
+		t.Fatalf("invalid world must not persist: world=%+v err=%v", world, err)
 	}
 }
 

@@ -29,7 +29,7 @@ const zeroInitFreshnessGrace = 2 * time.Second
 // before the first chapter can be written. Keep the producer and every
 // consumer pinned to this single value so a legacy ready:true artifact cannot
 // bypass a newer prewriting contract.
-const ZeroInitReadinessSchemaVersion = 7
+const ZeroInitReadinessSchemaVersion = 8
 
 const zeroInitUserRulesDependency = "meta/user_rules.json"
 
@@ -43,6 +43,7 @@ const zeroInitUserRulesDependency = "meta/user_rules.json"
 var foundationFreshnessFiles = []string{
 	"premise.md", "characters.json", "world_rules.json",
 	"layered_outline.json", "outline.json", "world_codex.json",
+	"meta/world_coherence_report.json",
 	zeroInitUserRulesDependency,
 }
 
@@ -130,8 +131,9 @@ func zeroInitSHA256(data []byte) string {
 }
 
 // EnsureWorldCodexForChapterOne 第 1 章前的全局世界法典门禁：
-// 能力分级/技能范畴/种族/武器/装备/16 维世界 sections 是本工作室的
-// 第 1 章硬性交付，缺失时引导 Coordinator 派 architect 补齐（会话内可完成）。
+// 能力分级/技能范畴/种族/武器/装备/16 维世界 sections，以及 v2 的
+// 操作机制/反事实探针，是本工作室的第 1 章硬性交付。完整自洽性由
+// architect-check 产出的内容寻址报告与 zero-init readiness 继续验证。
 func EnsureWorldCodexForChapterOne(st *store.Store) error {
 	if !ChapterOnePendingFirstWrite(st) {
 		return nil
@@ -141,7 +143,7 @@ func EnsureWorldCodexForChapterOne(st *store.Store) error {
 	}
 	return fmt.Errorf("第 1 章前必须先落盘全局世界法典（world_codex.json 缺失）：" +
 		"请派 architect_long 调用 save_foundation(type=world_codex) 保存能力分级、技能范畴、种族、武器/装备范畴、" +
-		"16 维世界 sections 与 immutability_policy，之后再派 writer")
+		"16 维世界 sections、可引用的操作机制、反事实探针与 immutability_policy，之后运行 --architect-check 和 --zero-init 再派 writer")
 }
 
 // EnsureZeroInitReadyForChapterOne 第 1 章开写前的硬卡点。

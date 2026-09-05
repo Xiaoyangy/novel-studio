@@ -50,6 +50,7 @@ var pipelinePlanningFoundationDependencyPaths = []struct {
 	{kind: "characters", path: "characters.json"},
 	{kind: "book_world", path: "book_world.json"},
 	{kind: "world_codex", path: "world_codex.json"},
+	{kind: "world_coherence_report", path: "meta/world_coherence_report.json"},
 	{kind: "initial_relationships", path: "relationship_state.initial.json"},
 	{kind: "initial_foreshadow", path: "foreshadow_ledger.initial.json"},
 	{kind: "world_foundation", path: "meta/world_foundation.json"},

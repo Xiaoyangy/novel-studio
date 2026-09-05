@@ -941,6 +941,12 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 	} else {
 		warn("world_codex", err)
 	}
+	if report, err := t.store.LoadWorldCoherenceReport(); err == nil && report != nil {
+		envelope.Working["world_coherence_report"] = report
+		envelope.Working["world_coherence_policy"] = "该报告内容寻址绑定 world_rules、world_codex 与 book_world 的作者态结构，势力钟 progress 作为运行态实时复验。ready=false 或摘要失配时不得规划；行动引用 mechanism_id，并用 counterfactual_tests 排除无前置、无代价、零耗时或越过信息边界的剧情捷径。"
+	} else {
+		warn("world_coherence_report", err)
+	}
 	if dossiers, err := t.store.LoadAllCharacterDossiers(); err == nil && len(dossiers) > 0 {
 		if len(dossiers) > 18 {
 			dossiers = dossiers[:18]

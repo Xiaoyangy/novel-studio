@@ -373,18 +373,54 @@ type CharacterAgentFact struct {
 	Visibility string `json:"visibility,omitempty"`
 }
 
+// WorldOperationalState is the compact, arbitration-facing projection of
+// BookWorld. It keeps only topology, movement, faction pressure and finite
+// resources; visual prose and other encyclopedic fields stay out of every
+// character-agent round to avoid repeated tokens.
+type WorldOperationalState struct {
+	Version  int                       `json:"version,omitempty"`
+	Name     string                    `json:"name,omitempty"`
+	Places   []WorldOperationalPlace   `json:"places,omitempty"`
+	Routes   []WorldRoute              `json:"routes,omitempty"`
+	Factions []WorldOperationalFaction `json:"factions,omitempty"`
+}
+
+type WorldOperationalPlace struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Rules    []string `json:"rules,omitempty"`
+	Factions []string `json:"factions,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+}
+
+type WorldOperationalFaction struct {
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Aliases         []string          `json:"aliases,omitempty"`
+	Goal            string            `json:"goal,omitempty"`
+	Resources       []string          `json:"resources,omitempty"`
+	Relations       []FactionRelation `json:"relations,omitempty"`
+	Stance          string            `json:"stance,omitempty"`
+	InternalTension string            `json:"internal_tension,omitempty"`
+	Clock           *FactionClock     `json:"clock,omitempty"`
+}
+
 type WorldStimulusPacket struct {
-	Version       string               `json:"version"`
-	GenerationID  string               `json:"generation_id"`
-	Chapter       int                  `json:"chapter"`
-	TimeWindow    string               `json:"time_window"`
-	PublicFacts   []CharacterAgentFact `json:"public_facts,omitempty"`
-	CurrentEvents []CharacterAgentFact `json:"current_events,omitempty"`
-	HardContracts []string             `json:"hard_contracts,omitempty"`
-	SoftGuidance  []string             `json:"soft_guidance,omitempty"`
-	Sources       []string             `json:"sources,omitempty"`
-	GeneratedAt   string               `json:"generated_at,omitempty"`
-	Digest        string               `json:"digest"`
+	Version              string                     `json:"version"`
+	GenerationID         string                     `json:"generation_id"`
+	Chapter              int                        `json:"chapter"`
+	TimeWindow           string                     `json:"time_window"`
+	PublicFacts          []CharacterAgentFact       `json:"public_facts,omitempty"`
+	CurrentEvents        []CharacterAgentFact       `json:"current_events,omitempty"`
+	OperationalWorld     *WorldOperationalState     `json:"operational_world,omitempty"`
+	Mechanisms           []CodexMechanism           `json:"mechanisms,omitempty"`
+	CounterfactualTests  []CodexCounterfactualProbe `json:"counterfactual_tests,omitempty"`
+	WorldCoherenceDigest string                     `json:"world_coherence_digest,omitempty"`
+	HardContracts        []string                   `json:"hard_contracts,omitempty"`
+	SoftGuidance         []string                   `json:"soft_guidance,omitempty"`
+	Sources              []string                   `json:"sources,omitempty"`
+	GeneratedAt          string                     `json:"generated_at,omitempty"`
+	Digest               string                     `json:"digest"`
 }
 
 func ComputeWorldStimulusPacketDigest(p WorldStimulusPacket) (string, error) {
@@ -428,6 +464,7 @@ type CharacterObservationPacket struct {
 	KnownFacts       []CharacterAgentFact       `json:"known_facts,omitempty"`
 	PerceivedEvents  []CharacterAgentFact       `json:"perceived_events,omitempty"`
 	PublicRules      []CharacterAgentFact       `json:"public_rules,omitempty"`
+	PublicMechanisms []CodexMechanism           `json:"public_mechanisms,omitempty"`
 	Memory           []CharacterAgentMemoryFact `json:"memory,omitempty"`
 	ConflictFeedback []string                   `json:"conflict_feedback,omitempty"`
 	StimulusDigest   string                     `json:"stimulus_digest"`
@@ -454,6 +491,16 @@ func (p CharacterObservationPacket) AllowedFactIDs() map[string]struct{} {
 	return out
 }
 
+func (p CharacterObservationPacket) AllowedMechanismIDs() map[string]struct{} {
+	out := make(map[string]struct{}, len(p.PublicMechanisms))
+	for _, mechanism := range p.PublicMechanisms {
+		if id := strings.TrimSpace(mechanism.ID); id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
 func ComputeCharacterObservationDigest(p CharacterObservationPacket) (string, error) {
 	p.Digest = ""
 	return characterAgentDigest(p)
@@ -474,6 +521,11 @@ func FinalizeCharacterObservationPacket(p CharacterObservationPacket) (Character
 	p.Commitments = normalizeV2Strings(p.Commitments)
 	p.ConflictFeedback = normalizeV2Strings(p.ConflictFeedback)
 	p.Sources = normalizeV2Strings(p.Sources)
+	for _, mechanism := range p.PublicMechanisms {
+		if CodexMechanismVisibility(mechanism) == "secret" {
+			return p, fmt.Errorf("character observation exposes secret mechanism %q", mechanism.ID)
+		}
+	}
 	digest, err := ComputeCharacterObservationDigest(p)
 	if err != nil {
 		return p, err
@@ -502,6 +554,7 @@ type CharacterDecisionProposal struct {
 	IntendedAction       string   `json:"intended_action"`
 	ActionDuration       string   `json:"action_duration"`
 	KnowledgeRefs        []string `json:"knowledge_refs"`
+	MechanismRefs        []string `json:"mechanism_refs,omitempty"`
 	ResourceClaims       []string `json:"resource_claims,omitempty"`
 	Constraints          []string `json:"constraints,omitempty"`
 	Contingencies        []string `json:"contingencies,omitempty"`
@@ -529,6 +582,7 @@ func FinalizeCharacterDecisionProposal(p CharacterDecisionProposal, observation 
 	p.AvailableOptions = normalizeV2Strings(p.AvailableOptions)
 	p.RejectedOptions = normalizeV2Strings(p.RejectedOptions)
 	p.KnowledgeRefs = normalizeV2Strings(p.KnowledgeRefs)
+	p.MechanismRefs = normalizeV2Strings(p.MechanismRefs)
 	p.ResourceClaims = normalizeV2Strings(p.ResourceClaims)
 	p.Constraints = normalizeV2Strings(p.Constraints)
 	p.Contingencies = normalizeV2Strings(p.Contingencies)
@@ -537,6 +591,12 @@ func FinalizeCharacterDecisionProposal(p CharacterDecisionProposal, observation 
 	for _, ref := range p.KnowledgeRefs {
 		if _, ok := allowed[ref]; !ok {
 			return p, fmt.Errorf("proposal references unavailable knowledge %q", ref)
+		}
+	}
+	allowedMechanisms := observation.AllowedMechanismIDs()
+	for _, ref := range p.MechanismRefs {
+		if _, ok := allowedMechanisms[ref]; !ok {
+			return p, fmt.Errorf("proposal references unavailable mechanism %q", ref)
 		}
 	}
 	digest, err := ComputeCharacterDecisionProposalDigest(p)
@@ -566,6 +626,7 @@ type CharacterDecisionResolution struct {
 	CompletionState  string                    `json:"completion_state"`
 	ImmediateResult  string                    `json:"immediate_result"`
 	StateAfter       string                    `json:"state_after"`
+	MechanismRefs    []string                  `json:"mechanism_refs,omitempty"`
 	VisibleToPOV     bool                      `json:"visible_to_pov,omitempty"`
 	ButterflyEffects []DecisionButterflyEffect `json:"butterfly_effects"`
 	ConflictIDs      []string                  `json:"conflict_ids,omitempty"`
@@ -617,14 +678,26 @@ func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldSt
 	}
 	seen := map[string]struct{}{}
 	actionOrders := map[int]string{}
+	knownMechanisms := make(map[string]struct{}, len(stimulus.Mechanisms))
+	for _, mechanism := range stimulus.Mechanisms {
+		if id := strings.TrimSpace(mechanism.ID); id != "" {
+			knownMechanisms[id] = struct{}{}
+		}
+	}
 	for i := range r.Resolutions {
 		resolution := &r.Resolutions[i]
+		resolution.MechanismRefs = normalizeV2Strings(resolution.MechanismRefs)
 		proposal, ok := byAgent[resolution.AgentID]
 		if !ok || resolution.Character != proposal.Character || resolution.ProposalDigest != proposal.Digest {
 			return r, fmt.Errorf("resolution for %s is not bound to a proposal", resolution.AgentID)
 		}
 		if resolution.Decision != proposal.Decision || resolution.IntendedAction != proposal.IntendedAction {
 			return r, fmt.Errorf("arbiter rewrote intent for %s", resolution.AgentID)
+		}
+		for _, ref := range resolution.MechanismRefs {
+			if _, ok := knownMechanisms[ref]; !ok {
+				return r, fmt.Errorf("resolution for %s references unknown mechanism %q", resolution.AgentID, ref)
+			}
 		}
 		if _, duplicate := seen[resolution.AgentID]; duplicate {
 			return r, fmt.Errorf("duplicate resolution for %s", resolution.AgentID)
@@ -748,6 +821,7 @@ func (r WorldArbitrationReceipt) CharacterDecisions(proposals []CharacterDecisio
 			Pressure:          proposal.Pressure,
 			Resources:         append([]string(nil), proposal.Resources...),
 			KnowledgeBoundary: strings.Join(proposal.KnowledgeRefs, ","),
+			MechanismRefs:     normalizeV2Strings(append(append([]string(nil), proposal.MechanismRefs...), resolution.MechanismRefs...)),
 			AvailableOptions:  append([]string(nil), proposal.AvailableOptions...),
 			Decision:          proposal.Decision,
 			DecisionReason:    proposal.DecisionReason,

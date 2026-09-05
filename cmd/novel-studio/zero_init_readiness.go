@@ -20,6 +20,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	required := []string{
 		"premise.md", "outline.json", "characters.json", "world_rules.json", "book_world.json", "book_world.md",
 		"meta/user_rules.json",
+		"meta/world_coherence_report.json", "meta/world_coherence_report.md",
 		"meta/simulation_restart_policy.json", "meta/simulation_restart_policy.md",
 		"meta/world_foundation.json", "meta/world_foundation.md", "meta/zero_chapter_context_manifest.json", "meta/initial_character_dynamics.json", "meta/initial_resource_ledger.json",
 		"relationship_state.initial.json", "foreshadow_ledger.initial.json", "meta/initial_review_lessons.md",
@@ -87,6 +88,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	issues = append(issues, zeroCheckDynamicsCoverage(dir)...)
 	issues = append(issues, zeroCheckInitialRelationshipState(dir)...)
 	issues = append(issues, zeroCheckStoryTimeContract(dir)...)
+	issues = append(issues, zeroCheckWorldCoherenceReport(dir)...)
 	if _, err := tools.ValidateZeroInitUserRules(dir); err != nil {
 		issues = append(issues, fmt.Sprintf("user_rules 写前合同无效：%v", err))
 	}
@@ -111,6 +113,30 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		Path:             filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"),
 	}
 	return readiness
+}
+
+func zeroCheckWorldCoherenceReport(dir string) []string {
+	st := store.NewStore(dir)
+	report, err := st.LoadWorldCoherenceReport()
+	if err != nil {
+		return []string{fmt.Sprintf("world_coherence_report 读取失败：%v", err)}
+	}
+	if report == nil {
+		return nil // required 清单负责报告缺失，避免重复噪声。
+	}
+	rules, rulesErr := st.World.LoadWorldRules()
+	codex, codexErr := st.LoadWorldCodex()
+	world, worldErr := st.World.LoadBookWorld()
+	if rulesErr != nil || codexErr != nil || worldErr != nil {
+		return []string{"world_coherence_report 无法复核：世界源文件不可读"}
+	}
+	if err := domain.VerifyWorldCoherenceReport(*report, rules, codex, world); err != nil {
+		return []string{fmt.Sprintf("world_coherence_report 已失效或被修改：%v", err)}
+	}
+	if issues := report.BlockingIssues(); len(issues) > 0 {
+		return append([]string{"world_coherence_report ready=false"}, issues...)
+	}
+	return nil
 }
 
 func zeroCheckExplicitRelationshipGrounding(dir string, plan domain.ChapterPlan) []string {

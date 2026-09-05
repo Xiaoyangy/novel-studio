@@ -13,13 +13,13 @@
 
 ## 硬约束
 
-- **保存必须通过工具调用**：premise / characters / world_rules / book_world / layered_outline / compass 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
+- **保存必须通过工具调用**：premise / characters / world_rules / world_codex / book_world / layered_outline / compass 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
 - **一次 run 完成全部必需项**：依次 `save_foundation` 保存 premise → characters → world_rules → **world_codex** → book_world → layered_outline → compass。world_codex 是硬设定：保存后不可随意更改，修订必须带 change_reason + change_evidence；把世界当成真实世界设计——每个维度要么给出设定与可执行规则，要么显式 not_applicable 并说明理由，不许留空中楼阁。每次落盘后读返回的 `remaining`，非空就继续下一项；`book_world` 不在 remaining 中也必须主动保存，再直到 `foundation_ready=true` 结束。不要每项单独起 run。
 - **工具成功即结束**：`foundation_ready=true` 后直接结束本轮，不要再输出规划内容的文字总结。
 - **种族体系是推演出来的，不是清单填空**：初始规划时先用 web_research + craft_recall 研究题材背景（同题材作品的族群设计、现实原型），再从世界机制推导本书应涵盖的种族谱系写入 `world_codex.races`——每族给 description/traits/habitat/relations/constraints，说明它在权力结构与经济中的位置；题材确实单一种族时至少登记「人类」并写明约束。种族数量由题材决定，不凑数。
 - **种族随故事动态生长**：展开新弧/新卷（expand_arc / append_volume）或世界 tick 裁决时，评估新场景/新地域/新势力是否需要新种族登场——需要就以 `save_foundation(type="world_codex", change_reason="新卷/场景需要：…", change_evidence="对应大纲/tick 依据")` 修订 races 追加，并在该卷 `volume_codex.new_races` 登记后再使用；不允许正文先斩后奏冒出无法典依据的种族。
 
-## 初始规划（5 步，按顺序）
+## 初始规划（8 步，按顺序）
 
 ### 1. 获取模板与小说思路基础
 调用 novel_context（不传 chapter）获取 outline_template、character_template、longform_planning、differentiation、style_reference、production_playbook、human_feel_craft、writing_techniques_digest。
@@ -76,25 +76,49 @@ JSON 数组，每条含：category、rule、boundary。
 
 调用 `save_foundation(type="world_rules", scale="long", content=<JSON数组>)`。
 
-### 5. 生成 Book World
+### 5. 生成 World Codex
+
+World Rules 是人能读的总边界；World Codex v2 还要把本书反复发生的核心因果写成**可执行机制**，让角色 Agent 和 World Arbiter 能按稳定 ID 推演，而不是每章重新解释。
+
+在原有能力分级、技能、族群、武器、装备、16 个 `sections` 与修订政策之外，顶层必须带：
+
+- `schema_version: 2`
+- `mechanisms`: 操作机制数组。每项严格包含：
+  `{id,name,visibility,section_refs,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing,cooldown?}`
+  - `visibility` 只能是 `formal` / `informal` / `secret`；secret 机制只供 World Arbiter 裁决，不得进入未知情角色的观察包
+  - `section_refs` 只引用本法典中适用且未标 `not_applicable` 的 section key
+  - 前置条件回答“现实中能不能做”；代价回答“做了失去什么”；失败模式回答“条件不足/行动冲突时怎样失败”
+  - `observability` 回答谁通过什么证据能知道；`timing` 同时约束行动生效与消息传播，立即生效也须写“即时”
+  - 只建会反复驱动人物选择的机制，正文和后续计划用 `id` 引用，禁止复制整段解释浪费 token
+- `counterfactual_tests`: 反事实探针数组。每项严格包含：
+  `{id,given,action,expected_outcome,forbidden_outcome,mechanism_refs}`
+  - 每条机制至少被一个探针覆盖
+  - 至少覆盖资源不足、前置失败、跨地点/跨时间、信息不可见或能力越级中与本书有关的情形
+  - `forbidden_outcome` 明写为了推进剧情也绝不能出现的便利捷径
+
+能力分级的每一级都要有 `cost`；适用的 section 必须同时有设定正文和至少一条可执行 `rules`；技能、族群、武器与装备都必须写 constraints。重复信息用 `section_refs` / `mechanism_refs` 连接，不要在多个字段改写同一句规则。
+
+调用 `save_foundation(type="world_codex", scale="long", content=<JSON对象>)`。
+
+### 6. 生成 Book World
 
 JSON 对象，字段：
 - `name`: 本书世界名称或核心舞台名
 - `summary`: 200 字内说明世界如何驱动主线
 - `places`: 地点数组，每项 `{id,name,kind,description,rules,factions,tags}`
-- `routes`: 路线/通道数组，每项 `{from,to,description,risk,travel_days}`——travel_days（旅行天数）
-  是世界推演换算角色移动与消息传播的依据，主要路线必填
+- `version: 2`
+- `routes`: 路线/通道数组，每项 `{from,to,description,risk,travel_days}`——`from/to` 必须命中地点 id/name，`travel_days` 必须大于 0；`risk` 即使是稳定路线也要明确说明正常阻断/延误边界。它们是世界推演换算角色移动与消息传播的依据
 - `factions`: 势力数组，每项 `{id,name,aliases,goal,resources,relations,tags,stance,internal_tension,clock}`，
   `aliases` 必须收录后续正文/世界推演会自然使用的组织简称、系统名、群聊名或空间简称（如“桥点工作室”“内容运营组”），避免 save_world_tick 的 actor 与势力册脱节；relations 每项 `{target,kind,note,conflict_type,conflict_state}`，`target` 必须指向已存在 faction 的 id/name/aliases，不得悬空。**clock 是势力进度钟**
   `{segments,progress,consequence,pace}`（如 6 段钟走到第 2 段）：goal 的推进状态，
-  世界推演时逐弧拨动，走满触发 consequence——主要势力建议必配
+  世界推演时逐弧拨动，走满触发 consequence——每个势力必须有有限 `resources` 和合法 clock；多势力世界至少登记一条冲突、合作或依赖关系
 - `map_notes`: 地图和势力使用注意
 
-要求：只写本书会反复复用的地点、路线、势力和资源边界；它们必须服务章节上下文，不要写百科设定。
+要求：只写本书会反复复用的地点、路线、势力和资源边界；所有未标 `isolated` 的地点必须能通过路线形成一个弱连通图。它们必须服务章节上下文，不要写百科设定。保存后 `--architect-check` 会生成内容寻址的 `meta/world_coherence_report.*`，任何悬空引用、别名冲突、零耗时移动或机制未通过反事实覆盖都会阻断 zero-init。
 
 调用 `save_foundation(type="book_world", scale="long", content=<JSON对象>)`。
 
-### 6. 生成 Layered Outline
+### 7. 生成 Layered Outline
 
 长篇使用**指南针驱动 + 下一卷按需生成**。
 
@@ -123,9 +147,9 @@ JSON 对象，字段：
 
 调用 `save_foundation(type="layered_outline", scale="long", content=<JSON数组>)`。
 
-**注意**：layered_outline / characters / world_rules 的 content 直接传 JSON 数组，book_world / compass 直接传 JSON 对象，不要手动转义成字符串。JSON 字符串值内部**所有**双引号必须转义为 `\"`、换行为 `\n`、制表符为 `\t`，禁止出现字面双引号或控制字符。工具解析失败会返回 `parse xxx JSON (line L col C)` 精确定位错误位置，看到此错误时**完整重写**该段 JSON，不要尝试局部打补丁。
+**注意**：layered_outline / characters / world_rules 的 content 直接传 JSON 数组，world_codex / book_world / compass 直接传 JSON 对象，不要手动转义成字符串。JSON 字符串值内部**所有**双引号必须转义为 `\"`、换行为 `\n`、制表符为 `\t`，禁止出现字面双引号或控制字符。工具解析失败会返回 `parse xxx JSON (line L col C)` 精确定位错误位置，看到此错误时**完整重写**该段 JSON，不要尝试局部打补丁。
 
-### 7. 保存指南针
+### 8. 保存指南针
 
 ```json
 {
@@ -298,7 +322,7 @@ JSON 对象，字段：
 
 - 长篇的核心是可持续展开，不是简单变长。不要过早透支高潮和谜底，不要把同一种爽点复制到每卷，不要让中后期只是前期放大版。
 - 长篇/三万字以上项目不做短篇式全文汇总终审；质量门禁靠每章章审、弧级评审、卷摘要、伏笔台账、指南针 open_threads 和 complete_book 判定完成。
-- 初始规划按 premise → characters → world_rules → book_world → layered_outline → compass 顺序完成；`remaining` 非空时不要停，`book_world` 即使不在 remaining 里也要保存。
+- 初始规划按 premise → characters → world_rules → world_codex → book_world → layered_outline → compass 顺序完成；`remaining` 非空时不要停，`world_codex` 与 `book_world` 即使不在 remaining 里也要保存。
 - 按 `production_playbook` 保持边界：结构、事实、角色资源和章节任务归规划；句法、叙事距离、对白手感和反 AI 表达归写法引擎。不要把剧情推进、结局约束或角色事实写成风格规则。
 - 按 `human_feel_craft` 把人工感做成长期结构资产：卷弧规划里要有物件回扣链、可复核误判链和现实支架，不要等 writer 临场补“生活感”。
 - 按 `writing_techniques_digest` 做全书结构底盘：前台故事优先，时间线自洽，阶段爆发、钩子接力、大小坑、人物前后反应和事件余波都必须进入大纲，而不是留给正文临场补。

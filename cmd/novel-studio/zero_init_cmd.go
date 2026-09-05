@@ -48,6 +48,7 @@ type zeroInitProject struct {
 	Characters    []domain.Character
 	WorldRules    []domain.WorldRule
 	BookWorld     *domain.BookWorld
+	WorldCodex    *domain.WorldCodex
 	FirstChapter  domain.OutlineEntry
 	FirstCast     map[string]bool
 	FirstMentions map[string]int
@@ -558,6 +559,10 @@ func loadZeroInitProjectWithArchitectReadiness(
 	if err != nil {
 		return zeroInitProject{}, err
 	}
+	codex, err := st.LoadWorldCodex()
+	if err != nil {
+		return zeroInitProject{}, err
+	}
 	firstCast := zeroFirstChapterCast(outline[0], chars)
 	firstMentions := zeroCharacterFirstMentions(outline, chars)
 	generatedAt := time.Now().Format(time.RFC3339)
@@ -570,6 +575,7 @@ func loadZeroInitProjectWithArchitectReadiness(
 		Characters:    chars,
 		WorldRules:    rules,
 		BookWorld:     world,
+		WorldCodex:    codex,
 		FirstChapter:  outline[0],
 		FirstCast:     firstCast,
 		FirstMentions: firstMentions,
@@ -797,6 +803,7 @@ func zeroInitRAGSources(outputDir string) []string {
 		filepath.Join(outputDir, "world_codex.md"),
 		filepath.Join(outputDir, "book_world.md"),
 		filepath.Join(outputDir, "compass.md"),
+		filepath.Join(outputDir, "meta", "world_coherence_report.md"),
 		filepath.Join(outputDir, "meta", "volume_codex"),
 		filepath.Join(outputDir, "meta", "simulation_restart_policy.md"),
 		filepath.Join(outputDir, "meta", "user_rules.json"),
@@ -836,11 +843,12 @@ func zeroInitManifest(project zeroInitProject) map[string]any {
 		"required_dynamic_fields":        zeroRequiredDynamicFields(),
 		"required_side_character_fields": []string{"status", "transport", "travel_time", "meeting_constraint", "personality_delta", "death_state", "protagonist_notice"},
 		"world_foundation_rule":          "world_foundation 是正文开始前铁律、开局时间和过去时间线；角色未获得改变规则的明确能力/凭证前不得突破。",
+		"world_coherence_rule":           "world_coherence_report 内容寻址绑定 world_rules、world_codex 与 book_world；角色行动须引用法典 mechanism_id，反事实探针禁止为剧情方便绕过前置、代价、耗时或信息边界。",
 		"story_time_rule":                "story_time_contract 冻结全书目标章数与故事跨度；chapter_schedule/arc_schedule 优先，缺失具体 schedule 才按 nominal_days_per_chapter 估算。",
 		"character_dossier_rule":         "每个角色必须有独立 dossier；主角未通信/未见证/无证据时不能知道配角档案和时间线。",
 		"context_sources": []string{
 			"premise", "outline/current_chapter_outline", "characters", "world_rules/book_world", "meta/user_rules.json", "simulation_restart_policy",
-			"world_foundation", "story_time_contract", "story_calendar", "character_dossiers", "initial_character_dynamics", "relationship_state.initial", "initial_resource_ledger",
+			"world_coherence_report", "world_foundation", "story_time_contract", "story_calendar", "character_dossiers", "initial_character_dynamics", "relationship_state.initial", "initial_resource_ledger",
 			"foreshadow_ledger.initial", "crowd_role_policy", "prewrite_storycraft_plan", "world_background_plan", "dialogue_writing", "initial_review_lessons",
 		},
 		"authoritative_numeric_sources": []string{"meta/user_rules.json#structured.chapter_words", "meta/story_time_contract.json", "meta/story_calendar.json"},
@@ -1007,12 +1015,14 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 			To:          "opening-place",
 			Description: "开局城市到第一章现场的现实路线；交通工具、步行、电梯、门禁和夜间限制必须按当前世界阶段计算耗时。",
 			Risk:        routeRisk,
+			TravelDays:  0.25,
 		},
 		{
 			From:        "opening-place",
 			To:          "nearby-life-node",
 			Description: "第一章现场到相邻生活节点的短程路线，用于承载补给、求助、消息传递或配角迟到/缺席的时间成本。",
 			Risk:        lifeRouteRisk,
+			TravelDays:  0.05,
 		},
 	}
 	factions := []domain.WorldFaction{{
@@ -1041,8 +1051,22 @@ func zeroInitBookWorld(project zeroInitProject) domain.BookWorld {
 			Pace:        "每弧 1 段；主角退让或组织动作加速时 2 段",
 		},
 	})
+	factions[0].Relations = []domain.FactionRelation{{
+		Target:        "opening-pressure",
+		Kind:          "opposed",
+		Note:          "主角方的可持续行动会阻断开局压力按原方式推进。",
+		ConflictType:  "资源",
+		ConflictState: "open_war",
+	}}
+	factions[1].Relations = []domain.FactionRelation{{
+		Target:        "protagonist-side",
+		Kind:          "pressures",
+		Note:          "开局压力通过时间、责任或资源边界迫使主角选择。",
+		ConflictType:  "资源",
+		ConflictState: "open_war",
+	}}
 	return domain.BookWorld{
-		Version:      1,
+		Version:      domain.CurrentBookWorldSchemaVersion,
 		Name:         project.Name,
 		Summary:      "由 premise、world_rules、characters 和第一章大纲自动生成的零章动态世界资产；需在 architect 或人工确认后继续细化城市地图、地点状态、路线耗时和势力变化。",
 		Places:       places,
@@ -1165,6 +1189,14 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 		},
 	}
 	knowledgePolicy := "主角视角不是世界全知视角；RAG 可召回世界后台和配角档案，但正文只能通过通信、证据、目击、记录、现场结果或明确权限把信息传给主角。"
+	var mechanismRefs []string
+	if project.WorldCodex != nil {
+		for _, mechanism := range project.WorldCodex.Mechanisms {
+			if id := strings.TrimSpace(mechanism.ID); id != "" {
+				mechanismRefs = append(mechanismRefs, id)
+			}
+		}
+	}
 	return domain.WorldFoundation{
 		Version: 1,
 		Project: project.Name,
@@ -1176,11 +1208,12 @@ func zeroInitWorldFoundation(project zeroInitProject) domain.WorldFoundation {
 		},
 		IronLaws:             laws,
 		RuleChangeConditions: zeroRuleChangeConditions(project, laws),
+		MechanismRefs:        mechanismRefs,
 		PastTimeline:         past,
 		CityBaseline:         baselines,
 		KnowledgePolicy:      knowledgePolicy,
 		GeneratedAt:          project.GeneratedAt,
-		Sources:              []string{"premise.md", "world_rules.json", "book_world.json", "characters.json", "outline.json"},
+		Sources:              []string{"premise.md", "world_rules.json", "world_codex.json", "book_world.json", "meta/world_coherence_report.json", "characters.json", "outline.json"},
 	}
 }
 

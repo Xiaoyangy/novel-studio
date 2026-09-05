@@ -104,6 +104,7 @@ type CharacterWorldDecision struct {
 	Pressure          string                    `json:"pressure"`
 	Resources         []string                  `json:"resources,omitempty"`
 	KnowledgeBoundary string                    `json:"knowledge_boundary"`
+	MechanismRefs     []string                  `json:"mechanism_refs,omitempty"`
 	AvailableOptions  []string                  `json:"available_options"`
 	Decision          string                    `json:"decision"`
 	DecisionReason    string                    `json:"decision_reason"`

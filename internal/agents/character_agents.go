@@ -21,10 +21,11 @@ import (
 const characterAgentSystemPrompt = `你是一个小说角色本人的决策 Agent，不是作者、编剧或旁白。
 
 你只能使用用户消息里的 character_observation_packet：
-- 只依据其中明确列出的自身目标、压力、资源、关系、承诺、已知事实、感知事件、公共规则和记忆。
+- 只依据其中明确列出的自身目标、压力、资源、关系、承诺、已知事实、感知事件、公共规则、公开机制和记忆。
 - 不得猜测未来大纲、章节钩子、叙事任务、其他角色秘密或未被你感知的世界事实。
 - 先考虑至少两个当下真实可行的选项，再以此角色的性格、误判、利益和风险承受作出选择。
 - knowledge_refs 只能逐字引用 observation 中存在的 fact id。
+- 行动使用了 public_mechanisms 时，mechanism_refs 只能引用其 id；不得猜测或引用未公开机制。
 - 只调用 submit_character_decision 一次；decision_reason 写可审计的简明动因，不输出思维链、分析过程或作者说明。
 - 决定可以是等待、拒绝、观察或继续已有行动，但不能为了配合大纲而失去人物自主性。`
 
@@ -33,6 +34,8 @@ const worldArbiterSystemPrompt = `你是单一世界的规则裁判，不是作�
 你会收到世界刺激、硬合同、软方向和全部角色的独立提案：
 - decision 与 intended_action 必须逐字复制对应提案，绝对不得替角色改意图。
 - 只裁决行动顺序、时间、地点、资源、知识、物理/社会规则、碰撞、完成度和结果。
+- operational_world 是地点、路线耗时、势力资源与进度钟的权威快照；mechanisms 给出触发、前置、输入、代价、效果、失败、可观测性和时间。每条 resolution 用 mechanism_refs 记录实际适用的机制。
+- counterfactual_tests.forbidden_outcome 是硬性反捷径约束；即使软大纲需要，也不能裁决出该结果。
 - 软方向不是预定结果；角色选择破坏软情节时，保留真实结果交给 Planner 重算。
 - 不得把一个角色的私有理由或知识泄露给另一个角色。
 - 每个活跃角色恰好一条 resolution，butterfly_effects 至少一条。
@@ -715,7 +718,11 @@ func buildWorldStimulus(st *store.Store, generationID string, chapter int, bound
 			packet.HardContracts = append(packet.HardContracts, "ending_direction: "+compass.EndingDirection)
 		}
 	}
-	if rules, _ := st.World.LoadWorldRules(); len(rules) > 0 {
+	rules, err := st.World.LoadWorldRules()
+	if err != nil {
+		return packet, fmt.Errorf("load world rules for character agents: %w", err)
+	}
+	if len(rules) > 0 {
 		for _, rule := range rules {
 			text := strings.TrimSpace(rule.Rule + "；边界：" + rule.Boundary)
 			if domain.WorldRuleVisibility(rule) == "secret" {
@@ -726,11 +733,73 @@ func buildWorldStimulus(st *store.Store, generationID string, chapter int, bound
 			packet.HardContracts = append(packet.HardContracts, text)
 		}
 	}
+	codex, err := st.LoadWorldCodex()
+	if err != nil {
+		return packet, fmt.Errorf("load world codex for character agents: %w", err)
+	}
+	world, err := st.World.LoadBookWorld()
+	if err != nil {
+		return packet, fmt.Errorf("load book world for character agents: %w", err)
+	}
+	report, err := st.LoadWorldCoherenceReport()
+	if err != nil {
+		return packet, fmt.Errorf("load world coherence report for character agents: %w", err)
+	}
+	strictWorld := (codex != nil && codex.SchemaVersion >= domain.CurrentWorldCodexSchemaVersion) ||
+		(world != nil && world.Version >= domain.CurrentBookWorldSchemaVersion)
+	if report == nil && strictWorld {
+		return packet, fmt.Errorf("world coherence report is required for v2 character-agent arbitration")
+	}
+	if report != nil {
+		if err := domain.VerifyWorldCoherenceReport(*report, rules, codex, world); err != nil {
+			return packet, fmt.Errorf("verify world coherence before character-agent arbitration: %w", err)
+		}
+		if !report.Ready {
+			return packet, fmt.Errorf("world coherence report is not ready")
+		}
+		packet.WorldCoherenceDigest = report.ReportDigest
+	}
+	if codex != nil {
+		packet.Mechanisms = append([]domain.CodexMechanism(nil), codex.Mechanisms...)
+		packet.CounterfactualTests = append([]domain.CodexCounterfactualProbe(nil), codex.CounterfactualTests...)
+	}
+	packet.OperationalWorld = characterAgentOperationalWorld(world)
 	for _, fact := range projected.CumulativeState {
 		text := strings.TrimSpace(fmt.Sprintf("%s的%s=%s", fact.Subject, fact.Field, fact.Value))
 		packet.CurrentEvents = append(packet.CurrentEvents, newCharacterAgentFact("projected_state", text, fact.StableID, "arbiter"))
 	}
 	return domain.FinalizeWorldStimulusPacket(packet)
+}
+
+func characterAgentOperationalWorld(world *domain.BookWorld) *domain.WorldOperationalState {
+	if world == nil {
+		return nil
+	}
+	state := &domain.WorldOperationalState{
+		Version: world.Version,
+		Name:    strings.TrimSpace(world.Name),
+		Routes:  append([]domain.WorldRoute(nil), world.Routes...),
+	}
+	for _, place := range world.Places {
+		state.Places = append(state.Places, domain.WorldOperationalPlace{
+			ID: strings.TrimSpace(place.ID), Name: strings.TrimSpace(place.Name),
+			Rules: append([]string(nil), place.Rules...), Factions: append([]string(nil), place.Factions...), Tags: append([]string(nil), place.Tags...),
+		})
+	}
+	for _, faction := range world.Factions {
+		entry := domain.WorldOperationalFaction{
+			ID: strings.TrimSpace(faction.ID), Name: strings.TrimSpace(faction.Name),
+			Aliases: append([]string(nil), faction.Aliases...), Goal: strings.TrimSpace(faction.Goal),
+			Resources: append([]string(nil), faction.Resources...), Relations: append([]domain.FactionRelation(nil), faction.Relations...),
+			Stance: strings.TrimSpace(faction.Stance), InternalTension: strings.TrimSpace(faction.InternalTension),
+		}
+		if faction.Clock != nil {
+			clock := *faction.Clock
+			entry.Clock = &clock
+		}
+		state.Factions = append(state.Factions, entry)
+	}
+	return state
 }
 
 func buildCharacterObservation(st *store.Store, generationID string, chapter int, profile characterAgentProfile, stimulus domain.WorldStimulusPacket, projected domain.ProjectedPlanningContextV2, now string) (domain.CharacterObservationPacket, error) {
@@ -807,6 +876,12 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 	}
 	for _, fact := range stimulus.PublicFacts {
 		observation.PublicRules = append(observation.PublicRules, fact)
+	}
+	for _, mechanism := range stimulus.Mechanisms {
+		if domain.CodexMechanismVisibility(mechanism) == "secret" {
+			continue
+		}
+		observation.PublicMechanisms = append(observation.PublicMechanisms, mechanism)
 	}
 	for _, fact := range projected.CumulativeState {
 		if agentIdentityKey(fact.Subject) != agentIdentityKey(profile.Character.Name) {

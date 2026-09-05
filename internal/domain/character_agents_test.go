@@ -45,6 +45,44 @@ func TestCharacterProposalRejectsKnowledgeOutsideObservation(t *testing.T) {
 	}
 }
 
+func TestCharacterProposalCanOnlyReferenceVisibleMechanisms(t *testing.T) {
+	stimulus, err := FinalizeWorldStimulusPacket(WorldStimulusPacket{Version: WorldStimulusPacketVersion, GenerationID: "pg2_mechanism", Chapter: 3, TimeWindow: "上午"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := CodexMechanism{ID: "public-transfer", Name: "公开转移", Visibility: "formal"}
+	observation, err := FinalizeCharacterObservationPacket(CharacterObservationPacket{
+		Version: CharacterObservationVersion, GenerationID: stimulus.GenerationID, Chapter: stimulus.Chapter, Round: 1,
+		AgentID: "ca_test", Character: "林默", CurrentGoal: "守住证据", Pressure: "有人逼近",
+		StimulusDigest: stimulus.Digest, KnownFacts: []CharacterAgentFact{{ID: "known-1", Kind: "known", Text: "门已锁"}},
+		PublicMechanisms: []CodexMechanism{visible},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := validCharacterAgentProposalForTest(observation)
+	proposal.MechanismRefs = []string{visible.ID}
+	if _, err := FinalizeCharacterDecisionProposal(proposal, observation); err != nil {
+		t.Fatalf("visible mechanism was rejected: %v", err)
+	}
+	proposal.MechanismRefs = []string{"secret-backdoor"}
+	if _, err := FinalizeCharacterDecisionProposal(proposal, observation); err == nil || !strings.Contains(err.Error(), "unavailable mechanism") {
+		t.Fatalf("hidden mechanism reference was accepted: %v", err)
+	}
+}
+
+func TestCharacterObservationRejectsSecretMechanismLeak(t *testing.T) {
+	_, err := FinalizeCharacterObservationPacket(CharacterObservationPacket{
+		Version: CharacterObservationVersion, GenerationID: "pg2_secret", Chapter: 1, Round: 1,
+		AgentID: "ca_test", Character: "林默", CurrentGoal: "核验", Pressure: "时间有限",
+		StimulusDigest:   "sha256:stimulus",
+		PublicMechanisms: []CodexMechanism{{ID: "hidden-rule", Name: "隐秘规则", Visibility: "secret"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "secret mechanism") {
+		t.Fatalf("secret mechanism leaked into observation: %v", err)
+	}
+}
+
 func TestWorldArbiterCannotRewriteCharacterIntent(t *testing.T) {
 	stimulus, activation, observation, proposal := validCharacterAgentProtocolForTest(t)
 	receipt := validCharacterArbitrationForTest(stimulus, activation, proposal)
@@ -53,6 +91,15 @@ func TestWorldArbiterCannotRewriteCharacterIntent(t *testing.T) {
 		t.Fatalf("arbiter intent rewrite was accepted: %v", err)
 	}
 	_ = observation
+}
+
+func TestWorldArbiterRejectsUnknownAppliedMechanism(t *testing.T) {
+	stimulus, activation, _, proposal := validCharacterAgentProtocolForTest(t)
+	receipt := validCharacterArbitrationForTest(stimulus, activation, proposal)
+	receipt.Resolutions[0].MechanismRefs = []string{"invented-shortcut"}
+	if _, err := FinalizeWorldArbitrationReceipt(receipt, stimulus, activation, []CharacterDecisionProposal{proposal}, 1); err == nil || !strings.Contains(err.Error(), "unknown mechanism") {
+		t.Fatalf("arbiter invented a mechanism: %v", err)
+	}
 }
 
 func TestCharacterAgentEvidenceDetectsTamperedObservation(t *testing.T) {

@@ -30,7 +30,7 @@ func (t *SubmitCharacterDecisionTool) Label() string                        { re
 func (t *SubmitCharacterDecisionTool) ReadOnly(json.RawMessage) bool        { return false }
 func (t *SubmitCharacterDecisionTool) ConcurrencySafe(json.RawMessage) bool { return true }
 func (t *SubmitCharacterDecisionTool) Description() string {
-	return "为当前绑定角色提交一次独立决定。只能引用 observation 中存在的 fact id；不能选择角色、章节或 generation。成功后立即停止。"
+	return "为当前绑定角色提交一次独立决定。只能引用 observation 中存在的 fact id 和公开 mechanism id；不能选择角色、章节或 generation。成功后立即停止。"
 }
 
 func (t *SubmitCharacterDecisionTool) Schema() map[string]any {
@@ -47,6 +47,7 @@ func (t *SubmitCharacterDecisionTool) Schema() map[string]any {
 		schema.Property("intended_action", schema.String("选择转化成的具体行动")).Required(),
 		schema.Property("action_duration", schema.String("现实耗时")).Required(),
 		schema.Property("knowledge_refs", schema.Array("本次决定实际使用的 observation fact id，只能原样引用", schema.String("fact id"))).Required(),
+		schema.Property("mechanism_refs", schema.Array("本次行动实际使用的 public_mechanisms id；普通行动可为空", schema.String("mechanism id"))),
 		schema.Property("resource_claims", schema.Array("会占用、消耗或竞争的资源", schema.String(""))),
 		schema.Property("constraints", schema.Array("角色自己必须遵守的边界", schema.String(""))),
 		schema.Property("contingencies", schema.Array("失败或受阻时的备选反应", schema.String(""))),
@@ -71,6 +72,7 @@ func (t *SubmitCharacterDecisionTool) Execute(_ context.Context, args json.RawMe
 		IntendedAction       string   `json:"intended_action"`
 		ActionDuration       string   `json:"action_duration"`
 		KnowledgeRefs        []string `json:"knowledge_refs"`
+		MechanismRefs        []string `json:"mechanism_refs"`
 		ResourceClaims       []string `json:"resource_claims"`
 		Constraints          []string `json:"constraints"`
 		Contingencies        []string `json:"contingencies"`
@@ -99,6 +101,7 @@ func (t *SubmitCharacterDecisionTool) Execute(_ context.Context, args json.RawMe
 		IntendedAction:       strings.TrimSpace(input.IntendedAction),
 		ActionDuration:       strings.TrimSpace(input.ActionDuration),
 		KnowledgeRefs:        input.KnowledgeRefs,
+		MechanismRefs:        input.MechanismRefs,
 		ResourceClaims:       input.ResourceClaims,
 		Constraints:          input.Constraints,
 		Contingencies:        input.Contingencies,
@@ -240,7 +243,7 @@ func (t *ResolveChapterWorldTool) Label() string                        { return
 func (t *ResolveChapterWorldTool) ReadOnly(json.RawMessage) bool        { return false }
 func (t *ResolveChapterWorldTool) ConcurrencySafe(json.RawMessage) bool { return false }
 func (t *ResolveChapterWorldTool) Description() string {
-	return "裁决当前绑定的全部独立角色提案。decision 和 intended_action 必须逐字复制提案；只能决定顺序、可行性、完成度、结果和蝴蝶效应。存在未解决冲突时返回最小反馈，最终轮仍未解决会拒绝。"
+	return "裁决当前绑定的全部独立角色提案。decision 和 intended_action 必须逐字复制提案；依据 operational_world、mechanisms 和 counterfactual_tests 决定顺序、可行性、完成度、结果和蝴蝶效应。存在未解决冲突时返回最小反馈，最终轮仍未解决会拒绝。"
 }
 
 func (t *ResolveChapterWorldTool) Schema() map[string]any {
@@ -263,6 +266,7 @@ func (t *ResolveChapterWorldTool) Schema() map[string]any {
 		schema.Property("completion_state", schema.Enum("本章末完成度", "instant", "started", "in_progress", "completed", "blocked")).Required(),
 		schema.Property("immediate_result", schema.String("即时世界反馈")).Required(),
 		schema.Property("state_after", schema.String("行动后状态")).Required(),
+		schema.Property("mechanism_refs", schema.Array("实际用于裁决的 world_stimulus.mechanisms id，包含角色未知的隐秘机制", schema.String("mechanism id"))),
 		schema.Property("visible_to_pov", schema.Bool("POV 是否直接可见")),
 		schema.Property("butterfly_effects", schema.Array("下游影响，至少一个", effect)).Required(),
 		schema.Property("conflict_ids", schema.Array("关联冲突 id", schema.String(""))),

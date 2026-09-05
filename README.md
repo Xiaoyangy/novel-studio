@@ -17,7 +17,7 @@
 
 [简体中文](README.md) · [English](README_EN.md)
 
-[快速开始](#快速开始) · [工作流](#生产工作流) · [角色-Agent](#角色-agent-决策) · [RAG](#rag-与上下文) · [配置](#模型与部署) · [排障](#常见问题排查)
+[快速开始](#快速开始) · [工作流](#生产工作流) · [世界初始化](#可推敲的世界初始化) · [角色-Agent](#角色-agent-决策) · [RAG](#rag-与上下文) · [配置](#模型与部署) · [排障](#常见问题排查)
 
 </div>
 
@@ -179,6 +179,25 @@ flowchart LR
 
 完整 generation、bundle、promotion、outcome 和恢复协议见 [Project-All 按弧架构](docs/project-all-architecture.md) 与 [生产与运维参考](README-TECHNICAL.md)。
 
+## 可推敲的世界初始化
+
+Architect 不再只产出一组设定文字。新项目的世界底座由三份可独立验证的源文件组成：
+
+| 源文件 | 职责 |
+|---|---|
+| `world_rules.json` | 人能直接阅读的总规则、边界和可见性 |
+| `world_codex.json` v2 | 用稳定 `mechanism id` 定义触发、前置、输入、代价、效果、失败、可观测性、耗时与可见性；每条机制都必须有反事实探针 |
+| `book_world.json` v2 | 保存可行动地点、路线耗时/风险、势力有限资源、关系与进度钟 |
+
+`--architect-check` 会生成 `meta/world_coherence_report.json` 和便于人审阅的 Markdown 版。报告内容寻址绑定上述作者态设定，检查重复身份、悬空引用、地图断裂、零耗时移动、无资源/无进度钟势力、无失败边界机制以及未被反事实覆盖的捷径。任一硬错会在 zero-init 之前停止；旧 v1 工件仍可读，但会提示待升级项。
+
+角色 Agent 只接收 `formal` / `informal` 机制；`secret` 机制只进入 World Arbiter。Arbiter 还会收到去掉百科描述的紧凑地图和势力快照，并在裁决回执里记录实际使用的 `mechanism_refs`。正常 world tick 只推进势力钟的运行态，不会被误判为作者设定漂移；非法进度仍会在每次复验时被拒绝。
+
+```bash
+# pipeline 会自动执行；也可以对已落盘 foundation 单独复核
+novel-studio --architect-check --dir data/runs/<书名>/output/novel
+```
+
 ## 角色 Agent 决策
 
 新项目默认启用 `character-agent-protocol.v1`：
@@ -318,6 +337,7 @@ docker compose run --rm --service-ports novel-studio service start --host 0.0.0.
 | `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | 只完成当前弧正式推演与封存，不写正文 |
 | `novel-studio --pipeline --dir <RUN> --stages promote,render` | 渲染并审核下一份 sealed chapter bundle |
 | `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | 为符合范围的短篇执行全文终审和交付 |
+| `novel-studio --architect-check --dir <RUN>/output/novel` | 生成并验证世界自洽证明，不进入正文 |
 | `novel-studio --build-rag --dir <RUN>/output/novel` | 构建项目 RAG 索引 |
 | `novel-studio --rag-ready --dir <RUN>/output/novel` | 验证并恢复 RAG 与 Qdrant |
 | `novel-studio rag audit --root data/runs` | 只读审计全部 RAG 快照 |
@@ -344,11 +364,14 @@ data/runs/<书名>/
         ├── characters.json
         ├── layered_outline.json
         ├── world_rules.json
+        ├── world_codex.json             # 机制、代价、失败与反事实探针
+        ├── book_world.json              # 地点、路线、势力资源与进度钟
         ├── chapters/                 # 已验收正文
         ├── reviews/                  # exact-body 审核证据
         ├── 正文.md                   # 短篇 finalize 后的全文
         └── meta/
             ├── character_agents/     # 注册表、观察、决定、裁决与记忆
+            ├── world_coherence_report.json # 内容寻址的世界自洽证明
             ├── rag/                  # 索引、向量、trace、receipt 与健康摘要
             └── ...                   # 进度、世界状态、规划与发布回执
 ```

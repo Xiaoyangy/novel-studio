@@ -55,7 +55,7 @@ flowchart TD
 
 | 入口 | 主要写入 | RAG/召回沉淀 | 推进意义 |
 |---|---|---|---|
-| `save_foundation` | `premise.md`、`outline.json/md`、`layered_outline.json/md`、`characters.json/md`、`world_rules.json/md`、`book_world.json/md`、`meta/compass.json` | foundation chunk upsert 到 `meta/rag/index_state.json`，embedding 启用时同步写 Qdrant 和 `vector_store.json` | 新书有可写的设计包 |
+| `save_foundation` / `--architect-check` | `premise.md`、`outline.json/md`、`layered_outline.json/md`、`characters.json/md`、`world_rules.json/md`、`world_codex.json/md`、`book_world.json/md`、`meta/compass.json`、`meta/world_coherence_report.json/md` | foundation 与世界自洽报告 chunk upsert 到 `meta/rag/index_state.json`，embedding 启用时同步写 Qdrant 和 `vector_store.json` | 新书有可验证、可供裁决的设计包 |
 | `--zero-init` | `meta/zero_chapter_context_manifest.*`、`meta/initial_character_dynamics.*`、`relationship_state.initial.*`、`meta/initial_resource_ledger.*`、`meta/character_return_plan.*`、`meta/crowd_role_policy.*`、`drafts/01.zero_init.plan.json`、`meta/ch01_zero_init_plan.md`、`meta/first_chapter_generation_readiness.*` | 可按零章白名单重建项目 RAG；只作为第一章写前证据，不是已发生正文事实 | foundation 已落盘但正文未开写时，生成角色系统、关系契约、资源边界、捧场角色策略和第一章推演草案 |
 | `plan_chapter` | `drafts/NN.plan.json`、章节工作态；必须包含 `causal_simulation` | 不直接沉淀 RAG | 本章从待写进入可草稿状态；写前必须证明已理解前文、全员时间线、当前卷弧、未来 3-4 章、网络参考、角色弧线、资源/伏笔/关系账本和 AI 味风险 |
 | `draft_chapter` | `drafts/NN.draft.md` | 不直接沉淀 RAG | 草稿保存，但不算完成 |

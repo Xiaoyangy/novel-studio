@@ -121,6 +121,9 @@ func renderWorldFoundation(f domain.WorldFoundation) string {
 	if f.KnowledgePolicy != "" {
 		fmt.Fprintf(&b, "- 信息边界：%s\n", f.KnowledgePolicy)
 	}
+	if len(f.MechanismRefs) > 0 {
+		fmt.Fprintf(&b, "- 法典机制引用：%s\n", strings.Join(f.MechanismRefs, "、"))
+	}
 	b.WriteString("\n## 世界铁律\n\n")
 	for _, law := range f.IronLaws {
 		fmt.Fprintf(&b, "### %s\n\n", law.Name)

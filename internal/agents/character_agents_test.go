@@ -168,6 +168,60 @@ func TestCharacterProposalRoundBatchesMoreThanEightAtConcurrencyFour(t *testing.
 	}
 }
 
+func TestWorldStimulusCarriesOperationalWorldAndRedactsSecretMechanisms(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveWorldCodex(domain.WorldCodex{
+		Mechanisms: []domain.CodexMechanism{
+			{ID: "public-route", Name: "公开通行", Visibility: "formal"},
+			{ID: "secret-toll", Name: "隐秘追缴", Visibility: "secret"},
+		},
+		CounterfactualTests: []domain.CodexCounterfactualProbe{{ID: "no-pass", MechanismRefs: []string{"public-route"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveBookWorld(domain.BookWorld{
+		Version: 1, Name: "凭证城",
+		Places:   []domain.WorldPlace{{ID: "gate", Name: "城门"}, {ID: "market", Name: "集市"}},
+		Routes:   []domain.WorldRoute{{From: "gate", To: "market", TravelDays: 0.1, Risk: "夜间关闭"}},
+		Factions: []domain.WorldFaction{{ID: "guards", Name: "守门人", Resources: []string{"登记簿"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stimulus, err := buildWorldStimulus(st, "pg2_world", 1, ProjectedArcBoundary{Goal: "进城"}, domain.ProjectedPlanningContextV2{}, nil, "now")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stimulus.OperationalWorld == nil || len(stimulus.OperationalWorld.Routes) != 1 || len(stimulus.Mechanisms) != 2 || len(stimulus.CounterfactualTests) != 1 {
+		t.Fatalf("stimulus lost operational contracts: %+v", stimulus)
+	}
+	observation, err := buildCharacterObservation(st, stimulus.GenerationID, 1, characterAgentProfile{
+		Character: domain.Character{Name: "林默", Role: "主角", Tier: "core"},
+		Record:    domain.CharacterAgentRecord{AgentID: "ca_linmo", Character: "林默"},
+	}, stimulus, domain.ProjectedPlanningContextV2{}, "now")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.PublicMechanisms) != 1 || observation.PublicMechanisms[0].ID != "public-route" {
+		t.Fatalf("secret mechanism visibility leak: %+v", observation.PublicMechanisms)
+	}
+}
+
+func TestWorldStimulusV2RequiresCoherenceProof(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveBookWorld(domain.BookWorld{Version: domain.CurrentBookWorldSchemaVersion, Name: "未审世界"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildWorldStimulus(st, "pg2_unverified", 1, ProjectedArcBoundary{}, domain.ProjectedPlanningContextV2{}, nil, "now"); err == nil {
+		t.Fatal("v2 operational world entered arbitration without a coherence proof")
+	}
+}
+
 func containsAgentString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

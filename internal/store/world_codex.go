@@ -59,6 +59,9 @@ func volumeCodexPath(volume int, ext string) string {
 func renderWorldCodexMarkdown(codex domain.WorldCodex) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 世界法典（v%d）\n\n", codex.Version)
+	if codex.SchemaVersion > 0 {
+		fmt.Fprintf(&b, "- 结构版本：%d\n", codex.SchemaVersion)
+	}
 	if codex.NovelName != "" {
 		fmt.Fprintf(&b, "- 作品：%s\n", codex.NovelName)
 	}
@@ -150,6 +153,40 @@ func renderWorldCodexMarkdown(codex domain.WorldCodex) string {
 		}
 		for _, rule := range sec.Rules {
 			fmt.Fprintf(&b, "- 规则：%s\n", rule)
+		}
+	}
+	if len(codex.Mechanisms) > 0 {
+		b.WriteString("\n## 操作机制\n\n")
+		for _, mechanism := range codex.Mechanisms {
+			fmt.Fprintf(&b, "### %s（%s）\n\n", mechanism.Name, mechanism.ID)
+			fmt.Fprintf(&b, "- 可见性：%s\n", domain.CodexMechanismVisibility(mechanism))
+			fmt.Fprintf(&b, "- 维度引用：%s\n", strings.Join(mechanism.SectionRefs, "、"))
+			fmt.Fprintf(&b, "- 行动主体：%s\n", strings.Join(mechanism.ActorScope, "、"))
+			fmt.Fprintf(&b, "- 触发：%s\n", mechanism.Trigger)
+			fmt.Fprintf(&b, "- 前置：%s\n", strings.Join(mechanism.Preconditions, "；"))
+			if len(mechanism.Inputs) > 0 {
+				fmt.Fprintf(&b, "- 输入/占用：%s\n", strings.Join(mechanism.Inputs, "；"))
+			}
+			fmt.Fprintf(&b, "- 代价：%s\n", strings.Join(mechanism.Costs, "；"))
+			fmt.Fprintf(&b, "- 结果：%s\n", strings.Join(mechanism.Effects, "；"))
+			fmt.Fprintf(&b, "- 失败模式：%s\n", strings.Join(mechanism.FailureModes, "；"))
+			fmt.Fprintf(&b, "- 可观测性：%s\n", strings.Join(mechanism.Observability, "；"))
+			fmt.Fprintf(&b, "- 时间：%s\n", mechanism.Timing)
+			if mechanism.Cooldown != "" {
+				fmt.Fprintf(&b, "- 再触发：%s\n", mechanism.Cooldown)
+			}
+			b.WriteString("\n")
+		}
+	}
+	if len(codex.CounterfactualTests) > 0 {
+		b.WriteString("## 反事实探针\n\n")
+		for _, probe := range codex.CounterfactualTests {
+			fmt.Fprintf(&b, "- **%s**\n", probe.ID)
+			fmt.Fprintf(&b, "  - 初态：%s\n", strings.Join(probe.Given, "；"))
+			fmt.Fprintf(&b, "  - 行动：%s\n", probe.Action)
+			fmt.Fprintf(&b, "  - 应得结果：%s\n", probe.ExpectedOutcome)
+			fmt.Fprintf(&b, "  - 禁止捷径：%s\n", probe.ForbiddenOutcome)
+			fmt.Fprintf(&b, "  - 机制引用：%s\n", strings.Join(probe.MechanismRefs, "、"))
 		}
 	}
 	if len(codex.ChangeLog) > 0 {

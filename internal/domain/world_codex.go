@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // 世界法典（world_codex）：初始化世界时一次性敲定的全局硬设定。
 // 目标是让世界像真实世界一样自洽——能力有分级、结构有层级、机制可运转、
 // 资源有稀缺、历史有来处；不是空中楼阁，也不随写作漂移。
@@ -9,6 +11,11 @@ package domain
 //     修改必须带 change_reason + evidence 走版本升级，禁止随意更改。
 //   - 卷级上限（VolumeCodex）：分卷初始化（卷详细大纲落地）时生成，
 //     声明该卷会触碰的能力/武器/装备/技能/种族上限，写作不得越级。
+
+// CurrentWorldCodexSchemaVersion 是新建 world_codex 的结构版本。
+// Version 仍表示用户可见的修订代数；SchemaVersion 只描述数据协议，避免把
+// “第二次修订”和“第二版结构”混为一谈。旧文件未携带该字段时按 v1 读取。
+const CurrentWorldCodexSchemaVersion = 2
 
 // CodexAbilityTier 能力分级的一级：从量级、晋升、边界、代价四面锁死。
 type CodexAbilityTier struct {
@@ -71,11 +78,55 @@ type CodexChange struct {
 	Fields   []string `json:"fields"`   // 改了哪些部分
 }
 
+// CodexMechanism 把一条世界机制从说明文字收敛为可执行合同。
+// 它不预定剧情结果，只声明什么条件下谁能做什么、会付出什么、世界如何响应，
+// 以及哪些观察者能在多长时间后知道。章节角色决策和 World Arbiter 可引用 ID，
+// 无需重复粘贴整段法典。
+type CodexMechanism struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Visibility    string   `json:"visibility"`         // formal / informal / secret
+	SectionRefs   []string `json:"section_refs"`       // 引用 WorldCodex.Sections.key
+	ActorScope    []string `json:"actor_scope"`        // 谁可触发/使用
+	Trigger       string   `json:"trigger"`            // 何时进入判定
+	Preconditions []string `json:"preconditions"`      // 行动真实可执行的前置条件
+	Inputs        []string `json:"inputs"`             // 被占用/消耗/转换的资源；无额外输入也须显式声明
+	Costs         []string `json:"costs"`              // 即时或延迟代价；“无额外代价”也须显式说明边界
+	Effects       []string `json:"effects"`            // 成功后的状态变化
+	FailureModes  []string `json:"failure_modes"`      // 条件不满足或冲突时如何失败
+	Observability []string `json:"observability"`      // 谁能通过何种证据感知
+	Timing        string   `json:"timing"`             // 生效/传播耗时；即时也要显式写明
+	Cooldown      string   `json:"cooldown,omitempty"` // 冷却、恢复或再次触发条件
+}
+
+// CodexMechanismVisibility 统一新旧法典的可见性口径。旧工件没有
+// visibility 时按显规则读取，以保持历史可读；v2 新建/修订会在
+// 世界自洽门禁中强制显式填写。
+func CodexMechanismVisibility(mechanism CodexMechanism) string {
+	visibility := strings.ToLower(strings.TrimSpace(mechanism.Visibility))
+	if visibility == "" {
+		return "formal"
+	}
+	return visibility
+}
+
+// CodexCounterfactualProbe 是世界法典的反事实单元测试。
+// 它验证机制在不利条件下仍得出同一类结果，并明确禁止“为了剧情方便”出现的捷径。
+type CodexCounterfactualProbe struct {
+	ID               string   `json:"id"`
+	Given            []string `json:"given"`
+	Action           string   `json:"action"`
+	ExpectedOutcome  string   `json:"expected_outcome"`
+	ForbiddenOutcome string   `json:"forbidden_outcome"`
+	MechanismRefs    []string `json:"mechanism_refs"`
+}
+
 // WorldCodex 全局世界法典。
 type WorldCodex struct {
-	Version     int    `json:"version"`
-	NovelName   string `json:"novel_name,omitempty"`
-	GeneratedAt string `json:"generated_at,omitempty"`
+	Version       int    `json:"version"`
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	NovelName     string `json:"novel_name,omitempty"`
+	GeneratedAt   string `json:"generated_at,omitempty"`
 
 	// 用户九类硬设定（强类型）
 	AbilityTiers        []CodexAbilityTier    `json:"ability_tiers"`        // 能力分级
@@ -86,6 +137,10 @@ type WorldCodex struct {
 
 	// 结构与现实性维度（覆盖清单，见 RequiredCodexSections）
 	Sections []CodexSection `json:"sections"`
+
+	// v2 操作层：用稳定 ID 连接设定、角色行动、资源/信息变化和反事实验证。
+	Mechanisms          []CodexMechanism           `json:"mechanisms,omitempty"`
+	CounterfactualTests []CodexCounterfactualProbe `json:"counterfactual_tests,omitempty"`
 
 	// 修订治理
 	ImmutabilityPolicy string        `json:"immutability_policy,omitempty"` // 修改条件声明

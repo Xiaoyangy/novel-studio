@@ -269,6 +269,7 @@ func pipelineProjectAllFoundationSnapshotRoot(outputDir string) (string, error) 
 		"meta/compass.json",
 		"meta/run.json",
 		"meta/world_foundation.json",
+		"meta/world_coherence_report.json",
 		"meta/initial_character_dynamics.json",
 		"meta/initial_resource_ledger.json",
 		"meta/simulation_restart_policy.json",
