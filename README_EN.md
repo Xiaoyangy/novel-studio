@@ -74,33 +74,36 @@ The dashboard cross-checks prose, progress, sealed planning, reviews, RAG, check
 ### Requirements
 
 - Native macOS or Linux. Use WSL2 on Windows; do not use the native Windows ZIP from an older Release.
-- Release installs do not require a local Go toolchain; building from source requires Go 1.25.5.
+- Release installs do not require a local Go toolchain. Source builds require Go 1.25.5 or newer; the current stable Go 1.27.1 is recommended.
 - At least one configured text-model provider. For production, route `roles.reviewer` independently to DeepSeek.
-- Python 3 for the dashboard. It currently starts from a source checkout; the one-line Release installer installs only the CLI binary. Embeddings and Qdrant are optional and config-driven.
+- Python 3.9+ for the dashboard. Dashboard sources are embedded in the CLI, so Release installs no longer require a source checkout. Embeddings and Qdrant are optional and config-driven.
 - “Local-first” does not automatically mean fully offline. That also depends on text, embedding and vector providers, plus whether the run invokes `web_research` or another network-dependent setup step.
 
 ### 1. Install
 
-This README documents current `main`. Choose the source build for the production contracts and dashboard described here. Choose the Release for a stable CLI-only installation that may lag behind `main`. Do not run both blocks.
+This README documents current `main`. Most users should choose the stable Release; use a source checkout for development or unreleased main-branch features. Choose one path.
 
 ```bash
-# Option A: current main with the full dashboard
+# Option A (recommended): stable Release with SHA-256 verification
+curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
+```
+
+```bash
+# Option B: current main from source
 git clone https://github.com/Xiaoyangy/novel-studio.git
 cd novel-studio
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/novel-studio" ./cmd/novel-studio
-export PATH="$HOME/.local/bin:$PATH"
+./scripts/run-local.sh doctor
 ```
+
+If the installer reports that its destination is not on `PATH`, run the exact `export PATH=...` line it prints. Source mode needs no pre-build; `scripts/run-local.sh` always executes the current checkout.
+
+### 2. Diagnose, configure, then verify providers
 
 ```bash
-# Option B: stable Release, CLI only; install without sudo
-mkdir -p "$HOME/.local/bin"
-curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \
-  | NOVEL_STUDIO_INSTALL_DIR="$HOME/.local/bin" sh
-export PATH="$HOME/.local/bin:$PATH"
+novel-studio doctor
 ```
 
-### 2. Configure and verify providers
+`doctor` makes no model calls and does not alter project data. It checks the platform, writable workspace, effective config, Python/embedded dashboard, optional Qdrant runtime, and source-build tools, then prints actionable fixes. In source mode, replace `novel-studio` below with `./scripts/run-local.sh`.
 
 ```bash
 novel-studio
@@ -148,15 +151,15 @@ novel-studio --pipeline --dir data/runs/<book-name> \
 
 Eligible short books produce `output/novel/正文.md`, whole-book review artifacts and a publication package. A long-form project's current terminal state is its complete chapter-acceptance chain; this is not presented as an exact-book review.
 
-### 6. Open the dashboard from the source checkout
+### 6. Open the dashboard
 
 ```bash
 novel-studio service open
 ```
 
-`service open` starts the dashboard in the background when needed, then opens the browser. Default URL: [http://127.0.0.1:8765/](http://127.0.0.1:8765/). To watch server logs in the foreground, run `novel-studio service start` in a separate terminal.
+`service open` starts the embedded dashboard in the background when needed, then opens the browser. Default URL: [http://127.0.0.1:8765/](http://127.0.0.1:8765/). To watch server logs in the foreground, run `novel-studio service start` in a separate terminal. Release and source installs use the same dashboard sources.
 
-> **Path guide:** pipeline and `--diag` use `data/runs/<book-name>`; RAG commands use `data/runs/<book-name>/output/novel`; dashboard commands run from the source-checkout root.
+> **Path guide:** pipeline and `--diag` use `data/runs/<book-name>`; RAG commands use `data/runs/<book-name>/output/novel`; the dashboard scans `data/runs/` under the current workspace, while pipeline-launched dashboards bind to the active book's runs root automatically.
 
 ## From world to prose
 
@@ -264,6 +267,17 @@ Roles can use different providers, models and reasoning effort. Adapters current
 
 Project state stays local. For production, route the raw-body `reviewer` independently to DeepSeek; other roles remain independently configurable. A run is fully offline only when every active role and retrieval service is local and no stage invokes `web_research` or another network-dependent setup step. Never commit real API keys.
 
+Docker users should create writable config and workspace directories, then use one-shot Compose runs for the same workflow:
+
+```bash
+mkdir -p config workspace
+docker compose run --rm novel-studio             # first-time setup
+docker compose run --rm novel-studio doctor --dir /workspace
+docker compose run --rm novel-studio --check
+```
+
+Compose builds default to `https://goproxy.cn,direct`; set `GOPROXY` before building to use an enterprise or regional proxy. To serve the dashboard from the container, run `docker compose run --rm --service-ports novel-studio service start --host 0.0.0.0`, then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When the Compose Qdrant service is enabled, set `rag.qdrant.url` to `http://qdrant:6333`, not the container's own `127.0.0.1`.
+
 ## Who is it for?
 
 - Authors building dozens to hundreds of chapters of serialized fiction or web novels.
@@ -280,6 +294,7 @@ In the table below, `<RUN>` means `data/runs/<book-name>`.
 
 | Command | Purpose |
 |---|---|
+| `novel-studio doctor` | Check local prerequisites and print fixes without calling a model |
 | `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the pipeline |
 | `novel-studio --pipeline --dir <RUN>` | Resume the next legal step |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Simulate and seal the current arc without prose |

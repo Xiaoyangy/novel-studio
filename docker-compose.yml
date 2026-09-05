@@ -1,6 +1,6 @@
 services:
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.19.1
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -11,9 +11,16 @@ services:
     image: ghcr.io/xiaoyangy/novel-studio:latest
     build:
       context: .
+      args:
+        # 中国大陆默认使用可达的 Go module mirror；可通过宿主 GOPROXY 覆盖。
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
     volumes:
       - ./config:/root/.novel-studio
       - ./workspace:/workspace
+    environment:
+      NOVEL_STUDIO_RUNS_DIR: /workspace/data/runs
+    ports:
+      - "8765:8765"
     stdin_open: true
     tty: true
 

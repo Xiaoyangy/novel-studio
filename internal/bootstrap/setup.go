@@ -60,11 +60,20 @@ var setupProviders = []setupProvider{
 // RunSetup 运行首次引导，返回生成的配置。纯文本 stdin 交互，无 TUI 依赖，
 // 因此在管道/重定向场景下也能逐行回答（无 TTY 时由调用方提前拦截）。
 func RunSetup() (Config, error) {
+	return RunSetupAt("")
+}
+
+// RunSetupAt runs guided setup and persists to path. An empty path uses the
+// normal global config. This keeps --config authoritative even on first use.
+func RunSetupAt(path string) (Config, error) {
 	r := bufio.NewReader(os.Stdin)
+	if path == "" {
+		path = DefaultConfigPath()
+	}
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "未检测到配置文件，开始初始化设置...")
-	fmt.Fprintf(os.Stderr, "  配置文件路径：%s\n", DefaultConfigPath())
+	fmt.Fprintf(os.Stderr, "  配置文件路径：%s\n", path)
 	fmt.Fprintf(os.Stderr, "  完成后可随时编辑该文件调整高级设置。\n")
 	fmt.Fprintln(os.Stderr)
 
@@ -126,7 +135,7 @@ func RunSetup() (Config, error) {
 	}
 
 	// Step 4: 模型名（必填）
-	modelName, err := runTextInput(r, "[4/4] 模型名称", "例如：gpt-4o / claude-sonnet-4 / gemini-2.5-pro")
+	modelName, err := runTextInput(r, "[4/4] 模型名称", "从服务商控制台复制精确模型 ID")
 	if err != nil {
 		return Config{}, err
 	}
@@ -141,7 +150,6 @@ func RunSetup() (Config, error) {
 	}
 
 	// 保存
-	path := DefaultConfigPath()
 	if err := SaveConfig(path, cfg); err != nil {
 		return cfg, fmt.Errorf("save config: %w", err)
 	}

@@ -74,7 +74,7 @@ flowchart TD
 
 ## 看板服务策略
 
-HTML 看板由 `services/dashboard/` 提供（统一读取 `data/runs/`），入口命令是：
+HTML 看板由 CLI 内嵌的 `services/dashboard/` 资源提供（统一读取 `data/runs/`），入口命令是：
 
 ```bash
 go run ./cmd/novel-studio service status
@@ -85,10 +85,10 @@ go run ./cmd/novel-studio service open
 默认地址：
 
 ```text
-http://127.0.0.1:8765/novel.html
+http://127.0.0.1:8765/
 ```
 
-`/novel.html` 是长篇/当前工程项目看板，会自动发现当前 workspace 的 `output/novel`、`data/runs/*/output/novel` 以及 `NOVEL_STUDIO_NOVEL_DIR` / `NOVEL_STUDIO_NOVEL_DIRS` 指定目录。它动态刷新 `progress.json`、`pipeline.json`、章节、草稿、审核、AI 审核、摘要、日志、导出文件和 meta 下的全部资料。`/index.html` 仍保留短篇项目服务看板。
+首页是统一项目看板，扫描 `$NOVEL_STUDIO_RUNS_DIR`；未设置时默认扫描当前 workspace 的 `data/runs/`。pipeline 自动启动看板时会把它绑定到当前书目所在的 runs 根目录。页面动态刷新 `progress.json`、`pipeline.json`、章节、草稿、审核、AI 审核、摘要、日志、导出文件和 meta 下的资料。
 
 启动规则：
 
@@ -99,11 +99,10 @@ http://127.0.0.1:8765/novel.html
 - 看板页面自身每 3.5 秒轮询刷新一次；手动刷新只调用页面的刷新按钮或重新请求 API，不重启服务。
 - `--pipeline` 启动时会尽力后台拉起或复用看板，并在终端打印小说项目看板 URL；看板启动失败只告警，不阻断创作。
 
-后台启动参考：
+后台启动由 `service open` 自动处理。如需前台查看日志：
 
 ```bash
-mkdir -p output/logs
-nohup go run ./cmd/novel-studio service start --host 127.0.0.1 --port 8765 > output/logs/dashboard.log 2>&1 &
+novel-studio service start --host 127.0.0.1 --port 8765
 ```
 
 注意：看板服务只负责展示、项目状态、章节/审核文件读写和本地指标；它不是写作调度器。写作恢复和章级推进仍由 `novel-studio` CLI、Store 和 checkpoint 决定。

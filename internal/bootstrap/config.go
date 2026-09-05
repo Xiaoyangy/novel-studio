@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -47,11 +48,12 @@ func CompactReserveTokens(window int) int {
 
 // ProviderConfig 定义单个 LLM 提供商的凭证。
 type ProviderConfig struct {
-	Type    string   `json:"type,omitempty"`     // API 协议类型（openai/anthropic/gemini），自定义代理时指定
-	API     string   `json:"api,omitempty"`      // OpenAI 协议 endpoint：chat（默认）/ responses
-	APIKey  string   `json:"api_key,omitempty"`  // API Key
-	BaseURL string   `json:"base_url,omitempty"` // API Base URL
-	Models  []string `json:"models,omitempty"`   // 可选模型列表，供 TUI 切换时展示
+	Type      string   `json:"type,omitempty"`        // API 协议类型（openai/anthropic/gemini），自定义代理时指定
+	API       string   `json:"api,omitempty"`         // OpenAI 协议 endpoint：chat（默认）/ responses
+	APIKey    string   `json:"api_key,omitempty"`     // API Key
+	APIKeyEnv string   `json:"api_key_env,omitempty"` // 可选；运行时从环境变量读取，优先于 api_key
+	BaseURL   string   `json:"base_url,omitempty"`    // API Base URL
+	Models    []string `json:"models,omitempty"`      // 可选模型列表，供 TUI 切换时展示
 	// ExtraBody 透传给该 provider 每次请求的额外参数（如 temperature/top_p/min_p/
 	// presence_penalty，或厂商特有键如 nvidia 开 think 的 chat_template_kwargs）。
 	// OpenAI 兼容端逐字并入请求体（即 extra_body 约定）；值由用户自负其责。
@@ -59,6 +61,17 @@ type ProviderConfig struct {
 	// Extra 透传给 provider 级配置（litellm.ProviderConfig.Extra），用于 HTTP
 	// headers、user_agent、anthropic_beta 等客户端/传输层选项。
 	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// EffectiveAPIKey resolves an optional environment-backed secret without
+// copying it into the persisted configuration object.
+func (pc ProviderConfig) EffectiveAPIKey() string {
+	if pc.APIKeyEnv != "" {
+		if value := strings.TrimSpace(os.Getenv(pc.APIKeyEnv)); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(pc.APIKey)
 }
 
 // RequiresAPIKey 返回该 provider 是否必须显式配置 api_key。
@@ -284,8 +297,8 @@ func (c *Config) ValidateBase() error {
 	if !ok {
 		return fmt.Errorf("provider %q 未在 providers 中配置凭证；若在 ./.novel-studio/config.json 里覆盖了 provider，需同时声明 providers.%s（含 api_key/base_url），不能只改顶层 provider: %w", c.Provider, c.Provider, errs.ErrConfig)
 	}
-	if pc.RequiresAPIKey(c.Provider) && pc.APIKey == "" {
-		return fmt.Errorf("provider %q has no api_key configured: %w", c.Provider, errs.ErrConfig)
+	if pc.RequiresAPIKey(c.Provider) && pc.EffectiveAPIKey() == "" {
+		return fmt.Errorf("provider %q has no usable api_key (set api_key or api_key_env): %w", c.Provider, errs.ErrConfig)
 	}
 	if err := validateProviderConfigText(c.Provider, pc); err != nil {
 		return err
@@ -400,6 +413,7 @@ func validateProviderConfigText(name string, pc ProviderConfig) error {
 		{label: fmt.Sprintf("provider %q type", name), value: pc.Type},
 		{label: fmt.Sprintf("provider %q api", name), value: pc.API},
 		{label: fmt.Sprintf("provider %q api_key", name), value: pc.APIKey},
+		{label: fmt.Sprintf("provider %q api_key_env", name), value: pc.APIKeyEnv},
 		{label: fmt.Sprintf("provider %q base_url", name), value: pc.BaseURL},
 	}
 	for _, field := range fields {
@@ -644,8 +658,8 @@ func (c Config) validateModelRef(owner string, ref ModelRef) error {
 	if !ok {
 		return fmt.Errorf("%s references provider %q which is not configured: %w", owner, ref.Provider, errs.ErrConfig)
 	}
-	if pc.RequiresAPIKey(ref.Provider) && pc.APIKey == "" {
-		return fmt.Errorf("%s references provider %q which has no api_key: %w", owner, ref.Provider, errs.ErrConfig)
+	if pc.RequiresAPIKey(ref.Provider) && pc.EffectiveAPIKey() == "" {
+		return fmt.Errorf("%s references provider %q which has no usable api_key (set api_key or api_key_env): %w", owner, ref.Provider, errs.ErrConfig)
 	}
 	if err := c.validateProviderAPI(owner, ref.Provider, pc); err != nil {
 		return err

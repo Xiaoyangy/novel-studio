@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	dashboardassets "github.com/chenhongyang/novel-studio/services/dashboard"
 )
 
 // currentDashboardVersion must hash server.py + static/index.html exactly the way
@@ -34,6 +36,41 @@ func TestCurrentDashboardVersionMatchesPythonStamp(t *testing.T) {
 
 	if got := currentDashboardVersion(script); got != want {
 		t.Fatalf("currentDashboardVersion=%q want=%q", got, want)
+	}
+}
+
+func TestEmbeddedDashboardVersionMatchesLauncher(t *testing.T) {
+	script, err := dashboardassets.Materialize(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := currentDashboardVersion(script), dashboardassets.Version(); got != want {
+		t.Fatalf("currentDashboardVersion=%q want=%q", got, want)
+	}
+}
+
+func TestRunsDirForNovelOutput(t *testing.T) {
+	runs := filepath.Join(t.TempDir(), "data", "runs")
+	output := filepath.Join(runs, "book", "output", "novel")
+	if got := runsDirForNovelOutput(output); got != runs {
+		t.Fatalf("runsDirForNovelOutput=%q want=%q", got, runs)
+	}
+	if got := runsDirForNovelOutput(filepath.Join(t.TempDir(), "elsewhere")); got != "" {
+		t.Fatalf("unexpected runs dir %q", got)
+	}
+}
+
+func TestRecognizesSourceAndEmbeddedDashboardCommands(t *testing.T) {
+	for _, command := range []string{
+		"python3 /repo/services/dashboard/server.py --port 8765",
+		"python3 /home/me/.novel-studio/runtime/dashboard/abc/server.py --port 8765",
+	} {
+		if !isNovelStudioDashboardCommand(command) {
+			t.Fatalf("did not recognize %q", command)
+		}
+	}
+	if isNovelStudioDashboardCommand("python3 /tmp/server.py") {
+		t.Fatal("recognized unrelated Python server")
 	}
 }
 

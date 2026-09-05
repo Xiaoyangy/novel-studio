@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # novel-studio 本地一键运行脚本
 # 用法：
-#   ./scripts/run-local.sh                                  # 启动 TUI（默认）
-#   ./scripts/run-local.sh tui                              # 同上
+#   ./scripts/run-local.sh                                  # 首次配置或打印帮助
+#   ./scripts/run-local.sh doctor                           # 本地前置检查
+#   ./scripts/run-local.sh check                            # 真实模型连通性检查
+#   ./scripts/run-local.sh pipeline --new-novel --prompt ...
+#   ./scripts/run-local.sh service open
 #   ./scripts/run-local.sh review [--from N --to M]
 #   ./scripts/run-local.sh rewrite [--from N --to M]
 #   ./scripts/run-local.sh help
@@ -19,12 +22,28 @@ cd "$ROOT"
 # PATH 里的 novel-studio 是旧 release 二进制，可能跟当前源码不同步。
 BIN=(go run ./cmd/novel-studio)
 
-cmd="${1:-tui}"
-shift || true
+if [ "$#" -eq 0 ]; then
+    exec "${BIN[@]}"
+fi
+
+cmd="$1"
+shift
 
 case "$cmd" in
-    tui|ui)
+    tui|ui|setup)
         exec "${BIN[@]}" "$@"
+        ;;
+    doctor)
+        exec "${BIN[@]}" doctor "$@"
+        ;;
+    check)
+        exec "${BIN[@]}" --check "$@"
+        ;;
+    pipeline)
+        exec "${BIN[@]}" --pipeline "$@"
+        ;;
+    service)
+        exec "${BIN[@]}" service "$@"
         ;;
     review)
         exec "${BIN[@]}" --review-existing "$@"
@@ -36,8 +55,7 @@ case "$cmd" in
         "${BIN[@]}" --help
         ;;
     *)
-        echo "未知命令: $cmd" >&2
-        echo "用法: $0 [tui|review|rewrite|help] [args...]" >&2
-        exit 1
+		# 其它参数原样透传，确保脚本不会落后于 CLI 新增的命令/flag。
+		exec "${BIN[@]}" "$cmd" "$@"
         ;;
 esac

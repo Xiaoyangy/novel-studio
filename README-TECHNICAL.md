@@ -177,21 +177,19 @@ projected state delta。
 
 ### 安装
 
-本页描述当前 `main` 的完整协议；Release 可能滞后于主干。当前一键安装只部署 CLI 二进制，浏览器看板需在源码 checkout 的项目根目录启动。
+本页描述当前 `main` 的完整协议；Release 可能滞后于主干。看板资源已嵌入 CLI，Release 不再依赖源码 checkout；本地看板仍需要 Python 3.9+。
 
 以下两种方式二选一：
 
 ```bash
-# 方式 A：当前 main + 完整看板
+# 方式 A：当前 main
 git clone https://github.com/Xiaoyangy/novel-studio.git
 cd novel-studio
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/novel-studio" ./cmd/novel-studio
-export PATH="$HOME/.local/bin:$PATH"
+./scripts/run-local.sh doctor
 ```
 
 ```bash
-# 方式 B：稳定 Release，仅安装 CLI
+# 方式 B：稳定 Release（含内嵌看板）
 curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
 ```
 
@@ -200,6 +198,7 @@ curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts
 ### 首次配置
 
 ```bash
+novel-studio doctor
 novel-studio
 novel-studio --check
 ```
@@ -779,7 +778,7 @@ python3 scripts/validate_skill_context.py
 
 ## 开发与验证
 
-要求 Go 1.25.5；看板使用 Python 3；embedding 与 Qdrant 按配置启用。
+最低要求 Go 1.25.5，建议使用当前稳定版 Go 1.27.1；看板使用 Python 3.9+；embedding 与 Qdrant 按配置启用。
 
 ```bash
 go test -count=1 ./...

@@ -33,6 +33,82 @@ func writeGlobal(t *testing.T, content string) string {
 	return home
 }
 
+func TestSaveConfigUsesPrivatePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SaveConfig(path, Config{Provider: "ollama", ModelName: "qwen3:8b"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode=%#o want=0600", got)
+	}
+}
+
+func TestLoadConfigResolvesProviderAPIKeyEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	const envName = "NOVEL_STUDIO_TEST_PROVIDER_KEY"
+	t.Setenv(envName, "from-environment")
+	if err := os.WriteFile(path, []byte(`{
+  "provider": "openai",
+  "model": "test-model",
+  "providers": {"openai": {"api_key_env": "NOVEL_STUDIO_TEST_PROVIDER_KEY"}}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["openai"].EffectiveAPIKey(); got != "from-environment" {
+		t.Fatalf("resolved api key=%q", got)
+	}
+	if got := cfg.Providers["openai"].APIKey; got == "from-environment" {
+		t.Fatalf("environment secret was copied into persisted config field: %q", got)
+	}
+}
+
+func TestMergeConfigExplicitAPIKeyOverridesInheritedEnvironmentReference(t *testing.T) {
+	t.Setenv("NOVEL_STUDIO_TEST_GLOBAL_KEY", "global-secret")
+	base := Config{Providers: map[string]ProviderConfig{
+		"openai": {APIKeyEnv: "NOVEL_STUDIO_TEST_GLOBAL_KEY"},
+	}}
+	overlay := Config{Providers: map[string]ProviderConfig{
+		"openai": {APIKey: "project-secret"},
+	}}
+	got := mergeConfig(base, overlay).Providers["openai"]
+	if got.APIKeyEnv != "" || got.EffectiveAPIKey() != "project-secret" {
+		t.Fatalf("higher-precedence api_key did not win: %+v", got)
+	}
+}
+
+func TestMergeConfigIncludesRuntimeAgentSettings(t *testing.T) {
+	base := Config{
+		Roles:           map[string]RoleConfig{"writer": {MaxTurns: 10}},
+		CharacterAgents: CharacterAgentsConfig{Protocol: "legacy", MaxConcurrency: 2},
+	}
+	overlay := Config{
+		Roles: map[string]RoleConfig{"writer": {MaxTurns: 20}},
+		CharacterAgents: CharacterAgentsConfig{
+			Protocol:          "v1",
+			Scope:             "active_core",
+			Activation:        "event_driven",
+			MaxConcurrency:    4,
+			MaxRevisionRounds: 1,
+		},
+	}
+	got := mergeConfig(base, overlay)
+	if got.Roles["writer"].MaxTurns != 20 {
+		t.Fatalf("writer max_turns=%d", got.Roles["writer"].MaxTurns)
+	}
+	if got.CharacterAgents != overlay.CharacterAgents {
+		t.Fatalf("character_agents=%+v want=%+v", got.CharacterAgents, overlay.CharacterAgents)
+	}
+}
+
 // writeProjectConfig 在当前工作目录的 ./.novel-studio/ 下写入项目级配置。
 // 调用前需先 t.Chdir 到目标目录。
 func writeProjectConfig(t *testing.T, content string) {

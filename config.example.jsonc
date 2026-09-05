@@ -10,11 +10,14 @@
   "reasoning_effort": "medium",
 
   // Provider 凭证库。key 自定义，用作上面 provider 字段引用的目标。
+  // api_key_env 可从环境变量读取密钥并优先于 api_key，适合 CI/Docker；
+  // 若直接写 api_key，novel-studio 创建的配置文件权限为 0600。
   // 已知 provider（openai/anthropic/gemini/openrouter/deepseek/qwen/glm/grok/mimo/ollama/bedrock/minimax）
   // 可省略 type；自定义代理必须显式声明 type 指明 API 协议。
   "providers": {
     "minimax": {
       "api_key": "sk-xxx",
+      // "api_key_env": "MINIMAX_API_KEY",
       // [1M] 后缀是长上下文变体的约定写法；具体以 provider 的模型清单为准。
       "models": ["MiniMax-M3[1M]", "MiniMax-M3"]
     },

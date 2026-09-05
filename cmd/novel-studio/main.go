@@ -29,6 +29,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "service" {
 		os.Exit(runServiceCommand(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runDoctorCommand(os.Args[2:], versionInfo()))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "skills" {
 		os.Exit(runSkillsCommand(os.Args[2:]))
 	}
@@ -203,7 +206,7 @@ func main() {
 		if opts.Headless {
 			die("error: headless 模式不支持首次引导，请先在交互终端运行一次 novel-studio 完成配置，或手写配置文件")
 		}
-		setupCfg, err := bootstrap.RunSetup()
+		setupCfg, err := bootstrap.RunSetupAt(opts.ConfigPath)
 		if err != nil {
 			die("setup: %v", err)
 		}
@@ -407,7 +410,7 @@ func loadPrompt(opts cliOptions) (string, error) {
 func hasAnySubcommand(argv []string) bool {
 	for _, a := range argv {
 		switch a {
-		case "service", "skills", "--review-existing", "--rewrite-existing", "--draft-ai-judge",
+		case "service", "doctor", "skills", "--review-existing", "--rewrite-existing", "--draft-ai-judge",
 			"--check", "--diag", "--simulate", "--import-sim", "--steer",
 			"--cocreate", "--pipeline", "--architect-check", "--writing-assets", "--refresh-progress", "--build-rag", "--rag-ready", "--zero-init":
 			return true
@@ -452,8 +455,13 @@ func stripRoutingTokens(argv []string, tokens ...string) []string {
 func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "novel-studio — AI 长篇小说创作引擎")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "首次运行:")
+	fmt.Fprintln(w, "  1. novel-studio doctor       # 检查本机环境并给出修复建议")
+	fmt.Fprintln(w, "  2. novel-studio              # 创建配置（仅首次需要）")
+	fmt.Fprintln(w, "  3. novel-studio --check      # 发起最小真实模型请求")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "用法:")
-	fmt.Fprintln(w, "  novel-studio --pipeline --prompt <text>     # 可恢复流水线：写作→评审→重写→交付")
+	fmt.Fprintln(w, "  novel-studio --pipeline --prompt <text>     # 可恢复流水线：设计→按弧推演→逐章渲染审核")
 	fmt.Fprintln(w, "  novel-studio --pipeline --prompt-file p.md  # 从文件读 prompt 后进入流水线")
 	fmt.Fprintln(w, "  novel-studio --cocreate                     # 多轮对话澄清需求，定稿创作指令")
 	fmt.Fprintln(w, "  novel-studio --headless --prompt <text>     # 兼容别名：内部转为 --pipeline")
@@ -477,6 +485,7 @@ func printTopUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio --steer \"<指令>\"               # 排队一条干预，下次启动生效")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "其它:")
+	fmt.Fprintln(w, "  novel-studio doctor                         # 本地环境/配置/看板前置检查（不调用模型）")
 	fmt.Fprintln(w, "  novel-studio service start                  # 启动浏览器进度看板（长篇 output/novel + 短篇服务）")
 	fmt.Fprintln(w, "  novel-studio service open                   # 手动打开小说项目进度看板")
 	fmt.Fprintln(w, "  novel-studio service status                 # 检查看板服务 /api/health")

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Go tests
+        run: go test ./...
+      - name: Dashboard tests
+        run: python -m unittest services.dashboard.test_server
+      - name: Build release binary
+        run: go build -trimpath -o /tmp/novel-studio ./cmd/novel-studio
+      - name: Smoke test release binary
+        run: |
+          /tmp/novel-studio --version
+          /tmp/novel-studio doctor --config /tmp/missing-novel-studio-config.json --json || test $? -eq 1
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: go.sum
+      - name: Race-sensitive packages
+        run: go test -race ./internal/store ./internal/agents ./internal/tools ./services/dashboard
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build container
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: novel-studio:test
+          build-args: GOPROXY=https://proxy.golang.org,direct
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test embedded dashboard
+        run: |
+          trap 'docker rm -f novel-studio-dashboard-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name novel-studio-dashboard-smoke \
+            -p 18765:8765 novel-studio:test \
+            service start --host 0.0.0.0 --port 8765
+          for _ in {1..30}; do
+            if curl -fsS http://127.0.0.1:18765/api/health | grep -q '"ok": true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs novel-studio-dashboard-smoke
+          exit 1

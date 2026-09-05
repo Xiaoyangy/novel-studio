@@ -63,33 +63,36 @@ novel-studio 把这些问题拆成独立且可审计的工程边界：
 ### 运行要求
 
 - macOS 或 Linux；Windows 请使用 WSL2，不要使用旧 Release 中的原生 Windows ZIP。
-- 使用 Release 安装无需本地 Go 工具链；从源码构建需要 Go 1.25.5。
+- 使用 Release 安装无需本地 Go 工具链；从源码构建最低需要 Go 1.25.5，建议使用当前稳定版 Go 1.27.1。
 - 至少配置一个可用的文本模型 provider；生产配置建议把 `roles.reviewer` 独立路由到 DeepSeek。
 - 是否完全离线还取决于 provider、embedding、向量服务，以及本次流程是否调用 `web_research` 等联网能力。
-- 进度看板使用 Python 3，当前需从源码 checkout 的项目根目录启动；Release 一键安装目前只安装 CLI 二进制。RAG embedding 与 Qdrant 按配置启用。
+- 进度看板使用 Python 3.9+；看板代码已嵌入 CLI，Release 安装不再要求旁边保留源码 checkout。RAG embedding 与 Qdrant 按配置启用。
 
 ### 1. 安装
 
-本页描述当前 `main`。想体验这里介绍的最新生产合同与看板，请选择源码构建；GitHub Release 更适合只需要稳定 CLI 的用户，但可能晚于主干能力。下面两种方式二选一。
+本页描述当前 `main`。普通用户优先选择 Release；参与开发或需要尚未发版的主干能力时再选择源码构建。下面两种方式二选一。
 
 ```bash
-# 方式 A：当前 main + 完整看板
+# 方式 A（推荐）：稳定 Release；自动选择可写目录并校验 SHA-256
+curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh | sh
+```
+
+```bash
+# 方式 B：当前 main 源码
 git clone https://github.com/Xiaoyangy/novel-studio.git
 cd novel-studio
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/novel-studio" ./cmd/novel-studio
-export PATH="$HOME/.local/bin:$PATH"
+./scripts/run-local.sh doctor
 ```
+
+安装脚本若提示安装目录不在 `PATH`，按它打印的那一行 `export PATH=...` 执行即可。源码模式不需要先构建，`scripts/run-local.sh` 会始终运行当前 checkout。
+
+### 2. 先诊断，再配置模型
 
 ```bash
-# 方式 B：稳定 Release，仅安装 CLI；写入用户目录，不触发 sudo
-mkdir -p "$HOME/.local/bin"
-curl -fsSL https://raw.githubusercontent.com/Xiaoyangy/novel-studio/main/scripts/install.sh \
-  | NOVEL_STUDIO_INSTALL_DIR="$HOME/.local/bin" sh
-export PATH="$HOME/.local/bin:$PATH"
+novel-studio doctor
 ```
 
-### 2. 配置并检查模型
+`doctor` 不调用模型、不改项目数据；它会检查平台、工作目录、配置、Python/内嵌看板、可选 Qdrant 依赖和源码构建工具，并针对失败项打印可执行的修复建议。源码模式把下文的 `novel-studio` 替换为 `./scripts/run-local.sh` 即可。
 
 ```bash
 novel-studio
@@ -139,15 +142,15 @@ novel-studio --pipeline --dir data/runs/<书名> \
 
 满足短篇全局终审合同的项目会生成 `output/novel/正文.md`、全文终审与出版包；长篇的当前终态是全书章级验收链完成，不冒充全书 exact-book 终审。
 
-### 6. 打开进度看板（源码 checkout）
+### 6. 打开进度看板
 
 ```bash
 novel-studio service open
 ```
 
-`service open` 会在需要时后台启动看板并打开浏览器，默认地址是 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)。若要在前台查看服务日志，请在单独终端运行 `novel-studio service start`。
+`service open` 会在需要时从 CLI 内嵌资源启动看板并打开浏览器，默认地址是 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)。若要在前台查看服务日志，请在单独终端运行 `novel-studio service start`。Release 安装与源码运行使用同一套看板代码。
 
-> **路径速记：**pipeline 与 `--diag` 的 `--dir` 指向 `data/runs/<书名>`；RAG 命令指向 `data/runs/<书名>/output/novel`；看板命令需在源码 checkout 根目录运行。
+> **路径速记：**pipeline 与 `--diag` 的 `--dir` 指向 `data/runs/<书名>`；RAG 命令指向 `data/runs/<书名>/output/novel`；看板默认扫描当前工作目录的 `data/runs/`，pipeline 自动启动时会绑定本书所在的 runs 根目录。
 
 ## 从世界到正文
 
@@ -289,6 +292,17 @@ novel-studio 可以按角色选择不同 provider、model 和 reasoning effort�
 
 **Local-first / 自托管编排不等于默认完全离线或完全私密。** 项目文件与状态保存在本机；文本是否离线生成，取决于你选择 Ollama、本地兼容服务还是远程 API。生产环境建议把裸正文 `reviewer` 独立路由到 DeepSeek，其他角色仍可分别选择 provider。即使模型、embedding 与 Qdrant 都在本地，brainstorm 或返工阶段调用 `web_research` 时仍会联网。不要把真实 API key 提交到仓库。
 
+Docker 用户先创建可写的配置与工作目录，再用一次性容器完成同一个流程：
+
+```bash
+mkdir -p config workspace
+docker compose run --rm novel-studio             # 首次配置
+docker compose run --rm novel-studio doctor --dir /workspace
+docker compose run --rm novel-studio --check
+```
+
+Compose 构建默认使用 `https://goproxy.cn,direct`，海外或企业网络可先设置自己的 `GOPROXY` 再构建。要从容器启动看板，运行 `docker compose run --rm --service-ports novel-studio service start --host 0.0.0.0`，然后打开 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)。若启用 compose 内的 Qdrant，配置中的 `rag.qdrant.url` 应写成 `http://qdrant:6333`，而不是容器自己的 `127.0.0.1`。
+
 ## 适合谁
 
 - 想写几十章到数百章网文、长篇小说或系列故事的作者。
@@ -305,6 +319,7 @@ novel-studio 可以按角色选择不同 provider、model 和 reasoning effort�
 
 | 命令 | 用途 |
 |---|---|
+| `novel-studio doctor` | 不调用模型，检查本地运行环境并给出修复建议 |
 | `novel-studio --pipeline --new-novel --prompt "..."` | 新建书目并启动生产流程 |
 | `novel-studio --pipeline --dir <RUN>` | 从可信证据恢复下一步 |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | 只完成当前弧全部章节的正式推演与封存，不写正文 |

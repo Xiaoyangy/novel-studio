@@ -1,5 +1,6 @@
 .git
 .github
+.codegraph
 .vscode
 .idea
 go.work
@@ -13,4 +14,14 @@ dist
 tasks
 refer
 output*
+data
+deconstruction-library
+deconstruction-library.zip
+models/embedding/*.gguf
+debug.test*
+novel-studio
+__pycache__
+*.pyc
+coverage.*
+*.coverprofile
 *.log

@@ -371,7 +371,7 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 	}
 
 	m, err := llm.NewModel(providerType, model,
-		llm.WithAPIKey(pc.APIKey),
+		llm.WithAPIKey(pc.EffectiveAPIKey()),
 		llm.WithBaseURL(pc.BaseURL),
 		llm.WithStreamIdleTimeout(streamIdleTimeout),
 		llm.WithProviderExtra(providerExtra),

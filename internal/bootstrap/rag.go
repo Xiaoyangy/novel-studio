@@ -67,7 +67,7 @@ func NewRAGEmbedderWithOverride(cfg Config, override RAGEmbeddingConfig) (rag.Em
 		}
 	}
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(pc.APIKey)
+		apiKey = pc.EffectiveAPIKey()
 	}
 	baseURL := strings.TrimSpace(emb.BaseURL)
 	if baseURL == "" {

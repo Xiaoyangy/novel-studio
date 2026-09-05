@@ -111,7 +111,6 @@ func LoadConfig(flagPath string) (Config, error) {
 		}
 		cfg = mergeConfig(cfg, override)
 	}
-
 	return cfg, nil
 }
 
@@ -193,6 +192,12 @@ func mergeConfig(base, overlay Config) Config {
 			}
 			if v.APIKey != "" {
 				existing.APIKey = v.APIKey
+				// An explicit key in a higher-precedence layer must not be
+				// shadowed by an inherited environment-variable reference.
+				existing.APIKeyEnv = ""
+			}
+			if v.APIKeyEnv != "" {
+				existing.APIKeyEnv = v.APIKeyEnv
 			}
 			if v.BaseURL != "" {
 				existing.BaseURL = v.BaseURL
@@ -229,7 +234,27 @@ func mergeConfig(base, overlay Config) Config {
 			if v.ReasoningEffort != "" {
 				existing.ReasoningEffort = v.ReasoningEffort
 			}
+			if v.MaxTurns > 0 {
+				existing.MaxTurns = v.MaxTurns
+			}
 			base.Roles[k] = existing
+		}
+	}
+	if overlay.CharacterAgents != (CharacterAgentsConfig{}) {
+		if overlay.CharacterAgents.Protocol != "" {
+			base.CharacterAgents.Protocol = overlay.CharacterAgents.Protocol
+		}
+		if overlay.CharacterAgents.Scope != "" {
+			base.CharacterAgents.Scope = overlay.CharacterAgents.Scope
+		}
+		if overlay.CharacterAgents.Activation != "" {
+			base.CharacterAgents.Activation = overlay.CharacterAgents.Activation
+		}
+		if overlay.CharacterAgents.MaxConcurrency > 0 {
+			base.CharacterAgents.MaxConcurrency = overlay.CharacterAgents.MaxConcurrency
+		}
+		if overlay.CharacterAgents.MaxRevisionRounds > 0 {
+			base.CharacterAgents.MaxRevisionRounds = overlay.CharacterAgents.MaxRevisionRounds
 		}
 	}
 
@@ -419,5 +444,8 @@ func SaveConfig(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }

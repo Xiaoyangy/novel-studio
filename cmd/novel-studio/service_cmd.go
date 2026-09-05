@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
+	dashboardassets "github.com/chenhongyang/novel-studio/services/dashboard"
 )
 
 type serviceFlags struct {
@@ -82,12 +85,18 @@ func runServiceStart(argv []string) int {
 		fmt.Fprintf(os.Stderr, "service start: %v\n", err)
 		return 1
 	}
+	python, err := findDashboardPython()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "service start: %v\n", err)
+		return 1
+	}
 	args := []string{script, "--host", flags.Host, "--port", fmt.Sprint(flags.Port)}
-	cmd := exec.Command("python3", args...)
+	cmd := exec.Command(python, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	cmd.Dir = findProjectRootFrom(script)
+	cmd.Env = dashboardEnvironment(cmd.Dir, "")
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "service start: %v\n", err)
 		return 1
@@ -219,8 +228,12 @@ func startServiceBackground(flags serviceFlags, novelDir string) error {
 	if err != nil {
 		return err
 	}
+	python, err := findDashboardPython()
+	if err != nil {
+		return err
+	}
 	root := findProjectRootFrom(script)
-	logDir := filepath.Join(root, "output", "logs")
+	logDir := dashboardLogDir(script, root)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return err
 	}
@@ -232,18 +245,13 @@ func startServiceBackground(flags serviceFlags, novelDir string) error {
 	defer logFile.Close()
 
 	args := []string{script, "--host", flags.Host, "--port", fmt.Sprint(flags.Port)}
-	cmd := exec.Command("python3", args...)
+	cmd := exec.Command(python, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.Dir = root
-	cmd.Env = os.Environ()
+	cmd.Env = dashboardEnvironment(root, novelDir)
 	cmd.SysProcAttr = detachSysProcAttr()
-	if novelDir != "" {
-		if abs, err := filepath.Abs(novelDir); err == nil {
-			cmd.Env = append(cmd.Env, "NOVEL_STUDIO_NOVEL_DIR="+abs)
-		}
-	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -306,8 +314,7 @@ func stopDashboardProcesses(flags serviceFlags) error {
 	stopped := 0
 	for _, pid := range pids {
 		cmdline, _ := processCommandLine(pid)
-		if !strings.Contains(cmdline, filepath.Join("services", "dashboard", "server.py")) &&
-			!strings.Contains(cmdline, "services/dashboard/server.py") {
+		if !isNovelStudioDashboardCommand(cmdline) {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -440,7 +447,15 @@ func findShortStoryServiceScript() (string, error) {
 			return abs, nil
 		}
 	}
-	return "", fmt.Errorf("services/dashboard/server.py not found; run from the novel-studio project root")
+	configDir := bootstrap.DefaultConfigDir()
+	if configDir == "" {
+		return "", fmt.Errorf("services/dashboard/server.py not found and user runtime directory is unavailable")
+	}
+	script, err := dashboardassets.Materialize(filepath.Join(configDir, "runtime", "dashboard"))
+	if err != nil {
+		return "", err
+	}
+	return script, nil
 }
 
 func findProjectRootFrom(path string) string {
@@ -451,14 +466,81 @@ func findProjectRootFrom(path string) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
+			if cwd, err := os.Getwd(); err == nil && cwd != "" {
+				return cwd
+			}
 			return filepath.Dir(path)
 		}
 		dir = parent
 	}
 }
 
+func findDashboardPython() (string, error) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		return "", fmt.Errorf("需要 Python 3.9+ 才能启动看板；请安装 Python 3 后重试，或运行 novel-studio doctor 查看修复建议")
+	}
+	major, minor, err := pythonVersion(python)
+	if err != nil {
+		return "", fmt.Errorf("无法读取 Python 版本（%s）：%w", python, err)
+	}
+	if major < 3 || (major == 3 && minor < 9) {
+		return "", fmt.Errorf("看板需要 Python 3.9+，当前为 %d.%d（%s）", major, minor, python)
+	}
+	return python, nil
+}
+
+func dashboardLogDir(script, projectRoot string) string {
+	normalized := filepath.ToSlash(script)
+	if strings.Contains(normalized, "/services/dashboard/server.py") {
+		return filepath.Join(projectRoot, "output", "logs")
+	}
+	if dir := bootstrap.DefaultConfigDir(); dir != "" {
+		return filepath.Join(dir, "logs")
+	}
+	return filepath.Join(projectRoot, "output", "logs")
+}
+
+func dashboardEnvironment(projectRoot, novelDir string) []string {
+	env := os.Environ()
+	if _, explicitlySet := os.LookupEnv("NOVEL_STUDIO_RUNS_DIR"); explicitlySet {
+		return env
+	}
+	runsDir := ""
+	if novelDir != "" {
+		runsDir = runsDirForNovelOutput(novelDir)
+	}
+	if runsDir == "" && projectRoot != "" {
+		runsDir = filepath.Join(projectRoot, "data", "runs")
+	}
+	if abs, err := filepath.Abs(runsDir); err == nil && runsDir != "" {
+		env = append(env, "NOVEL_STUDIO_RUNS_DIR="+abs)
+	}
+	return env
+}
+
+func runsDirForNovelOutput(outputDir string) string {
+	abs, err := filepath.Abs(outputDir)
+	if err != nil {
+		return ""
+	}
+	if filepath.Base(abs) == "novel" && filepath.Base(filepath.Dir(abs)) == "output" {
+		return filepath.Dir(filepath.Dir(filepath.Dir(abs)))
+	}
+	return ""
+}
+
+func isNovelStudioDashboardCommand(commandLine string) bool {
+	normalized := filepath.ToSlash(commandLine)
+	if strings.Contains(normalized, "services/dashboard/server.py") {
+		return true
+	}
+	return strings.Contains(normalized, ".novel-studio/runtime/dashboard/") &&
+		strings.Contains(normalized, "/server.py")
+}
+
 func printServiceUsage(w *os.File) {
-	fmt.Fprintln(w, "novel-studio service — browser progress board for novel and short-story projects")
+	fmt.Fprintln(w, "novel-studio service — embedded browser progress board")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  novel-studio service start [--host 127.0.0.1] [--port 8765]")
@@ -466,8 +548,6 @@ func printServiceUsage(w *os.File) {
 	fmt.Fprintln(w, "  novel-studio service open [--host 127.0.0.1] [--port 8765]")
 	fmt.Fprintln(w, "  novel-studio service url [--host 127.0.0.1] [--port 8765]")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Service: %s\n", filepath.Join("services", "dashboard"))
-	fmt.Fprintf(w, "Novel board: %s\n", "/")
-	fmt.Fprintf(w, "Short-story data root: %s\n", filepath.Join("data", "generated-output", "short_story_service", "projects"))
-	fmt.Fprintf(w, "Audit scripts: %s\n", filepath.Join("quality", "audit", "scripts"))
+	fmt.Fprintln(w, "Data root: $NOVEL_STUDIO_RUNS_DIR or <workspace>/data/runs")
+	fmt.Fprintln(w, "Release binaries extract the embedded dashboard into ~/.novel-studio/runtime/dashboard.")
 }
