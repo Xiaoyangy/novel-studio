@@ -298,6 +298,8 @@ novel-studio 可以按角色选择不同 provider、model 和 reasoning effort�
 | `budget` | 单书成本告警与硬停止 |
 | `notify` | 桌面或自定义通知 |
 
+所有多轮 Agent 默认使用短期前缀缓存：支持 block cache 的 provider 会缓存稳定 system/tools 与最近一次工具结果，OpenAI 官方端会收到不含项目隐私的哈希路由键。任意 OpenAI-compatible 代理默认不发送专有缓存参数，避免严格网关报错；确认代理会透传这些参数后，可在对应 provider 的 `extra` 中显式设置 `"prompt_cache_params": true`。
+
 **Local-first / 自托管编排不等于默认完全离线或完全私密。** 项目文件与状态保存在本机；文本是否离线生成，取决于你选择 Ollama、本地兼容服务还是远程 API。生产环境建议把裸正文 `reviewer` 独立路由到 DeepSeek，其他角色仍可分别选择 provider。即使模型、embedding 与 Qdrant 都在本地，brainstorm 或返工阶段调用 `web_research` 时仍会联网。不要把真实 API key 提交到仓库。
 
 Docker 用户先创建可写的配置与工作目录，再用一次性容器完成同一个流程：

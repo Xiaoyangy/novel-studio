@@ -2,14 +2,66 @@ package ctxpack
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	storepkg "github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
 	corecontext "github.com/voocel/agentcore/context"
 )
+
+func TestTruncateJSONToTokensKeepsCJKPayloadValidAndWithinBudget(t *testing.T) {
+	source, err := json.Marshal(map[string]any{
+		"角色状态": strings.Repeat("林岚在雨夜追查仓库线索。", 800),
+		"线索":   []string{"旧录音", "码头目击", "未兑现承诺"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const budget = 180
+	got := truncateJSONToTokens(source, budget)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated restore JSON split a UTF-8 rune")
+	}
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("truncated restore section is not valid JSON: %q", got)
+	}
+	if tokens := corecontext.EstimateTokens(agentcore.UserMsg(got)); tokens > budget {
+		t.Fatalf("CJK restore section exceeded token budget: got=%d budget=%d", tokens, budget)
+	}
+	var envelope struct {
+		Truncated bool   `json:"_truncated"`
+		Preview   string `json:"preview"`
+	}
+	if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !envelope.Truncated || !strings.Contains(envelope.Preview, "角色状态") {
+		t.Fatalf("expected an explicit, useful truncation preview: %#v", envelope)
+	}
+}
+
+func TestAppendJSONSectionAccountsForHeadingAndTruncationSuffix(t *testing.T) {
+	const budget = 220
+	remaining := budget
+	var parts []string
+	stopped := appendJSONSection(&parts, "角色快照", map[string]any{
+		"状态": strings.Repeat("雨夜追查仍在继续。", 1000),
+	}, &remaining)
+	if !stopped || len(parts) != 1 {
+		t.Fatalf("expected one truncated terminal section, stopped=%v parts=%d", stopped, len(parts))
+	}
+	if used := corecontext.EstimateTokens(agentcore.UserMsg(parts[0])); used > budget {
+		t.Fatalf("rendered section exceeded total budget: got=%d budget=%d", used, budget)
+	}
+	if remaining < 0 {
+		t.Fatalf("remaining budget became negative: %d", remaining)
+	}
+}
 
 func TestStoreSummaryCompactApplyUsesPersistentStoreData(t *testing.T) {
 	s := seededWriterStore(t)

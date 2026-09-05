@@ -581,6 +581,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      architectThinking,
 		ToolsAreIdempotent: false,
+		CacheLastMessage:   promptCacheControl,
+		PromptCacheKey:     agentPromptCacheKey("architect_short", store.Dir()),
 		OnMessage:          onMsg,
 		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
 			if architectRefreshTarget != "" {
@@ -601,6 +603,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      architectThinking,
 		ToolsAreIdempotent: false,
+		CacheLastMessage:   promptCacheControl,
+		PromptCacheKey:     agentPromptCacheKey("architect_long", store.Dir()),
 		OnMessage:          onMsg,
 		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
 			if architectRefreshTarget != "" {
@@ -669,6 +673,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
 		ToolsAreIdempotent:  false,
+		CacheLastMessage:    promptCacheControl,
+		PromptCacheKey:      agentPromptCacheKey("writer", store.Dir()),
 		StopAfterToolResult: plannerShouldStopAfterToolResult,
 		OnMessage:           onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
@@ -686,6 +692,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:          subagentMaxRetries,
 		ThinkingLevel:       resolvedRoleThinking(writerModel, cfg, "writer"),
 		ToolsAreIdempotent:  false,
+		CacheLastMessage:    promptCacheControl,
+		PromptCacheKey:      agentPromptCacheKey("world_simulator", store.Dir()),
 		StopAfterToolResult: worldSimulatorShouldStopAfterToolResult,
 		OnMessage:           onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
@@ -706,6 +714,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:         drafterMaxRetries,
 		ThinkingLevel:      resolvedRoleThinking(drafterRuntimeModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
+		CacheLastMessage:   promptCacheControl,
+		PromptCacheKey:     agentPromptCacheKey("drafter", store.Dir()),
 		StopAfterTools:     []string{"commit_chapter"},
 		StopAfterToolResult: func(toolName string, result json.RawMessage) bool {
 			return pipelineRenderDrafterShouldStopAfterToolResult(store, toolName, result)
@@ -727,6 +737,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:         drafterMaxRetries,
 		ThinkingLevel:      resolvedRoleThinking(finalizerRuntimeModel, cfg, "drafter"),
 		ToolsAreIdempotent: false,
+		CacheLastMessage:   promptCacheControl,
+		PromptCacheKey:     agentPromptCacheKey("draft_finalizer", store.Dir()),
 		StopAfterTools:     []string{"commit_chapter"},
 		OnMessage:          onMsg,
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
@@ -745,6 +757,8 @@ func BuildCoordinatorWithOptions(
 		MaxRetries:         subagentMaxRetries,
 		ThinkingLevel:      resolvedRoleThinking(editorModel, cfg, "editor"),
 		ToolsAreIdempotent: false,
+		CacheLastMessage:   promptCacheControl,
+		PromptCacheKey:     agentPromptCacheKey("editor", store.Dir()),
 		OnMessage:          onMsg,
 		// 仅摘要类终态产物命中即停；save_review 不再硬停——StopAfterTool 退出会绕过
 		// StopGuard（agentcore loop.go），若 save_review 硬停，"被派生成弧摘要却先复核"
@@ -784,6 +798,8 @@ func BuildCoordinatorWithOptions(
 		// subagent 是流程主通道；真实错误应显式返回给 Host，而不是在单次 run 内永久禁用工具。
 		agentcore.WithMaxToolErrors(0),
 		agentcore.WithMaxRetries(coordinatorMaxRetries),
+		agentcore.WithCacheLastMessage(promptCacheControl),
+		agentcore.WithPromptCacheKey(agentPromptCacheKey("coordinator", store.Dir())),
 		agentcore.WithContextManager(coordinatorEngine),
 		agentcore.WithStopGuard(reminder.NewStopGuard(store, nil)),
 		agentcore.WithMiddlewares(flowBoundaryMiddleware(onFlowBoundary)),

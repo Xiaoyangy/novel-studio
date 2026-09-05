@@ -1,6 +1,26 @@
 package openai
 
-import "github.com/voocel/litellm"
+import (
+	"net/url"
+	"strings"
+
+	"github.com/voocel/litellm"
+)
+
+func (p *Provider) promptCacheParamsSupport() litellm.Support {
+	if p.cfg.PromptCacheParams || isOfficialOpenAIBaseURL(p.cfg.BaseURL) {
+		return litellm.SupportYes
+	}
+	return litellm.SupportUnknown
+}
+
+func isOfficialOpenAIBaseURL(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), "api.openai.com")
+}
 
 func (p *Provider) Capabilities(model string) litellm.Capabilities {
 	reasoningModel := p.isReasoningModel(model)
@@ -43,8 +63,8 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 		},
 		Cache: litellm.CacheCapabilities{
 			Block:      litellm.SupportNo,
-			PromptKey:  litellm.SupportYes,
-			Retention:  litellm.SupportYes,
+			PromptKey:  p.promptCacheParamsSupport(),
+			Retention:  p.promptCacheParamsSupport(),
 			UsageRead:  litellm.SupportYes,
 			UsageWrite: litellm.SupportNo,
 		},

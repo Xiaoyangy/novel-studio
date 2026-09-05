@@ -29,6 +29,8 @@ type contextBuildState struct {
 	currentEntry        *domain.OutlineEntry
 	chapterPlan         *domain.ChapterPlan
 	chapterParticipants []string
+	characters          []domain.Character
+	outline             []domain.OutlineEntry
 	storyThreads        []domain.RecallItem
 	foreshadow          []domain.ForeshadowEntry
 	relationships       []domain.RelationshipEntry
@@ -194,24 +196,22 @@ func (t *ContextTool) buildSimulationProfile(result map[string]any, sectionKey s
 	result["simulation_profile"] = true
 }
 
-func (t *ContextTool) buildBaseContext(result map[string]any, warn func(string, error)) {
+func (t *ContextTool) buildBaseContext(result map[string]any, state contextBuildState, warn func(string, error)) {
 	if premise, err := t.store.Outline.LoadPremise(); err == nil && premise != "" {
 		result["premise"] = premise
 		if sections := parsePremiseSections(premise); len(sections) > 0 {
 			result["premise_sections"] = sections
 		}
 		tier := domain.PlanningTier("")
-		if meta, err := t.store.RunMeta.Load(); err == nil && meta != nil {
-			tier = meta.PlanningTier
+		if state.runMeta != nil {
+			tier = state.runMeta.PlanningTier
 		}
 		result["premise_structure"] = premiseStructure(premise, tier)
 	} else {
 		warn("premise", err)
 	}
-	if outline, err := t.store.Outline.LoadOutline(); err == nil && outline != nil {
-		result["outline"] = outline
-	} else {
-		warn("outline", err)
+	if state.outline != nil {
+		result["outline"] = state.outline
 	}
 	if rules, err := t.store.World.LoadWorldRules(); err == nil && len(rules) > 0 {
 		result["world_rules"] = orderWorldRulesByVisibility(rules)
@@ -221,10 +221,8 @@ func (t *ContextTool) buildBaseContext(result map[string]any, warn func(string, 
 	} else {
 		warn("world_rules", err)
 	}
-	if world, err := t.store.World.LoadBookWorld(); err == nil && world != nil {
-		result["book_world"] = world
-	} else {
-		warn("book_world", err)
+	if state.bookWorld != nil {
+		result["book_world"] = state.bookWorld
 	}
 }
 
@@ -254,11 +252,14 @@ func (t *ContextTool) prepareChapterContext(chapter int, requestedProfile string
 		state.profile.Layered = false
 	}
 
-	currentEntry, currentEntryErr := t.store.Outline.GetChapterOutline(chapter)
-	if currentEntryErr == nil {
+	outline, outlineErr := t.store.Outline.LoadOutline()
+	warn("outline", outlineErr)
+	state.outline = outline
+	currentEntry := findContextOutlineEntry(outline, chapter)
+	if currentEntry != nil {
 		envelope.Working["current_chapter_outline"] = currentEntry
 	} else {
-		warn("current_chapter_outline", currentEntryErr)
+		warn("current_chapter_outline", fmt.Errorf("chapter %d not found in outline", chapter))
 	}
 	state.currentEntry = currentEntry
 
@@ -327,7 +328,10 @@ func (t *ContextTool) prepareChapterContext(chapter int, requestedProfile string
 		}
 		envelope.Working["next_step"] = "调用 draft_chapter(mode=write) 一次整章覆盖旧草稿；写入新哈希后立即结束，等待外层 pipeline 外判。"
 	}
-	state.chapterParticipants = t.detectChapterParticipants(currentEntry, chapterPlan, warn)
+	characters, charactersErr := t.store.Characters.Load()
+	warn("characters", charactersErr)
+	state.characters = characters
+	state.chapterParticipants = detectChapterParticipants(currentEntry, chapterPlan, characters)
 	if len(state.chapterParticipants) > 0 {
 		envelope.Working["chapter_participants"] = state.chapterParticipants
 		envelope.Working["character_context_policy"] = "characters/character_snapshots 已按本章参与者筛选；未进入列表的角色不要塞入本章正文"
@@ -768,9 +772,9 @@ func (t *ContextTool) buildChapterContext(ctx context.Context, result map[string
 	result["memory_policy"] = domain.NewChapterMemoryPolicy(state.progress, state.profile, state.currentEntry != nil)
 
 	if state.profile.Layered {
-		t.loadLayeredCharacters(envelope.Episodic, state.chapter, state.chapterParticipants, warn)
+		t.loadLayeredCharacters(envelope.Episodic, state, warn)
 	} else {
-		t.loadFilteredCharacters(envelope.Episodic, state.chapter, state.chapterParticipants, warn)
+		t.loadFilteredCharacters(envelope.Episodic, state)
 	}
 
 	t.buildChapterEpisodicMemory(&envelope, state, warn)
@@ -811,10 +815,8 @@ func (t *ContextTool) buildStyleStats(envelope *chapterContextEnvelope, state co
 	}
 
 	var titles []string
-	if outline, err := t.store.Outline.LoadOutline(); err == nil {
-		for _, entry := range outline {
-			titles = append(titles, entry.Title)
-		}
+	for _, entry := range state.outline {
+		titles = append(titles, entry.Title)
 	}
 
 	stats := stylestat.Compute(stylestat.Input{
@@ -970,10 +972,10 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 	if isRewriteTarget {
 		envelope.Working["future_outline_policy"] = "当前处于返工阶段，只使用 current_chapter_outline 与 rewrite_brief 重建本章；next_chapter_outline 和 future_outline_window 已隐藏，禁止续写未来章。"
 	} else {
-		if next, err := t.store.Outline.GetChapterOutline(state.chapter + 1); err == nil && next != nil {
+		if next := findContextOutlineEntry(state.outline, state.chapter+1); next != nil {
 			envelope.Working["next_chapter_outline"] = next
 		}
-		if future := t.futureOutlineWindow(state.chapter, 4); len(future) > 0 {
+		if future := contextFutureOutlineWindow(state.outline, state.chapter, 4); len(future) > 0 {
 			envelope.Working["future_outline_window"] = future
 			envelope.Working["future_outline_policy"] = "写正文前必须同时核对当前章及后续3-4章大纲，确保本章选择、伏笔、资源和人物状态服务本卷/本弧后续推进；不得只顾当前单章爽点。"
 		}
@@ -1179,19 +1181,26 @@ func hasInformalOrSecretRules(rules []domain.WorldRule) bool {
 	return false
 }
 
-func (t *ContextTool) futureOutlineWindow(chapter, lookahead int) []domain.OutlineEntry {
+func contextFutureOutlineWindow(outline []domain.OutlineEntry, chapter, lookahead int) []domain.OutlineEntry {
 	if lookahead < 0 {
 		lookahead = 0
 	}
-	var out []domain.OutlineEntry
+	out := make([]domain.OutlineEntry, 0, lookahead+1)
 	for ch := chapter; ch <= chapter+lookahead; ch++ {
-		entry, err := t.store.Outline.GetChapterOutline(ch)
-		if err != nil || entry == nil {
-			continue
+		if entry := findContextOutlineEntry(outline, ch); entry != nil {
+			out = append(out, *entry)
 		}
-		out = append(out, *entry)
 	}
 	return out
+}
+
+func findContextOutlineEntry(outline []domain.OutlineEntry, chapter int) *domain.OutlineEntry {
+	for i := range outline {
+		if outline[i].Chapter == chapter {
+			return &outline[i]
+		}
+	}
+	return nil
 }
 
 func compactProgressionSnapshot(ledger *domain.ChapterProgressLedger, chapter int) map[string]any {
@@ -1439,6 +1448,7 @@ func (t *ContextTool) buildChapterEpisodicMemory(envelope *chapterContextEnvelop
 		if related := t.buildRelatedChapters(
 			state.chapter,
 			state.currentEntry,
+			state.characters,
 			state.foreshadow,
 			state.relationships,
 			state.allStateChanges,
@@ -1506,8 +1516,7 @@ func (t *ContextTool) buildChapterReferencePack(envelope *chapterContextEnvelope
 
 		if state.currentEntry != nil {
 			var voiceSamples []map[string]any
-			chars, _ := t.store.Characters.Load()
-			for _, c := range chars {
+			for _, c := range state.characters {
 				if c.Tier == "secondary" || c.Tier == "decorative" {
 					continue
 				}
@@ -1553,12 +1562,7 @@ func decodeLiteraryRenderingCards(raw string) (any, error) {
 	return cards, nil
 }
 
-func (t *ContextTool) detectChapterParticipants(entry *domain.OutlineEntry, plan *domain.ChapterPlan, warn func(string, error)) []string {
-	chars, err := t.store.Characters.Load()
-	if err != nil {
-		warn("characters", err)
-		return nil
-	}
+func detectChapterParticipants(entry *domain.OutlineEntry, plan *domain.ChapterPlan, chars []domain.Character) []string {
 	text := ""
 	if entry != nil {
 		text += entry.Title + " " + entry.CoreEvent + " " + entry.Hook + " " + strings.Join(entry.Scenes, " ")

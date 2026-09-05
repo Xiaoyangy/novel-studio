@@ -1,5 +1,5 @@
-github.com/voocel/agentcore v1.7.7 h1:0Zjqzp9MbnNh47Sxa2l9JD3FTPLPjyE6dArD88sQ5jI=
-github.com/voocel/agentcore v1.7.7/go.mod h1:qMuVJkM6oBHACYtfCsf1irZdjR5lI77Lnnq6Nu4GWyg=
+github.com/voocel/agentcore v1.7.8 h1:JnzUPLykbxf7yHOoJg3Iz+1jpqux2+zQyoFvRsJQW6s=
+github.com/voocel/agentcore v1.7.8/go.mod h1:UzjwD/G7+h4OWMDhD75OJS23GhWjXK0mDgGlbJw70gI=
 golang.org/x/image v0.43.0 h1:FLxcP4ec2350nTfOC8ysKtqYSIFbk/QGjw1ZHNP4tsY=
 golang.org/x/image v0.43.0/go.mod h1:rrpelvGFt+kLPAjPM4HeWPgrl0FtafueU//e5N0qk/Q=
 golang.org/x/text v0.38.0 h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=

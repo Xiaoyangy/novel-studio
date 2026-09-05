@@ -441,7 +441,9 @@ func runCharacterAgentSuccessorArchitect(
 		agentcore.LoopConfig{
 			Model: model, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns("architect", 8), 10), MaxRetries: subagentMaxRetries,
 			MaxToolErrors: 0, ThinkingLevel: resolvedRoleThinking(model, cfg, "architect"), ToolsAreIdempotent: false,
-			StopAfterTool: func(name string) bool { return name == tool.Name() },
+			CacheLastMessage: promptCacheControl,
+			PromptCacheKey:   agentPromptCacheKey("character_successor_architect", st.Dir(), receipt.GenerationID, receipt.Digest),
+			StopAfterTool:    func(name string) bool { return name == tool.Name() },
 		},
 	)
 	var runErr error
@@ -1018,6 +1020,7 @@ func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.S
 		ctx, model, characterAgentSystemPrompt,
 		"你是 "+observation.Character+"。这是你唯一可见的观察包：\n<character_observation_packet>\n"+string(raw)+"\n</character_observation_packet>\n现在只调用 submit_character_decision。",
 		tool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("character", 6), 8), roleThinking(cfg, "character"), guard,
+		agentPromptCacheKey("character", st.Dir(), observation.GenerationID, fmt.Sprint(observation.Chapter), fmt.Sprint(observation.Round), observation.AgentID),
 	)
 	if err != nil {
 		return err
@@ -1045,6 +1048,7 @@ func runCharacterAgentTerminalLoop(
 	maxTurns int,
 	thinking agentcore.ThinkingLevel,
 	guard agentcore.StopGuard,
+	promptCacheKey string,
 ) (agentcore.Usage, error) {
 	resolvedThinking, _ := ResolveThinkingForModel(model, thinking)
 	events := agentcore.AgentLoop(
@@ -1054,6 +1058,7 @@ func runCharacterAgentTerminalLoop(
 		agentcore.LoopConfig{
 			Model: model, MaxTurns: maxTurns, MaxRetries: subagentMaxRetries, MaxToolErrors: 0,
 			ThinkingLevel: resolvedThinking, ToolsAreIdempotent: false, StopGuard: guard,
+			CacheLastMessage: promptCacheControl, PromptCacheKey: promptCacheKey,
 			StopAfterTool: func(name string) bool { return name == terminalTool },
 		},
 	)
@@ -1113,6 +1118,7 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 		ctx, model, worldArbiterSystemPrompt,
 		"裁决以下单一世界输入。soft_guidance 只能作为方向，不得覆盖角色选择：\n<world_arbitration_input>\n"+string(payload)+"\n</world_arbitration_input>\n现在只调用 resolve_chapter_world。",
 		tool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("world_arbiter", 6), 8), roleThinking(cfg, "world_arbiter"), guard,
+		agentPromptCacheKey("world_arbiter", st.Dir(), inputs.Stimulus.GenerationID, fmt.Sprint(inputs.Stimulus.Chapter), fmt.Sprint(round)),
 	)
 	if err != nil {
 		return nil, err

@@ -269,6 +269,8 @@ Roles can use different providers, models and reasoning effort. Adapters current
 | `budget` | Per-book cost warnings and hard stops |
 | `notify` | Desktop or custom notifications |
 
+All multi-turn agents enable short-lived prefix caching. Providers with block-cache support cache the stable system/tools prefix and the latest tool result; the official OpenAI endpoint receives an opaque hashed routing key. Arbitrary OpenAI-compatible gateways do not receive proprietary cache parameters by default, which avoids failures on strict relays. If a relay is known to forward them, opt in with `"prompt_cache_params": true` in that provider's `extra` object.
+
 Project state stays local. For production, route the raw-body `reviewer` independently to DeepSeek; other roles remain independently configurable. A run is fully offline only when every active role and retrieval service is local and no stage invokes `web_research` or another network-dependent setup step. Never commit real API keys.
 
 Docker users should create writable config and workspace directories, then use one-shot Compose runs for the same workflow:

@@ -1,11 +1,14 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -254,9 +257,9 @@ func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.R
 
 	if a.Chapter > 0 {
 		// Writer 路径：加载全量基础数据 + 章节上下文
-		t.buildBaseContext(result, warn)
 		seed := newChapterContextEnvelope()
 		state := t.prepareChapterContext(a.Chapter, a.Profile, &seed, warn)
+		t.buildBaseContext(result, state, warn)
 		seed.apply(result)
 		if err := t.buildChapterContext(ctx, result, state, warn); err != nil {
 			return nil, err
@@ -461,6 +464,20 @@ func finalizeContextResult(result map[string]any, chapter int, profile string) (
 	applyChapterContextProfile(result, profile)
 	if chapter > 0 && profile != "" && profile != "full" {
 		result["_context_profile"] = profile
+		// chapterContextEnvelope keeps root-level mirrors for legacy full-context
+		// consumers. Focused profiles use the canonical memory containers, so
+		// carrying an identical root copy only makes every model turn pay for the
+		// same facts twice. Remove exact mirrors before the first budget check;
+		// previously this only happened after an oversized payload triggered trim.
+		removed, savedBytes := deduplicateExactContextMirrors(result)
+		if removed > 0 {
+			slog.Debug("novel_context removed duplicate mirrors",
+				"profile", profile,
+				"chapter", chapter,
+				"fields", removed,
+				"bytes_saved", savedBytes,
+			)
+		}
 	}
 	result["_loading_summary"] = buildLoadingSummary(result, chapter)
 	if chapter > 0 {
@@ -950,6 +967,72 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	return result, true, nil
 }
 
+var canonicalContextContainers = []string{
+	"working_memory",
+	"episodic_memory",
+	"planning_memory",
+	"foundation_memory",
+	"reference_pack",
+	"selected_memory",
+}
+
+// firstContextValue resolves a field from its legacy root mirror or from one of
+// the canonical context containers. Focused profiles intentionally omit exact
+// root mirrors, so diagnostics must not depend on the compatibility copy.
+func firstContextValue(result map[string]any, key string) (any, bool) {
+	if value, ok := result[key]; ok {
+		return value, true
+	}
+	for _, containerKey := range canonicalContextContainers {
+		section, ok := result[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		if value, ok := section[key]; ok {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+// deduplicateExactContextMirrors removes only byte-for-byte equivalent JSON
+// mirrors at the result root. A divergent legacy value is retained so context
+// compaction can never silently discard information.
+func deduplicateExactContextMirrors(result map[string]any) (removed int, savedBytes int) {
+	for _, containerKey := range canonicalContextContainers {
+		section, ok := result[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(section))
+		for key := range section {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			rootValue, mirrored := result[key]
+			if !mirrored {
+				continue
+			}
+			canonicalValue := section[key]
+			if !reflect.DeepEqual(rootValue, canonicalValue) {
+				rootJSON, rootErr := json.Marshal(rootValue)
+				canonicalJSON, canonicalErr := json.Marshal(canonicalValue)
+				if rootErr != nil || canonicalErr != nil || !bytes.Equal(rootJSON, canonicalJSON) {
+					continue
+				}
+			}
+			fieldJSON, err := json.Marshal(map[string]any{key: rootValue})
+			if err == nil {
+				savedBytes += len(fieldJSON)
+			}
+			delete(result, key)
+			removed++
+		}
+	}
+	return removed, savedBytes
+}
+
 // buildLoadingSummary 从已组装的 result 中统计各项数据量，生成一行可读摘要。
 func buildLoadingSummary(result map[string]any, chapter int) string {
 	var parts []string
@@ -959,18 +1042,22 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 	} else {
 		parts = append(parts, "architect")
 	}
-	if tier, ok := result["planning_tier"].(domain.PlanningTier); ok && tier != "" {
-		parts = append(parts, fmt.Sprintf("tier=%s", tier))
+	if value, exists := firstContextValue(result, "planning_tier"); exists {
+		if tier, ok := value.(domain.PlanningTier); ok && tier != "" {
+			parts = append(parts, fmt.Sprintf("tier=%s", tier))
+		}
 	}
 
 	// 卷弧位置
-	if pos, ok := result["position"].(map[string]any); ok {
-		parts = append(parts, fmt.Sprintf("V%dA%d", pos["volume"], pos["arc"]))
+	if value, exists := firstContextValue(result, "position"); exists {
+		if pos, ok := value.(map[string]any); ok {
+			parts = append(parts, fmt.Sprintf("V%dA%d", pos["volume"], pos["arc"]))
+		}
 	}
 
 	var items []string
 	countSlice := func(key string) int {
-		if v, ok := result[key]; ok {
+		if v, ok := firstContextValue(result, key); ok {
 			if s, ok := v.([]domain.Character); ok {
 				return len(s)
 			}
@@ -1029,14 +1116,16 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 	if n := countSlice("recent_state_changes"); n > 0 {
 		items = append(items, fmt.Sprintf("状态变化:%d", n))
 	}
-	if _, ok := result["previous_tail"]; ok {
+	if _, ok := firstContextValue(result, "previous_tail"); ok {
 		items = append(items, "前章尾部:ok")
 	}
-	if _, ok := result["style_rules"]; ok {
+	if _, ok := firstContextValue(result, "style_rules"); ok {
 		items = append(items, "风格规则:ok")
 	}
-	if n := sliceLen(result["related_chapters"]); n > 0 {
-		items = append(items, fmt.Sprintf("相关章:%d", n))
+	if related, ok := firstContextValue(result, "related_chapters"); ok {
+		if n := sliceLen(related); n > 0 {
+			items = append(items, fmt.Sprintf("相关章:%d", n))
+		}
 	}
 	if selected, ok := result["selected_memory"].(map[string]any); ok && len(selected) > 0 {
 		if n := sliceLen(selected["story_threads"]); n > 0 {
@@ -1051,28 +1140,30 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 	}
 
 	// 参考资料
-	if refs, ok := result["references"].(map[string]string); ok && len(refs) > 0 {
-		items = append(items, fmt.Sprintf("参考:%d项", len(refs)))
+	if value, exists := firstContextValue(result, "references"); exists {
+		if refs, ok := value.(map[string]string); ok && len(refs) > 0 {
+			items = append(items, fmt.Sprintf("参考:%d项", len(refs)))
+		}
 	}
 	if pack, ok := result["reference_pack"].(map[string]any); ok && len(pack) > 0 {
 		items = append(items, fmt.Sprintf("参考包:%d", len(pack)))
 	}
-	if _, ok := result["writing_engine"]; ok {
+	if _, ok := firstContextValue(result, "writing_engine"); ok {
 		items = append(items, "写法引擎:ok")
 	}
-	if _, ok := result["book_world_context"]; ok {
+	if _, ok := firstContextValue(result, "book_world_context"); ok {
 		items = append(items, "本书世界:ok")
 	}
-	if _, ok := result["resource_audit"]; ok {
+	if _, ok := firstContextValue(result, "resource_audit"); ok {
 		items = append(items, "资源审计:ok")
 	}
-	if _, ok := result["character_continuity"]; ok {
+	if _, ok := firstContextValue(result, "character_continuity"); ok {
 		items = append(items, "人物续用:ok")
 	}
-	if _, ok := result["memory_policy"]; ok {
+	if _, ok := firstContextValue(result, "memory_policy"); ok {
 		items = append(items, "记忆策略:ok")
 	}
-	if _, ok := result["simulation_profile"]; ok {
+	if _, ok := firstContextValue(result, "simulation_profile"); ok {
 		items = append(items, "仿写画像:ok")
 	}
 	if warnings, ok := result["_warnings"].([]string); ok && len(warnings) > 0 {
@@ -1124,27 +1215,21 @@ func sliceLen(v any) int {
 
 // loadFilteredCharacters 按本章参与者和 Tier 过滤角色。
 // 有明确参与者时只返回参与者 + 主角兜底；无参与者时退回旧的 Tier 策略。
-func (t *ContextTool) loadFilteredCharacters(result map[string]any, chapter int, participants []string, warn func(string, error)) {
-	chars, err := t.store.Characters.Load()
-	if err != nil {
-		warn("characters", err)
-		return
-	}
+func (t *ContextTool) loadFilteredCharacters(result map[string]any, state contextBuildState) {
+	chars := state.characters
 	if len(chars) == 0 {
 		return
 	}
 
-	// 获取当前章节大纲的场景描述，用于匹配次要角色
-	entry, err := t.store.Outline.GetChapterOutline(chapter)
-	if err != nil {
-		warn("current_chapter_outline", err)
+	entry := state.currentEntry
+	if entry == nil {
 		result["characters"] = chars
 		annotateCharacterPsych(result, chars)
 		return
 	}
 	sceneText := strings.Join(entry.Scenes, " ") + " " + entry.CoreEvent + " " + entry.Title
 
-	filtered := filterCharactersForChapter(chars, participants, sceneText)
+	filtered := filterCharactersForChapter(chars, state.chapterParticipants, sceneText)
 	result["characters"] = filtered
 	annotateCharacterPsych(result, filtered)
 }
@@ -1274,17 +1359,17 @@ func (t *ContextTool) loadLayeredSummaries(result map[string]any, chapter, summa
 }
 
 // loadLayeredCharacters Layered 模式下的角色加载：优先用最近快照，回退到原始设定 + Tier 过滤。
-func (t *ContextTool) loadLayeredCharacters(result map[string]any, chapter int, participants []string, warn func(string, error)) {
+func (t *ContextTool) loadLayeredCharacters(result map[string]any, state contextBuildState, warn func(string, error)) {
 	snapshots, err := t.store.Characters.LoadLatestSnapshots()
 	if err == nil && len(snapshots) > 0 {
-		result["character_snapshots"] = filterSnapshotsForChapter(snapshots, participants)
+		result["character_snapshots"] = filterSnapshotsForChapter(snapshots, state.chapterParticipants)
 		// 同时保留原始设定中的 core/important 角色（快照可能不含新登场角色）
-		t.loadFilteredCharacters(result, chapter, participants, warn)
+		t.loadFilteredCharacters(result, state)
 		return
 	}
 	warn("character_snapshots", err)
 	// 无快照时回退到原始设定
-	t.loadFilteredCharacters(result, chapter, participants, warn)
+	t.loadFilteredCharacters(result, state)
 }
 
 func filterSnapshotsForChapter(snapshots []domain.CharacterSnapshot, participants []string) []domain.CharacterSnapshot {
@@ -1444,21 +1529,23 @@ func trimByBudget(result map[string]any, budget int, chapter ...int) bool {
 		return true
 	}
 
-	// chapterContextEnvelope 同时保留 canonical 容器与旧版顶层镜像。上下文较大时
-	// 先删镜像，模型仍可从 working_memory/episodic_memory/reference_pack/
-	// selected_memory 读取同一份数据，且不会为完全相同的内容支付两次窗口成本。
-	for _, containerKey := range []string{"working_memory", "episodic_memory", "reference_pack", "selected_memory"} {
-		section, ok := result[containerKey].(map[string]any)
-		if !ok {
-			continue
+	// Full/legacy payloads keep compatibility mirrors while they fit. Under
+	// pressure, remove only mirrors proven identical to their canonical value;
+	// a divergent root value is real information and must not be discarded.
+	beforeKeys := make(map[string]struct{}, len(result))
+	for key := range result {
+		beforeKeys[key] = struct{}{}
+	}
+	deduplicateExactContextMirrors(result)
+	mirrorKeys := make([]string, 0)
+	for key := range beforeKeys {
+		if _, stillPresent := result[key]; !stillPresent {
+			mirrorKeys = append(mirrorKeys, key)
 		}
-		for key := range section {
-			if _, mirrored := result[key]; !mirrored {
-				continue
-			}
-			delete(result, key)
-			recordTrimmed("mirror:" + key)
-		}
+	}
+	sort.Strings(mirrorKeys)
+	for _, key := range mirrorKeys {
+		recordTrimmed("mirror:" + key)
 	}
 
 	// chapter_plan 已内含 causal_simulation，而 working_memory 还提供同级的
@@ -1563,14 +1650,7 @@ func hasContextKey(result map[string]any, key string) bool {
 	if _, ok := result[key]; ok {
 		return true
 	}
-	for _, containerKey := range []string{
-		"working_memory",
-		"episodic_memory",
-		"planning_memory",
-		"foundation_memory",
-		"reference_pack",
-		"selected_memory",
-	} {
+	for _, containerKey := range canonicalContextContainers {
 		section, ok := result[containerKey].(map[string]any)
 		if !ok {
 			continue
@@ -1618,14 +1698,7 @@ func stripChapterPlanCausalDuplicate(working map[string]any) bool {
 
 func deleteContextKey(result map[string]any, key string) {
 	delete(result, key)
-	for _, containerKey := range []string{
-		"working_memory",
-		"episodic_memory",
-		"planning_memory",
-		"foundation_memory",
-		"reference_pack",
-		"selected_memory",
-	} {
+	for _, containerKey := range canonicalContextContainers {
 		section, ok := result[containerKey].(map[string]any)
 		if !ok {
 			continue
@@ -1640,6 +1713,7 @@ func deleteContextKey(result map[string]any, key string) {
 func (t *ContextTool) buildRelatedChapters(
 	chapter int,
 	entry *domain.OutlineEntry,
+	characters []domain.Character,
 	foreshadow []domain.ForeshadowEntry,
 	relationships []domain.RelationshipEntry,
 	stateChanges []domain.StateChange,
@@ -1681,8 +1755,7 @@ func (t *ContextTool) buildRelatedChapters(
 	}
 
 	// 2. 角色出场反查：批量单次遍历，IO 从 O(角色数×章节数) 降为 O(章节数)
-	chars, _ := t.store.Characters.Load()
-	outlineChars := matchOutlineCharacters(outlineText, chars)
+	outlineChars := matchOutlineCharacters(outlineText, characters)
 	if len(outlineChars) > 0 {
 		appearances := t.store.Summaries.FindCharacterAppearances(outlineChars, chapter, recentWindow)
 		for _, name := range outlineChars {

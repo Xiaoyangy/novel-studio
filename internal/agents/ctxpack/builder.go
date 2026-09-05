@@ -478,12 +478,29 @@ func appendJSONSection(parts *[]string, heading string, data any, remaining *int
 	text := string(b)
 	tokens := estimateCompactSectionTokens(heading, text)
 	if tokens > *remaining {
-		if *remaining <= 100 {
+		const truncatedSuffix = " [已截断]"
+		minimum := fmt.Sprintf("## %s\nnull%s", heading, truncatedSuffix)
+		if corecontext.EstimateTokens(agentcore.UserMsg(minimum)) > *remaining {
 			return true
 		}
-		text = truncateJSONToTokens(b, *remaining-20)
-		*parts = append(*parts, fmt.Sprintf("## %s\n%s [已截断]", heading, text))
-		*remaining = 0
+		bodyBudget := *remaining
+		var section string
+		var used int
+		for bodyBudget > 0 {
+			text = truncateJSONToTokens(b, bodyBudget)
+			section = fmt.Sprintf("## %s\n%s%s", heading, text, truncatedSuffix)
+			used = corecontext.EstimateTokens(agentcore.UserMsg(section))
+			if used <= *remaining {
+				break
+			}
+			bodyBudget -= max(1, used-*remaining)
+		}
+		if used > *remaining {
+			section = minimum
+			used = corecontext.EstimateTokens(agentcore.UserMsg(section))
+		}
+		*parts = append(*parts, section)
+		*remaining -= used
 		return true
 	}
 	*parts = append(*parts, fmt.Sprintf("## %s\n%s", heading, text))

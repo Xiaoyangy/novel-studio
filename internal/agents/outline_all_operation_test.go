@@ -21,6 +21,7 @@ type outlineAllOperationCaptureModel struct {
 	messages  []agentcore.Message
 	requests  [][]agentcore.Message
 	tools     []agentcore.ToolSpec
+	configs   []agentcore.CallConfig
 	response  agentcore.Message
 	responses []agentcore.Message
 }
@@ -28,6 +29,7 @@ type outlineAllOperationCaptureModel struct {
 func (m *outlineAllOperationCaptureModel) take(
 	messages []agentcore.Message,
 	tools []agentcore.ToolSpec,
+	opts []agentcore.CallOption,
 ) *agentcore.LLMResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -36,6 +38,7 @@ func (m *outlineAllOperationCaptureModel) take(
 	m.messages = append([]agentcore.Message(nil), messages...)
 	m.requests = append(m.requests, append([]agentcore.Message(nil), messages...))
 	m.tools = append([]agentcore.ToolSpec(nil), tools...)
+	m.configs = append(m.configs, agentcore.ResolveCallConfig(opts))
 	response := m.response
 	if callIndex < len(m.responses) {
 		response = m.responses[callIndex]
@@ -47,18 +50,18 @@ func (m *outlineAllOperationCaptureModel) Generate(
 	_ context.Context,
 	messages []agentcore.Message,
 	tools []agentcore.ToolSpec,
-	_ ...agentcore.CallOption,
+	opts ...agentcore.CallOption,
 ) (*agentcore.LLMResponse, error) {
-	return m.take(messages, tools), nil
+	return m.take(messages, tools, opts), nil
 }
 
 func (m *outlineAllOperationCaptureModel) GenerateStream(
 	_ context.Context,
 	messages []agentcore.Message,
 	tools []agentcore.ToolSpec,
-	_ ...agentcore.CallOption,
+	opts ...agentcore.CallOption,
 ) (<-chan agentcore.StreamEvent, error) {
-	response := m.take(messages, tools)
+	response := m.take(messages, tools, opts)
 	events := make(chan agentcore.StreamEvent, 1)
 	events <- agentcore.StreamEvent{
 		Type:       agentcore.StreamEventDone,
@@ -159,6 +162,15 @@ func TestRunOutlineAllOperationWithModelDirectPromptAndCapability(t *testing.T) 
 	}
 	if len(model.messages) < 3 {
 		t.Fatalf("model messages = %d, want system + complete task + final authorization", len(model.messages))
+	}
+	if len(model.configs) != 1 || model.configs[0].PromptCacheKey == "" {
+		t.Fatalf("direct model call did not receive a prompt cache key: %#v", model.configs)
+	}
+	if got := model.messages[0].Metadata["cache_control"]; got != promptCacheControl {
+		t.Fatalf("system cache floor = %#v, want %q", got, promptCacheControl)
+	}
+	if got := model.messages[len(model.messages)-1].Metadata["cache_control"]; got != promptCacheControl {
+		t.Fatalf("latest user message cache marker = %#v, want %q", got, promptCacheControl)
 	}
 	if got := model.messages[len(model.messages)-2].TextContent(); got != task {
 		t.Fatalf("direct task changed:\n got: %q\nwant: %q", got, task)

@@ -33,6 +33,12 @@ type Config struct {
 	StreamIdleTimeout time.Duration
 	UserAgent         string
 	Headers           map[string]string
+
+	// PromptCacheParams opts a known-compatible relay into OpenAI prompt-cache
+	// routing parameters. The official OpenAI endpoint is enabled automatically;
+	// arbitrary OpenAI-compatible endpoints remain capability-unknown so strict
+	// relays do not reject an unsupported prompt_cache_key field.
+	PromptCacheParams bool
 }
 
 type HTTPClient interface {

@@ -2,6 +2,7 @@ package ctxpack
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -179,17 +180,49 @@ func (p *WriterRestorePack) buildMessage(budgetTokens int) (agentcore.Message, b
 	return agentcore.UserMsg(p.text), true
 }
 
-// truncateJSONToTokens keeps the first portion of JSON bytes that fits within
-// the token budget. Simple byte-level truncation — the result may not be valid
-// JSON, but it preserves the most important leading content (keys, early fields).
+type truncatedJSONPreview struct {
+	Truncated     bool   `json:"_truncated"`
+	OriginalBytes int    `json:"original_bytes"`
+	Preview       string `json:"preview,omitempty"`
+}
+
+// truncateJSONToTokens returns valid, UTF-8-safe JSON within the model token
+// budget. When the source does not fit, its leading content is carried as a
+// JSON string in an explicit truncation envelope. This avoids both mid-rune
+// corruption and the severe CJK undercount caused by the old bytes/4 shortcut.
 func truncateJSONToTokens(b []byte, budgetTokens int) string {
-	// Rough: 1 token ≈ 4 bytes for ASCII-dominant JSON
-	maxBytes := budgetTokens * 4
-	if maxBytes >= len(b) {
+	if budgetTokens <= 0 {
+		return "null"
+	}
+	if json.Valid(b) && corecontext.EstimateTokens(agentcore.UserMsg(string(b))) <= budgetTokens {
 		return string(b)
 	}
-	if maxBytes < 20 {
-		maxBytes = 20
+
+	runes := []rune(string(b))
+	encode := func(prefixLen int) string {
+		payload, err := json.Marshal(truncatedJSONPreview{
+			Truncated:     true,
+			OriginalBytes: len(b),
+			Preview:       string(runes[:prefixLen]),
+		})
+		if err != nil {
+			return "null"
+		}
+		return string(payload)
 	}
-	return string(b[:maxBytes])
+	if empty := encode(0); corecontext.EstimateTokens(agentcore.UserMsg(empty)) > budgetTokens {
+		return "null"
+	}
+
+	low, high := 0, len(runes)
+	for low < high {
+		mid := low + (high-low+1)/2
+		candidate := encode(mid)
+		if corecontext.EstimateTokens(agentcore.UserMsg(candidate)) <= budgetTokens {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return encode(low)
 }

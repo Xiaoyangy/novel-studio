@@ -305,6 +305,8 @@ func runSealedConvergencePlannerContinuationWithModelAndSession(
 			MaxToolErrors:       sealedConvergenceContinuationMaxErrors,
 			ThinkingLevel:       resolvedRoleThinking(model, cfg, "writer"),
 			ToolsAreIdempotent:  false,
+			CacheLastMessage:    promptCacheControl,
+			PromptCacheKey:      agentPromptCacheKey(agentName, st.Dir(), fmt.Sprint(chapter), prompt),
 			Middlewares:         []agentcore.ToolMiddleware{failFast},
 			StopAfterToolResult: plannerShouldStopAfterToolResult,
 			OnMessage: func(msg agentcore.AgentMessage) {

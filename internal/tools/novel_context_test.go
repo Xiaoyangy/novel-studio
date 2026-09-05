@@ -1076,6 +1076,101 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 	}
 }
 
+func TestFinalizeFocusedContextRemovesExactMirrorsBeforeBudgetPressure(t *testing.T) {
+	position := map[string]any{"volume": 2, "arc": 3}
+	result := map[string]any{
+		"working_memory": map[string]any{"position": position},
+		"position":       position,
+	}
+
+	raw, err := finalizeContextResult(result, 7, "planning")
+	if err != nil {
+		t.Fatalf("finalize focused context: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, exists := payload["position"]; exists {
+		t.Fatal("focused context still carries an exact root mirror")
+	}
+	working, ok := payload["working_memory"].(map[string]any)
+	if !ok || working["position"] == nil {
+		t.Fatalf("canonical position was lost: %#v", payload["working_memory"])
+	}
+	if summary, _ := payload["_loading_summary"].(string); !strings.Contains(summary, "V2A3") {
+		t.Fatalf("loading summary must resolve canonical values after de-duplication: %q", summary)
+	}
+}
+
+func TestFinalizeFocusedContextEliminatesDuplicateTokenPayload(t *testing.T) {
+	shared := map[string]any{
+		"facts": strings.Repeat("角色事实与连续性锚点。", 1200),
+	}
+	result := map[string]any{
+		"working_memory":  map[string]any{"continuity_blob": shared},
+		"continuity_blob": shared,
+	}
+	legacyPayload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := finalizeContextResult(result, 7, "planning")
+	if err != nil {
+		t.Fatalf("finalize focused context: %v", err)
+	}
+	// Metadata added during finalization makes this a conservative check. The
+	// focused payload should still be close to one canonical copy, rather than
+	// the two copies that previously slipped through while under budget.
+	if len(raw)*3 >= len(legacyPayload)*2 {
+		t.Fatalf("duplicate context was not materially reduced: legacy=%d focused=%d", len(legacyPayload), len(raw))
+	}
+	t.Logf("focused context bytes: legacy mirrors=%d canonical-only=%d saved=%.1f%%",
+		len(legacyPayload), len(raw), 100*(1-float64(len(raw))/float64(len(legacyPayload))))
+}
+
+func TestFinalizeFullContextKeepsLegacyMirrorWhileItFits(t *testing.T) {
+	position := map[string]any{"volume": 1, "arc": 4}
+	result := map[string]any{
+		"working_memory": map[string]any{"position": position},
+		"position":       position,
+	}
+
+	raw, err := finalizeContextResult(result, 3, "full")
+	if err != nil {
+		t.Fatalf("finalize full context: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, exists := payload["position"]; !exists {
+		t.Fatal("full context must retain the legacy root mirror while under budget")
+	}
+}
+
+func TestFinalizeFocusedContextPreservesDivergentRootValue(t *testing.T) {
+	result := map[string]any{
+		"working_memory": map[string]any{
+			"current_chapter_outline": map[string]any{"chapter": 2, "goal": "canonical"},
+		},
+		"current_chapter_outline": map[string]any{"chapter": 2, "goal": "legacy-but-divergent"},
+	}
+
+	raw, err := finalizeContextResult(result, 2, "planning")
+	if err != nil {
+		t.Fatalf("finalize focused context: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, exists := payload["current_chapter_outline"]; !exists {
+		t.Fatal("de-duplication must not discard a divergent root value")
+	}
+}
+
 func TestTrimByBudgetPreservesCompactLiteraryCardsAtPlanningBudget(t *testing.T) {
 	cardIDs := []string{
 		"focalization-boundary",

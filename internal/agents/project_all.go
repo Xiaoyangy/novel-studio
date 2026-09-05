@@ -723,6 +723,8 @@ func RunProjectedChapterPlanning(
 				agentcore.WithToolsAreIdempotent(false),
 				agentcore.WithMaxToolErrors(0),
 				agentcore.WithMaxRetries(subagentMaxRetries),
+				agentcore.WithCacheLastMessage(promptCacheControl),
+				agentcore.WithPromptCacheKey(agentPromptCacheKey("project_all_world_simulator", st.Dir(), fmt.Sprint(chapter), fmt.Sprint(pass))),
 				agentcore.WithStopGuard(reminder.NewWorldSimulatorStopGuard(st)),
 			)
 			thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))
@@ -873,6 +875,8 @@ func RunProjectedChapterPlanning(
 			agentcore.WithToolsAreIdempotent(false),
 			agentcore.WithMaxToolErrors(0),
 			agentcore.WithMaxRetries(subagentMaxRetries),
+			agentcore.WithCacheLastMessage(promptCacheControl),
+			agentcore.WithPromptCacheKey(agentPromptCacheKey("project_all_planner", st.Dir(), fmt.Sprint(chapter))),
 			agentcore.WithStopGuard(reminder.NewPlannerStopGuard(st)),
 		)
 		thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))

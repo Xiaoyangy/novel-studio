@@ -64,6 +64,8 @@ func RunBrainstorm(cfg bootstrap.Config, bundle assets.Bundle, runsRoot, idea st
 		agentcore.WithToolsAreIdempotent(false),
 		agentcore.WithMaxToolErrors(0),
 		agentcore.WithMaxRetries(subagentMaxRetries),
+		agentcore.WithCacheLastMessage(promptCacheControl),
+		agentcore.WithPromptCacheKey(agentPromptCacheKey("brainstorm", stagingDir, kickoffKey)),
 	)
 	thinking, _ := ResolveThinkingForModel(models.ForRole("architect"), roleThinking(cfg, "architect"))
 	agent.SetThinkingLevel(thinking)

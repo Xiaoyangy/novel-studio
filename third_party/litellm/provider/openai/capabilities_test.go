@@ -30,3 +30,28 @@ func TestCapabilitiesNonReasoningModel(t *testing.T) {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
 }
+
+func TestCapabilitiesPromptCacheParamsAreGatedForCompatibleEndpoints(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want litellm.Support
+	}{
+		{name: "official default", cfg: Config{APIKey: "test"}, want: litellm.SupportYes},
+		{name: "official explicit URL", cfg: Config{APIKey: "test", BaseURL: "https://api.openai.com/v1"}, want: litellm.SupportYes},
+		{name: "unknown compatible relay", cfg: Config{APIKey: "test", BaseURL: "https://relay.example/v1"}, want: litellm.SupportUnknown},
+		{name: "compatible relay opt-in", cfg: Config{APIKey: "test", BaseURL: "https://relay.example/v1", PromptCacheParams: true}, want: litellm.SupportYes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, err := New(tt.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caps := provider.Capabilities("gpt-5.1")
+			if caps.Cache.PromptKey != tt.want || caps.Cache.Retention != tt.want {
+				t.Fatalf("cache capability = %+v, want prompt/retention %v", caps.Cache, tt.want)
+			}
+		})
+	}
+}

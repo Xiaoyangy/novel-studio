@@ -185,6 +185,8 @@ func runOutlineAllOperationWithModel(
 			MaxToolErrors:       0,
 			ThinkingLevel:       resolvedRoleThinking(resolved.ChatModel, cfg, "architect"),
 			ToolsAreIdempotent:  false,
+			CacheLastMessage:    promptCacheControl,
+			PromptCacheKey:      agentPromptCacheKey("architect_outline_all", st.Dir(), prompt),
 			GetSteeringMessages: takeRetryReminder,
 			Middlewares:         []agentcore.ToolMiddleware{preventSecondMutation},
 			StopAfterToolResult: stopAfterSuccessfulSave,
