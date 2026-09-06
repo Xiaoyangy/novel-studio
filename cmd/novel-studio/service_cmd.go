@@ -201,7 +201,7 @@ func serviceNovelURL(flags serviceFlags) string {
 
 func ensureDashboardServiceForRun(outputDir string) {
 	flags := serviceFlags{Host: "127.0.0.1", Port: 8765}
-	replaceStaleDashboardIfNeeded(flags)
+	replaceStaleDashboardIfNeeded(flags, outputDir)
 	if serviceHealthy(flags) {
 		fmt.Fprintf(os.Stderr, "[dashboard] %s\n", serviceNovelURL(flags))
 		return
@@ -273,7 +273,7 @@ func startServiceBackground(flags serviceFlags, novelDir string) error {
 // replaceStaleDashboardIfNeeded stops a healthy-but-stale dashboard so the next
 // health check fails and the normal start path launches the current checkout. A
 // no-op when nothing is running or the running board already matches this code.
-func replaceStaleDashboardIfNeeded(flags serviceFlags) {
+func replaceStaleDashboardIfNeeded(flags serviceFlags, novelDirs ...string) {
 	if !serviceHealthy(flags) {
 		return
 	}
@@ -281,7 +281,12 @@ func replaceStaleDashboardIfNeeded(flags serviceFlags) {
 	if err != nil {
 		return
 	}
-	if matches, reason := runningDashboardMatchesCheckout(flags, script); matches {
+	novelDir := ""
+	if len(novelDirs) > 0 {
+		novelDir = novelDirs[0]
+	}
+	expectedRunsDir := expectedDashboardRunsDir(findProjectRootFrom(script), novelDir)
+	if matches, reason := runningDashboardMatchesCheckout(flags, script, expectedRunsDir); matches {
 		return
 	} else {
 		fmt.Fprintf(os.Stderr, "[dashboard] replacing stale board on port %d (%s)\n", flags.Port, reason)
@@ -348,7 +353,7 @@ func stopDashboardProcesses(flags serviceFlags) error {
 // stamped by /api/health against a hash of the local server.py + index.html, so
 // a stale instance from another checkout (or older code) is detected and
 // replaced instead of silently pinning the user to an outdated board.
-func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string) (bool, string) {
+func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string, expectedRunsDirs ...string) (bool, string) {
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(serviceURL(flags) + "/api/health")
 	if err != nil {
@@ -362,6 +367,7 @@ func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string) (boo
 	var health struct {
 		Version string `json:"version"`
 		Script  string `json:"script"`
+		RunsDir string `json:"runs_dir"`
 	}
 	if err := json.Unmarshal(body, &health); err != nil {
 		return false, "health not JSON"
@@ -377,7 +383,34 @@ func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string) (boo
 	if health.Version != want {
 		return false, "version mismatch"
 	}
+	if len(expectedRunsDirs) > 0 {
+		if health.RunsDir == "" {
+			return false, "missing data source stamp"
+		}
+		got := health.RunsDir
+		if !filepath.IsAbs(got) {
+			got = filepath.Join(findProjectRootFrom(health.Script), got)
+		}
+		got, _ = filepath.Abs(got)
+		expected, _ := filepath.Abs(expectedRunsDirs[0])
+		if filepath.Clean(got) != filepath.Clean(expected) {
+			return false, "data source mismatch"
+		}
+	}
 	return true, ""
+}
+
+func expectedDashboardRunsDir(projectRoot, novelDir string) string {
+	if value, explicit := os.LookupEnv("NOVEL_STUDIO_RUNS_DIR"); explicit {
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(projectRoot, value)
+		}
+		return filepath.Clean(value)
+	}
+	if value := runsDirForNovelOutput(novelDir); value != "" {
+		return value
+	}
+	return filepath.Join(projectRoot, "data", "runs")
 }
 
 // currentDashboardVersion hashes the local dashboard code identically to the

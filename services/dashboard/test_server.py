@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -103,6 +104,39 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["runtime"]["current_stage"], "project-all")
         self.assertEqual(data["working"]["step"], "simulate")
         self.assertFalse(data["working"]["last_failed"])
+
+    def test_direct_pipeline_failure_remains_visible_without_host_queue(self):
+        self.write_json("meta/progress.json", {"phase": "init", "current_chapter": 0})
+        failed = datetime.now().astimezone() - timedelta(hours=1)
+        record = {"schema": "pipeline-timing.v1", "scope": "stage", "stage": "zero-init",
+                  "status": "error", "finished_at": failed.isoformat(),
+                  "error": "initial_state[林澄].knowledge_ledger 未补足"}
+        log = self.nd / "meta/pipeline_timings.jsonl"
+        log.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+        data = server.summarize_run(self.run)
+        self.assertEqual(data["runtime"]["status"], "error")
+        self.assertFalse(data["runtime"]["active"])
+        self.assertFalse(data["runtime"]["last_error_recovered"])
+        self.assertEqual(data["runtime"]["current_stage"], "zero-init")
+        self.assertIn("knowledge_ledger", data["runtime"]["last_error"]["detail"])
+        # A new successful stage record is actual recovery evidence.
+        record.update(status="ok", error="", finished_at=datetime.now().astimezone().isoformat())
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        data = server.summarize_run(self.run)
+        self.assertTrue(data["runtime"]["last_error_recovered"])
+        self.assertNotEqual(data["runtime"]["status"], "error")
+
+    def test_timing_events_ignore_unknown_schema_scope_and_unfinished_rows(self):
+        records = [
+            {"schema": "pipeline-timing.v9", "scope": "stage", "stage": "render", "status": "error"},
+            {"schema": "pipeline-timing.v1", "scope": "chapter", "stage": "render", "status": "error"},
+            {"schema": "pipeline-timing.v1", "scope": "stage", "stage": "render", "status": "started"},
+            {"schema": "pipeline-timing.v1", "scope": "stage", "stage": "render", "status": "error", "finished_at": "invalid"},
+        ]
+        (self.nd / "meta/pipeline_timings.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in records) + "\n", encoding="utf-8")
+        self.assertEqual(server.runtime_events(self.nd), [])
 
     def test_live_project_all_lease_stays_running_beyond_activity_window(self):
         self.seed_progress()
@@ -292,6 +326,30 @@ class DashboardDataTest(unittest.TestCase):
         self.assertNotIn("不得暴露的私有理由", serialized)
         self.assertNotIn("不得泄漏的未来软大纲", serialized)
 
+    def test_activation_chapter_dashboard_keeps_cycle_order_and_readiness_separate(self):
+        def cycle(index):
+            return {"index": index, "evidence": {
+                "chapter": 1, "evidence_root": f"cycle-{index}",
+                "activation": {"entries": [{"agent_id": "ca_a", "character": "甲", "tier": "core", "state": "active", "reasons": ["received_information"]}]},
+                "proposals": [{"agent_id": "ca_a", "character": "甲", "round": 1, "decision": f"选择{index}", "intended_action": "核验", "decision_reason": "SECRET理由"}],
+                "arbitrations": [{"round": 1, "resolutions": [{"agent_id": "ca_a", "character": "甲", "outcome": "success", "immediate_result": f"结果{index}"}]}],
+                "observations": [{"private": "SECRET观察"}], "memory": {"private": "SECRET记忆"},
+            }}
+        self.write_json("meta/planning/v2/generations/pg2_cycles/chapters/0001.bundle.json", {
+            "character_activation_evidence": {"cycles": [cycle(2), cycle(1)], "context": {"private": "SECRET未来目标"}},
+        })
+        usage_path = self.nd / "meta/character_agents/usage.jsonl"
+        usage_path.parent.mkdir(parents=True, exist_ok=True)
+        usage_path.write_text(json.dumps({"usage_id": "ready-1", "generation_id": "pg2_cycles", "role": "chapter_readiness", "agent_id": "chapter_readiness", "chapter": 1, "cycle": 2, "round": 1, "input": 100, "output": 20}) + "\n")
+        payload = server.character_agent_payload(self.nd)
+        self.assertEqual(len(payload["characters"]), 1)
+        row = payload["characters"][0]
+        self.assertEqual(row["recent_decision"], "选择2")
+        self.assertEqual(row["activation_cycle"], 2)
+        self.assertEqual(row["decision_cycle"], 2)
+        self.assertEqual(payload["chapter_readiness_usage"]["tokens_in"], 100)
+        self.assertNotIn("SECRET", json.dumps(payload, ensure_ascii=False))
+
     def test_chapter_zero_planning_lease_is_not_presented_as_active_prose(self):
         now = datetime.now().astimezone()
         self.write_json("meta/progress.json", {
@@ -321,6 +379,131 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["working"]["next_chapter"], 0)
         self.assertIsNone(data["working"]["last_chapter"])
         self.assertEqual(data["runtime"]["current_stage"], "foundation")
+
+    def test_character_usage_reports_partial_estimates_unknown_and_sleeping_zero(self):
+        self.write_json("meta/character_agents/registry.json", {"entries": [
+            {"agent_id": "ca_lin", "character": "林澄", "tier": "core", "status": "active"},
+            {"agent_id": "ca_sleep", "character": "休眠角色", "status": "sleeping"},
+            {"agent_id": "ca_free", "character": "免费调用", "status": "active"},
+        ]})
+        estimated = {"generation_id": "g1", "role": "character", "agent_id": "ca_lin", "chapter": 1,
+                     "round": 1, "input": 200, "output": 50, "cost_usd": 0.0049,
+                     "cost_source": "estimated", "provider": "codex", "model": "test-model"}
+        legacy_copy = {k: v for k, v in estimated.items() if k not in ("cost_source", "provider", "model")}
+        self.write_json("meta/planning/v2/.building/g1/chapters/0001.bundle.json", {
+            "character_agent_evidence": {"chapter": 1, "usage": [legacy_copy]},
+        })
+        unknown = {"generation_id": "g1", "role": "character", "agent_id": "ca_lin", "chapter": 2,
+                   "round": 1, "input": 100, "output": 20}
+        reported = {"generation_id": "g1", "role": "character", "agent_id": "ca_lin", "chapter": 3,
+                    "round": 1, "input": 80, "output": 30, "cost_usd": 0.01, "cost_source": "reported"}
+        arbiter = {"generation_id": "g1", "role": "world_arbiter", "agent_id": "world_arbiter", "chapter": 1,
+                   "round": 1, "input": 250, "output": 40, "cost_usd": 0.005, "cost_source": "unknown",
+                   "provider": "codex", "model": "mixed", "models": [
+                       {"provider": "codex", "model": "first", "private_context": "不得泄露模型私有上下文"},
+                       {"provider": "test", "model": "second"},
+                       {"model": {"secret": "不得转换成模型名的秘密对象"}},
+                   ]}
+        # Explicit reported zero is omitted by the Go struct's omitempty tag.
+        free = {"generation_id": "g1", "role": "character", "agent_id": "ca_free", "chapter": 1,
+                "round": 1, "input": 50, "output": 10, "cost_source": "reported"}
+        path = self.nd / "meta/character_agents/usage.jsonl"
+        path.write_text("\n".join(json.dumps(row, ensure_ascii=False)
+                                   for row in [estimated, estimated, unknown, reported, arbiter, free]), encoding="utf-8")
+
+        payload = server.character_agent_payload(self.nd)
+        rows = {row["agent_id"]: row for row in payload["characters"]}
+        lin = rows["ca_lin"]
+        self.assertEqual(lin["usage_calls"], 3)
+        self.assertEqual(lin["tokens_in"], 380)
+        self.assertEqual(lin["tokens_out"], 100)
+        self.assertAlmostEqual(lin["cost_usd"], 0.0149)
+        self.assertFalse(lin["cost_complete"])
+        self.assertEqual(lin["cost_source"], "unknown")
+        self.assertEqual(lin["cost_sources"], {"reported": 1, "estimated": 1, "unknown": 1})
+        self.assertEqual(lin["unpriced_calls"], 1)
+        self.assertEqual(lin["models"], [{"provider": "codex", "model": "test-model"}])
+        self.assertEqual(rows["ca_sleep"]["cost_usd"], 0)
+        self.assertEqual(rows["ca_sleep"]["usage_calls"], 0)
+        self.assertTrue(rows["ca_sleep"]["cost_complete"])
+        self.assertEqual(rows["ca_free"]["usage_calls"], 1)
+        self.assertTrue(rows["ca_free"]["cost_complete"])
+        self.assertEqual(rows["ca_free"]["cost_source"], "reported")
+        self.assertEqual(payload["world_arbiter_usage"]["cost_usd"], 0.005)
+        self.assertFalse(payload["world_arbiter_usage"]["cost_complete"])
+        self.assertEqual(payload["world_arbiter_usage"]["models"], [
+            {"provider": "codex", "model": "first"}, {"provider": "test", "model": "second"},
+        ])
+        total = payload["usage_summary"]
+        self.assertEqual(total["usage_calls"], 5)
+        self.assertEqual(total["unpriced_calls"], 2)
+        self.assertAlmostEqual(total["cost_usd"], 0.0199)
+        self.assertEqual(total["tokens_in"], 680)
+        self.assertEqual(total["tokens_out"], 150)
+        self.assertNotIn("不得泄露", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("秘密对象", json.dumps(payload, ensure_ascii=False))
+
+    def test_character_usage_dedupes_price_enrichment_but_preserves_rounds_and_generations(self):
+        base = {"generation_id": "g1", "role": "character", "agent_id": "ca_lin", "chapter": 1,
+                "round": 1, "input": 100, "output": 20}
+        self.write_json("meta/planning/v2/.building/g1/chapters/0001.bundle.json", {
+            "character_agent_evidence": {"chapter": 1, "usage": [base]},
+        })
+        priced = dict(base, cost_source="estimated", cost_usd=0.004)
+        path = self.nd / "meta/character_agents/usage.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(row) for row in [
+            priced, dict(priced, round=2), dict(priced, generation_id="g2"),
+        ]), encoding="utf-8")
+        row = server.character_agent_payload(self.nd)["characters"][0]
+        self.assertEqual(row["usage_calls"], 3)
+        self.assertEqual(row["tokens_in"], 300)
+        self.assertEqual(row["cost_usd"], 0.012)
+        self.assertTrue(row["cost_complete"])
+        self.assertEqual(row["cost_source"], "estimated")
+
+    def test_character_usage_does_not_treat_missing_or_invalid_prices_as_free(self):
+        for item in [
+            {"input": 100}, {"input": 0}, {"input": 100, "cost_usd": None},
+            {"cost_source": "reported", "cost_usd": -1},
+            {"cost_source": "estimated", "cost_usd": "not-a-price"},
+            {"cost_source": "reported", "cost_usd": float("nan")},
+            {"cost_source": "reported", "cost_usd": float("inf")},
+        ]:
+            with self.subTest(item=item):
+                self.assertEqual(server.character_usage_cost(item), (0.0, "unknown"))
+        self.assertEqual(server.character_usage_cost({"input": 100, "cost_usd": 0}), (0.0, "reported"))
+        self.assertEqual(server.character_usage_cost({"input": 100, "cost_source": "reported"}), (0.0, "reported"))
+        self.assertEqual(server.character_usage_cost({"input": 100, "cost_source": "estimated"}), (0.0, "estimated"))
+
+    def test_character_usage_ids_preserve_failed_retries_and_unpriced_subcalls(self):
+        base = {"generation_id": "g1", "role": "character", "agent_id": "ca_lin", "chapter": 1,
+                "round": 1, "input": 100, "output": 20, "cost_source": "unknown", "cost_usd": 0.003,
+                "provider": "codex", "model": "mixed", "models": ["codex/first", "openrouter/vendor/second"]}
+        failed = dict(base, usage_id="run-1", status="failed", attempts=5, unpriced_calls=4)
+        success = dict(base, usage_id="run-2", status="success", attempts=3, unpriced_calls=2)
+        canceled = dict(base, usage_id="run-3", status="canceled", attempts=1, unpriced_calls=1)
+        self.write_json("meta/planning/v2/.building/g1/chapters/0001.bundle.json", {
+            "character_agent_evidence": {"chapter": 1, "usage": [failed, success]},
+        })
+        path = self.nd / "meta/character_agents/usage.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(row) for row in [failed, success, canceled, success]), encoding="utf-8")
+
+        payload = server.character_agent_payload(self.nd)
+        row = payload["characters"][0]
+        self.assertEqual(row["usage_calls"], 3)
+        self.assertEqual(row["attempts"], 9)
+        self.assertEqual(row["tokens_in"], 300)
+        self.assertEqual(row["unpriced_calls"], 7)
+        self.assertEqual(row["cost_sources"]["unknown"], 3)
+        self.assertEqual(row["usage_statuses"], {"failed": 1, "success": 1, "canceled": 1, "unknown": 0})
+        self.assertEqual(row["cost_usd"], 0.009)
+        self.assertFalse(row["cost_complete"])
+        self.assertEqual(payload["usage_summary"]["unpriced_calls"], 7)
+        self.assertEqual(row["models"], [
+            {"provider": "codex", "model": "first"}, {"provider": "openrouter", "model": "vendor/second"},
+        ])
 
     def test_scan_rag_processes_matches_explicit_run_dir(self):
         command = (
@@ -456,6 +639,90 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(data["words_reported"], len(body) + 9)
         self.assertIn("word_total_mismatch", codes)
         self.assertIn("chapter_word_mismatch", codes)
+
+    def test_long_book_includes_chapters_above_99_and_ignores_backup_names(self):
+        self.seed_progress()
+        for ch in (99, 100, 1000):
+            (self.nd / "chapters" / f"{ch:02d}.md").write_text(f"# 第 {ch} 章\n正文。", encoding="utf-8")
+        for name in ("00.md", "1.md", "0100.md", "100.md.pre-rewrite.md", "100.draft.md"):
+            (self.nd / "chapters" / name).write_text("非正式正文", encoding="utf-8")
+        (self.nd / "chapters" / "02.md").mkdir()
+        self.write_json("meta/progress.json", {
+            "completed_chapters": [1, 99, 100, 1000], "total_chapters": 1000,
+        })
+        self.write_json("reviews/100.json", {"verdict": "accept"})
+
+        summary = server.summarize_run(self.run)
+        self.assertEqual(server.chapter_files(self.nd), [1, 99, 100, 1000])
+        self.assertEqual(summary["chapters_completed"], 4)
+        self.assertEqual(summary["reviews_accepted"], 1)
+        self.assertIn("1000", summary["chapter_words"])
+        self.assertEqual([row["chapter"] for row in server.quality_payload(self.run)["chapters"]],
+                         [1, 99, 100, 1000])
+        self.assertEqual([row["n"] for row in server.run_detail(self.run)["chapters"]],
+                         [1, 99, 100, 1000])
+
+    def test_polling_reuses_one_body_read_across_summary_quality_and_detail(self):
+        body = self.seed_progress()
+        path = self.nd / "chapters" / "01.md"
+        original = Path.read_bytes
+        reads = []
+
+        def read_bytes(candidate):
+            if candidate == path:
+                reads.append(candidate)
+            return original(candidate)
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes):
+            server.summarize_run(self.run)
+            server.quality_payload(self.run)
+            detail = server.run_detail(self.run)
+            server.summarize_run(self.run)
+
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(detail["chapters"][0]["words"], len(body))
+        self.assertEqual(detail["chapters"][0]["title"], "第一章")
+
+    def test_body_cache_invalidates_same_size_rewrite_and_atomic_replacement(self):
+        body = self.seed_progress("# 标题\r\n旧正文。\r\n")
+        path = self.nd / "chapters" / "01.md"
+        self.write_json("reviews/01.json", {
+            "verdict": "accept", "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        })
+        self.assertEqual(server.count_words(self.nd, 1), len(body))
+        self.assertEqual(server.quality_payload(self.run)["stale"], 0)
+        old_stat = path.stat()
+        replacement = body.replace("旧", "新")
+        path.write_text(replacement, encoding="utf-8")
+        os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        self.assertEqual(server.file_sha256(path), hashlib.sha256(replacement.encode()).hexdigest())
+        self.assertEqual(server.quality_payload(self.run)["stale"], 1)
+
+        staged = path.with_suffix(".tmp")
+        staged.write_text(body, encoding="utf-8")
+        os.utime(staged, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        staged.replace(path)
+        self.assertEqual(server.quality_payload(self.run)["stale"], 0)
+        path.unlink()
+        self.assertEqual(server.file_sha256(path), "")
+        self.assertEqual(server.count_words(self.nd, 1), 0)
+
+    def test_body_cache_is_bounded_and_thread_safe(self):
+        paths = []
+        for ch in range(1, 13):
+            path = self.nd / "chapters" / f"{ch:02d}.md"
+            path.write_text(f"第 {ch} 章\n正文", encoding="utf-8")
+            paths.append(path)
+        expected = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+        with server._body_cache_lock:
+            server._body_cache.clear()
+        with mock.patch.object(server, "BODY_CACHE_ENTRIES", 4):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(server.file_sha256, paths * 20))
+            self.assertEqual(results, [expected[path] for path in paths * 20])
+            with server._body_cache_lock:
+                self.assertLessEqual(len(server._body_cache), 4)
+                self.assertTrue(all(len(value[1]) == 3 for value in server._body_cache.values()))
 
     def test_quality_payload_tracks_freshness_and_ai_metrics(self):
         body = self.seed_progress("第一章\n\n有停顿，也有选择。\n")

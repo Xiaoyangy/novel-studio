@@ -12,15 +12,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import subprocess
 import time
 import urllib.parse
+from collections import OrderedDict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("NOVEL_STUDIO_RUNS_DIR", ROOT / "data" / "runs"))
@@ -46,6 +49,11 @@ SERVICE_VERSION = _dashboard_version()
 ACTIVE_WINDOW_SECONDS = 300  # 运行事件 5 分钟内有更新即视为执行中
 LOG_TAIL_LINES = 80
 RUNTIME_EVENT_LINES = 120
+BODY_CACHE_ENTRIES = 2048
+# Keep only derived metadata, never chapter text. Check file identity on every
+# read so rewrites/atomic promotion become visible without a polling TTL.
+_body_cache: OrderedDict = OrderedDict()
+_body_cache_lock = Lock()
 
 
 # ---------- 数据读取（全部防御式，缺文件返回空） ----------
@@ -127,11 +135,13 @@ def latest_mtime(*paths: Path) -> float:
 
 def chapter_files(nd: Path) -> list[int]:
     out = []
-    for p in (nd / "chapters").glob("[0-9][0-9].md"):
-        try:
-            out.append(int(p.stem))
-        except ValueError:
-            pass
+    for p in (nd / "chapters").glob("*.md"):
+        if not re.fullmatch(r"[0-9]{2,}", p.stem):
+            continue
+        ch = int(p.stem)
+        # Go's %02d specifies a minimum width, not a two-digit chapter limit.
+        if ch > 0 and p.stem == f"{ch:02d}" and p.is_file():
+            out.append(ch)
     return sorted(out)
 
 
@@ -174,31 +184,51 @@ def chapter_title(nd: Path, ch: int) -> str:
         title = str(s.get("title", "")).strip()
         if title:
             return title
+    return _body_metadata(nd / "chapters" / f"{ch:02d}.md")[1]
+
+
+def _file_identity(info: os.stat_result) -> tuple:
+    # ctime also detects a same-size rewrite whose mtime was deliberately kept;
+    # inode/device distinguish an atomically promoted replacement.
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _body_metadata(path: Path) -> tuple[int, str, str]:
+    """Return rune count, title and SHA from one file version, with bounded reuse."""
     try:
-        with open(nd / "chapters" / f"{ch:02d}.md", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    return re.sub(r"^#+\s*", "", line)[:40]
+        identity = _file_identity(path.stat())
+        with _body_cache_lock:
+            cached = _body_cache.get(path)
+            if cached is not None and cached[0] == identity:
+                _body_cache.move_to_end(path)
+                return cached[1]
+        raw = path.read_bytes()
+        # Avoid retaining a snapshot while a producer is replacing/writing it.
+        unchanged = _file_identity(path.stat()) == identity
     except OSError:
-        pass
-    return ""
+        with _body_cache_lock:
+            _body_cache.pop(path, None)
+        return 0, "", ""
+    text = raw.decode("utf-8", errors="replace")
+    title = next((re.sub(r"^#+\s*", "", line.strip())[:40]
+                  for line in text.splitlines() if line.strip()), "")
+    metadata = (len(text), title, hashlib.sha256(raw).hexdigest())
+    if unchanged:
+        with _body_cache_lock:
+            _body_cache[path] = (identity, metadata)
+            _body_cache.move_to_end(path)
+            while len(_body_cache) > BODY_CACHE_ENTRIES:
+                _body_cache.popitem(last=False)
+    return metadata
 
 
 def count_words(nd: Path, ch: int) -> int:
-    try:
-        text = (nd / "chapters" / f"{ch:02d}.md").read_text(encoding="utf-8")
-        # 与 internal/domain.WordCount 一致：按 Unicode rune 计数，包含换行与标点。
-        return len(text)
-    except OSError:
-        return 0
+    # 与 internal/domain.WordCount 一致：按 Unicode rune 计数，包含换行与标点。
+    return _body_metadata(nd / "chapters" / f"{ch:02d}.md")[0]
 
 
 def file_sha256(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
+    return _body_metadata(path)[2]
 
 
 def line_count(path: Path) -> int:
@@ -543,7 +573,32 @@ def runtime_events(nd: Path, n: int = RUNTIME_EVENT_LINES) -> list[dict]:
             "step": normalize_step(summary or detail),
             "chapter": event_chapter,
         })
-    return events
+    # Direct pipeline stages need not construct a Host, so queue.jsonl can be
+    # empty even when a durable stage failure exists. Read the numeric/status
+    # ledger too; never infer success or failure from stale terminal prose.
+    for item in read_jsonl_tail(nd / "meta" / "pipeline_timings.jsonl", n):
+        if not isinstance(item, dict) or item.get("schema") != "pipeline-timing.v1" or item.get("scope") != "stage":
+            continue
+        stage, status = item.get("stage"), item.get("status")
+        if not isinstance(stage, str) or not stage or status not in (
+            "ok", "error", "verification_error", "checkpoint_error", "watchdog_progress_error",
+        ):
+            continue
+        finished_at = item.get("finished_at")
+        finished_ts = timestamp(finished_at)
+        if not finished_ts or not math.isfinite(finished_ts):
+            continue
+        failed = status != "ok"
+        events.append({
+            "seq": None, "time": finished_at, "timestamp": finished_ts,
+            "finished_at": finished_at, "activity_timestamp": finished_ts,
+            "category": "PIPELINE", "agent": "pipeline", "stage": stage,
+            "summary": clip(f"{stage} {'失败' if failed else '完成'}", 260),
+            "detail": clip(str(item.get("error") or ""), 480),
+            "failed": failed, "step": normalize_step(stage), "chapter": None,
+        })
+    events.sort(key=lambda e: (e.get("activity_timestamp") or 0, int_value(e.get("seq"))))
+    return events[-n:]
 
 
 def runtime_state(nd: Path, prog: dict) -> dict:
@@ -583,6 +638,10 @@ def runtime_state(nd: Path, prog: dict) -> dict:
     recovery_ts = max(durable_ts, successful_event_ts, execution_ts, rag_ts)
     error_ts = (last_error or {}).get("activity_timestamp") or 0
     current_error = bool(last_error) and error_ts >= recovery_ts
+    if last_error and last_error.get("category") == "PIPELINE":
+        # Touching progress/metadata is not evidence that a failed stage was
+        # repaired. Require a subsequent successful event or a live retry.
+        current_error = error_ts >= max(successful_event_ts, execution_ts, rag_ts)
     last_event_current = bool(last) and (last.get("activity_timestamp") or 0) >= max(
         durable_ts, execution_ts, rag_started_ts,
     )
@@ -592,8 +651,10 @@ def runtime_state(nd: Path, prog: dict) -> dict:
         status = "running"
     elif prog.get("phase") == "complete":
         status = "complete"
+    elif current_error:
+        status = "error"
     elif updated and age is not None and age < ACTIVE_WINDOW_SECONDS:
-        status = "error" if current_error else "running"
+        status = "running"
     elif pending or prog.get("flow") == "rewriting":
         status = "attention"
     else:
@@ -601,13 +662,15 @@ def runtime_state(nd: Path, prog: dict) -> dict:
     pipeline_stage = execution.get("stage") if execution.get("active") else ""
     if not pipeline_stage and rag_execution.get("active"):
         pipeline_stage = rag_execution.get("stage") or "rag-build"
+    if not pipeline_stage and current_error:
+        pipeline_stage = (last_error or {}).get("stage") or ""
     if status == "running" and not pipeline_stage and not last_event_current:
         pipeline_stage = next_pipeline_stage(pipe)
     recent = events[-16:]
     errors = failures[-8:]
     return {
         "status": status,
-        "active": status in ("running", "error"),
+        "active": status == "running",
         "updated_at": updated,
         "updated_iso": iso_time(updated),
         "age_seconds": round(age, 1) if age is not None else None,
@@ -655,6 +718,9 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
         cur = (len(completed_chapters(prog.get("completed_chapters"))) or 0) + 1
     if execution.get("active") and execution.get("target_chapter"):
         cur = execution["target_chapter"]
+    projection = runtime.get("planning_projection") or {}
+    if projection.get("state") == "running" and execution.get("active") and execution.get("mode") == "project_all":
+        cur = projection["chapter"]
     live = runtime.get("last_event") or {}
     if live and not runtime.get("last_event_current"):
         live = {}
@@ -693,6 +759,8 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
     return {
         "chapter": display_chapter,
         "target_chapter": cur if planning_execution else display_chapter,
+        "cycle": (runtime.get("planning_progress") or {}).get("cycle", 0) if planning_execution else 0,
+        "round": (runtime.get("planning_progress") or {}).get("round", 0) if planning_execution else 0,
         "next_chapter": prog.get("current_chapter") or 0,
         "mode": mode,
         "step": step,
@@ -993,6 +1061,12 @@ def summarize_run(run: Path) -> dict:
     actual_counts = {ch: count_words(nd, ch) for ch in files}
     runtime = runtime_state(nd, prog)
     formal_planning = formal_planning_summary(nd, prog, runtime)
+    workspace, projection = current_character_planning_workspace(nd, formal_planning)
+    if projection is not None:
+        runtime["planning_projection"] = projection
+    planning_progress = current_planning_watchdog(nd, pipe, runtime, workspace, projection)
+    if planning_progress is not None:
+        runtime["planning_progress"] = planning_progress
     health = progress_health(nd, prog, files, actual_counts)
     assets = artifact_inventory(nd)
     reviews_dir = nd / "reviews"
@@ -1083,7 +1157,250 @@ def summarize_run(run: Path) -> dict:
     }
 
 
-def character_agent_payload(nd: Path) -> dict:
+def empty_character_usage() -> dict:
+    return {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "usage_calls": 0,
+            "attempts": 0, "unpriced_calls": 0,
+            "cost_sources": {"reported": 0, "estimated": 0, "unknown": 0},
+            "usage_statuses": {"success": 0, "failed": 0, "canceled": 0, "unknown": 0},
+            "_usage_models": set()}
+
+
+def character_usage_cost(item: dict) -> tuple[float, str]:
+    """Missing legacy prices are unknown; an explicit source can prove zero.
+
+    An unknown aggregate may carry the priced subtotal of some responses.
+    Preserve that amount without claiming its entire usage was priced.
+    """
+    source = str(item.get("cost_source") or "").strip().lower()
+    raw_cost = item.get("cost_usd")
+    try:
+        amount = float(raw_cost) if raw_cost is not None and not isinstance(raw_cost, bool) else None
+    except (TypeError, ValueError):
+        amount = None
+    valid = amount is not None and math.isfinite(amount) and amount >= 0
+    if not valid:
+        # cost_usd uses omitempty in the Go protocol, including reported zero.
+        if "cost_usd" not in item and source in ("reported", "estimated"):
+            return 0.0, source
+        return 0.0, "unknown"
+    if not source:
+        return amount, "reported"
+    return amount, source if source in ("reported", "estimated") else "unknown"
+
+
+def accumulate_character_usage(summary: dict, item: dict):
+    amount, source = character_usage_cost(item)
+    unpriced = max(0, int_value(item.get("unpriced_calls")))
+    if unpriced:
+        source = "unknown"
+    elif source == "unknown":
+        # Legacy records identify an unpriced aggregate, but not its number
+        # of underlying calls. Count at least one rather than assuming free.
+        unpriced = 1
+    summary["cost_usd"] += amount
+    summary["tokens_in"] += max(0, int_value(item.get("input")))
+    summary["tokens_out"] += max(0, int_value(item.get("output")))
+    summary["usage_calls"] += 1
+    summary["attempts"] += max(1, int_value(item.get("attempts")))
+    summary["unpriced_calls"] += unpriced
+    summary["cost_sources"][source] += 1
+    status = item.get("status")
+    summary["usage_statuses"][status if status in ("success", "failed", "canceled") else "unknown"] += 1
+    models = item.get("models") if isinstance(item.get("models"), list) else []
+    for identity in [item, *models]:
+        if isinstance(identity, str):
+            provider, separator, model = identity.partition("/")
+            if not separator:
+                provider, model = "", provider
+            identity = {"provider": provider.strip(), "model": model.strip()}
+        if not isinstance(identity, dict):
+            continue
+        provider = clip(identity.get("provider"), 100) if isinstance(identity.get("provider"), str) else ""
+        model = clip(identity.get("model"), 100) if isinstance(identity.get("model"), str) else ""
+        if model == "mixed" and models:
+            continue
+        if provider or model:
+            summary["_usage_models"].add((provider, model))
+
+
+def finalize_character_usage(summary: dict) -> dict:
+    sources = summary["cost_sources"]
+    summary["cost_usd"] = round(summary["cost_usd"], 8)
+    summary["cost_complete"] = sources["unknown"] == 0
+    summary["cost_source"] = "unknown" if sources["unknown"] else "estimated" if sources["estimated"] else "reported"
+    summary["models"] = [{"provider": provider, "model": model}
+                         for provider, model in sorted(summary.pop("_usage_models"))]
+    return summary
+
+
+def contained_regular_path(root: Path, path: Path) -> bool:
+    """Only follow ordinary descendants of this explicit, already-bound root."""
+    try:
+        relative = path.relative_to(root)
+        if root.is_symlink():
+            return False
+        current = root
+        for part in relative.parts:
+            if part in ("", ".", ".."):
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        return (path.is_file() or path.is_dir()) and path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def current_character_planning_workspace(nd: Path, formal: dict) -> tuple[Path | None, dict | None]:
+    """Resolve one current building generation; never search historical workspaces."""
+    generation_id = str(formal.get("generation_id") or "")
+    if formal.get("state") != "building" or not re.fullmatch(r"pg2_[A-Za-z0-9_-]+", generation_id):
+        return None, None
+    run = nd.parent.parent
+    workspace = run / ".project-all" / generation_id / "output" / "novel"
+    generation_dir = nd / "meta" / "planning" / "v2" / ".building" / generation_id
+
+    def bound_json(path):
+        return read_json(path) if contained_regular_path(run, path) else None
+
+    generation = bound_json(generation_dir / "generation.json") or {}
+    snapshot = bound_json(generation_dir / "source_snapshot.json") or {}
+    cursor = bound_json(nd / "meta" / "planning" / "v2" / "projection_cursor.json") or {}
+    manifest = bound_json(workspace / "meta" / "project_all_workspace_manifest.json") or {}
+    if not all(isinstance(item, dict) for item in (generation, snapshot, cursor, manifest)):
+        return None, None
+    lifecycle = nd / "meta" / "planning" / "v2" / "lifecycle"
+    if any((lifecycle / kind / generation_id).exists() for kind in ("archives", "invalidations")):
+        return None, None
+    if (generation.get("status") != "building" or generation.get("generation_id") != generation_id or
+            cursor.get("generation_id") != generation_id or snapshot.get("generation_id") != generation_id or
+            manifest.get("version") != "project-all-workspace.v3" or
+            manifest.get("generation_id") != generation_id or manifest.get("isolated_writes") is not True or
+            manifest.get("source_output") != str(nd) or manifest.get("workspace") != str(workspace) or
+            manifest.get("base_chapter") != generation.get("base_canon_chapter") or
+            manifest.get("base_chapter") != snapshot.get("base_canon_chapter")):
+        return None, None
+    for key in ("foundation_snapshot_root", "rag_snapshot_root"):
+        digest = snapshot.get(key)
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or manifest.get(key) != digest:
+            return None, None
+    if not contained_regular_path(run, workspace):
+        return None, None
+    base = generation.get("base_canon_chapter")
+    first, last = int_value(generation.get("first_projected_chapter")), int_value(generation.get("last_projected_chapter"))
+    if not isinstance(base, int) or isinstance(base, bool) or base < 0 or first <= base or last < first:
+        return None, None
+    live_execution = pipeline_execution_state(nd)
+    shadow_execution = (pipeline_execution_state(workspace)
+                        if contained_regular_path(run, workspace / "meta/runtime/pipeline_execution.json") else {})
+    active = (live_execution.get("active") and shadow_execution.get("active") and
+              live_execution.get("mode") == shadow_execution.get("mode") == "project_all" and
+              live_execution.get("process_id") == shadow_execution.get("process_id") and
+              live_execution.get("process_id", 0) > 0 and
+              first <= int_value(shadow_execution.get("target_chapter")) <= last)
+    return workspace, {
+        "evidence_scope": "projected", "generation_id": generation_id,
+        "state": "running" if active else "paused", "label": "当前规划投影",
+        "first_chapter": first, "last_chapter": last,
+        "chapter": int_value(shadow_execution.get("target_chapter")),
+    }
+
+
+PLANNING_COMMIT_PHASES = frozenset(("proposal_committed", "arbitration_committed", "cycle_committed",
+                                   "readiness_committed", "bundle_committed"))
+PLANNING_WATCHDOG_MAX_BYTES = 1024 * 1024  # Includes Go's bounded, private deduplication keys.
+
+
+def watchdog_opaque_token(value: str) -> str:
+    """Match pipelineWatchdogOpaqueToken without exposing arbitrary source text."""
+    value = value.strip()
+    if len(value.encode("utf-8")) <= 256 and re.fullmatch(r"[A-Za-z0-9._:/@+\\=\-]+", value):
+        return value
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest() if value else ""
+
+
+def pipeline_watchdog_path(nd: Path) -> Path:
+    """Same external, output-root-bound control path as the Go publisher."""
+    absolute = Path(os.path.abspath(nd))
+    token = watchdog_opaque_token(absolute.name).removeprefix("sha256:")
+    token = re.sub(r"[/:@+=]", "-", token)[:96] or "unknown"
+    suffix = hashlib.sha256(str(absolute).encode("utf-8")).hexdigest()[:16]
+    return absolute.parent / ".pipeline-runtime" / f"{token}-{suffix}" / "meta/runtime/pipeline_watchdog.json"
+
+
+def current_planning_watchdog(nd: Path, pipe: dict, runtime: dict, workspace: Path | None,
+                              projection: dict | None, now: float | None = None) -> dict | None:
+    """Read one bounded, public control snapshot, never proposal/observation history.
+
+    A heartbeat proves liveness only. The returned progress timestamp/sequence
+    are copied from durable events; neither leases nor usage can advance them.
+    Invalid/missing monitoring data has no business or filesystem side effects.
+    """
+    execution = runtime.get("execution") or {}
+    if (workspace is None or not projection or projection.get("state") != "running" or
+            not execution.get("active") or execution.get("mode") != "project_all" or
+            runtime.get("current_stage") != "project-all"):
+        return None
+    run = nd.parent.parent
+    path = pipeline_watchdog_path(nd)
+    if not contained_regular_path(run, path) or not path.is_file():
+        return None
+    try:
+        with path.open("rb") as source:
+            encoded = source.read(PLANNING_WATCHDOG_MAX_BYTES + 1)
+        if len(encoded) > PLANNING_WATCHDOG_MAX_BYTES:
+            return None
+        raw = json.loads(encoded)
+        if not isinstance(raw, dict):
+            return None
+        identity = pipe.get("run_identity")
+        if not isinstance(identity, str) or not identity.strip():
+            return None
+        if (raw.get("schema") != "pipeline-watchdog.v1" or raw.get("stage") != "project-all" or
+                raw.get("run_identity") != watchdog_opaque_token(identity) or
+                raw.get("invocation_id") != watchdog_opaque_token(identity.strip() + ":project-all") or
+                raw.get("generation_id") != projection.get("generation_id") or
+                raw.get("status") not in ("running", "stalled") or raw.get("stopped_at")):
+            return None
+        chapter, cycle, revision, seq = (raw.get(key, 0) for key in ("chapter", "cycle", "round", "progress_seq"))
+        if (not all(isinstance(value, int) and not isinstance(value, bool) for value in (chapter, cycle, revision, seq)) or
+                chapter != projection.get("chapter") or not 0 <= cycle <= 64 or not 0 <= revision <= 2 or seq < 0):
+            return None
+        phase, digest = raw.get("planning_phase"), raw.get("progress_artifact_digest", "")
+        if (phase not in PLANNING_COMMIT_PHASES | {"context_bound"} or not isinstance(digest, str) or
+                (digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)) or
+                (phase in PLANNING_COMMIT_PHASES and (not digest or seq == 0))):
+            return None
+        # Invocation IDs intentionally survive same-run restart in Go. Require
+        # a heartbeat observed after BOTH current leases, not an old PID's state.
+        if not contained_regular_path(run, workspace / "meta/runtime/pipeline_execution.json"):
+            return None
+        shadow = pipeline_execution_state(workspace, now)
+        if (not shadow.get("active") or shadow.get("mode") != "project_all" or
+                shadow.get("process_id") != execution.get("process_id") or execution.get("process_id", 0) <= 0 or
+                shadow.get("target_chapter") != chapter):
+            return None
+        times = {key: raw.get(key) for key in ("started_at", "heartbeat_at", "last_progress_at")}
+        if not all(isinstance(value, str) and 0 < len(value) <= 64 for value in times.values()):
+            return None
+        start, heartbeat, progress = (timestamp(times[key]) for key in ("started_at", "heartbeat_at", "last_progress_at"))
+        now = time.time() if now is None else now
+        leases = [execution.get("acquired_timestamp", 0), shadow.get("acquired_timestamp", 0)]
+        if (not all(math.isfinite(value) and value > 0 for value in (start, heartbeat, progress, *leases)) or
+                not start <= progress <= heartbeat or heartbeat < max(leases) or not -5 <= now - heartbeat <= 90):
+            return None
+        last_kind = raw.get("last_progress_kind")
+        return {
+            "generation_id": projection["generation_id"], "chapter": chapter, "cycle": cycle, "round": revision,
+            "planning_phase": phase, "status": raw["status"], "progress_artifact_digest": digest,
+            "last_progress_kind": last_kind if last_kind in PLANNING_COMMIT_PHASES else "",
+            "progress_seq": seq, "last_progress_at": times["last_progress_at"], "heartbeat_at": times["heartbeat_at"],
+        }
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        return None
+
+
+def character_agent_payload(nd: Path, planning_workspace: Path | None = None, planning_projection: dict | None = None) -> dict:
     """Public dashboard projection of character-agent evidence.
 
     Observation packets, private memories and decision reasons never leave the
@@ -1111,17 +1428,19 @@ def character_agent_payload(nd: Path) -> dict:
             "arbitration_result": "",
             "conflict_rounds": 0,
             "conflict_count": 0,
-            "cost_usd": 0.0,
-            "tokens_in": 0,
-            "tokens_out": 0,
+            **empty_character_usage(),
             "_latest_chapter": -1,
         }
         memory = read_json(nd / "meta" / "character_agents" / "memory" / f"{entry['agent_id']}.json") or {}
         rows[entry["agent_id"]]["memory_chapter"] = memory.get("last_accepted_chapter") or 0
 
     seen_evidence = set()
-    seen_usage = set()
-    arbiter_usage = {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0}
+    usage_records = {}
+    arbiter_usage = empty_character_usage()
+    readiness_usage = empty_character_usage()
+    total_usage = empty_character_usage()
+    projected_usage = empty_character_usage()
+    current_generation = (planning_projection or {}).get("generation_id") or ""
 
     def ensure_row(agent_id, character="", tier=""):
         if not agent_id:
@@ -1133,8 +1452,8 @@ def character_agent_payload(nd: Path) -> dict:
                 "status": "sleeping", "last_activated_chapter": 0, "memory_version": 0,
                 "memory_chapter": 0, "activation_reasons": [], "recent_decision": "",
                 "recent_action": "", "arbitration_outcome": "", "arbitration_result": "",
-                "conflict_rounds": 0, "conflict_count": 0, "cost_usd": 0.0,
-                "tokens_in": 0, "tokens_out": 0, "_latest_chapter": -1,
+                "conflict_rounds": 0, "conflict_count": 0,
+                **empty_character_usage(), "_latest_chapter": -1,
             }
         return rows[agent_id]
 
@@ -1142,22 +1461,31 @@ def character_agent_payload(nd: Path) -> dict:
         if not isinstance(item, dict):
             return
         agent_id = item.get("agent_id") or ""
-        key = (item.get("generation_id"), item.get("role"), agent_id, item.get("chapter"), item.get("round"), item.get("input"),
-               item.get("output"), item.get("cost_usd"))
-        if not agent_id or key in seen_usage:
+        key = (item.get("generation_id"), item.get("role"), agent_id, item.get("chapter"), item.get("cycle") or 0, item.get("round"),
+               item.get("input"), item.get("output"), item.get("cache_read") or 0, item.get("cache_write") or 0)
+        if isinstance(item.get("usage_id"), str) and item["usage_id"].strip():
+            # Failed/canceled retries share the same character/chapter/round,
+            # but are distinct paid runs. New immutable usage IDs distinguish
+            # them; only legacy records use the old shape-based fallback.
+            key = ("usage_id", item["usage_id"])
+        if not agent_id:
             return
-        seen_usage.add(key)
-        if item.get("role") == "world_arbiter" or agent_id == "world_arbiter":
-            arbiter_usage["tokens_in"] += int(item.get("input") or 0)
-            arbiter_usage["tokens_out"] += int(item.get("output") or 0)
-            arbiter_usage["cost_usd"] += float(item.get("cost_usd") or 0.0)
-            return
-        row = ensure_row(agent_id, item.get("character") or "")
-        row["tokens_in"] += int(item.get("input") or 0)
-        row["tokens_out"] += int(item.get("output") or 0)
-        row["cost_usd"] += float(item.get("cost_usd") or 0.0)
+        # A bundle and its usage ledger describe the same completed round.
+        # Enriched pricing/model metadata must not count its tokens twice.
+        def quality(record):
+            _, source = character_usage_cost(record)
+            return (record.get("cost_source") in ("reported", "estimated", "unknown"),
+                    {"unknown": 0, "estimated": 1, "reported": 2}[source],
+                    bool(record.get("model") or record.get("models")))
+        previous = usage_records.get(key)
+        if previous is None or quality(item) >= quality(previous):
+            usage_records[key] = item
 
-    def ingest(evidence):
+    def is_current(row, chapter, cycle, scope):
+        return ((scope == "projected" and row.get("evidence_scope") != "projected")
+                or (chapter, cycle) >= (row["_latest_chapter"], row.get("_latest_cycle", 0)))
+
+    def ingest(evidence, scope="stored", cycle=0):
         if not isinstance(evidence, dict):
             return
         root = evidence.get("evidence_root") or ""
@@ -1178,7 +1506,9 @@ def character_agent_payload(nd: Path) -> dict:
                 continue
             activation_by_agent[entry["agent_id"]] = entry
             row = ensure_row(entry["agent_id"], entry.get("character"), entry.get("tier"))
-            if chapter >= row["_latest_chapter"]:
+            if is_current(row, chapter, cycle, scope):
+                row["_latest_chapter"], row["_latest_cycle"] = chapter, cycle
+                row["activation_cycle"] = cycle
                 row["status"] = entry.get("state") or row["status"]
                 row["activation_reasons"] = [clip(x, 80) for x in (entry.get("reasons") or [])][:8]
                 if entry.get("state") == "active":
@@ -1190,6 +1520,17 @@ def character_agent_payload(nd: Path) -> dict:
             current = proposals.get(proposal["agent_id"])
             if current is None or int(proposal.get("round") or 0) > int(current.get("round") or 0):
                 proposals[proposal["agent_id"]] = proposal
+        for agent_id, proposal in proposals.items():
+            row = ensure_row(agent_id, proposal.get("character") or "")
+            if is_current(row, chapter, cycle, scope):
+                row["_latest_chapter"] = chapter
+                row["_latest_cycle"] = cycle
+                row["decision_cycle"] = cycle
+                row["evidence_scope"] = scope
+                row["recent_decision"] = clip(proposal.get("decision"), 180)
+                row["recent_action"] = clip(proposal.get("intended_action"), 180)
+                row["arbitration_outcome"] = ""
+                row["arbitration_result"] = ""
         arbitrations = [x for x in (evidence.get("arbitrations") or []) if isinstance(x, dict)]
         arbitrations.sort(key=lambda x: int(x.get("round") or 0))
         final = arbitrations[-1] if arbitrations else {}
@@ -1200,8 +1541,11 @@ def character_agent_payload(nd: Path) -> dict:
             agent_id = resolution["agent_id"]
             row = ensure_row(agent_id, resolution.get("character") or "")
             proposal = proposals.get(agent_id) or {}
-            if chapter >= row["_latest_chapter"]:
+            if is_current(row, chapter, cycle, scope):
                 row["_latest_chapter"] = chapter
+                row["_latest_cycle"] = cycle
+                row["decision_cycle"] = cycle
+                row["evidence_scope"] = scope
                 row["recent_decision"] = clip(proposal.get("decision"), 180)
                 row["recent_action"] = clip(proposal.get("intended_action"), 180)
                 row["arbitration_outcome"] = resolution.get("outcome") or ""
@@ -1218,6 +1562,11 @@ def character_agent_payload(nd: Path) -> dict:
         for path in planning_root.rglob("*.bundle.json"):
             bundle = read_json(path) or {}
             ingest(bundle.get("character_agent_evidence"))
+            activation_chapter = bundle.get("character_activation_evidence") or {}
+            if isinstance(activation_chapter, dict):
+                for cycle in activation_chapter.get("cycles") or []:
+                    if isinstance(cycle, dict):
+                        ingest(cycle.get("evidence"), cycle=int_value(cycle.get("index")))
 
     projected_root = nd / "meta" / "character_agents" / "projected"
     if projected_root.is_dir():
@@ -1241,10 +1590,86 @@ def character_agent_payload(nd: Path) -> dict:
     for item in read_jsonl_tail(nd / "meta" / "character_agents" / "usage.jsonl", 10000):
         add_usage(item)
 
+    if planning_workspace is not None and current_generation:
+        # Only public projections are ingested. In particular, never load the
+        # workspace's observations or memory: accepted memory stays live-owned.
+        def projected_json(path):
+            return read_json(path) if contained_regular_path(planning_workspace, path) else None
+
+        projected_registry = projected_json(planning_workspace / "meta/character_agents/registry.json") or {}
+        for entry in (projected_registry.get("entries") or []) if isinstance(projected_registry, dict) else []:
+            if not isinstance(entry, dict):
+                continue
+            row = ensure_row(entry.get("agent_id"), entry.get("character"), entry.get("tier"))
+            if row is not None and entry.get("agent_name"):
+                row["agent_name"] = entry["agent_name"]
+        chapters = planning_workspace / "meta/character_agents/projected" / current_generation / "chapters"
+        chapter_dirs = sorted(chapters.glob("*")) if contained_regular_path(planning_workspace, chapters) else []
+        for chapter_dir in chapter_dirs:
+            activation = projected_json(chapter_dir / "activation.json")
+            if not isinstance(activation, dict) or activation.get("generation_id") != current_generation:
+                continue
+            chapter = int_value(activation.get("chapter"))
+            if not (planning_projection["first_chapter"] <= chapter <= planning_projection["last_chapter"]):
+                continue
+            def matching(path):
+                value = projected_json(path)
+                return (value if isinstance(value, dict) and value.get("generation_id") == current_generation
+                        and int_value(value.get("chapter")) == chapter else None)
+            proposals = [value for path in sorted((chapter_dir / "proposals").glob("round-*/*.json"))
+                         if (value := matching(path)) is not None]
+            arbitrations = [value for path in sorted(chapter_dir.glob("arbitration-round-*.json"))
+                            if (value := matching(path)) is not None]
+            ingest({"chapter": chapter, "activation": activation, "proposals": proposals,
+                    "arbitrations": arbitrations}, "projected")
+        usage_path = planning_workspace / "meta/character_agents/usage.jsonl"
+        # Read only per-cycle public projection files, never input snapshots,
+        # observations, private memories or readiness reasoning inputs.
+        sessions = planning_workspace / "meta/character_agents/activation_sessions" / current_generation
+        session_dirs = sorted(sessions.glob("*")) if contained_regular_path(planning_workspace, sessions) else []
+        for session_dir in session_dirs:
+            chapter = int_value(session_dir.name)
+            if not (planning_projection["first_chapter"] <= chapter <= planning_projection["last_chapter"]):
+                continue
+            work = session_dir / "work"
+            cycle_dirs = sorted(work.glob("*")) if contained_regular_path(planning_workspace, work) else []
+            for cycle_dir in cycle_dirs:
+                proof = cycle_dir / "proof"
+                activation = projected_json(proof / "activation.json")
+                if not isinstance(activation, dict) or activation.get("generation_id") != current_generation or int_value(activation.get("chapter")) != chapter:
+                    continue
+                def cycle_item(path):
+                    value = projected_json(path)
+                    return (value if isinstance(value, dict) and value.get("generation_id") == current_generation
+                            and int_value(value.get("chapter")) == chapter else None)
+                proposals = [value for path in sorted((proof / "proposals").glob("round-*/*.json"))
+                             if (value := cycle_item(path)) is not None]
+                arbitrations = [value for path in sorted(proof.glob("arbitration-round-*.json"))
+                                if (value := cycle_item(path)) is not None]
+                ingest({"chapter": chapter, "activation": activation, "proposals": proposals,
+                        "arbitrations": arbitrations}, "projected", int_value(cycle_dir.name))
+        if contained_regular_path(planning_workspace, usage_path):
+            for item in read_jsonl_tail(usage_path, 10000):
+                if item.get("generation_id") == current_generation:
+                    add_usage(item)
+
+    for item in usage_records.values():
+        if item.get("role") == "world_arbiter" or item.get("agent_id") == "world_arbiter":
+            row = arbiter_usage
+        elif item.get("role") == "chapter_readiness" or item.get("agent_id") == "chapter_readiness":
+            row = readiness_usage
+        else:
+            row = ensure_row(item["agent_id"], item.get("character") or "")
+        accumulate_character_usage(row, item)
+        accumulate_character_usage(total_usage, item)
+        if current_generation and item.get("generation_id") == current_generation:
+            accumulate_character_usage(projected_usage, item)
+
     public_rows = []
     for row in rows.values():
         row.pop("_latest_chapter", None)
-        row["cost_usd"] = round(row["cost_usd"], 4)
+        row.pop("_latest_cycle", None)
+        finalize_character_usage(row)
         public_rows.append(row)
     public_rows.sort(key=lambda row: (0 if row["tier"] == "core" else 1, row["character"], row["agent_id"]))
     successor_public = None
@@ -1268,18 +1693,19 @@ def character_agent_payload(nd: Path) -> dict:
         "version": registry.get("version") or "",
         "registry_root": registry.get("registry_root") or "",
         "characters": public_rows,
-        "world_arbiter_usage": {
-            "cost_usd": round(arbiter_usage["cost_usd"], 4),
-            "tokens_in": arbiter_usage["tokens_in"],
-            "tokens_out": arbiter_usage["tokens_out"],
-        },
+        "world_arbiter_usage": finalize_character_usage(arbiter_usage),
+        "chapter_readiness_usage": finalize_character_usage(readiness_usage),
+        "usage_summary": finalize_character_usage(total_usage),
         "successor_generation": successor_public,
+        "planning_projection": ({**planning_projection, "usage_summary": finalize_character_usage(projected_usage)}
+                                if planning_projection else None),
     }
 
 
 def run_detail(run: Path) -> dict:
     nd = novel_dir(run)
     base = summarize_run(run)
+    planning_workspace, planning_projection = current_character_planning_workspace(nd, base["formal_planning"])
     usage = read_json(nd / "meta" / "usage.json") or {}
     assets = artifact_inventory(nd)
     chapters = []
@@ -1344,7 +1770,7 @@ def run_detail(run: Path) -> dict:
         "deliveries": deliveries,
         "position": position,
         "assets": assets,
-        "character_agents": character_agent_payload(nd),
+        "character_agents": character_agent_payload(nd, planning_workspace, planning_projection),
         "log": log_tail(nd),
     })
     return base

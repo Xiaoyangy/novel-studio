@@ -3,12 +3,57 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	dashboardassets "github.com/chenhongyang/novel-studio/services/dashboard"
 )
+
+func TestDashboardReuseRequiresMatchingDataSource(t *testing.T) {
+	script, err := dashboardassets.Materialize(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := t.TempDir()
+	health := map[string]string{"version": currentDashboardVersion(script), "script": script, "runs_dir": runs}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(health) }))
+	defer server.Close()
+	_, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portText)
+	flags := serviceFlags{Host: "127.0.0.1", Port: port}
+	if ok, why := runningDashboardMatchesCheckout(flags, script, runs); !ok {
+		t.Fatalf("same source rejected: %s", why)
+	}
+	if ok, why := runningDashboardMatchesCheckout(flags, script, t.TempDir()); ok || why != "data source mismatch" {
+		t.Fatalf("healthy wrong source reused: %t %s", ok, why)
+	}
+	delete(health, "runs_dir")
+	if ok, _ := runningDashboardMatchesCheckout(flags, script, runs); ok {
+		t.Fatal("unknown source reused")
+	}
+}
+
+func TestExpectedDashboardRunsDirHonorsExplicitScope(t *testing.T) {
+	root := t.TempDir()
+	novel := filepath.Join(root, "evals", "book", "output", "novel")
+	t.Setenv("NOVEL_STUDIO_RUNS_DIR", "isolated")
+	if got := expectedDashboardRunsDir(root, novel); got != filepath.Join(root, "isolated") {
+		t.Fatalf("explicit relative root ignored: %s", got)
+	}
+	t.Setenv("NOVEL_STUDIO_RUNS_DIR", filepath.Join(root, "other"))
+	if got := expectedDashboardRunsDir(root, novel); got != filepath.Join(root, "other") {
+		t.Fatalf("explicit absolute root ignored: %s", got)
+	}
+}
 
 // currentDashboardVersion must hash server.py + static/index.html exactly the way
 // the Python /api/health stamp does, so a stale instance from another checkout is

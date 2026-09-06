@@ -38,6 +38,9 @@ var defaultPipelineStages = []string{
 	"architect", "outline-all", "zero-init", "preplan", "project-all", "seal", "promote", "render",
 }
 
+// Tests replace this boundary without touching a user's desktop service.
+var pipelineEnsureDashboard = ensureDashboardServiceForRun
+
 var knownPipelineStages = map[string]bool{
 	"cocreate": true, "architect": true, "outline-all": true, "zero-init": true,
 	"preplan": true, "project-all": true, "seal": true, "promote": true,
@@ -349,7 +352,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			fmt.Fprintf(os.Stderr, "[pipeline] Qdrant 已就绪\n")
 		}
 	}
-	ensureDashboardServiceForRun(cfg.OutputDir)
+	pipelineEnsureDashboard(cfg.OutputDir)
 	statePath := filepath.Join(cfg.OutputDir, "meta", "pipeline.json")
 	if stageArgs == nil {
 		stageArgs = pipelineStageArgs(flags)

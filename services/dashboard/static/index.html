@@ -687,10 +687,28 @@ const $ = (s, el = document) => el.querySelector(s);
 const grid = $("#grid"), empty = $("#empty");
 const overlay = $("#overlay"), drawer = $("#drawer");
 let currentDetail = null, currentTab = "overview", detailTimer = null;
+let detailRequest = null;
 let allNovels = [], activeFilter = "all", refreshing = false;
 
 const fmtNum = n => (n >= 10000 ? (n / 10000).toFixed(1) + " 万" : String(n ?? 0));
 const fmtMoney = n => "$" + (n ?? 0).toFixed(2);
+function fmtCharacterCost(usage = {}) {
+  const sources = usage.cost_sources || {};
+  const amount = Math.max(0, Number(usage.cost_usd) || 0);
+  const tokens = (Number(usage.tokens_in) || 0) + (Number(usage.tokens_out) || 0);
+  const calls = Number(usage.usage_calls ?? (tokens > 0 ? 1 : 0));
+  const legacyUnknown = !usage.cost_source && !Object.hasOwn(usage, "cost_usd") && calls > 0;
+  const unpriced = Number(usage.unpriced_calls ?? sources.unknown ?? (legacyUnknown ? 1 : 0));
+  const partial = usage.cost_complete === false || usage.cost_source === "unknown" || unpriced > 0 || legacyUnknown;
+  const money = amount > 0 && amount < 0.0001 ? "<$0.0001" : "$" + amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2);
+  if (partial) {
+    const missing = unpriced > 0 ? `${unpriced} 次调用未计价` : "部分调用未计价";
+    return amount > 0 ? `已计价小计 ${money}；${missing}` : `未计价（${missing}）`;
+  }
+  if (!calls && !tokens && amount === 0) return "$0.00（未调用）";
+  if (usage.cost_source === "estimated" || Number(sources.estimated) > 0) return `约 ${money}（估算）`;
+  return `${money}（已知）`;
+}
 const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
 const stepName = { rag: "RAG 重建", simulate: "推演", plan: "计划", draft: "落稿", check: "校验", commit: "提交", review: "评审", rewrite: "返工", deliver: "交付" };
 const stageName = { "rag-build": "RAG 重建", foundation: "基础冻结", "outline-all": "全书分层大纲", preplan: "弧规划准备", "project-all": "正式弧推演规划", seal: "弧规划封存", render: "正文渲染" };
@@ -715,7 +733,7 @@ const travelTime = days => {
   return `${Number(days).toFixed(1)} 天`;
 };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const api = p => fetch(p, { cache: "no-store" }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+const api = (p, signal) => fetch(p, { cache: "no-store", signal }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
 /* ---------- 项目列表 ---------- */
 function stepChain(w, compact) {
@@ -728,14 +746,40 @@ function stepChain(w, compact) {
   return `<div class="steps"><span class="lbl">第 ${w.chapter} 章${compact ? "" : " 进展"}</span>${chain}</div>`;
 }
 
+function planningWorkTitle(w, runtime) {
+  if (runtime.current_stage !== "project-all" || !Number.isSafeInteger(w.target_chapter) || w.target_chapter <= 0)
+    return stageName[runtime.current_stage] || "规划阶段";
+  const running = (runtime.execution || {}).active === true;
+  const cycle = Number.isSafeInteger(w.cycle) && w.cycle > 0 ? `／周期 ${w.cycle}` : "";
+  return `${running ? "正在推演" : "规划目标"}第 ${w.target_chapter} 章${cycle}${running ? "" : "（未运行）"}`;
+}
+
+function renderPlanningProgress(d) {
+  const w = d.working || {}, runtime = d.runtime || {}, formal = d.formal_planning || {};
+  if (w.mode !== "planning" || runtime.current_stage !== "project-all") return "";
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const expected = count(formal.expected_chapters) || "?";
+  const summary = `已接受 ${count(d.chapters_completed)} 章｜${planningWorkTitle(w, runtime)}｜正式计划 ${count(formal.planned_chapters)}/${expected}`;
+  const p = runtime.planning_progress;
+  let evidence = "";
+  if (p) {
+    const phase = { context_bound: "本周期输入已绑定（不计业务进展）", proposal_committed: "角色提案已提交",
+      arbitration_committed: "裁决已提交", cycle_committed: "周期已提交", readiness_committed: "就绪判断已提交", bundle_committed: "正式章节计划已提交" };
+    const last = p.last_progress_kind && phase[p.last_progress_kind]
+      ? `${phase[p.last_progress_kind]} · ${shortTime(p.last_progress_at)}` : "尚无角色规划提交";
+    evidence = `<div class="latest-event">${esc(phase[p.planning_phase] || "检查点待核对")}${p.status === "stalled" ? " · 持久进展停滞" : ""}<br>最近业务提交（运行级）：${esc(last)}<br>心跳 ${esc(shortTime(p.heartbeat_at))}（仅存活，不计进展）</div>`;
+  }
+  return `<div class="latest-event"><b>${esc(summary)}</b></div>${evidence}`;
+}
+
 function card(b) {
   const runtime = b.runtime || {}, health = b.health || {}, w = b.working || {};
   const formal = b.formal_planning || {};
   const status = runtime.status || (b.active ? "running" : "idle");
-  const workLabel = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? (stageName[runtime.current_stage] || "规划阶段") : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
+  const workLabel = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? planningWorkTitle(w, runtime) : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
   const latest = w.last_step || (runtime.last_event || {}).summary || "等待下一步";
   const err = w.last_error || runtime.last_error;
-  const errRecovered = err && w.last_at && new Date(w.last_at).getTime() > new Date(err.time || 0).getTime() && !w.last_failed;
+  const errRecovered = err && (typeof runtime.last_error_recovered === "boolean" ? runtime.last_error_recovered : w.last_at && new Date(w.last_at).getTime() > new Date(err.time || 0).getTime() && !w.last_failed);
   const target = b.chapter_word_target || {};
   const targetText = target.min || target.max ? `${target.min || "?"}–${target.max || "?"}` : "未设置";
   const healthCls = `health-${health.status || "warning"}`;
@@ -767,6 +811,7 @@ function card(b) {
       <section class="project-section">
         <div class="section-kicker"><span>当前执行</span><b>${runtimeName[status] || esc(status)}</b></div>
         <div class="current-title"><b>${workLabel}</b><span>${w.mode === "planning" ? esc(stageName[runtime.current_stage] || runtime.current_stage || "规划") : w.step ? stepName[w.step] || esc(w.step) : "等待 pipeline 动作"}</span></div>
+        ${renderPlanningProgress(b)}
         ${w.mode === "rag" ? '<div class="latest-event">正在重建项目检索索引，不推进正文章号。</div>' : w.mode === "planning" ? '<div class="latest-event">当前处理规划资产，不代表正文章号已经开始。</div>' : stepChain(w, true)}
         <div class="latest-event"><b>${esc(latest)}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""} · ${shortTime(w.last_at)}</div>
         ${err && (runtime.active || status === "error") ? `<div class="runtime-error ${errRecovered ? "recovered" : ""}">${errRecovered ? "近期错误后已继续：" : "当前错误："}${esc(err.summary || err.detail)}</div>` : ""}
@@ -787,7 +832,7 @@ function card(b) {
     <footer class="project-footer">
       <span>模型 <b>${esc(model)}</b>${runtime.planning_tier ? ` · ${esc(runtime.planning_tier)}` : ""}</span>
       <span>输入/输出 <b>${fmtNum(b.tokens_in)} / ${fmtNum(b.tokens_out)}</b></span>
-      <span>成本 <b>${fmtMoney(b.cost_usd)}</b></span>
+      <span>账本记录成本 <b>${fmtMoney(b.cost_usd)}</b></span>
       <span>RAG <b>${fmtNum(b.rag_chunks)}</b></span>
       ${b.generation_mode ? `<span>模式 <b>${esc(b.generation_mode.replace(/_/g, " "))}</b></span>` : ""}
       <span class="updated">更新 ${ago(b.updated_at)}</span>
@@ -797,7 +842,7 @@ function card(b) {
 
 function renderPortfolio(novels) {
   const sum = key => novels.reduce((n, x) => n + Number(x[key] || 0), 0);
-  const running = novels.filter(n => ["running", "error"].includes((n.runtime || {}).status)).length;
+  const running = novels.filter(n => (n.runtime || {}).status === "running").length;
   const attention = novels.filter(n => ["error", "attention"].includes((n.runtime || {}).status) || n.rewrite_pending || (n.health || {}).status === "error").length;
   const issues = novels.reduce((n, x) => n + ((x.health || {}).issues || []).length, 0);
   const metrics = [
@@ -807,7 +852,7 @@ function renderPortfolio(novels) {
     ["已归档章节", sum("chapters_completed"), `${sum("chapters_on_disk")} 章正文落盘`, ""],
     ["评审通过", sum("reviews_accepted"), `${sum("gate_passed")} 章通过 AI 门禁`, ""],
     ["正文实算", fmtNum(sum("words_total")), `${fmtNum(sum("tokens_out"))} 输出 tokens`, ""],
-    ["累计成本", fmtMoney(sum("cost_usd")), `缓存节省 ${fmtMoney(sum("saved_usd"))}`, ""],
+    ["账本记录成本", fmtMoney(sum("cost_usd")), `缓存节省 ${fmtMoney(sum("saved_usd"))}`, ""],
     ["数据差异", issues, issues ? "展开项目查看明细" : "进度与正文一致", issues ? "attn" : ""],
   ];
   $("#portfolio-metrics").innerHTML = metrics.map(([k, v, s, cls]) => `<div class="portfolio-metric ${cls}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
@@ -822,7 +867,7 @@ function applyView() {
   const q = $("#project-search").value.trim().toLowerCase();
   let list = allNovels.filter(n => {
     const status = (n.runtime || {}).status || "idle";
-    const matchesFilter = activeFilter === "all" || (activeFilter === "running" && ["running", "error"].includes(status)) || (activeFilter === "attention" && isAttention(n)) || (activeFilter === "idle" && ["idle", "complete"].includes(status));
+    const matchesFilter = activeFilter === "all" || (activeFilter === "running" && status === "running") || (activeFilter === "attention" && isAttention(n)) || (activeFilter === "idle" && ["idle", "complete"].includes(status));
     const haystack = [n.name, n.dir, (n.runtime || {}).model, n.generation_mode].join(" ").toLowerCase();
     return matchesFilter && (!q || haystack.includes(q));
   });
@@ -845,7 +890,7 @@ function render(novels) {
   allNovels = novels;
   renderPortfolio(novels);
   applyView();
-  const running = novels.filter(n => ["running", "error"].includes((n.runtime || {}).status)).length;
+  const running = novels.filter(n => (n.runtime || {}).status === "running").length;
   document.title = (running ? `${running} 本执行中 · ` : "") + "novel-studio · 创作进度看板";
 }
 
@@ -910,6 +955,11 @@ function mdToHtml(src) {
 const verdictTag = v => v === "accept" ? '<span class="tag accept">通过</span>'
   : v ? `<span class="tag rewrite">${esc(v)}</span>` : '<span class="tag pending">待审</span>';
 
+function renderCharacterPlanningProjection(projection) {
+  if (!projection) return "";
+  return `<div class="panel" style="margin-bottom:8px"><span class="tag pending">当前规划投影 · ${projection.state === "running" ? "推演规划中" : "已暂存"}</span><p>选择与裁决尚未写入正史；正式记忆章号仍来自已接受账本。</p><small>${esc(projection.generation_id || "")} · 规划费用 ${esc(fmtCharacterCost(projection.usage_summary || {}))}（已纳入下方角色费用，按证据去重）</small></div>`;
+}
+
 function renderOverview(d) {
   const w = d.working || {};
   const runtime = d.runtime || {}, health = d.health || {}, assets = d.assets || {}, pos = d.position || {};
@@ -949,20 +999,23 @@ function renderOverview(d) {
   const formal = d.formal_planning || {};
   const characterAgents = (d.character_agents || {}).characters || [];
   const worldArbiterUsage = (d.character_agents || {}).world_arbiter_usage || {};
+  const readinessUsage = (d.character_agents || {}).chapter_readiness_usage || {};
+  const characterUsage = (d.character_agents || {}).usage_summary || {};
   const characterSuccessor = (d.character_agents || {}).successor_generation;
+  const characterProjection = (d.character_agents || {}).planning_projection;
   const characterAgentRows = characterAgents.map(a => `<tr>
     <td><b>${esc(a.character || a.agent_id)}</b><br><small style="color:var(--muted)">${esc(a.agent_name || a.agent_id)} · ${esc(a.tier || "—")}</small></td>
-    <td><span class="tag ${a.status === "active" ? "ok" : "pending"}">${a.status === "active" ? "活跃" : a.status === "retired" ? "退场" : "休眠"}</span><br><small>${(a.activation_reasons || []).map(esc).join("、") || "无本章触发"}</small></td>
+    <td><span class="tag ${a.status === "active" ? "ok" : "pending"}">${a.status === "active" ? "活跃" : a.status === "retired" ? "退场" : "休眠"}</span>${a.activation_cycle ? `<br><small>章内周期 ${esc(a.activation_cycle)}</small>` : ""}<br><small>${(a.activation_reasons || []).map(esc).join("、") || "无本章触发"}</small></td>
     <td>${a.last_activated_chapter ? `第 ${a.last_activated_chapter} 章` : "—"}<br><small>正式记忆至第 ${a.memory_chapter || 0} 章 · v${a.memory_version || 0}</small></td>
-    <td>${esc(a.recent_decision || "—")}${a.recent_action ? `<br><small>${esc(a.recent_action)}</small>` : ""}</td>
+    <td>${a.evidence_scope === "projected" ? '<span class="tag pending">规划投影 · 未接受</span><br>' : ""}${esc(a.recent_decision || "—")}${a.decision_cycle ? `<br><small>选择来自周期 ${esc(a.decision_cycle)}</small>` : ""}${a.recent_action ? `<br><small>${esc(a.recent_action)}</small>` : ""}</td>
     <td><span class="tag ${a.arbitration_outcome === "success" ? "ok" : a.arbitration_outcome === "blocked" ? "rewrite" : "pending"}">${esc(a.arbitration_outcome || "—")}</span>${a.arbitration_result ? `<br><small>${esc(a.arbitration_result)}</small>` : ""}<br><small>冲突 ${a.conflict_count || 0} · 修订 ${a.conflict_rounds || 0} 轮</small></td>
-    <td>${fmtMoney(a.cost_usd)}<br><small>${fmtNum(a.tokens_in)} / ${fmtNum(a.tokens_out)} tokens</small></td>
+    <td>${esc(fmtCharacterCost(a))}<br><small>${fmtNum(a.tokens_in)} / ${fmtNum(a.tokens_out)} tokens</small>${(a.models || []).length ? `<br><small>${a.models.map(m => esc([m.provider, m.model].filter(Boolean).join(" / "))).join("、")}</small>` : ""}</td>
   </tr>`).join("");
   const lastError = runtime.last_error;
   const lastEvent = runtime.last_event || {};
-  const errorRecovered = lastError && lastEvent.time && new Date(lastEvent.time).getTime() > new Date(lastError.time || 0).getTime() && !lastEvent.failed;
+  const errorRecovered = lastError && (typeof runtime.last_error_recovered === "boolean" ? runtime.last_error_recovered : lastEvent.time && new Date(lastEvent.time).getTime() > new Date(lastError.time || 0).getTime() && !lastEvent.failed);
   const healthTag = `<span class="tag health-${health.status || "warning"}">${healthName[health.status] || "待校验"}</span>`;
-  const workTitle = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? (stageName[runtime.current_stage] || "规划阶段") : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
+  const workTitle = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? planningWorkTitle(w, runtime) : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
   return `
     <div class="detail-kpis">
       <div class="detail-kpi"><div class="k">正文游标</div><div class="v">${chapterText(d.current_chapter)}</div></div>
@@ -970,7 +1023,7 @@ function renderOverview(d) {
       <div class="detail-kpi"><div class="k">完成 / 目标</div><div class="v">${d.chapters_completed} / ${d.chapters_total || "?"}</div></div>
       <div class="detail-kpi"><div class="k">正文实算</div><div class="v">${fmtNum(d.words_total)}</div></div>
       <div class="detail-kpi"><div class="k">评审 / 门禁</div><div class="v">${d.reviews_accepted} / ${d.gate_passed}</div></div>
-      <div class="detail-kpi"><div class="k">累计成本</div><div class="v">${fmtMoney(d.cost_usd)}</div></div>
+      <div class="detail-kpi"><div class="k">账本记录成本</div><div class="v">${fmtMoney(d.cost_usd)}</div></div>
     </div>
     <div class="sec"><h3>当前执行</h3>
       <div class="panel">
@@ -978,6 +1031,7 @@ function renderOverview(d) {
         <div class="kv"><span class="k">当前位置</span><span>${pos.volume_title ? `卷 ${pos.volume}《${esc(pos.volume_title)}》 · 弧 ${pos.arc}「${esc(pos.arc_title)}」` : `卷 ${d.volume || "?"} · 弧 ${d.arc || "?"}`}${pos.arc_total ? `　${pos.arc_completed}/${pos.arc_total} 章` : ""}</span></div>
         ${pos.arc_goal ? `<div class="kv"><span class="k">弧目标</span><span>${esc(pos.arc_goal)}</span></div>` : ""}
         <div class="kv"><span class="k">当前工作</span><span><b>${workTitle}</b>${w.next_chapter && w.next_chapter !== w.chapter ? `　正文游标为第 ${w.next_chapter} 章` : ""}</span></div>
+        ${renderPlanningProgress(d)}
         ${w.mode === "rag" ? '<span style="color:var(--muted);font-size:11px">正在重建项目检索索引；该活动独立于正文与弧规划进度。</span>' : w.mode === "planning" ? '<span style="color:var(--muted);font-size:11px">当前处理规划资产；正文游标仍以进度台账为准。</span>' : stepChain(w) || '<span style="color:var(--muted);font-size:11px">尚未进入章节 pipeline。</span>'}
         <div class="kv" style="margin-top:10px"><span class="k">最近动作</span><span><b>${esc(w.last_step || "—")}</b>${w.last_agent ? ` · ${esc(w.last_agent)}` : ""}　<span style="color:var(--muted)">${shortTime(w.last_at)}</span></span></div>
         ${lastError ? `<div class="runtime-error ${errorRecovered ? "recovered" : ""}">${errorRecovered ? "近期错误后已继续：" : "最近错误："}${esc(lastError.summary || lastError.detail)} · ${shortTime(lastError.time)}</div>` : ""}
@@ -1005,12 +1059,15 @@ function renderOverview(d) {
              : '<div class="loading">还没有规划或落盘的章节。</div>'}
     </div>
     <div class="sec"><h3>角色独立 Agent</h3>
+      ${renderCharacterPlanningProjection(characterProjection)}
+      ${characterUsage.usage_calls ? `<div class="panel" style="margin-bottom:8px"><div class="kv"><span class="k">角色决策、裁决与就绪费用</span><span>${esc(fmtCharacterCost(characterUsage))}</span></div><small>按独立用量证据汇总；估算不是实际账单，未计价不代表免费。</small></div>` : ""}
       ${characterAgentRows ? `<div class="table-wrap"><table><thead><tr><th>角色 / Agent</th><th>状态 / 激活原因</th><th>激活 / 记忆</th><th>最近选择</th><th>裁决</th><th>单角色成本</th></tr></thead><tbody>${characterAgentRows}</tbody></table></div>`
-                          : '<div class="loading">当前项目尚未生成角色 Agent 注册表；历史 generation 会继续按旧协议完成。</div>'}
-      ${worldArbiterUsage.tokens_in || worldArbiterUsage.tokens_out ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">World Arbiter 用量</span><span>${fmtMoney(worldArbiterUsage.cost_usd)} · ${fmtNum(worldArbiterUsage.tokens_in)} / ${fmtNum(worldArbiterUsage.tokens_out)} tokens</span></div></div>` : ""}
+                          : characterProjection ? '<div class="loading">当前规划投影已绑定，等待角色注册与激活记录。</div>' : '<div class="loading">当前项目尚未生成角色 Agent 注册表；历史 generation 会继续按旧协议完成。</div>'}
+      ${worldArbiterUsage.usage_calls || worldArbiterUsage.tokens_in || worldArbiterUsage.tokens_out ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">World Arbiter 用量</span><span>${esc(fmtCharacterCost(worldArbiterUsage))} · ${fmtNum(worldArbiterUsage.tokens_in)} / ${fmtNum(worldArbiterUsage.tokens_out)} tokens</span></div></div>` : ""}
+      ${readinessUsage.usage_calls || readinessUsage.tokens_in || readinessUsage.tokens_out ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">章节就绪判断用量</span><span>${esc(fmtCharacterCost(readinessUsage))} · ${fmtNum(readinessUsage.tokens_in)} / ${fmtNum(readinessUsage.tokens_out)} tokens</span></div></div>` : ""}
       ${characterSuccessor ? `<div class="panel" style="margin-top:8px"><div class="kv"><span class="k">Successor generation</span><span><span class="tag rewrite">硬合同重排</span>　第 ${characterSuccessor.trigger_chapter} 章 · ${esc(characterSuccessor.plan_digest)}</span></div><div style="margin-top:6px">${esc(characterSuccessor.architect_summary || "")}</div><small style="color:var(--muted)">${(characterSuccessor.hard_contract_conflicts || []).map(esc).join("；")}</small></div>` : ""}
     </div>
-    <div class="sec"><h3>用量 · 总成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
+    <div class="sec"><h3>用量 · 账本记录成本 ${fmtMoney(d.cost_usd)}（缓存节省 ${fmtMoney(d.saved_usd)}）</h3>
       ${agentRows ? `<div class="table-wrap"><table><thead><tr><th>角色</th><th>输入 tokens</th><th>输出 tokens</th><th>成本</th></tr></thead><tbody>${agentRows}</tbody></table></div>`
                   : '<div class="loading">暂无用量数据。</div>'}
     </div>`;
@@ -1422,7 +1479,7 @@ document.addEventListener("click", e => {
 
 function renderLog(d) {
   const runtime = d.runtime || {};
-  const events = [...(runtime.recent_events || [])].reverse().map(e => `<div class="event-row ${e.failed ? "failed" : ""}"><time>${shortTime(e.time)}</time><span>${esc(e.agent) || "system"}</span><span>${esc(e.category) || "event"}</span><span>${esc(e.summary) || esc(e.detail)}</span></div>`).join("");
+  const events = [...(runtime.recent_events || [])].reverse().map(e => `<div class="event-row ${e.failed ? "failed" : ""}"><time>${shortTime(e.time)}</time><span>${esc(e.agent) || "system"}</span><span>${esc(e.category) || "event"}</span><span>${esc(e.summary) || esc(e.detail)}${e.failed && e.summary && e.detail ? `<details><summary>失败详情</summary><small>${esc(e.detail)}</small></details>` : ""}</span></div>`).join("");
   const lines = (d.log || []).map(l =>
     `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
   return `<div class="detail-kpis">
@@ -1440,15 +1497,24 @@ function renderLog(d) {
 /* ---------- 抽屉驱动 ---------- */
 async function loadTab(keepScroll) {
   if (!currentDetail) return;
+  const dir = currentDetail, tab = currentTab;
+  // A slow request must not pile up every polling interval or render into a
+  // different book/tab after navigation.
+  if (keepScroll && detailRequest?.dir === dir && detailRequest?.tab === tab) return;
+  detailRequest?.controller.abort();
+  const request = { dir, tab, controller: new AbortController() };
+  detailRequest = request;
+  const isCurrent = () => detailRequest === request && currentDetail === dir && currentTab === tab;
   const body = $("#d-body");
   try {
-    if (currentTab === "overview" || currentTab === "log") {
-      const d = await api("/api/novels/" + encodeURIComponent(currentDetail));
+    if (tab === "overview" || tab === "log") {
+      const d = await api("/api/novels/" + encodeURIComponent(dir), request.controller.signal);
+      if (!isCurrent()) return;
       $("#d-title").textContent = d.name;
       const ph = $("#d-phase");
       ph.textContent = phaseName[d.phase] || d.phase;
       ph.className = "pill phase-" + d.phase;
-      if (currentTab === "overview") { body.innerHTML = renderOverview(d); return; }
+      if (tab === "overview") { body.innerHTML = renderOverview(d); return; }
       const prev = $("#d-log");
       const stick = !keepScroll || !prev || (prev.scrollTop + prev.clientHeight >= prev.scrollHeight - 20);
       body.innerHTML = renderLog(d);
@@ -1456,15 +1522,20 @@ async function loadTab(keepScroll) {
       if (log && stick) log.scrollTop = log.scrollHeight;
       return;
     }
-    const d = await api(`/api/novels/${encodeURIComponent(currentDetail)}/${currentTab}`);
-    if (currentTab === "setting") body.innerHTML = renderSetting(d);
-    else if (currentTab === "cast") body.innerHTML = renderCast(d);
-    else if (currentTab === "growth") body.innerHTML = renderGrowth(d);
-    else if (currentTab === "plan") body.innerHTML = renderPlan(d);
-    else if (currentTab === "offscreen") body.innerHTML = renderOffscreen(d);
-    else if (currentTab === "quality") body.innerHTML = renderQuality(d);
+    const d = await api(`/api/novels/${encodeURIComponent(dir)}/${tab}`, request.controller.signal);
+    if (!isCurrent()) return;
+    if (tab === "setting") body.innerHTML = renderSetting(d);
+    else if (tab === "cast") body.innerHTML = renderCast(d);
+    else if (tab === "growth") body.innerHTML = renderGrowth(d);
+    else if (tab === "plan") body.innerHTML = renderPlan(d);
+    else if (tab === "offscreen") body.innerHTML = renderOffscreen(d);
+    else if (tab === "quality") body.innerHTML = renderQuality(d);
   } catch (e) {
-    body.innerHTML = `<div class="loading">加载失败：${esc(e.message)}，稍后自动重试…</div>`;
+    if (isCurrent() && e.name !== "AbortError") {
+      body.innerHTML = `<div class="loading">加载失败：${esc(e.message)}，稍后自动重试…</div>`;
+    }
+  } finally {
+    if (detailRequest === request) detailRequest = null;
   }
 }
 
@@ -1482,10 +1553,12 @@ function openDetail(dir) {
   drawer.classList.add("show");
   switchTab(currentTab || "overview");
   clearInterval(detailTimer);
-  detailTimer = setInterval(() => currentDetail && loadTab(true), 4000);
+  detailTimer = setInterval(() => !document.hidden && currentDetail && loadTab(true), 4000);
 }
 function closeDetail() {
   currentDetail = null;
+  detailRequest?.controller.abort();
+  detailRequest = null;
   clearInterval(detailTimer);
   overlay.classList.remove("show");
   drawer.classList.remove("show");
@@ -1495,7 +1568,13 @@ $("#d-close").addEventListener("click", closeDetail);
 document.addEventListener("keydown", e => e.key === "Escape" && closeDetail());
 
 refresh();
-setInterval(refresh, 4000);
+setInterval(() => !document.hidden && refresh(), 4000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    refresh();
+    if (currentDetail) loadTab(true);
+  }
+});
 </script>
 </body>
 </html>
