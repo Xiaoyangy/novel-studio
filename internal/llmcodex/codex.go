@@ -1958,10 +1958,19 @@ func (m *CodexModel) runCodexExec(ctx context.Context, prompt string, schema map
 			"elapsed_ms", time.Since(started).Milliseconds(),
 			"err", err,
 		)
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("codex exec 超过本次硬时限 %s: %w", remaining.Round(time.Second), runCtx.Err())
+		diagnostic := events.failureSummary()
+		if diagnostic != "" {
+			diagnostic = "; structured: " + diagnostic
+		} else if tail := tailStr(stderr.String(), 800); tail != "" {
+			diagnostic = "; stderr: " + tail
 		}
-		return "", fmt.Errorf("codex exec 失败: %w; stderr: %s", err, tailStr(stderr.String(), 800))
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("codex exec 超过本次硬时限 %s: %w%s", remaining.Round(time.Second), errors.Join(err, runCtx.Err()), diagnostic)
+		}
+		if errors.Is(runCtx.Err(), context.Canceled) {
+			return "", fmt.Errorf("codex exec 已取消: %w%s", errors.Join(err, runCtx.Err()), diagnostic)
+		}
+		return "", fmt.Errorf("codex exec 失败: %w%s", err, diagnostic)
 	}
 	data, err = os.ReadFile(outPath)
 	if err != nil {

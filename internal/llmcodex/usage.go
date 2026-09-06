@@ -3,6 +3,10 @@ package llmcodex
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/voocel/agentcore"
 )
@@ -141,6 +145,103 @@ type codexUsageEventWriter struct {
 	usage              agentcore.Usage
 	completed, dropped int
 	invalid            bool
+	lastError          codexTerminalFailure
+	lastFailedTurn     codexTerminalFailure
+}
+
+const (
+	maxCodexFailureCodeBytes    = 128
+	maxCodexFailureMessageBytes = 2048
+)
+
+// Only terminal-event code/message values survive the transient JSONL buffer.
+// No item body, reasoning, tool argument, agent message or raw event is retained.
+type codexTerminalFailure struct {
+	eventType string
+	code      string
+	message   string
+}
+
+func boundedCodexFailureText(text string, maxBytes int) string {
+	var out strings.Builder
+	space := false
+	truncated := false
+	for _, r := range text {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+			if out.Len() > 0 {
+				space = true
+			}
+			continue
+		}
+		extra := utf8.RuneLen(r)
+		if space {
+			extra++
+		}
+		if out.Len()+extra > maxBytes {
+			truncated = true
+			break
+		}
+		if space {
+			out.WriteByte(' ')
+			space = false
+		}
+		out.WriteRune(r)
+	}
+	if truncated {
+		const marker = " [truncated]"
+		if maxBytes <= len(marker) {
+			return marker[:max(0, maxBytes)]
+		}
+		value := out.String()
+		if len(value) > maxBytes-len(marker) {
+			value = value[:maxBytes-len(marker)]
+			for !utf8.ValidString(value) {
+				value = value[:len(value)-1]
+			}
+		}
+		return strings.TrimRight(value, " ") + marker
+	}
+	return out.String()
+}
+
+func codexFailureString(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return value
+}
+
+func codexFailureCode(raw json.RawMessage) string {
+	if value := codexFailureString(raw); value != "" {
+		return value
+	}
+	var value json.Number
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return value.String()
+}
+
+func (f codexTerminalFailure) summary() string {
+	if f.code == "" && f.message == "" {
+		return ""
+	}
+	result := f.eventType
+	if f.code != "" {
+		result += fmt.Sprintf(" code=%q", f.code)
+	}
+	if f.message != "" {
+		result += fmt.Sprintf(" message=%q", f.message)
+	}
+	return result
+}
+
+func (w *codexUsageEventWriter) failureSummary() string {
+	if summary := w.lastFailedTurn.summary(); summary != "" {
+		return summary
+	}
+	return w.lastError.summary()
 }
 
 func (w *codexUsageEventWriter) Write(data []byte) (int, error) {
@@ -181,12 +282,46 @@ func (w *codexUsageEventWriter) finish() {
 
 func (w *codexUsageEventWriter) consume(line []byte) {
 	var event struct {
-		Type  string          `json:"type"`
-		Usage json.RawMessage `json:"usage"`
+		Type    string          `json:"type"`
+		Usage   json.RawMessage `json:"usage"`
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+		Error   json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(line, &event) != nil || event.Type != "turn.completed" {
+	if json.Unmarshal(line, &event) != nil {
 		return
 	}
+	if event.Type == "error" || event.Type == "turn.failed" {
+		var nested struct {
+			Code    json.RawMessage `json:"code"`
+			Message json.RawMessage `json:"message"`
+		}
+		_ = json.Unmarshal(event.Error, &nested)
+		code, message := codexFailureCode(event.Code), codexFailureString(event.Message)
+		if event.Type == "turn.failed" || (code == "" && message == "") {
+			if value := codexFailureCode(nested.Code); value != "" {
+				code = value
+			}
+			if value := codexFailureString(nested.Message); value != "" {
+				message = value
+			}
+		}
+		failure := codexTerminalFailure{eventType: event.Type, code: boundedCodexFailureText(code, maxCodexFailureCodeBytes), message: boundedCodexFailureText(message, maxCodexFailureMessageBytes)}
+		if failure.code != "" || failure.message != "" {
+			if event.Type == "turn.failed" {
+				w.lastFailedTurn = failure
+			} else {
+				w.lastError = failure
+			}
+		}
+		return
+	}
+	if event.Type != "turn.completed" {
+		return
+	}
+	// A completed turn recovered earlier provider errors. A later process
+	// failure must not be blamed on an already recovered network attempt.
+	w.lastError, w.lastFailedTurn = codexTerminalFailure{}, codexTerminalFailure{}
 	var u struct {
 		Input     *int `json:"input_tokens"`
 		Output    *int `json:"output_tokens"`
