@@ -39,9 +39,10 @@ var runPipelineOutlineAllArchitect = func(
 	cfg bootstrap.Config,
 	bundle assets.Bundle,
 	prompt string,
+	liveOutputDir string,
 ) error {
 	cfg.DisableModelFailover = true
-	return agents.RunOutlineAllOperation(context.Background(), cfg, bundle, cfg.OutputDir, prompt)
+	return runPipelineOutlineAllArchitectWithUsage(context.Background(), cfg, bundle, prompt, agents.RunOutlineAllOperation, liveOutputDir)
 }
 
 func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) {
@@ -464,12 +465,19 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err := copyPipelineMetadataForOutlineAllPublish(cfg.OutputDir, candidateDir); err != nil {
 		return err
 	}
+	usageCopy, err := copyPipelineOutlineAllUsageForPublish(cfg.OutputDir, candidateDir)
+	if err != nil {
+		return fmt.Errorf("outline-all preserve authoritative accounting before publish: %w", err)
+	}
 	expectedLiveRoot, err := store.DirectoryContentRoot(cfg.OutputDir)
 	if err != nil {
 		return err
 	}
 	if receipt.ExpectedLiveDirectoryRoot != "" && receipt.ExpectedLiveDirectoryRoot != expectedLiveRoot {
 		return fmt.Errorf("outline-all expected live directory root drifted before publish")
+	}
+	if err := verifyPipelineOutlineAllUsageCopy(cfg.OutputDir, usageCopy); err != nil {
+		return err
 	}
 	receipt, err = candidate.UpdateOutlineAllExecutionReceipt(receipt.ReceiptDigest, func(current *domain.OutlineAllExecutionReceipt) error {
 		current.ExpectedLiveDirectoryRoot = expectedLiveRoot
@@ -911,7 +919,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 		if err != nil {
 			return receipt, err
 		}
-		if err := runPipelineOutlineAllArchitect(cfg, bundle, prompt); err != nil {
+		if err := runPipelineOutlineAllArchitect(cfg, bundle, prompt, live.Dir()); err != nil {
 			return receipt, fmt.Errorf("outline-all operation %d architect: %w", action.Operation, err)
 		}
 		if err := validatePipelineOutlineAllCandidateNamespace(live.Dir(), st.Dir(), receipt.AttemptID, true); err != nil {

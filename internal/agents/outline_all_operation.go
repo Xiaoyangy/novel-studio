@@ -41,11 +41,7 @@ func OutlineAllOperationProtocolDigest(architectLongPrompt string) (string, erro
 	})
 }
 
-type outlineAllOperationModel struct {
-	ChatModel agentcore.ChatModel
-	Provider  string
-	Name      string
-}
+type outlineAllOperationModel = directAgentModelIdentity
 
 // RunOutlineAllOperation runs one frozen outline-all operation directly on
 // the configured Architect primary model. It does not construct a
@@ -57,6 +53,7 @@ func RunOutlineAllOperation(
 	bundle assets.Bundle,
 	candidateOutputDir string,
 	prompt string,
+	recorders ...UsageRecorder,
 ) error {
 	candidateOutputDir = strings.TrimSpace(candidateOutputDir)
 	prompt = strings.TrimSpace(prompt)
@@ -89,7 +86,7 @@ func RunOutlineAllOperation(
 		ChatModel: model,
 		Provider:  provider,
 		Name:      name,
-	}, tools.NewSaveFoundationTool(st))
+	}, tools.NewSaveFoundationTool(st), recorders...)
 }
 
 func runOutlineAllOperationWithModel(
@@ -100,6 +97,7 @@ func runOutlineAllOperationWithModel(
 	prompt string,
 	resolved outlineAllOperationModel,
 	saveFoundation agentcore.Tool,
+	recorders ...UsageRecorder,
 ) error {
 	if st == nil || resolved.ChatModel == nil || saveFoundation == nil {
 		return fmt.Errorf("outline-all direct Architect dependencies are incomplete")
@@ -119,6 +117,14 @@ func runOutlineAllOperationWithModel(
 	logger := st.Sessions.SubAgentLogger(func(string) (string, string) {
 		return resolved.Provider, resolved.Name
 	})
+	usage := outlineAllOperationUsage{resolved: resolved, record: func(msg agentcore.AgentMessage) {
+		logger("architect_outline_all", prompt, msg)
+		for _, record := range recorders {
+			if record != nil {
+				record("architect_outline_all", msg)
+			}
+		}
+	}}
 
 	var mutationMu sync.Mutex
 	mutationComplete := false
@@ -165,6 +171,8 @@ func runOutlineAllOperationWithModel(
 		return []agentcore.AgentMessage{agentcore.UserMsg(reminder)}
 	}
 
+	model := &outlineAllUsageModel{ChatModel: resolved.ChatModel, usage: &usage}
+	attachDirectUsageLifecycle(ctx, model, "architect_outline_all")
 	events := agentcore.AgentLoop(
 		ctx,
 		[]agentcore.AgentMessage{
@@ -179,7 +187,7 @@ func runOutlineAllOperationWithModel(
 			Tools:        []agentcore.Tool{saveFoundation},
 		},
 		agentcore.LoopConfig{
-			Model:               resolved.ChatModel,
+			Model:               model,
 			MaxTurns:            cappedMaxTurns(cfg.ResolveMaxTurns("architect", outlineAllOperationMaxTurns), outlineAllOperationMaxTurns),
 			MaxRetries:          subagentMaxRetries,
 			MaxToolErrors:       0,
@@ -191,12 +199,15 @@ func runOutlineAllOperationWithModel(
 			Middlewares:         []agentcore.ToolMiddleware{preventSecondMutation},
 			StopAfterToolResult: stopAfterSuccessfulSave,
 			OnMessage: func(msg agentcore.AgentMessage) {
-				logger("architect_outline_all", prompt, msg)
+				usage.message(msg)
 			},
 		},
 	)
 	var runErr error
 	for event := range events {
+		if event.Type == agentcore.EventError || event.Type == agentcore.EventRetry {
+			usage.observeError(event.Err)
+		}
 		if event.Type == agentcore.EventError && event.Err != nil {
 			runErr = event.Err
 		}
