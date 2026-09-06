@@ -31,5 +31,5 @@ func (s *UsageStore) Load() (*domain.UsageState, error) {
 // Save 把 state 完整覆盖落盘。调用方负责 debounce / 节流。
 func (s *UsageStore) Save(state domain.UsageState) error {
 	state.Schema = domain.UsageSchemaVersion
-	return s.io.WriteJSON("meta/usage.json", state)
+	return s.WithAuditTransaction(func(tx *UsageAuditTransaction) error { return tx.Save(state) })
 }

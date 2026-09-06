@@ -13,12 +13,26 @@ const UsageSchemaVersion = 2
 // 它只服务 UI 短期诊断，进程重启从空开始重新积累几轮即可恢复语义。
 // MissingAssistantUsage 保留持久化，跨重启累积更有诊断价值。
 type UsageState struct {
-	Schema       int                         `json:"schema"`
-	UpdatedAt    time.Time                   `json:"updated_at"`
-	Overall      AgentUsageTotals            `json:"overall"`
-	PerAgent     map[string]AgentUsageTotals `json:"per_agent"`
-	PerModel     map[string]AgentUsageTotals `json:"per_model,omitempty"`
-	MissingUsage int                         `json:"missing_assistant_usage"`
+	Schema            int                         `json:"schema"`
+	UpdatedAt         time.Time                   `json:"updated_at"`
+	Overall           AgentUsageTotals            `json:"overall"`
+	PerAgent          map[string]AgentUsageTotals `json:"per_agent"`
+	PerModel          map[string]AgentUsageTotals `json:"per_model,omitempty"`
+	MissingUsage      int                         `json:"missing_assistant_usage"`
+	AccountedUsageIDs map[string]string           `json:"accounted_usage_ids,omitempty"`
+	AuditOffset       int64                       `json:"audit_offset,omitempty"`
+	PendingUsageCalls map[string]UsageCallStart   `json:"pending_usage_calls,omitempty"`
+}
+
+// UsageCallStart is pure process/accounting provenance, never prompt text.
+// A started call has no token or cost claim until its ordinary usage record
+// closes it; an abandoned pending call remains explicitly visible on restart.
+type UsageCallStart struct {
+	Agent        string `json:"agent"`
+	ProcessID    int    `json:"process_id"`
+	ProcessStart string `json:"process_start,omitempty"`
+	StartedAt    string `json:"started_at"`
+	GenerationID string `json:"generation_id,omitempty"`
 }
 
 // AgentUsageTotals 是单个角色（或 overall）累计计数的可持久化形态。

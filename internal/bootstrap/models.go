@@ -120,19 +120,24 @@ func (m *SwappableModel) Current() (provider, name string) {
 
 // ModelSet 持有按角色分配的模型实例，未配置的角色回退到默认模型。
 type ModelSet struct {
-	Default   *SwappableModel
-	models    map[string]*SwappableModel
-	fallbacks map[string][]modelTarget
-	config    Config
+	Default          *SwappableModel
+	models           map[string]*SwappableModel
+	fallbacks        map[string][]modelTarget
+	config           Config
+	selectionMu      sync.RWMutex
+	decoratorMu      sync.RWMutex
+	attemptDecorator ModelAttemptDecorator
 }
 
 // ForRole 返回指定角色的模型，未配置时返回默认模型。
 // reviewer 未配置时回落 editor；drafter 未配置时回落 writer。
 func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
+	ms.selectionMu.RLock()
+	defer ms.selectionMu.RUnlock()
 	if m, ok := ms.models[resolveRoleAlias(ms, role)]; ok {
-		return m
+		return ms.observeRole(role, m)
 	}
-	return ms.Default
+	return ms.observeRole(role, ms.Default)
 }
 
 // resolveRoleAlias 解析内部 agent 别名和可选角色的继承链（fallbacks 同规则）。
@@ -174,6 +179,8 @@ type FallbackTarget struct {
 
 // FallbackTargets 返回某角色按顺序配置的备用 provider/model（已构建实例），无则空。
 func (ms *ModelSet) FallbackTargets(role string) []FallbackTarget {
+	ms.selectionMu.RLock()
+	defer ms.selectionMu.RUnlock()
 	targets := ms.fallbacks[resolveRoleAlias(ms, role)]
 	out := make([]FallbackTarget, 0, len(targets))
 	for _, t := range targets {
@@ -185,25 +192,31 @@ func (ms *ModelSet) FallbackTargets(role string) []FallbackTarget {
 // ForRoleWithFailover 返回带有单次请求级 fallback 的角色模型。
 // 仅当该角色显式配置了 fallbacks 时生效；未配置时退化为普通模型。
 func (ms *ModelSet) ForRoleWithFailover(role string, report FailoverReporter) agentcore.ChatModel {
+	ms.selectionMu.RLock()
+	defer ms.selectionMu.RUnlock()
+	accountingRole := role
 	role = resolveRoleAlias(ms, role)
 	primary, ok := ms.models[role]
 	if !ok {
-		return ms.Default
+		return ms.observeRole(accountingRole, ms.Default)
 	}
 	targets := ms.fallbacks[role]
 	if len(targets) == 0 {
-		return primary
+		return ms.observeRole(accountingRole, primary)
 	}
 	return &failoverModel{
-		role:      role,
-		primary:   primary,
-		fallbacks: append([]modelTarget(nil), targets...),
-		report:    report,
+		role:           role,
+		primary:        primary,
+		fallbacks:      append([]modelTarget(nil), targets...),
+		report:         report,
+		accountingRole: accountingRole, decorate: ms.getAttemptDecorator(),
 	}
 }
 
 // Summary 返回模型分配摘要（供日志使用）。
 func (ms *ModelSet) Summary() string {
+	ms.selectionMu.RLock()
+	defer ms.selectionMu.RUnlock()
 	var parts []string
 	for role, m := range ms.models {
 		provider, name := m.Current()
@@ -220,6 +233,8 @@ func (ms *ModelSet) Summary() string {
 // CurrentSelection 返回角色当前生效的 provider/model。
 // role 为空或 "default" 时返回默认模型。
 func (ms *ModelSet) CurrentSelection(role string) (provider, model string, explicit bool) {
+	ms.selectionMu.RLock()
+	defer ms.selectionMu.RUnlock()
 	if role == "" || role == "default" {
 		provider, model = ms.Default.Current()
 		return provider, model, true
@@ -244,6 +259,8 @@ func (ms *ModelSet) Swap(role, provider, model string) error {
 	if err != nil {
 		return fmt.Errorf("切换模型失败: %w", err)
 	}
+	ms.selectionMu.Lock()
+	defer ms.selectionMu.Unlock()
 
 	if role == "" || role == "default" {
 		ms.Default.Swap(provider, model, next)
@@ -401,15 +418,17 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 }
 
 type failoverModel struct {
-	role      string
-	primary   *SwappableModel
-	fallbacks []modelTarget
-	report    FailoverReporter
+	role           string
+	primary        *SwappableModel
+	fallbacks      []modelTarget
+	report         FailoverReporter
+	accountingRole string
+	decorate       ModelAttemptDecorator
 }
 
 func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	current := m.currentTarget()
-	resp, err := current.model.Generate(ctx, messages, tools, callOptionsForTarget(opts, current)...)
+	resp, err := m.attemptModel(ctx, current).Generate(ctx, messages, tools, callOptionsForTarget(opts, current)...)
 	if err == nil {
 		return resp, nil
 	}
@@ -419,7 +438,7 @@ func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Messa
 		return nil, err
 	}
 	m.reportFailover(current, next, reason, err)
-	return next.model.Generate(ctx, messages, tools, callOptionsForTarget(opts, next)...)
+	return m.attemptModel(ctx, next).Generate(ctx, messages, tools, callOptionsForTarget(opts, next)...)
 }
 
 func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
@@ -510,6 +529,9 @@ func (m *failoverModel) currentTarget() modelTarget {
 	if m.primary == nil {
 		return modelTarget{}
 	}
+	if m.decorate != nil {
+		return m.primary.snapshotTarget()
+	}
 	provider, name := m.primary.Current()
 	return modelTarget{
 		provider: provider,
@@ -586,12 +608,12 @@ func (m *failoverModel) startAttempt(ctx context.Context, target modelTarget, me
 	}
 
 	targetOpts := callOptionsForTarget(opts, target)
-	streamCh, err := target.model.GenerateStream(ctx, messages, tools, targetOpts...)
+	streamCh, err := m.attemptModel(ctx, target).GenerateStream(ctx, messages, tools, targetOpts...)
 	if err == nil {
 		return streamCh, nil, nil
 	}
 
-	resp, genErr := target.model.Generate(ctx, messages, tools, targetOpts...)
+	resp, genErr := m.attemptModel(ctx, target).Generate(ctx, messages, tools, targetOpts...)
 	if genErr != nil {
 		return nil, nil, genErr
 	}

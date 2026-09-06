@@ -31,6 +31,9 @@ import (
 // architect_short / architect_long 都共用同一个 architect role 配置。
 // 跟 host.agentRoleName 同义，因为 build 与 host 互不依赖故各持一份。
 func agentToRole(name string) string {
+	if name == "plan_grounding" {
+		return "world_arbiter"
+	}
 	if strings.HasPrefix(name, "character_") {
 		return "character"
 	}
@@ -354,7 +357,7 @@ func BuildCoordinatorWithOptions(
 	}
 	// 用户规则服务：归一化各来源 → 确定性合并 → 落盘本书快照。Coordinator 的
 	// save_user_rules 工具复用它做运行中更新；归一化用 Default 模型（与 Host 开书侧一致）。
-	userRulesSvc := userrules.NewService(store, models.Default, rules.DefaultOptions())
+	userRulesSvc := userrules.NewService(store, models.ForDefaultPurpose("coordinator"), rules.DefaultOptions())
 	readChapter := tools.NewReadChapterTool(store)
 	askUser := tools.NewAskUserTool()
 

@@ -44,8 +44,8 @@ type Host struct {
 	observer                   *observer
 	router                     *flow.Dispatcher
 	usage                      *UsageTracker
-	usageCancel                context.CancelFunc // 停掉 autoSaveLoop 并触发最后一次 flush
-	budget                     *BudgetSentinel    // 预算政策；未启用为 nil（方法 nil 安全）
+	usageAccounting            *hostProviderAccounting
+	budget                     *BudgetSentinel // 预算政策；未启用为 nil（方法 nil 安全）
 	budgetDetach               func()
 	notifier                   *notify.Notifier // 无人值守告警；未启用为 nil（Send nil 安全）
 	preserveCheckpointsOnStart bool
@@ -118,32 +118,16 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 	}
 	slog.Info("模型就绪", "module", "boot", "summary", models.Summary())
 
-	usage := NewUsageTracker(models, store)
-	// 优先读 meta/usage.json；以下情况都走 sessions/*.jsonl 一次性回填：
-	//   - 文件不存在（首次升级到带持久化的版本）
-	//   - schema 版本不匹配（未来升级后丢弃旧格式）
-	//   - 文件存在但损坏 / IO 错误（不能让坏数据让累计永久归零）
-	// 回填完立即 SaveNow，把结果固化下来，下次启动直接 Load 命中。
-	loaded, loadErr := usage.LoadFromStore()
-	if loadErr != nil {
-		slog.Warn("usage 加载失败，将尝试从 sessions 回填", "module", "usage", "err", loadErr)
+	accounting, err := newHostProviderAccounting(store)
+	if err != nil {
+		return nil, fmt.Errorf("load authoritative host usage: %w", err)
 	}
-	if !loaded {
-		if n, err := usage.ReplaySessions(cfg.OutputDir); err != nil {
-			slog.Warn("usage replay 失败", "module", "usage", "err", err)
-		} else if n > 0 {
-			slog.Info("usage 从 session 回填完成", "module", "usage", "messages", n)
-			if err := usage.SaveNow(); err != nil {
-				slog.Warn("usage 回填后保存失败", "module", "usage", "err", err)
-			}
-		}
-	}
-	usageCtx, usageCancel := context.WithCancel(context.Background())
-	usage.StartAutoSave(usageCtx)
+	models.SetAttemptDecorator(accounting.decorate)
+	usage := accounting.meter.Tracker()
 
 	var router *flow.Dispatcher
 	var budget *BudgetSentinel
-	coordinator, askUser, restore, coordinatorCtxMgr, applyThinking := agents.BuildCoordinatorWithOptions(cfg, store, models, bundle, usage.Record, func(string) {
+	coordinator, askUser, restore, coordinatorCtxMgr, applyThinking := agents.BuildCoordinatorWithOptions(cfg, store, models, bundle, accounting.record, func(string) {
 		if budget != nil && budget.HandleBoundary() {
 			return
 		}
@@ -170,7 +154,7 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		askUser:                    askUser,
 		writerRestore:              restore,
 		usage:                      usage,
-		usageCancel:                usageCancel,
+		usageAccounting:            accounting,
 		preserveCheckpointsOnStart: opts.PreserveCheckpointsOnStart,
 		disableFlowRouter:          opts.DisableFlowRouter,
 		events:                     make(chan Event, 100),
@@ -179,6 +163,9 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		lifecycle:                  lifecycleIdle,
 	}
 	h.observer = newObserver(coordinator, store, h.emitEvent, h.emitDelta, h.emitClear)
+	accounting.onError = func(err error) {
+		h.abortWithEvent("用量审计写入失败，停止继续调用模型："+err.Error(), "error")
+	}
 	if cfg.Notify.IsEnabled() {
 		h.notifier = notify.New(cfg.Notify.Command, cfg.Notify.Events)
 	}
@@ -194,11 +181,18 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 	); sentinel != nil {
 		h.budget = sentinel
 		budget = sentinel
+		// Background-purpose calls (for example normalization/compaction) may
+		// not share the active coordinator's cancellation. A hard budget must
+		// therefore also refuse the next provider dispatch. Soft budgets keep
+		// their existing sub-agent-boundary behavior.
+		if cfg.Budget.HardStop {
+			accounting.beforeCall = sentinel.Refuse
+		}
 		usage.SetOnCost(sentinel.OnCost)
 		h.budgetDetach = coordinator.Subscribe(sentinel.HandleEvent)
 		// 计费盲区告警：模型不报 usage 时成本恒 0，预算永不触发——保险丝没接上必须喊人。
 		usage.SetOnMissingUsage(func() {
-			const blind = "预算盲区: 模型未返回 usage 数据，成本统计为 0，预算上限不会触发（自定义模型请确认注册表价格或上游 include_usage）"
+			const blind = "预算盲区：存在未计价或未知调用，当前成本仅是已知小计，不代表完整账单。"
 			h.emitEvent(Event{Time: time.Now(), Category: "SYSTEM", Summary: blind, Level: "warn"})
 			h.notifier.Send(notify.Notification{Kind: "budget", Level: "warn", Title: "novel-studio: 预算", Body: blind})
 		})
@@ -244,7 +238,7 @@ func ensureHostRAG(ctx context.Context, cfg bootstrap.Config) (bool, error) {
 // 归一化失败只降级不报错（增强路径）；只有快照无法落盘才返回 error 中止开书——
 // 后续运行将没有稳定事实源（见设计 §失败与降级）。
 func (h *Host) PrepareUserRules(rawPrompt string) error {
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.ForDefaultPurpose("coordinator"), rules.DefaultOptions())
 	snap, err := svc.Build(context.Background(), rawPrompt)
 	if err != nil {
 		return fmt.Errorf("用户规则快照落盘失败，无法继续: %w", err)
@@ -256,7 +250,7 @@ func (h *Host) PrepareUserRules(rawPrompt string) error {
 // ensureUserRules 惰性确保快照存在（老书无快照时按 system_defaults + rules 文件生成）。
 // 恢复路径调用，让老书也能拿到 rules 文件的归一化结果。
 func (h *Host) ensureUserRules() {
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.ForDefaultPurpose("coordinator"), rules.DefaultOptions())
 	snap, err := svc.GetOrBuild(context.Background())
 	if err != nil {
 		slog.Warn("用户规则快照读取/生成失败，运行时将退到内置默认", "module", "rules", "err", err)
@@ -526,10 +520,8 @@ func (h *Host) abortWithEvent(summary, level string) bool {
 
 // Close 终止 coordinator 并关闭事件通道。
 //
-// Usage 持久化语义：先取消 autoSaveLoop（它自行 flush 最后一次 dirty 状态），
-// 再补一次同步 SaveNow 收尾。已知缺口：AbortSilent 之后若仍有 in-flight LLM
-// 调用回来，触发的 OnMessage → Record 会更新内存但**不会被持久化**。这部分
-// "最末几百 token" 的丢失在下次启动时会由 session jsonl replay 自动补回。
+// Provider observers keep the durable meter alive after AbortSilent: late
+// responses are written synchronously, without relying on session replay.
 func (h *Host) Close() {
 	h.observer.setAborting(true)
 	h.coordinator.AbortSilent()
@@ -537,11 +529,13 @@ func (h *Host) Close() {
 		h.budgetDetach()
 		h.budgetDetach = nil
 	}
-	if h.usageCancel != nil {
-		h.usageCancel()
-		h.usageCancel = nil
+	var usageErr error
+	if h.usageAccounting != nil {
+		usageErr = h.usageAccounting.flush()
+	} else if h.usage != nil {
+		usageErr = h.usage.SaveNow()
 	}
-	if err := h.usage.SaveNow(); err != nil {
+	if err := usageErr; err != nil {
 		slog.Warn("usage 退出前落盘失败", "module", "usage", "err", err)
 	}
 	h.closeTerminalChannels()

@@ -26,8 +26,8 @@ const recentSampleCap = 10
 // 工作机制：
 //   - 每次 agent 的 OnMessage 回调触发时调用 Record(agentName, msg)
 //   - agentName 映射到 role（architect_* 归一为 architect），查 ModelSet 当前该 role 绑定的模型
-//   - 用 models.DefaultRegistry 查模型价格，按非缓存输入/输出/缓存读/缓存写四项累乘
-//   - 注册表无此模型时，退回 msg.Usage.Cost.Total（provider 自带，可能为 0）
+//   - 优先使用 provider 自带的 msg.Usage.Cost.Total（明确的 0 也有效）
+//   - 无 provider 计价时，用 models.DefaultRegistry 和共享 token 计价函数估算
 //   - 模型热切换（/model）后续消息自动按新模型算价，旧消息保留旧成本
 //
 // 同时维护 per-role 维度（writer/editor/architect/coordinator）：
@@ -66,7 +66,12 @@ type UsageTracker struct {
 
 	// traceSink 调用级 JSONL trace（meta/runtime/llm_calls.jsonl，gen_ai.* 字段）。
 	// 纯观察层：nil 安全，写失败不影响记账。
-	traceSink *aitrace.Sink
+	traceSink         *aitrace.Sink
+	accountedUsageIDs map[string]string
+	auditOffset       int64
+	pendingUsageCalls map[string]domain.UsageCallStart
+	replayedUsageIDs  map[string]string
+	replayLegacyUsage int
 }
 
 // usageSample 是单次 OnMessage 的命中样本，仅记录命中率分子分母。
@@ -127,7 +132,62 @@ func (t *UsageTracker) Record(agentName string, msg agentcore.AgentMessage) {
 	}
 	role := agentRoleName(agentName)
 	provider, modelName := usageActualModel(m.Usage)
-	t.accumulate(role, provider, modelName, *m.Usage)
+	t.accumulateMessageUsage(role, provider, modelName, *m.Usage, m.Metadata)
+}
+
+func (t *UsageTracker) accumulateMessageUsage(role, provider, modelName string, u agentcore.Usage, metadata map[string]any) {
+	if raw, exists := metadata["codex_usage_breakdown"]; exists && u.Cost == nil {
+		var totalCost, totalSaved float64
+		capable := false
+		calls, err := models.DecodeTokenUsageBreakdown(raw)
+		if err == nil && len(calls) > 0 {
+			complete, _ := metadata["codex_usage_breakdown_complete"].(bool)
+			if !complete {
+				t.flagMissingUsage(role)
+			}
+			for _, call := range calls {
+				if call == nil {
+					t.flagMissingUsage(role)
+					continue
+				}
+				usage := agentcore.Usage{Input: call.Input, Output: call.Output, CacheRead: call.CacheRead, CacheWrite: call.CacheWrite}
+				if call.Cost != nil {
+					usage.Cost = &agentcore.Cost{Total: call.Cost.Total}
+				}
+				actualModel := strings.TrimSpace(call.Model)
+				if actualModel == "" {
+					actualModel = modelName
+				}
+				_, actualModel = t.effectiveModel(role, call.Provider, actualModel)
+				cost, saved, cacheCapable := t.resolveCost(actualModel, usage)
+				totalCost += cost
+				totalSaved += saved
+				capable = capable || cacheCapable
+			}
+			provider, modelName = t.effectiveModel(role, provider, modelName)
+			t.accumulateResolved(role, provider, modelName, u, totalCost, totalSaved, capable)
+			return
+		}
+		// A declared but unreadable breakdown cannot justify applying a
+		// long-context tier to an aggregate. Preserve tokens and flag the blind
+		// spot rather than manufacturing a full price.
+		t.flagMissingUsage(role)
+		provider, modelName = t.effectiveModel(role, provider, modelName)
+		t.accumulateResolved(role, provider, modelName, u, 0, 0, false)
+		return
+	}
+	provider, modelName = t.effectiveModel(role, provider, modelName)
+	if provider == "codex-cli" && u.Cost == nil {
+		if entry, ok := models.DefaultRegistry().Resolve(modelName); ok && models.TokenUsageCrossesPricingTier(usageTokenCounts(u), *entry) {
+			// Historical aggregate CLI records do not say whether any single
+			// request crossed the tier. Keep their tokens and mark the price
+			// unavailable rather than guessing a long-context surcharge.
+			t.flagMissingUsage(role)
+			t.accumulateResolved(role, provider, modelName, u, 0, 0, false)
+			return
+		}
+	}
+	t.accumulate(role, provider, modelName, u)
 }
 
 func usageActualModel(u *agentcore.Usage) (provider, modelName string) {
@@ -183,7 +243,10 @@ func (t *UsageTracker) notifyDirty() {
 func (t *UsageTracker) accumulate(role, provider, modelName string, u agentcore.Usage) {
 	provider, modelName = t.effectiveModel(role, provider, modelName)
 	cost, saved, capable := t.resolveCost(modelName, u)
+	t.accumulateResolved(role, provider, modelName, u, cost, saved, capable)
+}
 
+func (t *UsageTracker) accumulateResolved(role, provider, modelName string, u agentcore.Usage, cost, saved float64, capable bool) {
 	t.mu.Lock()
 	addUsage(&t.overall, u, cost, saved, capable)
 
@@ -370,12 +433,15 @@ func (t *UsageTracker) Snapshot() domain.UsageState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	state := domain.UsageState{
-		Schema:       domain.UsageSchemaVersion,
-		UpdatedAt:    time.Now(),
-		Overall:      totalsSnapshot(&t.overall),
-		PerAgent:     make(map[string]domain.AgentUsageTotals, len(t.perAgent)),
-		PerModel:     make(map[string]domain.AgentUsageTotals, len(t.perModel)),
-		MissingUsage: t.missingAssistantUsage,
+		Schema:            domain.UsageSchemaVersion,
+		UpdatedAt:         time.Now(),
+		Overall:           totalsSnapshot(&t.overall),
+		PerAgent:          make(map[string]domain.AgentUsageTotals, len(t.perAgent)),
+		PerModel:          make(map[string]domain.AgentUsageTotals, len(t.perModel)),
+		MissingUsage:      t.missingAssistantUsage,
+		AccountedUsageIDs: cloneAccountedUsageIDs(t.accountedUsageIDs),
+		AuditOffset:       t.auditOffset,
+		PendingUsageCalls: clonePendingUsageCalls(t.pendingUsageCalls),
 	}
 	for role, v := range t.perAgent {
 		state.PerAgent[role] = totalsSnapshot(v)
@@ -490,6 +556,31 @@ func (t *UsageTracker) applyState(state domain.UsageState) {
 		}
 	}
 	t.missingAssistantUsage = state.MissingUsage
+	t.accountedUsageIDs = cloneAccountedUsageIDs(state.AccountedUsageIDs)
+	t.auditOffset = state.AuditOffset
+	t.pendingUsageCalls = clonePendingUsageCalls(state.PendingUsageCalls)
+}
+
+func clonePendingUsageCalls(calls map[string]domain.UsageCallStart) map[string]domain.UsageCallStart {
+	if len(calls) == 0 {
+		return nil
+	}
+	clone := make(map[string]domain.UsageCallStart, len(calls))
+	for id, call := range calls {
+		clone[id] = call
+	}
+	return clone
+}
+
+func cloneAccountedUsageIDs(ids map[string]string) map[string]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	copy := make(map[string]string, len(ids))
+	for id, digest := range ids {
+		copy[id] = digest
+	}
+	return copy
 }
 
 // totalsSnapshot 把内存 agentTotals 拷贝成可持久化 domain.AgentUsageTotals。
@@ -608,36 +699,37 @@ func (t *UsageTracker) PerModel() []AgentUsage {
 }
 
 // resolveCost 同时返回本次消息的 cost / saved / capable。
-//   - cost: 注册表命中按 4 项累乘；未命中回落 provider 自带 cost
+//   - cost: provider cost 优先；无报价时按注册表估算
 //   - saved: 仅注册表命中、CacheRead > 0、且 InputCost > CacheReadCost 时 > 0
 //   - capable: 注册表命中且该模型 CacheReadCostPer1M > 0 → 已知支持 prompt caching
 //
 // modelName 优先用调用方传入的（replay 时来自 session jsonl 的 _meta.model）。
 func (t *UsageTracker) resolveCost(modelName string, u agentcore.Usage) (cost, saved float64, capable bool) {
-	if entry, ok := models.DefaultRegistry().Resolve(modelName); ok {
-		c := computeCost(u, *entry)
-		s := computeSaved(u, *entry)
-		canCache := entry.CacheReadCostPer1M > 0
-		if c > 0 {
-			return c, s, canCache
-		}
-	}
+	entry, _ := models.DefaultRegistry().Resolve(modelName)
+	var reported *float64
 	if u.Cost != nil {
-		return u.Cost.Total, 0, false
+		reported = &u.Cost.Total
 	}
-	return 0, 0, false
+	quote := models.ResolveTokenCost(usageTokenCounts(u), entry, reported)
+	if entry != nil {
+		return quote.USD, computeSaved(u, *entry), entry.CacheReadCostPer1M > 0
+	}
+	return quote.USD, 0, false
 }
 
 // agentRoleName 把 subagent 名字归一到 role 名。
 // architect_short/mid/long 都归到 architect；渲染和推演内部 agent 归到实际模型角色。
 func agentRoleName(agentName string) string {
+	if agentName == "plan_grounding" {
+		return "world_arbiter"
+	}
 	if strings.HasPrefix(agentName, "character_") {
 		return "character"
 	}
 	if strings.HasPrefix(agentName, "architect_") {
 		return "architect"
 	}
-	if strings.HasPrefix(agentName, "convergence_planner_fresh_") {
+	if strings.HasPrefix(agentName, "convergence_planner_") {
 		return "writer"
 	}
 	if agentName == "world_simulator" {
@@ -663,28 +755,16 @@ func agentRoleName(agentName string) string {
 // 因此 nonCachedInput = u.Input - u.CacheRead 在所有 provider 都成立。
 // 兜底分支保留是为了应对未来某个 provider 误返脏数据时不至于崩。
 func computeCost(u agentcore.Usage, e models.ModelEntry) float64 {
-	nonCachedInput := u.Input - u.CacheRead
-	if nonCachedInput < 0 {
-		nonCachedInput = u.Input
-	}
-	c := 0.0
-	c += float64(nonCachedInput) * e.InputCostPer1M / 1_000_000
-	c += float64(u.Output) * e.OutputCostPer1M / 1_000_000
-	c += float64(u.CacheRead) * e.CacheReadCostPer1M / 1_000_000
-	c += float64(u.CacheWrite) * e.CacheWriteCostPer1M / 1_000_000
-	return c
+	return models.ComputeTokenCost(usageTokenCounts(u), e)
+}
+
+func usageTokenCounts(u agentcore.Usage) models.TokenUsage {
+	return models.TokenUsage{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite}
 }
 
 // computeSaved 估算 CacheRead 命中相对于"按普通输入价计费"省下的美元。
 // 注意 CacheWrite 的溢价不抵扣 — 它属于"为后续命中铺路"的必要投入，
 // 真实收益靠后续 CacheRead 累计回收。
 func computeSaved(u agentcore.Usage, e models.ModelEntry) float64 {
-	if u.CacheRead <= 0 || e.InputCostPer1M <= 0 {
-		return 0
-	}
-	delta := e.InputCostPer1M - e.CacheReadCostPer1M
-	if delta <= 0 {
-		return 0
-	}
-	return float64(u.CacheRead) * delta / 1_000_000
+	return models.ComputeTokenCacheSavings(usageTokenCounts(u), e)
 }
