@@ -51,7 +51,8 @@ type modelTarget struct {
 }
 
 type modelCreateOptions struct {
-	temperature float64
+	temperature   float64
+	contextWindow int
 }
 
 // SwappableModel 是可热切换的 ChatModel 包装器。
@@ -239,7 +240,7 @@ func (ms *ModelSet) Swap(role, provider, model string) error {
 	if !ok {
 		return fmt.Errorf("provider %q is not configured: %w", provider, errs.ErrConfig)
 	}
-	next, err := createModelFromConfig(provider, model, pc, make(map[string]agentcore.ChatModel), createOptionsForRole(role))
+	next, err := createModelFromConfig(provider, model, pc, make(map[string]agentcore.ChatModel), createOptionsForModel(ms.config, role, model))
 	if err != nil {
 		return fmt.Errorf("切换模型失败: %w", err)
 	}
@@ -277,7 +278,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 
 	// 创建默认模型
 	defaultPC := cfg.DefaultProviderConfig()
-	defaultModel, err := createModelFromConfig(cfg.Provider, cfg.ModelName, defaultPC, cache)
+	defaultModel, err := createModelFromConfig(cfg.Provider, cfg.ModelName, defaultPC, cache, createOptionsForModel(cfg, "default", cfg.ModelName))
 	if err != nil {
 		return nil, fmt.Errorf("default model: %w", err)
 	}
@@ -295,7 +296,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 		if !ok {
 			return nil, fmt.Errorf("role %s references unknown provider %q: %w", role, rc.Provider, errs.ErrConfig)
 		}
-		m, err := createModelFromConfig(rc.Provider, rc.Model, pc, cache, createOptionsForRole(role))
+		m, err := createModelFromConfig(rc.Provider, rc.Model, pc, cache, createOptionsForModel(cfg, role, rc.Model))
 		if err != nil {
 			return nil, fmt.Errorf("role %s model: %w", role, err)
 		}
@@ -311,7 +312,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 			if !ok {
 				return nil, fmt.Errorf("role %s fallback references unknown provider %q: %w", role, fallback.Provider, errs.ErrConfig)
 			}
-			fm, err := createModelFromConfig(fallback.Provider, fallback.Model, fpc, cache, createOptionsForRole(role))
+			fm, err := createModelFromConfig(fallback.Provider, fallback.Model, fpc, cache, createOptionsForModel(cfg, role, fallback.Model))
 			if err != nil {
 				return nil, fmt.Errorf("role %s fallback %s/%s: %w", role, fallback.Provider, fallback.Model, err)
 			}
@@ -335,6 +336,15 @@ func createOptionsForRole(role string) modelCreateOptions {
 	return modelCreateOptions{}
 }
 
+func createOptionsForModel(cfg Config, role, model string) modelCreateOptions {
+	options := createOptionsForRole(role)
+	window, source := cfg.ResolveContextWindow(model)
+	if source != CtxWindowDefault {
+		options.contextWindow = window
+	}
+	return options
+}
+
 // createModelFromConfig 创建或复用 ChatModel 实例。
 func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache map[string]agentcore.ChatModel, opts ...modelCreateOptions) (agentcore.ChatModel, error) {
 	var opt modelCreateOptions
@@ -344,6 +354,9 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 	cacheKey := providerKey + "|" + model
 	if opt.temperature > 0 {
 		cacheKey += fmt.Sprintf("|temperature=%.2f", opt.temperature)
+	}
+	if opt.contextWindow > 0 {
+		cacheKey += fmt.Sprintf("|context_window=%d", opt.contextWindow)
 	}
 	if m, ok := cache[cacheKey]; ok {
 		return m, nil
@@ -358,7 +371,7 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 	if providerType == "codex-cli" || providerType == "codex" {
 		// reasoning 交给 codex 配置默认（config.toml model_reasoning_effort）；
 		// 角色级推理强度由上层 ResolveThinkingForModel 走 agentcore ThinkingLevel 处理。
-		cm := llmcodex.New(pc.BaseURL, model, "")
+		cm := llmcodex.New(pc.BaseURL, model, "", llmcodex.WithContextWindow(opt.contextWindow))
 		cache[cacheKey] = cm
 		return cm, nil
 	}

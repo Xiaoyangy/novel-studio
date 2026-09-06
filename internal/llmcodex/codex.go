@@ -90,14 +90,32 @@ type CodexModel struct {
 	model         string // 如 gpt-5.6-sol
 	reasoning     string // low/medium/high/xhigh/max/ultra；空=用 codex 配置默认
 	providerLabel string
+	contextWindow int // Optional operational budget for exact-agent inputs, not provider capability.
 }
 
+type Option func(*CodexModel)
+
+// WithContextWindow opts exact-agent packets into a token-estimated operating
+// budget. It does not configure/extend the provider's real context window or
+// change ordinary/prose compaction. Zero retains the legacy rune budget.
+func WithContextWindow(tokens int) Option {
+	return func(model *CodexModel) { model.contextWindow = tokens }
+}
+
+func (m *CodexModel) ExactAgentContextWindow() int { return m.contextWindow }
+
 // New 构造 CodexModel。binary 为空时按常见路径探测 Codex.app 内置 codex。
-func New(binary, model, reasoning string) *CodexModel {
+func New(binary, model, reasoning string, options ...Option) *CodexModel {
 	if strings.TrimSpace(binary) == "" {
 		binary = detectCodexBinary()
 	}
-	return &CodexModel{binary: binary, model: model, reasoning: reasoning, providerLabel: "codex-cli"}
+	result := &CodexModel{binary: binary, model: model, reasoning: reasoning, providerLabel: "codex-cli"}
+	for _, option := range options {
+		if option != nil {
+			option(result)
+		}
+	}
+	return result
 }
 
 func detectCodexBinary() string {
@@ -234,7 +252,8 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 		}
 		return &agentcore.LLMResponse{Message: msg}, nil
 	}
-	prompt, err := buildCodexPromptChecked(messages, tools)
+	callConfig := agentcore.ResolveCallConfig(opts)
+	prompt, err := buildCodexPromptWithExactBudget(messages, tools, codexExactAgentBudget{contextWindow: m.contextWindow, maxOutputTokens: callConfig.MaxTokens})
 	if err != nil {
 		return nil, err
 	}
@@ -1560,6 +1579,19 @@ func buildPlainPrompt(messages []agentcore.Message) string {
 // GenerateStream 直接包 Generate 后发一个 Done 事件——codex exec 非增量吐 token，
 // 对上层的流式接口来说等价于一次性完成。
 func (m *CodexModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	if m.contextWindow != 0 {
+		exact, err := validateCodexExactAgentCall(messages, tools)
+		if err != nil {
+			return nil, err
+		}
+		if exact {
+			// Return a pre-dispatch rejection directly so existing provider
+			// accounting cannot mistake a later error event for a started call.
+			if _, err := buildCodexPromptWithExactBudget(messages, tools, codexExactAgentBudget{contextWindow: m.contextWindow, maxOutputTokens: agentcore.ResolveCallConfig(opts).MaxTokens}); err != nil {
+				return nil, err
+			}
+		}
+	}
 	out := make(chan agentcore.StreamEvent, 2)
 	go func() {
 		defer close(out)
@@ -1580,6 +1612,10 @@ func buildCodexPrompt(messages []agentcore.Message, tools []agentcore.ToolSpec) 
 }
 
 func buildCodexPromptChecked(messages []agentcore.Message, tools []agentcore.ToolSpec) (string, error) {
+	return buildCodexPromptWithExactBudget(messages, tools, codexExactAgentBudget{})
+}
+
+func buildCodexPromptWithExactBudget(messages []agentcore.Message, tools []agentcore.ToolSpec, budget codexExactAgentBudget) (string, error) {
 	sourceReplacements, exactSources, err := codexFoundationSourceContext(messages)
 	if err != nil {
 		return "", err
@@ -1596,7 +1632,10 @@ func buildCodexPromptChecked(messages []agentcore.Message, tools []agentcore.Too
 	if len(tools) > 0 {
 		prefix.WriteString("## 可用工具\n")
 		for _, t := range tools {
-			params, _ := json.Marshal(t.Parameters)
+			params, marshalErr := json.Marshal(t.Parameters)
+			if marshalErr != nil && len(exactPackets) > 0 && budget.contextWindow != 0 {
+				return "", fmt.Errorf("exact agent packet tool schema is not serializable; no provider call: %w", marshalErr)
+			}
 			fmt.Fprintf(&prefix, "- %s：%s\n  参数 schema：%s\n", t.Name, t.Description, string(params))
 		}
 		prefix.WriteString("\n")
@@ -1621,7 +1660,11 @@ func buildCodexPromptChecked(messages []agentcore.Message, tools []agentcore.Too
 		"特别地：调用 draft_chapter 写正文时，arguments_json 的 content 字段**只填一句占位符**（例如「[待渲染]」）即可，" +
 		"真正的整章正文会在随后单独以自由文本渲染——不要在这里把上千字正文塞进 JSON 字符串（会拖慢并损伤正文质量）。"
 	if len(exactPackets) > 0 {
-		return assembleCodexExactAgentPrompt(prefix.String(), suffix, messages, exactPackets, sourceReplacements, exactSources)
+		budget.responseSchema, err = json.Marshal(buildResponseSchema(tools))
+		if err != nil {
+			return "", fmt.Errorf("exact agent packet output schema is not serializable: %w", err)
+		}
+		return assembleCodexExactAgentPrompt(prefix.String(), suffix, messages, exactPackets, sourceReplacements, exactSources, budget)
 	}
 	if exactSources != "" {
 		// Exact source bytes are required to make a narrow full-object update.

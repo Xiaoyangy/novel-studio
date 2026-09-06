@@ -44,6 +44,7 @@ func assembleCodexExactAgentPrompt(
 	packets map[int]modelinput.ExactAgentPacketDescriptor,
 	sourceReplacements map[int]string,
 	exactSources string,
+	budgets ...codexExactAgentBudget,
 ) (string, error) {
 	var protected strings.Builder
 	protected.WriteString(prefix)
@@ -68,11 +69,7 @@ func assembleCodexExactAgentPrompt(
 	}
 	protected.WriteString(exactSources)
 	protected.WriteString("## 后续对话与工具反馈\n完整数据包始终保留。以下旧历史仅使用剩余预算，未展示的历史不可猜测；最新反馈保持完整。\n")
-	type historyEntry struct {
-		index int
-		text  string
-	}
-	var history []historyEntry
+	var history []codexExactHistoryEntry
 	latest, latestError := -1, -1
 	for index, message := range messages {
 		if _, exact := packets[index]; exact || message.Role == agentcore.RoleSystem {
@@ -85,11 +82,17 @@ func assembleCodexExactAgentPrompt(
 		if text == "" {
 			continue
 		}
-		history = append(history, historyEntry{index, text})
+		history = append(history, codexExactHistoryEntry{index, text})
 		latest = index
 		if message.Role == agentcore.RoleTool && message.Metadata["is_error"] == true {
 			latestError = index
 		}
+	}
+	if len(budgets) > 1 {
+		return "", fmt.Errorf("exact agent packet has ambiguous operating budgets")
+	}
+	if len(budgets) == 1 && budgets[0].contextWindow != 0 {
+		return assembleCodexWindowedExactPrompt(protected.String(), suffix, messages, history, latest, latestError, budgets[0])
 	}
 	selected := make(map[int]bool)
 	remaining := codexPromptRuneBudget - utf8.RuneCountInString(protected.String()) - utf8.RuneCountInString(suffix)
