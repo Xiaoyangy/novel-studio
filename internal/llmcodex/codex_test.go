@@ -14,6 +14,10 @@ import (
 	"github.com/voocel/agentcore"
 )
 
+func fakeCLIWithEmptyMCP(script string) string {
+	return strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\nif [ \"$1\" = \"mcp\" ]; then printf '[]'; exit 0; fi\n", 1)
+}
+
 func TestDetectCodexBinaryHonorsExplicitPipelineOverride(t *testing.T) {
 	const want = "/opt/novel-studio/codex-cli"
 	t.Setenv("NOVEL_STUDIO_CODEX_BINARY", "  "+want+"  ")
@@ -70,7 +74,7 @@ done
 cat >/dev/null
 printf '%s' '{"prose":"第二章 测试\n\n这才是正文。"}' > "$out"
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	model := New(script, "gpt-5.6-sol", "ultra")
@@ -108,7 +112,7 @@ done
 cat >/dev/null
 printf '%s' '{"prose":"第二章 只走一次\n\n她推门进去。"}' > "$out"
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	model := New(script, "gpt-5.6-sol", "high")
@@ -155,7 +159,7 @@ done
 cat >/dev/null
 printf '%s' '{"prose":"第二章 流式\n\n只调用一次。"}' > "$out"
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	model := New(script, "gpt-5.6-sol", "high")
@@ -207,7 +211,7 @@ cat >/dev/null
 printf '%s' "$CODEX_DIRECT_RESPONSE" > "$out"
 `
 			t.Setenv("CODEX_DIRECT_RESPONSE", string(encoded))
-			if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+			if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			model := New(script, "gpt-5.6-sol", "high")
@@ -230,7 +234,7 @@ func TestAuthenticatedRenderToolAmbiguityFailsBeforeProvider(t *testing.T) {
 printf 'call\n' >> "$CODEX_DIRECT_CALL_LOG"
 exit 99
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	model := New(script, "gpt-5.6-sol", "high")
@@ -343,7 +347,7 @@ else
   printf '%s' '{"prose":"第一章 普通路径\n\n仍按旧协议。"}' > "$out"
 fi
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(fakeCLIWithEmptyMCP(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	model := New(script, "gpt-5.6-sol", "high")

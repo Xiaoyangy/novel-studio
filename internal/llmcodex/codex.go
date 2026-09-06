@@ -188,13 +188,34 @@ func (m *CodexModel) Info() llm.ModelInfo {
 	}
 }
 
-func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (response *agentcore.LLMResponse, returnErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The model is shared by concurrent agents; usage belongs to this Generate,
+	// never to mutable CodexModel state. Nested prose/repair calls share only
+	// this request's collector, including discarded candidates that used tokens.
+	usage := &codexUsageAccumulator{total: agentcore.Usage{Provider: m.providerLabel, Model: m.model}}
+	ctx = context.WithValue(ctx, codexUsageContextKey{}, usage)
+	defer func() {
+		if response != nil {
+			usage.apply(&response.Message)
+		}
+		returnErr = usage.wrapError(returnErr)
+	}()
 	reasoning := m.resolveReasoning(opts)
+	exactAgentInput, err := validateCodexExactAgentCall(messages, tools)
+	if err != nil {
+		return nil, err
+	}
 	directRender, err := authenticatedDirectRenderProse(messages, tools)
 	if err != nil {
 		return nil, err
 	}
 	if directRender != nil {
+		if exactAgentInput {
+			return nil, fmt.Errorf("exact agent packet cannot be reinterpreted as a prose render request")
+		}
 		return m.generateDirectRenderProse(ctx, messages, directRender, reasoning)
 	}
 	// 无工具 = 纯文本补全（规则归一化、摘要、审阅等）：不套 action/tool_call/final schema，
@@ -210,11 +231,13 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 			Role:       agentcore.RoleAssistant,
 			Content:    []agentcore.ContentBlock{{Type: agentcore.ContentText, Text: strings.TrimSpace(text)}},
 			StopReason: agentcore.StopReasonStop,
-			Usage:      m.estimateUsage(plain, text),
 		}
 		return &agentcore.LLMResponse{Message: msg}, nil
 	}
-	prompt := buildCodexPrompt(messages, tools)
+	prompt, err := buildCodexPromptChecked(messages, tools)
+	if err != nil {
+		return nil, err
+	}
 	schema := buildResponseSchema(tools)
 	raw, err := m.runCodex(ctx, prompt, schema, reasoning)
 	if err != nil {
@@ -232,7 +255,6 @@ func (m *CodexModel) Generate(ctx context.Context, messages []agentcore.Message,
 	if err := m.regenerateProseArgs(ctx, messages, &msg, reasoning); err != nil {
 		return nil, err
 	}
-	msg.Usage = m.estimateUsage(prompt, raw)
 	return &agentcore.LLMResponse{Message: msg}, nil
 }
 
@@ -542,7 +564,6 @@ func (m *CodexModel) generateDirectRenderProse(
 		Role:       agentcore.RoleAssistant,
 		Content:    []agentcore.ContentBlock{agentcore.ToolCallBlock(call)},
 		StopReason: agentcore.StopReasonToolUse,
-		Usage:      m.estimateUsage(prompt, prose),
 	}
 	return &agentcore.LLMResponse{Message: message}, nil
 }
@@ -1508,9 +1529,9 @@ func buildProseRepairPrompt(messages []agentcore.Message, previous string, previ
 	return compactCodexText(base, baseBudget) + repair
 }
 
-// estimateUsage 给出 token 用量的估算——codex exec 不回报 token 数，不填会触发
-// "响应未携带 usage"告警且成本面板全空。订阅是固定额度，精确成本无意义，用字符数
-// （CJK 近似 1 token/字）做粗估让面板有累计即可。
+// estimateUsage is a labeled compatibility fallback for a successful older CLI
+// that did not emit valid turn.completed usage. It must never replace reported
+// counts, fabricate cache hits or charge for locally cached prose.
 func (m *CodexModel) estimateUsage(prompt, output string) *agentcore.Usage {
 	in := utf8.RuneCountInString(prompt)
 	out := utf8.RuneCountInString(output)
@@ -1554,6 +1575,19 @@ func (m *CodexModel) GenerateStream(ctx context.Context, messages []agentcore.Me
 
 // buildCodexPrompt 把对话+工具序列化成 codex 的单条提示。
 func buildCodexPrompt(messages []agentcore.Message, tools []agentcore.ToolSpec) string {
+	prompt, _ := buildCodexPromptChecked(messages, tools)
+	return prompt
+}
+
+func buildCodexPromptChecked(messages []agentcore.Message, tools []agentcore.ToolSpec) (string, error) {
+	sourceReplacements, exactSources, err := codexFoundationSourceContext(messages)
+	if err != nil {
+		return "", err
+	}
+	exactPackets, err := codexExactAgentPackets(messages)
+	if err != nil {
+		return "", err
+	}
 	var prefix strings.Builder
 	prefix.WriteString("你在一个函数调用式的创作流程中充当推理引擎。阅读下面的对话与可用工具，" +
 		"决定下一步：要么调用一个工具，要么给出最终文本。严格只输出符合 output schema 的 JSON，" +
@@ -1569,9 +1603,11 @@ func buildCodexPrompt(messages []agentcore.Message, tools []agentcore.ToolSpec) 
 	}
 	prefix.WriteString("## 对话\n")
 	var dialog strings.Builder
-	for _, msg := range messages {
+	for index, msg := range messages {
 		role := string(msg.GetRole())
-		if text := strings.TrimSpace(msg.TextContent()); text != "" {
+		if replacement, ok := sourceReplacements[index]; ok {
+			fmt.Fprintf(&dialog, "[%s]\n%s\n\n", role, replacement)
+		} else if text := strings.TrimSpace(msg.TextContent()); text != "" {
 			fmt.Fprintf(&dialog, "[%s]\n%s\n\n", role, compactCodexText(text, codexPerMessageTextRuneBudget))
 		}
 		for _, tc := range msg.ToolCalls() {
@@ -1584,7 +1620,18 @@ func buildCodexPrompt(messages []agentcore.Message, tools []agentcore.ToolSpec) 
 		"要给最终文本时 action=\"final\"、text 填内容、tool_name=null、arguments_json=null。\n" +
 		"特别地：调用 draft_chapter 写正文时，arguments_json 的 content 字段**只填一句占位符**（例如「[待渲染]」）即可，" +
 		"真正的整章正文会在随后单独以自由文本渲染——不要在这里把上千字正文塞进 JSON 字符串（会拖慢并损伤正文质量）。"
-	return assembleBudgetedPrompt(prefix.String(), dialog.String(), suffix)
+	if len(exactPackets) > 0 {
+		return assembleCodexExactAgentPrompt(prefix.String(), suffix, messages, exactPackets, sourceReplacements, exactSources)
+	}
+	if exactSources != "" {
+		// Exact source bytes are required to make a narrow full-object update.
+		// Neither per-message nor history compaction may silently cut them.
+		suffix = exactSources + suffix
+		if utf8.RuneCountInString(prefix.String())+utf8.RuneCountInString(suffix)+12_000 > codexPromptRuneBudget {
+			return "", fmt.Errorf("exact foundation sources exceed the Codex prompt budget; request a smaller source scope instead of truncating source content")
+		}
+	}
+	return assembleBudgetedPrompt(prefix.String(), dialog.String(), suffix), nil
 }
 
 func assembleBudgetedPrompt(prefix, dialog, suffix string) string {
@@ -1790,6 +1837,17 @@ func (m *CodexModel) runCodexExec(ctx context.Context, prompt string, schema map
 	}
 	defer os.RemoveAll(tmp)
 	outPath := filepath.Join(tmp, "out.json")
+	effectiveDir := tmp
+	if !isolated {
+		effectiveDir, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("Codex MCP isolation: cannot resolve the control working directory")
+		}
+	}
+	disabledMCP, err := m.disabledMCPConfig(ctx, effectiveDir)
+	if err != nil {
+		return "", err
+	}
 	effectiveReasoning := cappedCodexReasoning(reasoning)
 	if effectiveReasoning != strings.ToLower(strings.TrimSpace(reasoning)) {
 		slog.Info("codex runtime reasoning cap applied",
@@ -1800,22 +1858,28 @@ func (m *CodexModel) runCodexExec(ctx context.Context, prompt string, schema map
 	}
 	args := []string{"exec", "-",
 		"-o", outPath,
+		"--json",
+		"--ephemeral", // Nested calls are stateless; do not persist reasoning/event rollouts.
+		"--ignore-rules",
+		"--disable", "multi_agent",
+		"--disable", "plugins",
+		"--disable", "apps",
+		"--disable", "browser_use",
+		"--disable", "computer_use",
+		"--disable", "shell_tool",
+		"-c", `web_search="disabled"`,
+		"-c", "memories.use_memories=false",
+		"-c", "project_doc_max_bytes=0", // --ignore-rules only covers execpolicy, not AGENTS.md.
 		"--skip-git-repo-check",
 		"--sandbox", "read-only",
 		// 明确覆盖推理强度：避免用到配置里的 xhigh 默认；minimal 会与内置工具冲突。
 		"-c", "model_reasoning_effort=" + effectiveReasoning,
 	}
+	if disabledMCP != "" {
+		args = append(args, "-c", disabledMCP)
+	}
 	if isolated {
-		args = append(args,
-			"--ephemeral",
-			"--ignore-rules",
-			"--disable", "multi_agent",
-			"--disable", "plugins",
-			"--disable", "apps",
-			"--disable", "browser_use",
-			"--disable", "computer_use",
-			"-C", tmp,
-		)
+		args = append(args, "-C", tmp)
 	}
 	// schema 非空才约束结构化输出；纯文本补全（schema=nil）直接取最终消息。
 	if schema != nil {
@@ -1847,11 +1911,39 @@ func (m *CodexModel) runCodexExec(ctx context.Context, prompt string, schema map
 		"attempt_timeout_ms", remaining.Milliseconds(),
 	)
 	cmd := exec.CommandContext(runCtx, m.binary, args...)
+	cmd.Dir = effectiveDir
 	// 超长章节上下文不能放在 argv 中，使用 stdin 避免触发系统参数长度限制。
 	cmd.Stdin = strings.NewReader(prompt)
-	var stderr strings.Builder
+	var stderr codexDiagnosticTail
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	events := &codexUsageEventWriter{}
+	cmd.Stdout = events
+	runErr := cmd.Run()
+	events.finish()
+	var data []byte
+	defer func() {
+		var callUsage *agentcore.Usage
+		source := "unavailable"
+		if events.completed > 0 && !events.invalid {
+			reported := events.usage
+			reported.Provider, reported.Model = m.providerLabel, m.model
+			callUsage, source = &reported, "reported"
+		} else if runErr == nil && data != nil {
+			callUsage, source = m.estimateUsage(prompt, string(data)), "estimated"
+		}
+		if collector, ok := ctx.Value(codexUsageContextKey{}).(*codexUsageAccumulator); ok && cmd.Process != nil {
+			collector.add(callUsage, source)
+		}
+		logUsage := agentcore.Usage{}
+		if callUsage != nil {
+			logUsage = *callUsage
+		}
+		slog.Info("codex call usage", "module", "codex", "call_id", callID,
+			"usage_source", source, "input_tokens", logUsage.Input, "output_tokens", logUsage.Output,
+			"cached_input_tokens", logUsage.CacheRead, "completed_turns", events.completed,
+			"dropped_event_lines", events.dropped)
+	}()
+	if err := runErr; err != nil {
 		status := "error"
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			status = "timeout"
@@ -1871,7 +1963,7 @@ func (m *CodexModel) runCodexExec(ctx context.Context, prompt string, schema map
 		}
 		return "", fmt.Errorf("codex exec 失败: %w; stderr: %s", err, tailStr(stderr.String(), 800))
 	}
-	data, err := os.ReadFile(outPath)
+	data, err = os.ReadFile(outPath)
 	if err != nil {
 		slog.Warn("codex call finished",
 			"module", "codex",
