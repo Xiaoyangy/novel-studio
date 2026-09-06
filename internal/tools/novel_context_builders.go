@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -2204,30 +2205,29 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 	}
 	facetHints := recallFacetHints(state)
 	ragState, ragStateErr := t.store.RAG.LoadIndexStateReadOnly()
-	trustedFactHashes := activeRAGFactHashes(ragState)
+	trustedFacts := activeRAGFactChunks(ragState)
 	scoredByID := make(map[string]*ragScored)
 	addScore := func(chunk domain.RAGChunk, score float64, reasons ...string) {
-		if score <= 0 {
+		if score <= 0 || math.IsNaN(score) || math.IsInf(score, 0) {
 			return
 		}
 		chunk = rag.NormalizeChunk(chunk)
-		if chunk.ID == "" || rag.IsForbiddenChunk(chunk) {
-			return
-		}
-		// 路由隔离：手法库/对标库只服务设计时刻（craft_recall 通道），
-		// 常规章节召回只走本书事实层，防止外部材料被当成已发生事实。
-		if rag.IsDesignOnlySourceKind(chunk.SourceKind) {
-			return
-		}
 		// A remote collection is only a cache of this local, content-addressed
-		// index. Requiring both ID and hash here prevents a same-sized stale or
-		// cross-project Qdrant collection from injecting foreign facts after the
-		// startup readiness check has completed.
-		if wantHash, trusted := trustedFactHashes[chunk.ID]; !trusted || wantHash != chunk.Hash {
+		// index. Bind its identity/version, then take all content from the local
+		// authority. A cache can retain a valid ID/hash while corrupting its
+		// text or summary; trusting that claimed hash alone would leak the
+		// altered payload before the later receipt check rejected it.
+		trustedChunk, trusted := trustedFacts[chunk.ID]
+		if !trusted || trustedChunk.Hash != chunk.Hash {
 			return
 		}
+		chunk = trustedChunk
 		if existing, ok := scoredByID[chunk.ID]; ok {
-			existing.score += score
+			combined := existing.score + score
+			if math.IsNaN(combined) || math.IsInf(combined, 0) {
+				return
+			}
+			existing.score = combined
 			existing.reasons = uniqueStrings(append(existing.reasons, reasons...))
 			return
 		}
@@ -2377,8 +2377,8 @@ func (t *ContextTool) selectRAGRecallFresh(ctx context.Context, state contextBui
 	return finishRAGRecall(scoredByID, focus, terms, strategy)
 }
 
-func activeRAGFactHashes(state *domain.RAGIndexState) map[string]string {
-	trusted := map[string]string{}
+func activeRAGFactChunks(state *domain.RAGIndexState) map[string]domain.RAGChunk {
+	trusted := map[string]domain.RAGChunk{}
 	if state == nil {
 		return trusted
 	}
@@ -2387,7 +2387,17 @@ func activeRAGFactHashes(state *domain.RAGIndexState) map[string]string {
 		if chunk.ID == "" || chunk.Hash == "" || rag.IsForbiddenChunk(chunk) || rag.IsDesignOnlySourceKind(chunk.SourceKind) {
 			continue
 		}
-		trusted[chunk.ID] = chunk.Hash
+		trusted[chunk.ID] = chunk
+	}
+	return trusted
+}
+
+// Retain the former identity-only helper for existing callers and tests.
+// Recall itself uses activeRAGFactChunks so cached text cannot become authority.
+func activeRAGFactHashes(state *domain.RAGIndexState) map[string]string {
+	trusted := map[string]string{}
+	for id, chunk := range activeRAGFactChunks(state) {
+		trusted[id] = chunk.Hash
 	}
 	return trusted
 }
