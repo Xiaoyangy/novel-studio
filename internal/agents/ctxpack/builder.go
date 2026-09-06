@@ -77,11 +77,9 @@ func buildWriterStoreSummaryText(s *store.Store, budgetTokens int) (string, bool
 	if budgetTokens <= 0 {
 		budgetTokens = defaultStoreSummaryBudgetTokens
 	}
-	parts := renderWriterStoreSections(state, budgetTokens, writerStoreSummarySections(state))
-	if len(parts) == 0 {
-		return "", false, nil
-	}
-	return "以下内容来自小说持久化 store，用于在压缩后恢复写作上下文。\n\n" + strings.Join(parts, "\n\n"), true, nil
+	text, ok := renderWriterContextText(state, budgetTokens, writerStoreSummarySections(state),
+		"以下内容来自小说持久化 store，用于在压缩后恢复写作上下文。\n\n", "")
+	return text, ok, nil
 }
 
 func buildWriterRestoreText(s *store.Store, budgetTokens int) (string, bool, error) {
@@ -101,11 +99,30 @@ func buildWriterRestoreText(s *store.Store, budgetTokens int) (string, bool, err
 	if budgetTokens <= 0 {
 		budgetTokens = restoreBudgetTokens
 	}
-	parts := renderWriterStoreSections(state, budgetTokens, writerRestoreSections(state))
-	if len(parts) == 0 {
-		return "", false, nil
+	text, ok := renderWriterContextText(state, budgetTokens, writerRestoreSections(state),
+		"<post-compact-context>\n", "\n</post-compact-context>")
+	return text, ok, nil
+}
+
+// Budget the complete injected message: the wrapper and separators also count.
+// The shared estimator changes its heuristic for CJK-dominant text, so adding
+// separately estimated sections is not necessarily additive. Verify the joined
+// message and shrink the section allowance until the actual envelope fits.
+func renderWriterContextText(state *writerStoreSummaryState, budgetTokens int, sections []writerStoreSection, prefix, suffix string) (string, bool) {
+	sectionBudget := budgetTokens - corecontext.EstimateTokens(agentcore.UserMsg(prefix+suffix))
+	for sectionBudget > 0 {
+		parts := renderWriterStoreSections(state, sectionBudget, sections)
+		if len(parts) == 0 {
+			return "", false
+		}
+		text := prefix + strings.Join(parts, "\n\n") + suffix
+		used := corecontext.EstimateTokens(agentcore.UserMsg(text))
+		if used <= budgetTokens {
+			return text, true
+		}
+		sectionBudget -= max(1, used-budgetTokens)
 	}
-	return "<post-compact-context>\n" + strings.Join(parts, "\n\n") + "\n</post-compact-context>", true, nil
+	return "", false
 }
 
 func loadWriterStoreSummaryState(s *store.Store) (*writerStoreSummaryState, bool, error) {

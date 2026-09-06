@@ -46,7 +46,7 @@ func pathHasSegment(path, want string) bool {
 	if clean == "" {
 		return false
 	}
-	for _, segment := range strings.Split(clean, "/") {
+	for segment := range strings.SplitSeq(clean, "/") {
 		if strings.EqualFold(strings.TrimSpace(segment), want) {
 			return true
 		}
@@ -66,7 +66,7 @@ func IsForbiddenSourcePath(path string) bool {
 	if IsCraftTechniquePath(clean) || IsBenchmarkLibraryPath(clean) || IsCalibrationPath(clean) {
 		return false
 	}
-	for _, segment := range strings.Split(clean, "/") {
+	for segment := range strings.SplitSeq(clean, "/") {
 		if isForbiddenRAGSegment(segment) {
 			return true
 		}
@@ -86,12 +86,7 @@ func MentionsForbiddenSourceMarker(text string) bool {
 	}
 	// 剔除 craft 白名单路径的提及后再查禁入标记，
 	// 让手法库自身的 chunk（context/text 带库内路径）不被误杀。
-	scrub := strings.NewReplacer(
-		"deconstruction-library/"+craftTechniqueSegment, "",
-		"拆文库/"+craftTechniqueSegment, "",
-		"deconstruction-library/"+benchmarkLibrarySegment, "",
-		"deconstruction-library/"+calibrationLibrarySegment, "",
-	).Replace(clean)
+	scrub := allowedLibraryMarkerReplacer.Replace(clean)
 	lower := strings.ToLower(scrub)
 	if strings.Contains(scrub, "拆文库") || strings.Contains(scrub, "对标库") ||
 		strings.Contains(scrub, "/对标/") || strings.Contains(scrub, "对标/") ||
@@ -102,6 +97,15 @@ func MentionsForbiddenSourceMarker(text string) bool {
 	}
 	return false
 }
+
+// strings.Replacer is safe for concurrent use. Build its matching table once;
+// this guard runs for every candidate in each local vector scan.
+var allowedLibraryMarkerReplacer = strings.NewReplacer(
+	"deconstruction-library/"+craftTechniqueSegment, "",
+	"拆文库/"+craftTechniqueSegment, "",
+	"deconstruction-library/"+benchmarkLibrarySegment, "",
+	"deconstruction-library/"+calibrationLibrarySegment, "",
+)
 
 // IsForbiddenChunk is the recall-time backstop for old or manually edited index
 // states. Even if a stale index_state.json still contains deconstruction chunks,

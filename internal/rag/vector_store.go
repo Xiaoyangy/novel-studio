@@ -125,27 +125,38 @@ func SearchVectorStoreWithOptions(store *domain.RAGVectorStore, query []float32,
 	if store == nil || len(query) == 0 || maxResults <= 0 {
 		return nil
 	}
-	var hits []VectorSearchHit
-	for _, point := range store.Points {
+	queryNorm := vectorNorm(query)
+	if queryNorm == 0 {
+		return nil
+	}
+	top := newTopScoredIndices(min(maxResults, len(store.Points)), func(a, b scoredIndex) bool {
+		if a.score == b.score {
+			left, right := store.Points[a.index].ID, store.Points[b.index].ID
+			if left == right {
+				return a.index < b.index
+			}
+			return left < right
+		}
+		return a.score > b.score
+	})
+	for index, point := range store.Points {
 		if IsForbiddenChunk(point.Chunk) ||
 			(options.ExcludeDesignOnly && IsDesignOnlySourceKind(point.Chunk.SourceKind)) ||
 			len(point.Vector) != len(query) {
 			continue
 		}
-		score := cosineFloat32(query, point.Vector)
+		score := cosineWithQueryNorm(query, point.Vector, queryNorm)
 		if score <= 0 {
 			continue
 		}
-		hits = append(hits, VectorSearchHit{Point: point, Score: score})
+		top.add(scoredIndex{index: index, score: score})
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].Score == hits[j].Score {
-			return strings.Compare(hits[i].Point.ID, hits[j].Point.ID) < 0
-		}
-		return hits[i].Score > hits[j].Score
-	})
-	if len(hits) > maxResults {
-		hits = hits[:maxResults]
+	var hits []VectorSearchHit
+	if len(top.items) > 0 {
+		hits = make([]VectorSearchHit, 0, len(top.items))
+	}
+	for _, item := range top.sorted() {
+		hits = append(hits, VectorSearchHit{Point: store.Points[item.index], Score: item.score})
 	}
 	return hits
 }
@@ -238,28 +249,43 @@ func mergeVectorStoreConfig(base, update domain.RAGIndexConfig) domain.RAGIndexC
 }
 
 func cosineFloat32(left, right []float32) float64 {
-	if len(left) != len(right) {
+	return cosineWithQueryNorm(left, right, vectorNorm(left))
+}
+
+func vectorNorm(vector []float32) float64 {
+	var norm float64
+	for _, value := range vector {
+		v := float64(value)
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0
+		}
+		norm += v * v
+	}
+	return math.Sqrt(norm)
+}
+
+func cosineWithQueryNorm(left, right []float32, leftNorm float64) float64 {
+	if len(left) != len(right) || leftNorm == 0 {
 		return 0
 	}
 	n := len(left)
 	if n == 0 {
 		return 0
 	}
-	var dot, leftNorm, rightNorm float64
+	var dot, rightNorm float64
 	for i := 0; i < n; i++ {
 		l := float64(left[i])
 		r := float64(right[i])
-		if math.IsNaN(l) || math.IsInf(l, 0) || math.IsNaN(r) || math.IsInf(r, 0) {
+		if math.IsNaN(r) || math.IsInf(r, 0) {
 			return 0
 		}
 		dot += l * r
-		leftNorm += l * l
 		rightNorm += r * r
 	}
-	if leftNorm == 0 || rightNorm == 0 {
+	if rightNorm == 0 {
 		return 0
 	}
-	return dot / (math.Sqrt(leftNorm) * math.Sqrt(rightNorm))
+	return dot / (leftNorm * math.Sqrt(rightNorm))
 }
 
 func dedupeVectorPoints(points []domain.RAGVectorPoint) []domain.RAGVectorPoint {

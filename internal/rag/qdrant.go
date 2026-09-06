@@ -398,7 +398,23 @@ func (c *QdrantClient) DeleteSourcePath(ctx context.Context, sourcePath string) 
 			}},
 		},
 	}
-	return c.doJSON(ctx, http.MethodPost, c.collectionPath()+"/points/delete?wait=true", body, nil, http.StatusOK)
+	err := c.doJSON(ctx, http.MethodPost, c.collectionPath()+"/points/delete?wait=true", body, nil, http.StatusOK)
+	if !isQdrantHTTPStatus(err, http.StatusNotFound) {
+		return err
+	}
+	// A fresh project's collection is created by the first vector write, after
+	// the source cleanup step. Confirm that the collection itself is absent
+	// before treating deletion as already complete; a missing delete route on
+	// an existing collection, auth failure or malformed response must still fail.
+	_, inspectErr := c.collectionInfo(ctx)
+	if isQdrantHTTPStatus(inspectErr, http.StatusNotFound) {
+		c.invalidateCollection()
+		return nil
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("verify missing qdrant collection after source deletion: %w", inspectErr)
+	}
+	return err
 }
 
 func (c *QdrantClient) deleteCollection(ctx context.Context) error {

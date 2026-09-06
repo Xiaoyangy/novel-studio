@@ -45,6 +45,33 @@ func TestTruncateJSONToTokensKeepsCJKPayloadValidAndWithinBudget(t *testing.T) {
 	}
 }
 
+func TestTruncateJSONToTokensBoundsMixedUnicodeAndPreservesFittingEvidence(t *testing.T) {
+	for _, sample := range []string{
+		"receipt: signed; actor: Lin; ",
+		"角色只知道已经发生的事实。",
+		"🔒证据\"line\nnext\t<&>\\",
+		strings.Repeat("contract ", 60) + strings.Repeat("中文证据", 90),
+	} {
+		source, err := json.Marshal(map[string]string{"evidence": strings.Repeat(sample, 300)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, budget := range []int{60, 180, 600} {
+			text := truncateJSONToTokens(source, budget)
+			if !utf8.ValidString(text) || !json.Valid([]byte(text)) {
+				t.Fatalf("invalid UTF-8 or JSON at budget %d", budget)
+			}
+			if used := corecontext.EstimateTokens(agentcore.UserMsg(text)); used > budget {
+				t.Fatalf("mixed-script evidence uses %d tokens, budget=%d", used, budget)
+			}
+		}
+		budget := corecontext.EstimateTokens(agentcore.UserMsg(string(source)))
+		if got := truncateJSONToTokens(source, budget); got != string(source) {
+			t.Fatal("fitting evidence changed during truncation")
+		}
+	}
+}
+
 func TestAppendJSONSectionAccountsForHeadingAndTruncationSuffix(t *testing.T) {
 	const budget = 220
 	remaining := budget
@@ -60,6 +87,50 @@ func TestAppendJSONSectionAccountsForHeadingAndTruncationSuffix(t *testing.T) {
 	}
 	if remaining < 0 {
 		t.Fatalf("remaining budget became negative: %d", remaining)
+	}
+}
+
+func TestWriterContextBuildersAccountForWholeMessageBudget(t *testing.T) {
+	s := seededWriterStore(t)
+	if err := s.Drafts.SaveChapterPlan(domain.ChapterPlan{
+		Chapter: 3, Title: "第三章", Goal: strings.Repeat("必须保持角色的知识边界与实际发生的因果。", 3000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, budget := range []int{180, 600, restoreBudgetTokens} {
+		for _, tc := range []struct {
+			name  string
+			build func(*storepkg.Store, int) (string, bool, error)
+		}{
+			{"restore", buildWriterRestoreText},
+			{"summary", buildWriterStoreSummaryText},
+		} {
+			text, ok, err := tc.build(s, budget)
+			if err != nil || !ok {
+				t.Fatalf("%s budget=%d: ok=%v err=%v", tc.name, budget, ok, err)
+			}
+			if used := corecontext.EstimateTokens(agentcore.UserMsg(text)); used > budget {
+				t.Errorf("%s whole message uses %d tokens, budget=%d", tc.name, used, budget)
+			}
+		}
+	}
+	pack := &WriterRestorePack{}
+	pack.Refresh(s)
+	if _, ok := pack.buildMessage(restoreBudgetTokens); !ok {
+		t.Fatal("a full restore pack was silently discarded after adding its envelope")
+	}
+}
+
+func BenchmarkTruncateJSONToTokensLargeCJK(b *testing.B) {
+	source, err := json.Marshal(map[string]string{"角色状态": strings.Repeat("林岚在雨夜追查仓库线索。", 10000)})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(source)))
+	b.ResetTimer()
+	for b.Loop() {
+		_ = truncateJSONToTokens(source, 600)
 	}
 }
 

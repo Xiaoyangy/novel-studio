@@ -83,12 +83,20 @@ func BuildIndex(
 		}
 	}
 	accepted := make([]domain.RAGChunk, 0, len(chunks))
+	identities := make(map[string]string, len(chunks))
 	skippedDup := 0
 	for _, chunk := range chunks {
 		chunk = NormalizeChunk(chunk)
 		if chunk.Hash == "" {
 			continue
 		}
+		// Local recovery deduplicates by ID and Qdrant upserts by ID. Reject
+		// conflicting versions before any paid embedding or concurrent write,
+		// including when one version was already indexed and would be skipped.
+		if hash, exists := identities[chunk.ID]; exists && hash != chunk.Hash {
+			return IndexResult{}, fmt.Errorf("conflicting rag chunk id %s: multiple content hashes in one index build", chunk.ID)
+		}
+		identities[chunk.ID] = chunk.Hash
 		if _, ok := known[chunk.Hash]; ok {
 			skippedDup++
 			continue
@@ -611,17 +619,18 @@ func metadataValueString(v any) string {
 }
 
 func normalizeSeparators(text string) string {
-	replacer := strings.NewReplacer(
-		"\n", " ", "\t", " ", "\r", " ",
-		"，", " ", "。", " ", "、", " ", "；", " ", "：", " ",
-		"！", " ", "？", " ", "（", " ", "）", " ", "《", " ", "》", " ",
-		"“", " ", "”", " ", "\"", " ", "'", " ", "·", " ",
-		",", " ", ".", " ", ";", " ", ":", " ", "!", " ", "?", " ",
-		"(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ",
-		"/", " ", "\\", " ", "|", " ", "-", " ", "_", " ",
-	)
-	return replacer.Replace(text)
+	return querySeparatorReplacer.Replace(text)
 }
+
+var querySeparatorReplacer = strings.NewReplacer(
+	"\n", " ", "\t", " ", "\r", " ",
+	"，", " ", "。", " ", "、", " ", "；", " ", "：", " ",
+	"！", " ", "？", " ", "（", " ", "）", " ", "《", " ", "》", " ",
+	"“", " ", "”", " ", "\"", " ", "'", " ", "·", " ",
+	",", " ", ".", " ", ";", " ", ":", " ", "!", " ", "?", " ",
+	"(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ",
+	"/", " ", "\\", " ", "|", " ", "-", " ", "_", " ",
+)
 
 func cleanTerm(term string) string {
 	return strings.Trim(strings.TrimSpace(term), " \t\r\n,.;:!?，。；：、！？（）()[]{}《》“”\"'`")

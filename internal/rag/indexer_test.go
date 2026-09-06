@@ -237,3 +237,29 @@ func TestBuildIndexEmbedsContextualChunkText(t *testing.T) {
 		t.Fatalf("expected payload context, got %+v", writer.points[0].Payload)
 	}
 }
+
+func TestBuildIndexRejectsConflictingIDsBeforeAnyIO(t *testing.T) {
+	old := NormalizeChunk(domain.RAGChunk{ID: "world:rule", SourcePath: "world_rules.json", Text: "门禁每天午夜开启。"})
+	newer := NormalizeChunk(domain.RAGChunk{ID: old.ID, SourcePath: old.SourcePath, Text: "门禁每月初一开启。"})
+	for _, existing := range [][]string{nil, {old.Hash}} {
+		embedder := &capturingEmbedder{}
+		writer := &fakeWriter{}
+		_, err := BuildIndex(context.Background(), []domain.RAGChunk{old, newer}, existing, domain.RAGIndexConfig{}, embedder, writer)
+		if err == nil || !strings.Contains(err.Error(), "conflicting rag chunk id world:rule") {
+			t.Fatalf("expected identity conflict, got %v", err)
+		}
+		if len(embedder.texts) != 0 || len(writer.points) != 0 {
+			t.Fatalf("identity conflict performed IO: embeddings=%d writes=%d", len(embedder.texts), len(writer.points))
+		}
+	}
+}
+
+func TestBuildIndexAllowsStableIDReplacementAcrossBuilds(t *testing.T) {
+	old := NormalizeChunk(domain.RAGChunk{ID: "world:rule", Text: "门禁每天午夜开启。"})
+	newer := NormalizeChunk(domain.RAGChunk{ID: old.ID, Text: "门禁每月初一开启。"})
+	writer := &fakeWriter{}
+	result, err := BuildIndex(context.Background(), []domain.RAGChunk{newer, newer}, []string{old.Hash}, domain.RAGIndexConfig{}, fakeEmbedder{}, writer)
+	if err != nil || result.Embedded != 1 || result.Written != 1 || result.SkippedDup != 1 {
+		t.Fatalf("stable ID replacement must remain valid: result=%+v err=%v", result, err)
+	}
+}

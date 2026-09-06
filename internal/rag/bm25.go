@@ -2,7 +2,6 @@ package rag
 
 import (
 	"math"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -26,15 +25,14 @@ type BM25Hit struct {
 
 // BM25Index 基于 chunk 文本构建的内存倒排索引。
 type BM25Index struct {
-	docs   []bm25Doc
-	df     map[string]int
-	avgLen float64
+	docs     []domain.RAGChunk
+	postings map[string][]bm25Posting
+	idf      map[string]float64
 }
 
-type bm25Doc struct {
-	chunk  domain.RAGChunk
-	tf     map[string]int
-	length int
+type bm25Posting struct {
+	doc    int
+	tfNorm float64
 }
 
 // TokenizeForBM25 文本切词：CJK 字符产出相邻二元组，其余字符按单词切分并小写。
@@ -71,7 +69,8 @@ func TokenizeForBM25(text string) []string {
 
 // BuildBM25Index 对 chunk 集合建索引；禁入 chunk（拆解库 deconstruction-library/旧代来源）直接跳过。
 func BuildBM25Index(chunks []domain.RAGChunk) *BM25Index {
-	idx := &BM25Index{df: make(map[string]int)}
+	idx := &BM25Index{postings: make(map[string][]bm25Posting), idf: make(map[string]float64)}
+	var lengths []int
 	total := 0
 	for _, chunk := range chunks {
 		chunk = NormalizeChunk(chunk)
@@ -86,14 +85,29 @@ func BuildBM25Index(chunks []domain.RAGChunk) *BM25Index {
 		for _, tok := range tokens {
 			tf[tok]++
 		}
-		for tok := range tf {
-			idx.df[tok]++
+		for tok, count := range tf {
+			idx.postings[tok] = append(idx.postings[tok], bm25Posting{doc: len(idx.docs), tfNorm: float64(count)})
 		}
-		idx.docs = append(idx.docs, bm25Doc{chunk: chunk, tf: tf, length: len(tokens)})
+		idx.docs = append(idx.docs, chunk)
+		lengths = append(lengths, len(tokens))
 		total += len(tokens)
 	}
 	if len(idx.docs) > 0 {
-		idx.avgLen = float64(total) / float64(len(idx.docs))
+		avgLen := float64(total) / float64(len(idx.docs))
+		n := float64(len(idx.docs))
+		// The corpus is immutable. Cache IDF and normalized term frequency
+		// once so queries only visit matching documents. Keep the final
+		// multiply/add together to preserve the original floating-point score.
+		for term, postings := range idx.postings {
+			df := float64(len(postings))
+			idx.idf[term] = math.Log(1 + (n-df+0.5)/(df+0.5))
+			for i := range postings {
+				tf := postings[i].tfNorm
+				tfNorm := (tf * (bm25K1 + 1)) /
+					(tf + bm25K1*(1-bm25B+bm25B*float64(lengths[postings[i].doc])/avgLen))
+				postings[i].tfNorm = tfNorm
+			}
+		}
 	}
 	return idx
 }
@@ -121,28 +135,25 @@ func (idx *BM25Index) Search(query string, limit int) []BM25Hit {
 		unique = append(unique, tok)
 	}
 
-	n := float64(len(idx.docs))
-	hits := make([]BM25Hit, 0, limit)
-	for _, doc := range idx.docs {
-		score := 0.0
-		for _, tok := range unique {
-			tf, ok := doc.tf[tok]
-			if !ok {
-				continue
-			}
-			df := float64(idx.df[tok])
-			idf := math.Log(1 + (n-df+0.5)/(df+0.5))
-			tfNorm := (float64(tf) * (bm25K1 + 1)) /
-				(float64(tf) + bm25K1*(1-bm25B+bm25B*float64(doc.length)/idx.avgLen))
-			score += idf * tfNorm
-		}
-		if score > 0 {
-			hits = append(hits, BM25Hit{Chunk: doc.chunk, Score: score})
+	scores := make(map[int]float64)
+	for _, tok := range unique {
+		idf := idx.idf[tok]
+		for _, posting := range idx.postings[tok] {
+			scores[posting.doc] += idf * posting.tfNorm
 		}
 	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
-	if len(hits) > limit {
-		hits = hits[:limit]
+	top := newTopScoredIndices(min(limit, len(scores)), func(a, b scoredIndex) bool {
+		if a.score == b.score {
+			return a.index < b.index // Preserve corpus order for equal scores.
+		}
+		return a.score > b.score
+	})
+	for doc, score := range scores {
+		top.add(scoredIndex{index: doc, score: score})
+	}
+	hits := make([]BM25Hit, 0, len(top.items))
+	for _, item := range top.sorted() {
+		hits = append(hits, BM25Hit{Chunk: idx.docs[item.index], Score: item.score})
 	}
 	return hits
 }
