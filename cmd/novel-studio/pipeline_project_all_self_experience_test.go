@@ -9,6 +9,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/testutil"
 )
 
 func projectAllSelfExperienceArtifacts(t *testing.T, generation domain.PlanningGenerationV2) (*agents.ProjectedChapterArtifacts, domain.OutlineEntry, domain.CharacterAgentRegistry) {
@@ -221,6 +222,7 @@ func TestProjectAllSelfExperienceFlowsThroughDeltaShadowAndOwnerObservation(t *t
 			t.Fatal("another owner received private task history")
 		}
 		raw, _ := json.Marshal(o)
+		raw = testutil.CharacterObservationPrivacyJSON(t, raw)
 		for _, secret := range []string{"作者私有实量", "作者秘密泵量", "棚内正在整理", "11.8"} {
 			if strings.Contains(string(raw), secret) {
 				t.Fatalf("owner self projection leaked %s", secret)
@@ -289,6 +291,7 @@ func TestProjectAllSelfExperienceAcceptedMemoryRemainsReceiptBound(t *testing.T)
 			t.Fatal(err)
 		}
 		raw, _ := json.Marshal(memory)
+		raw = testutil.CharacterMemoryPrivacyJSON(t, raw)
 		if actor.Character == "主角" && (!strings.Contains(string(raw), "累计有效工时1分钟") || !strings.Contains(string(raw), "尚余34分钟")) {
 			t.Fatal("accepted memory did not preserve actually executed self progress")
 		}

@@ -37,16 +37,53 @@ jobs:
           /tmp/novel-studio --version
           /tmp/novel-studio doctor --config /tmp/missing-novel-studio-config.json --json || test $? -eq 1
 
-  race:
+  race_core:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
           cache-dependency-path: go.sum
+      - name: Race sharding contract tests
+        run: bash scripts/test-agents-race-shard-test.sh
       - name: Race-sensitive packages
-        run: go test -race ./internal/store ./internal/agents ./internal/tools ./services/dashboard
+        run: go test -race -count=1 -timeout=10m ./internal/store ./internal/tools ./services/dashboard
+
+  race_agents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: go.sum
+      - name: Agents race shard
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: bash scripts/test-agents-race-shard.sh "$SHARD_INDEX"
+
+  race:
+    name: race
+    needs: [race_core, race_agents]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every race job to succeed
+        env:
+          CORE_RESULT: ${{ needs.race_core.result }}
+          AGENTS_RESULT: ${{ needs.race_agents.result }}
+        run: |
+          printf 'race_core=%s race_agents=%s\n' "$CORE_RESULT" "$AGENTS_RESULT"
+          test "$CORE_RESULT" = success && test "$AGENTS_RESULT" = success
 
   container:
     runs-on: ubuntu-latest

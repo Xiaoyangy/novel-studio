@@ -7,6 +7,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/testutil"
 )
 
 func TestCharacterPhysicalObservationDoesNotInheritAuthorNameUnitOrLegacyResourceText(t *testing.T) {
@@ -40,6 +41,7 @@ func TestCharacterPhysicalObservationDoesNotInheritAuthorNameUnitOrLegacyResourc
 			t.Fatalf("v2 resource view duplicated or omitted: %+v", observation)
 		}
 		raw, _ := json.Marshal(observation)
+		raw = testutil.CharacterObservationPrivacyJSON(t, raw)
 		for _, forbidden := range []string{"SECRET", "11.8", "actual_amount", "readable_facts"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Fatalf("author state leaked via %s: %s", forbidden, raw)

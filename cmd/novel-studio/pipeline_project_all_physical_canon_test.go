@@ -10,6 +10,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/testutil"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
@@ -327,6 +328,7 @@ func TestProjectAllPhysicalAcceptedCanonRestartsWithoutProjectedSidecars(t *test
 			t.Fatalf("accepted memory chapter mismatch: %+v", memory)
 		}
 		raw, _ := json.Marshal(memory)
+		raw = testutil.CharacterMemoryPrivacyJSON(t, raw)
 		if strings.Contains(string(raw), "废弃代次独有秘密") || strings.Contains(string(raw), "11.8") || strings.Contains(string(raw), "作者私有实量") || strings.Contains(string(raw), "未读到的作者私有记录") {
 			t.Fatalf("unauthorized truth entered canonical memory: %s", raw)
 		}
@@ -522,6 +524,7 @@ func TestProjectAllPhysicalAcceptedCanonRestartsWithoutProjectedSidecars(t *test
 		}
 		for _, observation := range observations {
 			raw, _ := json.Marshal(observation)
+			raw = testutil.CharacterObservationPrivacyJSON(t, raw)
 			if observation.Location != "B" || strings.Contains(string(raw), "11.8") || strings.Contains(string(raw), "废弃代次独有秘密") || !strings.Contains(string(raw), "铭牌记载：检修期曾换过阀门。") {
 				t.Fatalf("shadow did not consume exact accepted private baseline: %s", raw)
 			}
@@ -585,6 +588,7 @@ func TestProjectAllPhysicalAcceptedCanonRestartsWithoutProjectedSidecars(t *test
 			t.Fatalf("accepted physical position lost: %+v", observation)
 		}
 		raw, _ := json.Marshal(observation)
+		raw = testutil.CharacterObservationPrivacyJSON(t, raw)
 		if strings.Contains(string(raw), "废弃代次独有秘密") || strings.Contains(string(raw), "11.8") {
 			t.Fatalf("next generation imported unauthorized memory: %s", raw)
 		}

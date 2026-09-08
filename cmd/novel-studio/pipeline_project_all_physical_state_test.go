@@ -10,6 +10,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/testutil"
 )
 
 func projectAllPhysicalNumber(value float64) *float64 { return &value }
@@ -364,6 +365,7 @@ func TestProjectAllPhysicalStateArbitrationFlowsThroughBundleShadowAndNextObserv
 			t.Fatalf("C2 actor did not move A→B: %+v", observation)
 		}
 		raw, _ := json.Marshal(observation)
+		raw = testutil.CharacterObservationPrivacyJSON(t, raw)
 		if strings.Contains(string(raw), "11.8") || strings.Contains(string(raw), "作者秘密泵量") || strings.Contains(string(raw), "actual_amount") {
 			t.Fatalf("actual truth leaked into C2 observation: %s", raw)
 		}
