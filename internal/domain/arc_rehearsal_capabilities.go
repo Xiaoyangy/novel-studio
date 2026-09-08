@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -75,10 +77,29 @@ func rehearsalCapabilityKeyV1(s string) bool {
 	return physicalIdentityV2(s) && len(s) <= 128 && !strings.HasPrefix(s, "res_") && !strings.HasPrefix(s, "sha256:")
 }
 
-func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehearsalBody) error {
+func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehearsalBody) (resultErr error) {
+	materialIndex, requirementIndex := -1, -1
+	var diagnosticRequirement ArcRehearsalCapabilityRequirementV1
+	defer func() {
+		if resultErr == nil || materialIndex < 0 {
+			return
+		}
+		path := fmt.Sprintf("material_checks[%d]", materialIndex)
+		if requirementIndex >= 0 {
+			path += fmt.Sprintf(".capability_requirements[%d] key=%s kind=%s", requirementIndex,
+				rehearsalCapabilityDiagnosticValueV1(diagnosticRequirement.Key), rehearsalCapabilityDiagnosticValueV1(diagnosticRequirement.Kind))
+			if diagnosticRequirement.ArtifactRef != "" {
+				path += " artifact_ref=" + rehearsalCapabilityDiagnosticValueV1(diagnosticRequirement.ArtifactRef)
+			}
+		}
+		// Context only: preserve the original rejection and its unwrap chain.
+		// Put location first so bounded tool logs retain the actionable pointer.
+		resultErr = fmt.Errorf("%s: %w", path, resultErr)
+	}()
 	if input.ExecutionCapabilities == nil {
-		for _, m := range body.MaterialChecks {
+		for i, m := range body.MaterialChecks {
 			if len(m.CapabilityRequirements) != 0 {
+				materialIndex, requirementIndex, diagnosticRequirement = i, 0, m.CapabilityRequirements[0]
 				return fmt.Errorf("execution dependencies require the capability-bound rehearsal policy")
 			}
 		}
@@ -119,7 +140,8 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 	prior := map[string]priorRequirement{}
 	operations := map[string]bool{}
 	allocated := map[string]float64{}
-	for _, m := range body.MaterialChecks {
+	for i, m := range body.MaterialChecks {
+		materialIndex, requirementIndex = i, -1
 		if operations[m.Operation] || len(m.CapabilityRequirements) > 16 {
 			return fmt.Errorf("material operations must be unique with at most 16 capability dependencies")
 		}
@@ -132,7 +154,8 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 		}
 		covered := map[string]bool{}
 		readDependency := false
-		for _, r := range m.CapabilityRequirements {
+		for j, r := range m.CapabilityRequirements {
+			requirementIndex, diagnosticRequirement = j, r
 			if !rehearsalCapabilityKeyV1(r.Key) || prior[r.Key].value.Key != "" || len(prior) >= 128 || len(r.DependsOn) > 16 || len(r.ResourceRefs) > 16 || len(r.MechanismRefs) > 16 || len(r.MaterialInputs) > 16 {
 				return fmt.Errorf("capability dependency has duplicate, invalid or unbounded identity")
 			}
@@ -266,6 +289,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			}
 			prior[r.Key] = priorRequirement{value: r, available: true, creator: creator}
 		}
+		requirementIndex = -1 // Remaining checks concern the material as a whole.
 		if m.Status == "available" {
 			if m.RequiresReadable && !readDependency {
 				return fmt.Errorf("readable dependency lacks a document/artifact read capability")
@@ -278,4 +302,14 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 		}
 	}
 	return nil
+}
+
+func rehearsalCapabilityDiagnosticValueV1(value string) string {
+	quoted, _ := json.Marshal(value)
+	if len(quoted) <= 160 {
+		return string(quoted)
+	}
+	// Malformed oversized keys must not turn feedback into a payload echo.
+	// A hash/length is explicitly not a truncated key to copy into a revision.
+	return fmt.Sprintf("<omitted utf8_bytes=%d sha256=%x>", len(value), sha256.Sum256([]byte(value)))
 }
