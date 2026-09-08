@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -31,10 +31,27 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
-	if policy == domain.CharacterActivationCyclePolicyV3 && !domain.HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) {
-		return characterActivationProtocolV3LegacyDigest()
+	if policy == domain.CharacterActivationCyclePolicyV3 {
+		if !domain.HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3LegacyDigest()
+		}
+		if !domain.HasCharacterSelfCompletionViewPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3HistoryDigest()
+		}
 	}
 	return characterActivationProtocolForPolicy(policy)
+}
+
+func characterActivationV3PoliciesForProducer(producer string) []string {
+	switch producer {
+	case characterActivationProtocolV3LegacyDigest():
+		return characterActivationV3LegacyPolicies()
+	case characterActivationProtocolV3HistoryDigest():
+		return characterActivationV3HistoryPolicies()
+	case characterActivationProtocolV3Digest():
+		return characterActivationV3Policies()
+	}
+	return nil
 }
 
 func validateCharacterActivationProducerSource(stimulus domain.WorldStimulusPacket) error {

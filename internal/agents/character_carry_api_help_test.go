@@ -145,7 +145,7 @@ func TestCharacterCarryAPIHelpOnlyReachesNewProducerOwner(t *testing.T) {
 		characterActivationProtocolV3LegacyDigest(), domain.CharacterWorkContinuationHistoryPolicyV1, characterCarryAPIHelpV1,
 	})
 	selectionMust(t, err)
-	if characterActivationProtocolV3Digest() != "sha256:"+want {
+	if characterActivationProtocolV3HistoryDigest() != "sha256:"+want {
 		t.Fatal("new producer did not bind the complete fixed carry API help")
 	}
 	for _, enabled := range []bool{false, true} {

@@ -1558,6 +1558,9 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		if domain.HasCharacterWorkContinuationHistoryPolicyV1(observation.Sources) {
 			characterPrompt += characterCarryAPIHelpV1
 		}
+		if domain.HasCharacterSelfCompletionViewPolicyV1(observation.Sources) {
+			characterPrompt += characterSelfCompletionViewPromptV1
+		}
 	}
 	var executionTool agentcore.Tool = tool
 	if domain.HasCharacterSelfChronologyPolicyV1(observation.Sources) {

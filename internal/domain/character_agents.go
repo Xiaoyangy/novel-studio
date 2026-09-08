@@ -576,6 +576,14 @@ func (p CharacterObservationPacket) AllowedFactIDs() map[string]struct{} {
 					out[ref] = struct{}{}
 				}
 			}
+			// Only the opt-in, host-source-bound completion view can reference a
+			// completed row's original source without repeating its full event.
+			// This lookup is not authentication; frozen-input validation is.
+			for _, task := range p.TaskProgress {
+				if validCompactSelfCompletionV1(task, p) {
+					out[task.SourceExperienceID] = struct{}{}
+				}
+			}
 		}
 	}
 	return out

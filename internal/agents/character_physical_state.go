@@ -153,7 +153,7 @@ func applyCharacterPhysicalObservation(observation *domain.CharacterObservationP
 	observation.Location = actor.Location
 	observation.ResourceViews = views
 	if domain.HasCharacterSelfExperiencePolicyV2(stimulus.Sources) {
-		observation.SelfExperiences, observation.TaskProgress, err = domain.BuildCharacterSelfObservationV2(*stimulus.PhysicalState, profile.Record.AgentID)
+		observation.SelfExperiences, observation.TaskProgress, err = domain.BuildCharacterSelfObservationForSourcesV2(*stimulus.PhysicalState, profile.Record.AgentID, stimulus.Sources)
 		if err != nil {
 			return err
 		}

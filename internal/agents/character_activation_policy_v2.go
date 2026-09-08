@@ -78,8 +78,11 @@ func prepareCharacterActivationChronology(stimulus *domain.WorldStimulusPacket, 
 	}
 	if domain.CharacterActivationUsesRoundSources(policy) {
 		selected := characterActivationV3Policies()
-		if policy == domain.CharacterActivationCyclePolicyV3 && producer == characterActivationProtocolV3LegacyDigest() {
-			selected = characterActivationV3LegacyPolicies()
+		if policy == domain.CharacterActivationCyclePolicyV3 {
+			selected = characterActivationV3PoliciesForProducer(producer)
+			if selected == nil {
+				return fmt.Errorf("v3 chronology has an unknown frozen producer")
+			}
 		}
 		stimulus.Sources = compactAgentStrings(append(stimulus.Sources, selected...))
 	} else {
@@ -102,8 +105,8 @@ func validateCharacterActivationInputPolicy(input domain.CharacterActivationInpu
 				return fmt.Errorf("stored activation input differs from the generation's frozen producer")
 			}
 			selected := characterActivationV3Policies()
-			if policy == domain.CharacterActivationCyclePolicyV3 && !domain.HasCharacterWorkContinuationHistoryPolicyV1(input.Stimulus.Sources) {
-				selected = characterActivationV3LegacyPolicies()
+			if policy == domain.CharacterActivationCyclePolicyV3 {
+				selected = characterActivationV3PoliciesForProducer(characterActivationProtocolForStimulus(input.Stimulus))
 			}
 			for _, p := range selected {
 				found := false

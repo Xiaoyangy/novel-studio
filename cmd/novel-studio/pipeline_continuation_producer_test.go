@@ -16,14 +16,18 @@ import (
 
 // The old attempt exists before any cursor/input is published. Its producer
 // choice is the actual pre-history formula, not an arbitrary fixture digest.
-func continuationProducerCLIFixture(t *testing.T) (cliOptions, *store.Store, pipelineProjectAllIdentity) {
+func continuationProducerCLIFixture(t *testing.T, producers ...string) (cliOptions, *store.Store, pipelineProjectAllIdentity) {
 	t.Helper()
 	opts, st, _ := v3RestartEntryFixture(t)
 	_, err := writePipelinePlanningJSON(filepath.Join(st.Dir(), pipelineProjectAllAttemptPath), pipelineProjectAllAttempt{Version: "project-all-attempt.v2", Nonce: "legacy-v3-producer-attempt"})
 	publicationArtifactMust(t, err)
 	cfg, bundle, err := loadCfgBundle(opts)
 	publicationArtifactMust(t, err)
-	cfg.CharacterAgents.FrozenActivationProducer = agents.CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3)[1]
+	candidates := agents.CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3)
+	cfg.CharacterAgents.FrozenActivationProducer = candidates[len(candidates)-1]
+	if len(producers) == 1 {
+		cfg.CharacterAgents.FrozenActivationProducer = producers[0]
+	}
 	progress, err := st.Progress.Load()
 	publicationArtifactMust(t, err)
 	old, err := buildPipelineProjectAllIdentity(cfg, bundle, st, progress)

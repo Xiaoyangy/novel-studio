@@ -37,6 +37,10 @@ func hasCharacterActivationPolicyV3(sources []string) bool {
 }
 
 func characterActivationV3Policies() []string {
+	return append(characterActivationV3HistoryPolicies(), domain.CharacterSelfCompletionViewPolicyV1)
+}
+
+func characterActivationV3HistoryPolicies() []string {
 	return append(characterActivationV3LegacyPolicies(), domain.CharacterWorkContinuationHistoryPolicyV1)
 }
 
@@ -47,6 +51,15 @@ func characterActivationV3LegacyPolicies() []string {
 }
 
 func characterActivationProtocolV3Digest() string {
+	digest, err := domain.DeterministicPlanningHash(struct{ Base, CompletionView, CompletionPrompt string }{characterActivationProtocolV3HistoryDigest(), domain.CharacterSelfCompletionViewPolicyV1, characterSelfCompletionViewPromptV1})
+	if err != nil {
+		return ""
+	}
+	return "sha256:" + digest
+}
+
+// This exact producer remains executable for frozen b0513d-era generations.
+func characterActivationProtocolV3HistoryDigest() string {
 	digest, err := domain.DeterministicPlanningHash(struct{ Base, History, CarryAPIHelp string }{characterActivationProtocolV3LegacyDigest(), domain.CharacterWorkContinuationHistoryPolicyV1, characterCarryAPIHelpV1})
 	if err != nil {
 		return ""

@@ -192,6 +192,9 @@ func validateVerifiedActivationInputSession(prefix VerifiedCharacterActivationPr
 	if len(prefix.steps) > 0 && HasCharacterWorkContinuationHistoryPolicyV1(input.Stimulus.Sources) != HasCharacterWorkContinuationHistoryPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
 		return fmt.Errorf("activation input continuation history policy differs from the verified session origin")
 	}
+	if len(prefix.steps) > 0 && HasCharacterSelfCompletionViewPolicyV1(input.Stimulus.Sources) != HasCharacterSelfCompletionViewPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
+		return fmt.Errorf("activation input self completion view policy differs from the verified session origin")
+	}
 	if input.Stimulus.Version != WorldStimulusPacketV2Version || input.Stimulus.PhysicalState == nil || input.Stimulus.StoryClock == nil {
 		return fmt.Errorf("verified activation step requires typed physical state and actual story clock")
 	}

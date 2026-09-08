@@ -1,0 +1,4 @@
+package agents
+
+const characterSelfCompletionViewPromptV1 = `
+本人任务状态：task_progress保留由本人真实经历核验的当前任务汇总，包括completed项；每项source_experience_id精确绑定宿主持有的本人原始经历，可作为本人知识依据引用。已完成项不重复展示完整来源，当前未完成任务及资源位置等正在使用的来源和部分近期经历仍在self_experiences。不得因为较早经历未逐条展示，就清零累计工时或把已完成任务重新当作未完成。memory中的开局或既往“尚未完成”是历史状态，不能覆盖当前有来源的任务完成记录；current_goal和pressure里的旧估计也不能覆盖它。completed只证明该任务按实际执行达到已裁决的完成状态，不自动证明设备整体合格、未知检查项目已做、取得记录正文或拥有安全/离泊许可。是否开始另一项复核、回应他人或合作仍由你依据当前真实信息独立决定。`

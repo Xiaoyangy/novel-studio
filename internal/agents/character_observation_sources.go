@@ -23,7 +23,7 @@ func projectCharacterObservationSourcesV2(observation *domain.CharacterObservati
 	newPolicies := map[string]bool{}
 	sources := make([]string, 0, len(observation.Sources)+1)
 	for _, source := range observation.Sources {
-		if source == domain.CharacterWorkContinuationHistoryPolicyV1 || source == domain.CharacterResourceObservationTimePolicyV1 || source == domain.CharacterActivationCyclePolicyV3 || source == domain.CharacterArbitrationRoundSourcesPolicyV1 || source == domain.CharacterWorkArtifactPolicyV1 || source == domain.CharacterRevisionFeedbackPolicyV1 {
+		if source == domain.CharacterSelfCompletionViewPolicyV1 || source == domain.CharacterWorkContinuationHistoryPolicyV1 || source == domain.CharacterResourceObservationTimePolicyV1 || source == domain.CharacterActivationCyclePolicyV3 || source == domain.CharacterArbitrationRoundSourcesPolicyV1 || source == domain.CharacterWorkArtifactPolicyV1 || source == domain.CharacterRevisionFeedbackPolicyV1 {
 			newPolicies[source] = true
 			continue
 		}

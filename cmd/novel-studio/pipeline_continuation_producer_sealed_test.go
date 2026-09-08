@@ -39,7 +39,8 @@ func TestContinuationProducerCLIRecoversVerifiedSealedV3(t *testing.T) {
 	preplan := pipelinePreplanReceipt{Version: pipelinePlanningSchema, GenerationID: progress.GenerationID, BaseCanonRoot: base, CurrentCanonRoot: base, DependencyRoot: fingerprint.RootSHA256, TotalChapters: 1, VolumeIndices: []int{1}, StagedChapters: []int{1}, DetailedChapters: []int{1}, CreatedAt: "2026-09-08T00:00:00Z", SourceArtifacts: artifacts}
 	_, err = writePipelinePlanningJSON(filepath.Join(f.st.Dir(), pipelinePlanningReceiptPath), preplan)
 	publicationArtifactMust(t, err)
-	producer := agents.CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3)[1]
+	candidates := agents.CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3)
+	producer := candidates[len(candidates)-1]
 	cfg := bootstrap.Config{OutputDir: f.st.Dir(), Provider: "ollama", ModelName: "no-provider", CharacterAgents: bootstrap.CharacterAgentsConfig{Protocol: "v2", ExecutionPolicy: "v3", MaxActivationCycles: 4, FrozenActivationProducer: producer}}
 	prompts := assets.Bundle{}
 	identity, err := buildPipelineProjectAllIdentity(cfg, prompts, f.st, progress)

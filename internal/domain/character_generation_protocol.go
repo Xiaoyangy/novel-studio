@@ -72,6 +72,10 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 	wantNew := policy == CharacterActivationCyclePolicyV2 || wantV3
 	wantTimedResources := HasCharacterResourceObservationTimePolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantFullHistory := HasCharacterWorkContinuationHistoryPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	wantCompletions := HasCharacterSelfCompletionViewPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	if wantCompletions && (!wantV3 || !wantFullHistory) {
+		return fmt.Errorf("completed self-task view requires a full-owner v3 generation")
+	}
 	if wantFullHistory && !wantV3 {
 		return fmt.Errorf("full-owner continuation history requires a v3 generation")
 	}
@@ -79,6 +83,9 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 		return fmt.Errorf("timed resource observations require a v3 generation")
 	}
 	check := func(label string, sources []string) error {
+		if HasCharacterSelfCompletionViewPolicyV1(sources) != wantCompletions {
+			return fmt.Errorf("generation self completion view policy differs from %s", label)
+		}
 		if HasCharacterWorkContinuationHistoryPolicyV1(sources) != wantFullHistory {
 			return fmt.Errorf("generation continuation history policy differs from %s", label)
 		}

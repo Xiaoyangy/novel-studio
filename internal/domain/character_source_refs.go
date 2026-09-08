@@ -62,7 +62,7 @@ func validateCharacterObservationSourceRefsV2(observation CharacterObservationPa
 		return fmt.Errorf("opaque character source policy rejects raw %s", field)
 	}
 	for _, ref := range observation.Sources {
-		if ref != CharacterWorkContinuationHistoryPolicyV1 && ref != CharacterResourceObservationTimePolicyV1 && ref != CharacterSourceRefPolicyV2 && ref != CharacterSelfExperiencePolicyV2 && ref != CharacterOperationalAvailabilityPolicyV1 && ref != CharacterSelfChronologyPolicyV1 && ref != CharacterWorkContinuationPolicyV1 && ref != CharacterActivationCyclePolicyV3 && ref != CharacterArbitrationRoundSourcesPolicyV1 && ref != CharacterWorkArtifactPolicyV1 && ref != CharacterRevisionFeedbackPolicyV1 {
+		if ref != CharacterSelfCompletionViewPolicyV1 && ref != CharacterWorkContinuationHistoryPolicyV1 && ref != CharacterResourceObservationTimePolicyV1 && ref != CharacterSourceRefPolicyV2 && ref != CharacterSelfExperiencePolicyV2 && ref != CharacterOperationalAvailabilityPolicyV1 && ref != CharacterSelfChronologyPolicyV1 && ref != CharacterWorkContinuationPolicyV1 && ref != CharacterActivationCyclePolicyV3 && ref != CharacterArbitrationRoundSourcesPolicyV1 && ref != CharacterWorkArtifactPolicyV1 && ref != CharacterRevisionFeedbackPolicyV1 {
 			if err := require(ref, false, "sources"); err != nil {
 				return err
 			}
@@ -139,10 +139,13 @@ func ValidateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacke
 }
 
 func validateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacket, observation CharacterObservationPacket) error {
+	if HasCharacterSelfCompletionViewPolicyV1(stimulus.Sources) && (!HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) || !HasCharacterSelfExperiencePolicyV2(stimulus.Sources)) {
+		return fmt.Errorf("completed self-task view requires the full-owner v3 self-experience policies")
+	}
 	if HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) && (!HasCharacterWorkContinuationPolicyV1(stimulus.Sources) || !HasCharacterSelfChronologyPolicyV1(stimulus.Sources) || !physicalContainsRefV2(stimulus.Sources, CharacterActivationCyclePolicyV3)) {
 		return fmt.Errorf("full-owner continuation history requires the v3 continuation and chronology policies")
 	}
-	for _, policy := range []string{CharacterWorkContinuationHistoryPolicyV1, CharacterResourceObservationTimePolicyV1, CharacterActivationCyclePolicyV3, CharacterArbitrationRoundSourcesPolicyV1, CharacterRevisionFeedbackPolicyV1} {
+	for _, policy := range []string{CharacterSelfCompletionViewPolicyV1, CharacterWorkContinuationHistoryPolicyV1, CharacterResourceObservationTimePolicyV1, CharacterActivationCyclePolicyV3, CharacterArbitrationRoundSourcesPolicyV1, CharacterRevisionFeedbackPolicyV1} {
 		if physicalContainsRefV2(stimulus.Sources, policy) != physicalContainsRefV2(observation.Sources, policy) {
 			return fmt.Errorf("character observation round-source policy differs from its stimulus")
 		}
@@ -170,12 +173,15 @@ func validateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacke
 				}
 			}
 		}
-		experiences, progress, err := BuildCharacterSelfObservationV2(*stimulus.PhysicalState, observation.AgentID)
+		experiences, progress, err := BuildCharacterSelfObservationForSourcesV2(*stimulus.PhysicalState, observation.AgentID, stimulus.Sources)
 		if err != nil {
 			return err
 		}
 		if (!samePhysicalValueV2(experiences, observation.SelfExperiences) && !(len(experiences) == 0 && len(observation.SelfExperiences) == 0)) || (!samePhysicalValueV2(progress, observation.TaskProgress) && !(len(progress) == 0 && len(observation.TaskProgress) == 0)) {
 			return fmt.Errorf("self experience observation differs from the exact owner's confirmed state")
+		}
+		if err := validateCompactSelfCompletionSourcesV1(*stimulus.PhysicalState, observation); err != nil {
+			return err
 		}
 	}
 	opaque := HasCharacterSourceRefPolicyV2(stimulus.Sources)

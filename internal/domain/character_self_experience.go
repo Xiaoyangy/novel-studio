@@ -363,6 +363,13 @@ func validateCharacterSelfObservationV2(observation CharacterObservationPacket) 
 	seen := map[string]bool{}
 	for _, task := range observation.TaskProgress {
 		source, exists := byID[task.SourceExperienceID]
+		if !exists && validCompactSelfCompletionV1(task, observation) {
+			if seen[task.TaskID] {
+				return fmt.Errorf("self observation repeats a completed task summary")
+			}
+			seen[task.TaskID] = true
+			continue // Full-state binding, not this shape check, authenticates it.
+		}
 		statusBound := task.State == source.Status && task.LatestAttemptStatus == ""
 		if chronology && source.Evaluation != nil {
 			statusBound = task.LatestAttemptStatus == source.Status && (task.State == "not_started" || task.State == "in_progress" || task.State == "completed") && !(task.Completed > 0 && task.State == "not_started")
