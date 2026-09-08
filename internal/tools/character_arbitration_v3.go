@@ -68,6 +68,43 @@ func hasToolSourcePolicy(sources []string, policy string) bool {
 	return false
 }
 
+// A current verified continuation already binds its original proposal. Accept
+// its digest only as a settlement-input alias, then retain the canonical source
+// in the receipt. Admission history and every non-settlement field stay intact.
+// SaveArbitration refreshes this Store's session/sources under the publication
+// lock before accepting the finalized result; a captured stale view cannot write.
+func (t *ResolveChapterWorldTool) normalizeContinuationSettlementEvidence(receipt domain.WorldArbitrationReceipt) domain.WorldArbitrationReceipt {
+	if t.roundSourcesV3 == nil || t.arbitrationV3 == nil || receipt.Digest != "" {
+		return receipt
+	}
+	aliases := map[string]string{}
+	for _, grant := range t.roundSourcesV3.Continuations() {
+		aliases[grant.Digest] = grant.OriginProposalDigest
+	}
+	copied := false
+	for i, settlement := range receipt.ResourceSettlements {
+		var refs []string
+		for j, ref := range settlement.EvidenceRefs {
+			canonical, exists := aliases[ref]
+			if !exists || canonical == ref {
+				continue
+			}
+			if refs == nil {
+				refs = append([]string(nil), settlement.EvidenceRefs...)
+			}
+			refs[j] = canonical
+		}
+		if refs != nil {
+			if !copied {
+				receipt.ResourceSettlements = append([]domain.ResourceSettlementV2(nil), receipt.ResourceSettlements...)
+				copied = true
+			}
+			receipt.ResourceSettlements[i].EvidenceRefs = refs
+		}
+	}
+	return receipt
+}
+
 func (t *ResolveChapterWorldTool) finalizeBoundArbitration(receipt domain.WorldArbitrationReceipt) (domain.WorldArbitrationReceipt, error) {
 	if t.roundSourcesV3 == nil {
 		return domain.FinalizeWorldArbitrationReceipt(receipt, t.stimulus, t.activation, t.proposals, t.maxRevisionRounds)

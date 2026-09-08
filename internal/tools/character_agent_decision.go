@@ -525,6 +525,7 @@ func (t *ResolveChapterWorldTool) Execute(_ context.Context, args json.RawMessag
 	if t.stimulus.Version == domain.WorldStimulusPacketV2Version {
 		receipt.Version = domain.WorldArbitrationReceiptV2Version
 	}
+	receipt = t.normalizeContinuationSettlementEvidence(receipt)
 	if err := domain.PrecheckWorldArbitrationStaticReferencesV2(receipt, t.stimulus, t.proposals); err != nil {
 		return nil, fmt.Errorf("world arbitration rejected: %w: %w", err, errs.ErrToolPrecondition)
 	}
