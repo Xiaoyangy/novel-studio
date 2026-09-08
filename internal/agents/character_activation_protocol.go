@@ -57,6 +57,21 @@ func ProjectAllPlanningProtocolWithActivation(plannerPrompt, protocol string, ma
 	if !domain.IsCharacterActivationPolicy(policy) {
 		return ""
 	}
+	return ProjectAllPlanningProtocolWithActivationProducer(plannerPrompt, protocol, maxCycles, policy, "")
+}
+
+// producer is a host-only choice recovered from an exact generation identity.
+func ProjectAllPlanningProtocolWithActivationProducer(plannerPrompt, protocol string, maxCycles int, policy, producer string) string {
+	if policy == "" {
+		policy = domain.CharacterActivationCyclePolicy
+	}
+	if !domain.IsCharacterActivationPolicy(policy) {
+		return ""
+	}
+	selected := CharacterActivationProtocolWithProducer(policy, producer)
+	if selected == "" {
+		return ""
+	}
 	base := ProjectAllPlanningProtocolDigest(plannerPrompt, protocol)
 	if protocol != domain.CharacterAgentDecisionProtocolV2Version || maxCycles <= 1 {
 		return base
@@ -75,7 +90,7 @@ func ProjectAllPlanningProtocolWithActivation(plannerPrompt, protocol string, ma
 		// policies bind how a new generation displays and evaluates that data;
 		// the absent/v1 branch above retains its exact historical identity.
 		if policy == domain.CharacterActivationCyclePolicyV3 {
-			return activationPlanningPolicyV3Digest(activationPlanningPolicyV2Digest(digest))
+			return activationPlanningPolicyV3ProducerDigest(activationPlanningPolicyV2Digest(digest), selected)
 		}
 		return activationPlanningPolicyV2Digest(digest)
 	}

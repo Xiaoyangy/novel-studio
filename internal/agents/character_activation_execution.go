@@ -53,7 +53,7 @@ func runCharacterAgentDecisionProtocol(ctx context.Context, cfg bootstrap.Config
 		return nil, nil, err
 	}
 	if inputs.ContinuationSelection != nil && len(inputs.ContinuationSelection.Continuations) > 0 {
-		inputs.ContinuationProof, err = st.NewCharacterContinuationArbitration(*inputs.CycleSession, inputs.ContinuationSelection.Continuations, characterActivationProtocolForPolicy(characterActivationPolicyForStimulus(inputs.Stimulus)))
+		inputs.ContinuationProof, err = st.NewCharacterContinuationArbitration(*inputs.CycleSession, inputs.ContinuationSelection.Continuations, characterActivationProtocolForStimulus(inputs.Stimulus))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -168,7 +168,7 @@ func runCharacterActivationCycle(ctx context.Context, cfg bootstrap.Config, st *
 		return empty, err
 	}
 	if inputs.ContinuationSelection != nil && len(inputs.ContinuationSelection.Continuations) > 0 {
-		view, err := st.NewCharacterContinuationArbitration(session, inputs.ContinuationSelection.Continuations, characterActivationProtocolForPolicy(characterActivationPolicyForStimulus(inputs.Stimulus)))
+		view, err := st.NewCharacterContinuationArbitration(session, inputs.ContinuationSelection.Continuations, characterActivationProtocolForStimulus(inputs.Stimulus))
 		if err != nil {
 			return empty, err
 		}
@@ -184,7 +184,7 @@ func runCharacterActivationCycle(ctx context.Context, cfg bootstrap.Config, st *
 	evidence := domain.CharacterAgentEvidenceBundle{
 		GenerationID: session.GenerationID, Chapter: session.Chapter, Registry: *registry,
 		Stimulus: *stimulus, Activation: *activation,
-		ProtocolDigest: characterActivationProtocolForPolicy(characterActivationPolicyForStimulus(inputs.Stimulus)),
+		ProtocolDigest: characterActivationProtocolForStimulus(inputs.Stimulus),
 	}
 	for round := 1; round <= receipt.Round; round++ {
 		for _, agentID := range activeCharacterAgentIDs(*activation) {

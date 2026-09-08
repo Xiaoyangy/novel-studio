@@ -3994,7 +3994,7 @@ func resolveStages(raw string) ([]string, error) {
 			continue
 		}
 		if !knownPipelineStages[s] {
-			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver）", s)
+			return nil, fmt.Errorf("未知阶段 %q（可用：cocreate / architect / outline-all / zero-init / preplan / rehearse-arc / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver）", s)
 		}
 		stages = append(stages, s)
 	}
@@ -4017,14 +4017,48 @@ func resolveStages(raw string) ([]string, error) {
 				return nil, fmt.Errorf("architect 必须先于 outline-all")
 			}
 			switch stage {
-			case "zero-init", "preplan", "project-all", "seal", "promote", "plan", "render", "write", "review", "rewrite", "deliver":
+			case "zero-init", "preplan", "rehearse-arc", "project-all", "seal", "promote", "plan", "render", "write", "review", "rewrite", "deliver":
 				if i < outlineIndex {
 					return nil, fmt.Errorf("阶段 %s 不能先于 outline-all", stage)
 				}
 			}
 		}
 	}
+	if err := validatePipelineArcRehearsalStageOrder(stages); err != nil {
+		return nil, err
+	}
 	return stages, nil
+}
+
+// Explicit stage lists remain resumable: prerequisites may have completed in
+// an earlier invocation. When present together, however, a rehearsal cannot
+// follow formal planning or precede the initialization it consumes.
+func validatePipelineArcRehearsalStageOrder(stages []string) error {
+	rehearsal := -1
+	for i, stage := range stages {
+		if stage == "rehearse-arc" {
+			if rehearsal >= 0 {
+				return fmt.Errorf("rehearse-arc 只能在同一流水线阶段图中出现一次")
+			}
+			rehearsal = i
+		}
+	}
+	if rehearsal < 0 {
+		return nil
+	}
+	for i, stage := range stages {
+		switch stage {
+		case "architect", "outline-all", "zero-init", "preplan":
+			if i > rehearsal {
+				return fmt.Errorf("%s 必须先于 rehearse-arc", stage)
+			}
+		case "project-all", "seal", "promote", "plan", "render", "write", "review", "rewrite", "finalize", "deliver":
+			if i < rehearsal {
+				return fmt.Errorf("rehearse-arc 必须先于 %s", stage)
+			}
+		}
+	}
+	return nil
 }
 
 func normalizePipelineStageName(s string) string {
@@ -4249,7 +4283,7 @@ func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) s
 		ContextWindow:   contextWindow,
 		Role:            writer,
 		PlannerPrompt:   bundle.Prompts.Planner,
-		AgentProtocol:   agents.ProjectAllPlanningProtocolWithActivation(bundle.Prompts.Planner, cfg.CharacterAgentsProtocolVersion(), cfg.CharacterActivationLimit(), cfg.CharacterActivationPolicy()),
+		AgentProtocol:   agents.ProjectAllPlanningProtocolWithActivationProducer(bundle.Prompts.Planner, cfg.CharacterAgentsProtocolVersion(), cfg.CharacterActivationLimit(), cfg.CharacterActivationPolicy(), cfg.CharacterAgents.FrozenActivationProducer),
 		References:      bundle.References,
 		Embedding: struct {
 			Enabled   bool   `json:"enabled"`

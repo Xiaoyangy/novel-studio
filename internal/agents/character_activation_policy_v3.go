@@ -37,13 +37,26 @@ func hasCharacterActivationPolicyV3(sources []string) bool {
 }
 
 func characterActivationV3Policies() []string {
+	return append(characterActivationV3LegacyPolicies(), domain.CharacterWorkContinuationHistoryPolicyV1)
+}
+
+func characterActivationV3LegacyPolicies() []string {
 	return []string{domain.CharacterActivationCyclePolicyV3, domain.CharacterArbitrationRoundSourcesPolicyV1,
 		domain.CharacterWorkArtifactPolicyV1, domain.CharacterRevisionFeedbackPolicyV1,
 		domain.CharacterSelfChronologyPolicyV1, domain.CharacterWorkContinuationPolicyV1, domain.CharacterResourceObservationTimePolicyV1}
 }
 
 func characterActivationProtocolV3Digest() string {
-	policies := append(characterActivationV3Policies(), domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterPassiveReceptionPolicyV2)
+	digest, err := domain.DeterministicPlanningHash(struct{ Base, History, CarryAPIHelp string }{characterActivationProtocolV3LegacyDigest(), domain.CharacterWorkContinuationHistoryPolicyV1, characterCarryAPIHelpV1})
+	if err != nil {
+		return ""
+	}
+	return "sha256:" + digest
+}
+
+// Keep the immediately preceding producer executable for its frozen sources.
+func characterActivationProtocolV3LegacyDigest() string {
+	policies := append(characterActivationV3LegacyPolicies(), domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterPassiveReceptionPolicyV2)
 	submit := tools.NewSubmitCharacterDecisionTool(nil, domain.CharacterObservationPacket{Version: domain.CharacterObservationV2Version, Sources: policies})
 	token, _ := domain.CharacterActivationCycleSourceToken("pg2_v3_schema", 1, 1, "sha256:0000000000000000000000000000000000000000000000000000000000000000", "")
 	resolve := tools.NewResolveChapterWorldTool(nil, domain.WorldStimulusPacket{Version: domain.WorldStimulusPacketV2Version, PhysicalState: &domain.WorldPhysicalStateV2{}, StoryClock: &domain.StoryClockContext{}, Sources: append(policies, token)}, domain.CharacterAgentActivation{}, nil, "", nil, 1)
@@ -59,7 +72,11 @@ func characterActivationProtocolV3Digest() string {
 }
 
 func activationPlanningPolicyV3Digest(legacy string) string {
-	digest, err := domain.DeterministicPlanningHash(struct{ Base, Policy, Execution string }{legacy, domain.CharacterActivationCyclePolicyV3, characterActivationProtocolV3Digest()})
+	return activationPlanningPolicyV3ProducerDigest(legacy, characterActivationProtocolV3Digest())
+}
+
+func activationPlanningPolicyV3ProducerDigest(legacy, producer string) string {
+	digest, err := domain.DeterministicPlanningHash(struct{ Base, Policy, Execution string }{legacy, domain.CharacterActivationCyclePolicyV3, producer})
 	if err != nil {
 		return ""
 	}

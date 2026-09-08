@@ -330,7 +330,13 @@ func validatePipelineTerminalShortArcProof(
 		return fmt.Errorf("layered 短篇 finalize 找不到 sealed generation %s", active.GenerationID)
 	}
 	last := progress.TotalChapters
-	if generation.FirstProjectedChapter != 1 ||
+	windowAggregate := pipelineArcRequiresWindowAggregate(generation)
+	if windowAggregate {
+		if generation.DetailWindow.ArcFirstChapter != 1 || generation.DetailWindow.ArcLastChapter != last ||
+			generation.LastProjectedChapter != last || generation.BookHorizonChapter != last {
+			return fmt.Errorf("layered 短篇聚合终审必须绑定真实全书 1..%d，局部逻辑弧或末窗不能冒充全书", last)
+		}
+	} else if generation.FirstProjectedChapter != 1 ||
 		generation.LastProjectedChapter != last ||
 		generation.ExpectedChapterCount != last ||
 		generation.BookHorizonChapter != last {
@@ -365,20 +371,22 @@ func validatePipelineTerminalShortArcProof(
 			cursor.BlockedByRewrites,
 		)
 	}
-	acceptances, err := st.ArcCycle().ListChapterAcceptanceReceipts(generation.GenerationID)
-	if err != nil {
-		return fmt.Errorf("读取终端弧 chapter acceptances: %w", err)
-	}
-	if len(acceptances) != last {
-		return fmt.Errorf("终端弧必须有 %d 份 exact-body acceptance receipts，实际=%d", last, len(acceptances))
-	}
-	for i, acceptance := range acceptances {
-		if acceptance.Chapter != i+1 {
-			return fmt.Errorf("终端弧 acceptance receipts 必须按 1..%d 连续，index=%d chapter=%d", last, i, acceptance.Chapter)
+	if !windowAggregate {
+		acceptances, err := st.ArcCycle().ListChapterAcceptanceReceipts(generation.GenerationID)
+		if err != nil {
+			return fmt.Errorf("读取终端弧 chapter acceptances: %w", err)
 		}
-	}
-	if err := st.ArcCycle().ValidateArcCycle(generation.GenerationID); err != nil {
-		return fmt.Errorf("终端弧 immutable acceptance chain 无效: %w", err)
+		if len(acceptances) != last {
+			return fmt.Errorf("终端弧必须有 %d 份 exact-body acceptance receipts，实际=%d", last, len(acceptances))
+		}
+		for i, acceptance := range acceptances {
+			if acceptance.Chapter != i+1 {
+				return fmt.Errorf("终端弧 acceptance receipts 必须按 1..%d 连续，index=%d chapter=%d", last, i, acceptance.Chapter)
+			}
+		}
+		if err := st.ArcCycle().ValidateArcCycle(generation.GenerationID); err != nil {
+			return fmt.Errorf("终端弧 immutable acceptance chain 无效: %w", err)
+		}
 	}
 	completion, err := requirePipelineArcCompletion(st, generation)
 	if err != nil {
@@ -388,6 +396,16 @@ func validatePipelineTerminalShortArcProof(
 		len(completion.Acceptances) != last ||
 		completion.FinalOutcomeReceiptDigest != cursor.LastOutcomeReceiptDigest {
 		return fmt.Errorf("终端弧 completion receipt 未精确绑定 1..%d 与最终 realization cursor", last)
+	}
+	if windowAggregate {
+		if completion.WindowAggregate == nil || completion.SingleWindow != nil {
+			return fmt.Errorf("跨窗口短篇终审缺少明示的真实全书 aggregate proof")
+		}
+		for i, acceptance := range completion.Acceptances {
+			if acceptance.Chapter != i+1 {
+				return fmt.Errorf("全书 aggregate acceptance 未精确覆盖 1..%d", last)
+			}
+		}
 	}
 	return nil
 }

@@ -1,9 +1,9 @@
 package main
 
 // --pipeline：把各功能串成一条可恢复的流水线，按阶段顺序执行。
-// 阶段：cocreate → architect → outline-all → zero-init → preplan → project-all → seal → promote → render（默认不含 cocreate）。
-// project-all/seal 保留历史阶段名，但事务粒度已是当前弧：整弧推演并封存后，
-// 才逐章 promote → render → exact-body review；本弧全章通过后进入下一弧。
+// 阶段：cocreate → architect → outline-all → zero-init → preplan → rehearse-arc → project-all → seal → promote → render（默认不含 cocreate）。
+// 新项目/新弧先做整弧条件预演，再封存最多三章的详细窗口，逐章 promote/render/review。
+// 后续窗口依据已接受后果更新预演；完整逻辑弧证明通过后才进入下一弧。旧 generation 保留原范围。
 // 旧的逐章兼容路径仍为 preplan → plan → render。
 // 状态持久化到 meta/pipeline.json：已完成的阶段在重跑时自动跳过，从断点继续。
 //
@@ -35,7 +35,7 @@ import (
 // defaultPipelineStages 不含 cocreate：默认假设已有创作指令（--prompt/brainstorm.md）。
 // 新书必须先显式完成 Architect foundation，再执行 zero-init，最后才允许正文写作。
 var defaultPipelineStages = []string{
-	"architect", "outline-all", "zero-init", "preplan", "project-all", "seal", "promote", "render",
+	"architect", "outline-all", "zero-init", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render",
 }
 
 // Tests replace this boundary without touching a user's desktop service.
@@ -43,7 +43,7 @@ var pipelineEnsureDashboard = ensureDashboardServiceForRun
 
 var knownPipelineStages = map[string]bool{
 	"cocreate": true, "architect": true, "outline-all": true, "zero-init": true,
-	"preplan": true, "project-all": true, "seal": true, "promote": true,
+	"preplan": true, "rehearse-arc": true, "project-all": true, "seal": true, "promote": true,
 	"plan": true, "render": true,
 	"write": true, "review": true, "rewrite": true, "finalize": true, "deliver": true,
 }
@@ -80,10 +80,11 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / rehearse-arc / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
 		fmt.Fprintln(os.Stderr, "全书结构：outline-all 在第0章隔离工作区先完成全部卷/弧/章合同，再由 zero-init 与后续全书推演消费。")
-		fmt.Fprintln(os.Stderr, "弧式写作：preplan 保留全书稳定章位；project-all 每轮只推演当前一弧，seal 只封存本弧；随后 promote/render 逐章写、逐章审，本弧全部通过后才开放下一弧；短篇末章后显式执行 finalize 全文终审。")
+		fmt.Fprintln(os.Stderr, "弧式写作：preplan 保留全书稳定章位；新项目/新弧先整弧条件预演，project-all/seal 详细推进最多三章；逐章写审后更新预演再推进下一窗口；完整整弧证明通过才开放下一弧；短篇末章后显式执行 finalize。")
 		fmt.Fprintln(os.Stderr, "兼容路径：preplan → plan → render 仍可逐章规划，但不等同于全书先推演。")
+		fmt.Fprintln(os.Stderr, "整弧预演：rehearse-arc 默认用于新项目/新弧，也可显式调用；报告不代表角色决定或已经发生的事实。旧未完成 generation 按原范围恢复，不中途升级。")
 		fmt.Fprintln(os.Stderr, "\n选项：")
 		fs.PrintDefaults()
 	}
@@ -260,6 +261,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	if err != nil {
 		return err
 	}
+	var defaultResume *pipelineDefaultResume
 	if flags.RefreshArchitect {
 		if outputDir == "" {
 			return fmt.Errorf("--refresh-architect 需要可解析的项目输出目录")
@@ -283,6 +285,16 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		if err := recoverAllDirectoryPublishesWithControlHeld(outputDir); err != nil {
 			_ = releaseExclusive()
 			return err
+		}
+		defaultResume, err = preparePipelineDefaultResume(opts, flags, stages, prompt)
+		if err != nil {
+			_ = releaseExclusive()
+			return err
+		}
+		if defaultResume != nil {
+			stages = defaultResume.Stages
+			hasOutlineAll = slices.Contains(stages, "outline-all")
+			hasDownstream = pipelineStagesConsumePublishedOutlineAll(stages)
 		}
 		if flags.RefreshArchitect {
 			if err := validateExplicitArchitectRefreshState(outputDir); err != nil {
@@ -374,7 +386,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 
 	inputDigest := pipelineRunInputDigest(cfg, bundle)
 	runIdentity := pipelineRunIdentityDigest(flags)
-	state, err := loadOrInitPipelineState(statePath, stages, prompt, inputDigest, runIdentity, flags.Restart)
+	state, err := loadPipelineStateWithDefaultResume(statePath, stages, prompt, inputDigest, runIdentity, flags.Restart, defaultResume)
 	if err != nil {
 		return err
 	}
@@ -388,7 +400,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	if reset, err := resetCompletedSplitPipelineCycle(cfg.OutputDir, state); err != nil {
 		return err
 	} else if reset {
-		if pipelineStateHasStage(state, "project-all") && pipelineStateHasStage(state, "seal") &&
+		if state.Evidence["render"].Status == "next_window" {
+			fmt.Fprintln(os.Stderr, "[pipeline] 当前三章细推窗口已逐章验收；整弧尚未完成，下一轮更新整弧条件预演再细推下一窗口")
+		} else if pipelineStateHasStage(state, "project-all") && pipelineStateHasStage(state, "seal") &&
 			!state.Done("project-all") && !state.Done("seal") {
 			fmt.Fprintln(os.Stderr, "[pipeline] 当前弧全部章节已逐章渲染并审核通过；已封闭本弧，下一轮从下一弧 preplan/project-all 开始")
 		} else if pipelineStateHasStage(state, "project-all") && pipelineStateHasStage(state, "seal") {
@@ -553,7 +567,9 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 	}
 
 	if splitCycleReset {
-		if pipelineStateHasStage(state, "project-all") && state.Done("project-all") && state.Done("seal") {
+		if state.Evidence["render"].Status == "next_window" {
+			fmt.Fprintln(os.Stderr, "\n[pipeline] 本细推窗口已验收；整弧尚未完成，下一轮先更新整弧条件预演再细推下一窗口 ✓")
+		} else if pipelineStateHasStage(state, "project-all") && state.Done("project-all") && state.Done("seal") {
 			fmt.Fprintln(os.Stderr, "\n[pipeline] 本章已渲染并逐章审核通过；下一轮机械提升当前弧下一章 ✓")
 		} else if pipelineStateHasStage(state, "project-all") {
 			fmt.Fprintln(os.Stderr, "\n[pipeline] 当前弧全部章节已渲染并逐章审核通过；下一轮开始推演下一弧 ✓")
@@ -571,7 +587,7 @@ func invalidateExplicitArchitectRefresh(state *domain.PipelineState, refresh boo
 		return false
 	}
 	downstream := map[string]struct{}{
-		"architect": {}, "outline-all": {}, "zero-init": {}, "preplan": {},
+		"architect": {}, "outline-all": {}, "zero-init": {}, "preplan": {}, "rehearse-arc": {},
 		"project-all": {}, "seal": {}, "promote": {}, "plan": {}, "render": {},
 		"write": {}, "review": {}, "rewrite": {}, "finalize": {}, "deliver": {},
 	}
@@ -730,6 +746,26 @@ func resetCompletedSealedPipelineCycle(outputDir string, state *domain.PipelineS
 		return false, fmt.Errorf("当前章逐章审核回执尚未封存: %w", err)
 	}
 	if cursor.NextPromoteChapter > generation.LastProjectedChapter {
+		if window := generation.DetailWindow; window != nil && generation.LastProjectedChapter < window.ArcLastChapter {
+			boundary, err := projected.LoadAcceptedPlanningWindowBoundaryV1(generation.GenerationID)
+			if err != nil {
+				return false, fmt.Errorf("当前细推窗口尚未完整验收: %w", err)
+			}
+			if boundary == nil || boundary.LastOutcome.ReceiptDigest != cursor.LastOutcomeReceiptDigest {
+				return false, fmt.Errorf("当前细推窗口验收与正史游标不一致")
+			}
+			reset := false
+			for _, stage := range []string{"preplan", "rehearse-arc", "project-all", "seal", "promote", "render"} {
+				if state.Done(stage) {
+					state.ClearDone(stage, domain.PipelineStageEvidence{
+						Stage: stage, Status: "next_window", CheckedAt: time.Now(),
+						Message: "detail window accepted; update the whole-arc conditional forecast from real outcomes before planning the next three chapters; logical arc is not complete",
+					})
+					reset = true
+				}
+			}
+			return reset, nil
+		}
 		if err := requirePipelineArcChapterAcceptances(outputDir, st, generation); err != nil {
 			return false, fmt.Errorf("当前弧尚不能完成封印: %w", err)
 		}
@@ -745,7 +781,7 @@ func resetCompletedSealedPipelineCycle(outputDir string, state *domain.PipelineS
 			return false, nil
 		}
 		reset := false
-		for _, stage := range []string{"preplan", "project-all", "seal", "promote", "render"} {
+		for _, stage := range []string{"preplan", "rehearse-arc", "project-all", "seal", "promote", "render"} {
 			if !state.Done(stage) {
 				continue
 			}
@@ -753,7 +789,7 @@ func resetCompletedSealedPipelineCycle(outputDir string, state *domain.PipelineS
 				Stage:     stage,
 				Status:    "next_arc",
 				CheckedAt: time.Now(),
-				Message:   "every chapter in the current arc passed its own exact-body review; arc completion " + completion.ReceiptDigest + " unlocks exactly the next arc",
+				Message:   "every chapter in the current arc passed its own exact-body review; arc completion " + completion.description() + " unlocks exactly the next arc",
 			})
 			reset = true
 		}
@@ -842,7 +878,7 @@ func pipelineStagesConsumePublishedOutlineAll(stages []string) bool {
 func pipelineStagesNeedQdrant(stages []string) bool {
 	for _, stage := range stages {
 		switch normalizePipelineStageName(stage) {
-		case "outline-all", "preplan", "project-all", "seal", "promote", "render":
+		case "outline-all", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render":
 			continue
 		default:
 			return true
@@ -979,6 +1015,8 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		})
 	case "preplan":
 		return pipelinePreplan(opts, flags)
+	case "rehearse-arc":
+		return pipelineRehearseArc(opts, flags)
 	case "project-all":
 		return pipelineProjectAll(opts, flags)
 	case "seal":

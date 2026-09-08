@@ -34,7 +34,7 @@ func loadOrPrepareCharacterActivationInputs(st *store.Store, session domain.Char
 	if frozen, err := proofs.LoadActivationInputs(); err != nil {
 		return empty, err
 	} else if frozen != nil {
-		if err := validateCharacterActivationInputPolicy(*frozen, session, policy); err != nil {
+		if err := validateCharacterActivationInputPolicy(*frozen, session, policy, boundary.FrozenActivationProducer); err != nil {
 			return empty, err
 		}
 	}
@@ -77,7 +77,7 @@ func loadOrPrepareCharacterActivationInputs(st *store.Store, session domain.Char
 	if err != nil {
 		return empty, err
 	}
-	if err := validateCharacterActivationInputPolicy(input, session, policy); err != nil {
+	if err := validateCharacterActivationInputPolicy(input, session, policy, boundary.FrozenActivationProducer); err != nil {
 		return empty, err
 	}
 	if err := proofs.PublishActivationInputs(input); err != nil {
@@ -133,7 +133,11 @@ func prepareInitialCharacterActivationInputs(st *store.Store, session domain.Cha
 		}
 	}
 	policy := characterActivationPolicyForBoundary(boundary)
-	sources = append(cycleSources, token, domain.CharacterPassiveReceptionPolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, "character-agent-protocol:"+characterActivationProtocolForPolicy(policy))
+	producer := CharacterActivationProtocolWithProducer(policy, boundary.FrozenActivationProducer)
+	if producer == "" {
+		return input, fmt.Errorf("initial activation has an unknown frozen producer")
+	}
+	sources = append(cycleSources, token, domain.CharacterPassiveReceptionPolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, "character-agent-protocol:"+producer)
 	buildStimulus := buildWorldStimulus
 	if domain.CharacterActivationUsesVerifiedPrefix(policy) {
 		buildStimulus = buildWorldStimulusDraft
@@ -143,7 +147,7 @@ func prepareInitialCharacterActivationInputs(st *store.Store, session domain.Cha
 		return input, err
 	}
 	if domain.CharacterActivationUsesVerifiedPrefix(policy) {
-		if err := prepareCharacterActivationChronology(&stimulus, session, policy); err != nil {
+		if err := prepareCharacterActivationChronology(&stimulus, session, policy, producer); err != nil {
 			return input, err
 		}
 		stimulus, err = domain.FinalizeWorldStimulusPacket(stimulus)

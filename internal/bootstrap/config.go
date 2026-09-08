@@ -196,13 +196,15 @@ type Config struct {
 }
 
 type CharacterAgentsConfig struct {
-	Protocol            string `json:"protocol,omitempty"`         // v2 / v1 / legacy
-	Scope               string `json:"scope,omitempty"`            // active_core
-	Activation          string `json:"activation,omitempty"`       // event_driven
-	ExecutionPolicy     string `json:"execution_policy,omitempty"` // v1 / v2 / v3 / v4; frozen per generation
-	MaxConcurrency      int    `json:"max_concurrency,omitempty"`
-	MaxRevisionRounds   int    `json:"max_revision_rounds,omitempty"`
-	MaxActivationCycles int    `json:"max_activation_cycles,omitempty"`
+	// Host-only selection recovered from the complete generation identity.
+	FrozenActivationProducer string `json:"-"`
+	Protocol                 string `json:"protocol,omitempty"`         // v2 / v1 / legacy
+	Scope                    string `json:"scope,omitempty"`            // active_core
+	Activation               string `json:"activation,omitempty"`       // event_driven
+	ExecutionPolicy          string `json:"execution_policy,omitempty"` // v1 / v2 / v3 / v4; frozen per generation
+	MaxConcurrency           int    `json:"max_concurrency,omitempty"`
+	MaxRevisionRounds        int    `json:"max_revision_rounds,omitempty"`
+	MaxActivationCycles      int    `json:"max_activation_cycles,omitempty"`
 }
 
 func (c Config) CharacterActivationLimit() int {

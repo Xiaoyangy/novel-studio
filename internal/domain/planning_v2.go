@@ -77,6 +77,7 @@ type PlanningGenerationV2 struct {
 	CharacterActivationPolicy    string                     `json:"character_activation_policy,omitempty"`
 	MaxCharacterActivationCycles int                        `json:"max_character_activation_cycles,omitempty"`
 	PlanGroundingPolicy          string                     `json:"plan_grounding_policy,omitempty"`
+	DetailWindow                 *PlanningDetailWindowV1    `json:"detail_window,omitempty"`
 	Status                       PlanningGenerationStatusV2 `json:"status"`
 	BaseCanonChapter             int                        `json:"base_canon_chapter"`
 	BaseCanonRoot                string                     `json:"base_canon_root"`
@@ -100,18 +101,19 @@ type PlanningGenerationV2 struct {
 // PlanningSourceSnapshotV2 is a read-only fingerprint of canon and planning
 // inputs. Projected stores may retain it, but must never mutate the canon store.
 type PlanningSourceSnapshotV2 struct {
-	Version                string `json:"version"`
-	GenerationID           string `json:"generation_id"`
-	BaseCanonChapter       int    `json:"base_canon_chapter"`
-	BaseCanonRoot          string `json:"base_canon_root"`
-	BaseStateRoot          string `json:"base_state_root"`
-	StableOutlineRoot      string `json:"stable_outline_root"`
-	PlanningDependencyRoot string `json:"planning_dependency_root"`
-	RandomSeedContractRoot string `json:"random_seed_contract_root"`
-	FoundationSnapshotRoot string `json:"foundation_snapshot_root"`
-	RAGSnapshotRoot        string `json:"rag_snapshot_root"`
-	CapturedAt             string `json:"captured_at"`
-	SnapshotDigest         string `json:"snapshot_digest"`
+	DetailWindow           *PlanningDetailWindowV1 `json:"detail_window,omitempty"`
+	Version                string                  `json:"version"`
+	GenerationID           string                  `json:"generation_id"`
+	BaseCanonChapter       int                     `json:"base_canon_chapter"`
+	BaseCanonRoot          string                  `json:"base_canon_root"`
+	BaseStateRoot          string                  `json:"base_state_root"`
+	StableOutlineRoot      string                  `json:"stable_outline_root"`
+	PlanningDependencyRoot string                  `json:"planning_dependency_root"`
+	RandomSeedContractRoot string                  `json:"random_seed_contract_root"`
+	FoundationSnapshotRoot string                  `json:"foundation_snapshot_root"`
+	RAGSnapshotRoot        string                  `json:"rag_snapshot_root"`
+	CapturedAt             string                  `json:"captured_at"`
+	SnapshotDigest         string                  `json:"snapshot_digest"`
 }
 
 type StateMutationV2 struct {
@@ -308,6 +310,7 @@ type ProjectedPlanningPredecessorContractV2 struct {
 // bundle chain and obligation registry; shadow convenience ledgers are not a
 // second authority.
 type ProjectedPlanningContextV2 struct {
+	DetailWindow        *PlanningDetailWindowV1                 `json:"detail_window,omitempty"`
 	Version             string                                  `json:"version"`
 	GenerationID        string                                  `json:"generation_id"`
 	NextChapter         int                                     `json:"next_chapter"`
@@ -804,6 +807,9 @@ func ValidatePlanningGenerationV2(g PlanningGenerationV2) error {
 	if g.BaseCanonChapter < 0 || g.FirstProjectedChapter != g.BaseCanonChapter+1 {
 		return fmt.Errorf("planning generation v2: first_projected_chapter must immediately follow base_canon_chapter")
 	}
+	if err := ValidatePlanningDetailWindowV1(g); err != nil {
+		return fmt.Errorf("planning generation v2: %w", err)
+	}
 	if g.LastProjectedChapter < g.FirstProjectedChapter {
 		return fmt.Errorf("planning generation v2: invalid projected chapter range")
 	}
@@ -894,6 +900,11 @@ func ComputePlanningSourceSnapshotV2Digest(snapshot PlanningSourceSnapshotV2) (s
 }
 
 func ValidatePlanningSourceSnapshotV2(snapshot PlanningSourceSnapshotV2) error {
+	if snapshot.DetailWindow != nil {
+		if err := validatePlanningDetailWindowShapeV1(*snapshot.DetailWindow); err != nil {
+			return fmt.Errorf("planning source snapshot v2: %w", err)
+		}
+	}
 	if snapshot.Version != PlanningSourceSnapshotV2Version {
 		return fmt.Errorf("planning source snapshot v2: unsupported version %q", snapshot.Version)
 	}
@@ -930,6 +941,9 @@ func ValidatePlanningSourceSnapshotV2(snapshot PlanningSourceSnapshotV2) error {
 func ValidatePlanningSourceSnapshotAgainstGenerationV2(snapshot PlanningSourceSnapshotV2, generation PlanningGenerationV2) error {
 	if err := ValidatePlanningSourceSnapshotV2(snapshot); err != nil {
 		return err
+	}
+	if !samePlanningDetailWindowV1(snapshot.DetailWindow, generation.DetailWindow) {
+		return fmt.Errorf("planning source snapshot v2: detail window differs from generation")
 	}
 	if snapshot.GenerationID != generation.GenerationID ||
 		snapshot.BaseCanonChapter != generation.BaseCanonChapter ||
@@ -1391,8 +1405,14 @@ func CarryForwardArcObligationsV2(
 	if nextGeneration.BookHorizonChapter != previousGeneration.BookHorizonChapter {
 		return nextGeneration, empty, fmt.Errorf("next arc book horizon differs from predecessor")
 	}
+	if previousGeneration.DetailWindow != nil && previousGeneration.LastProjectedChapter < previousGeneration.DetailWindow.ArcLastChapter &&
+		!sameLogicalArcDetailWindowsV1(previousGeneration, nextGeneration) {
+		return nextGeneration, empty, fmt.Errorf("unfinished logical arc must continue in the same bound detail-window scope")
+	}
 	if nextGeneration.ScopeID == previousGeneration.ScopeID {
-		return nextGeneration, empty, fmt.Errorf("next arc scope_id must differ from predecessor")
+		if !sameLogicalArcDetailWindowsV1(previousGeneration, nextGeneration) {
+			return nextGeneration, empty, fmt.Errorf("next arc scope_id must differ from predecessor")
+		}
 	}
 
 	registry := ObligationRegistryV2{
@@ -2705,6 +2725,11 @@ func ComputeProjectedPlanningContextV2Digest(context ProjectedPlanningContextV2)
 }
 
 func ValidateProjectedPlanningContextV2(context ProjectedPlanningContextV2) error {
+	if context.DetailWindow != nil {
+		if err := validatePlanningDetailWindowContextV1(context); err != nil {
+			return err
+		}
+	}
 	if context.Version != ProjectedPlanningContextV2Version ||
 		!strings.HasPrefix(context.GenerationID, PlanningGenerationIDPrefix) ||
 		context.NextChapter <= 0 ||
@@ -2772,13 +2797,16 @@ func ValidateProjectedPlanningContextV2(context ProjectedPlanningContextV2) erro
 	}
 	if predecessor := context.PredecessorContract; predecessor != nil {
 		if len(context.RecentTransitions) == 0 {
-			return fmt.Errorf("projected planning context v2: predecessor_contract lacks recent transition evidence")
-		}
-		latest := context.RecentTransitions[len(context.RecentTransitions)-1]
-		if latest.Chapter != predecessor.Chapter ||
-			latest.BundleDigest != predecessor.BundleDigest ||
-			latest.ProjectedPostStateRoot != predecessor.ProjectedPostStateRoot {
-			return fmt.Errorf("projected planning context v2: predecessor_contract does not match latest transition")
+			if !planningDetailWindowHasAcceptedPredecessorV1(context) {
+				return fmt.Errorf("projected planning context v2: predecessor_contract lacks recent transition evidence")
+			}
+		} else {
+			latest := context.RecentTransitions[len(context.RecentTransitions)-1]
+			if latest.Chapter != predecessor.Chapter ||
+				latest.BundleDigest != predecessor.BundleDigest ||
+				latest.ProjectedPostStateRoot != predecessor.ProjectedPostStateRoot {
+				return fmt.Errorf("projected planning context v2: predecessor_contract does not match latest transition")
+			}
 		}
 	}
 	seen := make(map[string]struct{}, len(context.OpenObligations))
@@ -2832,6 +2860,19 @@ func DeriveProjectedPlanningContextV2(
 		ThroughChapter: nextChapter - 1,
 		StateRoot:      generation.BaseStateRoot,
 	}
+	if err := ValidatePlanningDetailWindowV1(generation); err != nil {
+		return context, err
+	}
+	if generation.DetailWindow != nil {
+		window := *generation.DetailWindow
+		context.DetailWindow = &window
+		if window.AcceptedPredecessor != nil {
+			predecessor := *window.AcceptedPredecessor
+			context.PredecessorContract = &predecessor
+			boundPredecessor := predecessor
+			window.AcceptedPredecessor = &boundPredecessor
+		}
+	}
 	if nextChapter < generation.FirstProjectedChapter || nextChapter > generation.LastProjectedChapter {
 		return context, fmt.Errorf("projected planning context v2: chapter %d outside generation range", nextChapter)
 	}
@@ -2858,6 +2899,9 @@ func DeriveProjectedPlanningContextV2(
 			return context, err
 		}
 		if i > 0 {
+			if err := validateGenerationContinuationHistoryPredecessor(ordered[i-1], ordered[i]); err != nil {
+				return context, err
+			}
 			if err := validateCharacterChronologyProjectedPredecessorV1(ordered[i-1], ordered[i]); err != nil {
 				return context, err
 			}
@@ -3102,6 +3146,9 @@ func ValidateProjectedChapterBundleChain(generation PlanningGenerationV2, bundle
 			}
 		} else {
 			previous := ordered[i-1]
+			if err := validateGenerationContinuationHistoryPredecessor(previous, bundle); err != nil {
+				return err
+			}
 			if bundle.PreviousBundleDigest != previous.BundleDigest {
 				return fmt.Errorf("projected chapter bundle chain v2: chapter %d previous_bundle_digest does not match chapter %d", bundle.Chapter, previous.Chapter)
 			}

@@ -69,6 +69,7 @@ type ArcCarriedObligation struct {
 // It binds the frozen full-book outline to one generation and an exact,
 // contiguous set of chapter bundle/capacity digests.
 type ArcPlanningManifest struct {
+	DetailWindow       *PlanningDetailWindowV1     `json:"detail_window,omitempty"`
 	Version            string                      `json:"version"`
 	ArcID              string                      `json:"arc_id"`
 	GenerationID       string                      `json:"generation_id"`
@@ -182,6 +183,9 @@ func ValidateArcPlanningManifest(manifest ArcPlanningManifest) error {
 	if manifest.Version != ArcPlanningManifestVersion {
 		return fmt.Errorf("%s: unsupported version %q", prefix, manifest.Version)
 	}
+	if err := validateArcManifestDetailWindowV1(manifest); err != nil {
+		return err
+	}
 	if manifest.Volume <= 0 || manifest.Arc <= 0 {
 		return fmt.Errorf("%s: volume and arc must be > 0", prefix)
 	}
@@ -190,6 +194,9 @@ func ValidateArcPlanningManifest(manifest ArcPlanningManifest) error {
 		return fmt.Errorf("%s: invalid chapter range %d..%d/book=%d", prefix, manifest.FirstChapter, manifest.LastChapter, manifest.BookLastChapter)
 	}
 	wantArcID := DeriveArcCycleID(manifest.Volume, manifest.Arc, manifest.FirstChapter, manifest.LastChapter)
+	if manifest.DetailWindow != nil {
+		wantArcID = DeriveArcCycleID(manifest.Volume, manifest.Arc, manifest.DetailWindow.ArcFirstChapter, manifest.DetailWindow.ArcLastChapter)
+	}
 	if manifest.ArcID != wantArcID {
 		return fmt.Errorf("%s: arc_id mismatch: got %q want %q", prefix, manifest.ArcID, wantArcID)
 	}
@@ -624,6 +631,9 @@ func ValidateArcCompletionReceiptAgainstManifest(
 ) error {
 	if err := ValidateArcPlanningManifest(manifest); err != nil {
 		return err
+	}
+	if window := manifest.DetailWindow; window != nil && (manifest.FirstChapter != window.ArcFirstChapter || manifest.LastChapter != window.ArcLastChapter) {
+		return fmt.Errorf("arc completion receipt: a detail window cannot stand in for complete logical arc acceptance")
 	}
 	if err := ValidateArcCompletionReceipt(receipt); err != nil {
 		return err

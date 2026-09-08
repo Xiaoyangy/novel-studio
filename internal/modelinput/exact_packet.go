@@ -26,6 +26,7 @@ const (
 	KindChapterReadiness     ExactAgentPacketKind = "chapter_readiness"
 	KindPlanGrounding        ExactAgentPacketKind = "plan_grounding"
 	KindCharacterSuccessor   ExactAgentPacketKind = "character_successor"
+	KindArcRehearsal         ExactAgentPacketKind = "arc_rehearsal"
 )
 
 type ExactAgentPacketDescriptor struct {
@@ -74,7 +75,7 @@ func ParseExactAgentPacketMessage(message agentcore.Message) (ExactAgentPacketDe
 		return descriptor, true, fmt.Errorf("exact agent packet has unsupported transport policy %q", descriptor.Version)
 	}
 	switch descriptor.Kind {
-	case KindCharacterObservation, KindWorldArbitration, KindPlannerContext, KindChapterReadiness, KindPlanGrounding, KindCharacterSuccessor:
+	case KindCharacterObservation, KindWorldArbitration, KindPlannerContext, KindChapterReadiness, KindPlanGrounding, KindCharacterSuccessor, KindArcRehearsal:
 	default:
 		return descriptor, true, fmt.Errorf("exact agent packet has unsupported kind %q", descriptor.Kind)
 	}

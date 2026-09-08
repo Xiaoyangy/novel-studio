@@ -35,6 +35,7 @@ func publicationArtifactCopy[T any](t *testing.T, value T) T {
 }
 
 type publicationArtifactFixture struct {
+	producer   string
 	st         *store.Store
 	generation domain.PlanningGenerationV2
 	registry   domain.ObligationRegistryV2
@@ -97,6 +98,9 @@ func (f *publicationArtifactFixture) rebind(t *testing.T) {
 	t.Helper()
 	input := &f.input
 	policies := []string{domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.CharacterSelfChronologyPolicyV1, domain.CharacterWorkContinuationPolicyV1, domain.CharacterArbitrationRoundSourcesPolicyV1, domain.CharacterActivationCyclePolicyV3, domain.CharacterWorkArtifactPolicyV1, domain.CharacterRevisionFeedbackPolicyV1, domain.PlanGroundingPolicyV1}
+	if f.producer != "" {
+		policies = append(policies[:len(policies)-1], domain.CharacterResourceObservationTimePolicyV1, domain.PlanGroundingPolicyV1)
+	}
 	previous := ""
 	if len(f.session.CycleDigests) > 0 {
 		previous = f.session.CycleDigests[len(f.session.CycleDigests)-1]
@@ -104,6 +108,9 @@ func (f *publicationArtifactFixture) rebind(t *testing.T) {
 	token, err := domain.CharacterActivationCycleSourceToken(f.session.GenerationID, 1, len(f.session.CycleDigests)+1, f.session.ChapterContextDigest, previous)
 	publicationArtifactMust(t, err)
 	input.Stimulus.Sources = append(policies, token)
+	if f.producer != "" {
+		input.Stimulus.Sources = append(input.Stimulus.Sources, "character-agent-protocol:"+f.producer)
+	}
 	input.Stimulus.SelfEvaluationContext, err = domain.NewCharacterSelfEvaluationContextV1(f.session)
 	publicationArtifactMust(t, err)
 	input.Stimulus.StoryClock.CurrentDay = f.session.CurrentDay
@@ -141,10 +148,14 @@ func (f *publicationArtifactFixture) rebind(t *testing.T) {
 
 func (f *publicationArtifactFixture) cycle(t *testing.T, sign bool) {
 	t.Helper()
+	producer := f.producer
+	if producer == "" {
+		producer = projectAllCmdTestDigest("artifact-protocol")
+	}
 	proofs, err := f.st.CharacterAgents.ForActivationCycle(f.session)
 	publicationArtifactMust(t, err)
 	publicationArtifactMust(t, proofs.PublishActivationInputs(f.input))
-	view, err := f.st.PrepareCharacterArbitrationV3(f.session, nil, projectAllCmdTestDigest("artifact-protocol"))
+	view, err := f.st.PrepareCharacterArbitrationV3(f.session, nil, producer)
 	publicationArtifactMust(t, err)
 	o := f.input.Observations[0]
 	taskID := "write"
@@ -177,13 +188,17 @@ func (f *publicationArtifactFixture) cycle(t *testing.T, sign bool) {
 	if !sign {
 		execution.OutputResults = []domain.CharacterWorkOutputResultV1{{OutputKey: "record", Status: "created", AtDay: end, ClaimIDs: []string{"claim"}, Complete: true}}
 		arbArgs["resource_settlements"] = []domain.ResourceSettlementV2{{ResourceID: publicationArtifactPaperID, Before: projectAllPhysicalNumber(2), Delta: projectAllPhysicalNumber(-1), After: projectAllPhysicalNumber(1), EvidenceRefs: []string{p.Digest}}}
+		if f.producer != "" {
+			settlements := arbArgs["resource_settlements"].([]domain.ResourceSettlementV2)
+			settlements[0].StartDay, settlements[0].EndDay = &start, &start
+		}
 	} else {
 		resolution["artifact_signatures"] = []domain.CharacterArtifactSignatureResultV1{{ResourceID: id, VersionDigest: version, ClaimIDs: []string{"claim"}, Scope: publicationArtifactSignScope, AtDay: end}}
 	}
 	resolution["self_executions"] = []domain.CharacterSelfExecutionV2{execution}
 	raw, err = json.Marshal(arbArgs)
 	publicationArtifactMust(t, err)
-	tool, err := tools.NewResolveCharacterArbitrationV3Tool(f.st, f.session, view, 1, projectAllCmdTestDigest("artifact-protocol"))
+	tool, err := tools.NewResolveCharacterArbitrationV3Tool(f.st, f.session, view, 1, producer)
 	publicationArtifactMust(t, err)
 	_, err = tool.Execute(context.Background(), raw)
 	publicationArtifactMust(t, err)

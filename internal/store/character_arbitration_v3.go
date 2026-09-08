@@ -30,6 +30,15 @@ type CharacterArbitrationV3 struct {
 	admission characterArbitrationAdmissionV3
 }
 
+// The admission has already been authenticated by Load/Prepare. Expose its
+// frozen producer for the runtime's executable-protocol check before payment.
+func (v *CharacterArbitrationV3) ProtocolDigest() string {
+	if v == nil {
+		return ""
+	}
+	return v.admission.Protocol
+}
+
 // Equal source hashes do not authorize writing a copied workspace. Runtime
 // tools may use another Store instance only for the same canonical directory.
 func (v *CharacterArbitrationV3) BelongsTo(st *Store) bool {

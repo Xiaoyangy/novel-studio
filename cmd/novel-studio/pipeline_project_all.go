@@ -35,13 +35,14 @@ type pipelineProjectAllAttempt struct {
 }
 
 type pipelineProjectAllIdentity struct {
-	Generation             domain.PlanningGenerationV2
-	Source                 domain.PlanningSourceSnapshotV2
-	Registry               domain.ObligationRegistryV2
-	Preplan                pipelinePreplanReceipt
-	Arc                    pipelineArcScope
-	FoundationSnapshotRoot string
-	RAGSnapshotRoot        string
+	FrozenActivationProducer string
+	Generation               domain.PlanningGenerationV2
+	Source                   domain.PlanningSourceSnapshotV2
+	Registry                 domain.ObligationRegistryV2
+	Preplan                  pipelinePreplanReceipt
+	Arc                      pipelineArcScope
+	FoundationSnapshotRoot   string
+	RAGSnapshotRoot          string
 }
 
 // pipelineProjectAll keeps its historical stage name for CLI/state migration,
@@ -172,6 +173,7 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 		return fmt.Errorf("project-all 获取执行锁期间规划输入发生漂移；请重跑本阶段")
 	}
 	identity = lockedIdentity
+	cfg.CharacterAgents.FrozenActivationProducer = identity.FrozenActivationProducer
 
 	projected := st.ProjectedV2()
 	restartPending, err := pipelineProjectAllRestartPending(cfg.OutputDir)
@@ -456,11 +458,36 @@ func buildPipelineProjectAllIdentityForPreflight(
 		)
 	}
 	first := baseChapter + 1
-	arcScope, err := requirePipelineArcStart(st, baseChapter)
+	arcScope, err := locatePipelineArcScope(st, first)
 	if err != nil {
 		return identity, fmt.Errorf("project-all 当前弧边界: %w", err)
 	}
+	var detailWindow *domain.PlanningDetailWindowV1
+	var originalAttempt *domain.PlanningGenerationV2
+	if !restarting {
+		originalAttempt, err = pipelineExistingAttemptBeforeDetailWindow(st, baseChapter, arcScope)
+		if err != nil {
+			return identity, err
+		}
+	}
+	if originalAttempt != nil {
+		detailWindow = originalAttempt.DetailWindow
+	} else {
+		detailWindow, err = loadPipelineDetailWindow(st, arcScope, baseChapter)
+		if err != nil {
+			return identity, err
+		}
+	}
+	if detailWindow == nil && first != arcScope.FirstChapter {
+		return identity, fmt.Errorf("旧式整弧 generation 只能从弧边界开始；不能在弧内静默切换协议")
+	}
 	last := arcScope.LastChapter
+	if detailWindow != nil {
+		_, last, err = domain.PlanningDetailWindowRangeV1(baseChapter, arcScope.FirstChapter, arcScope.LastChapter)
+		if err != nil {
+			return identity, err
+		}
+	}
 	bookLast := identity.Preplan.TotalChapters
 	if bookLast < first || arcScope.BookLastChapter != bookLast {
 		return identity, fmt.Errorf(
@@ -521,6 +548,16 @@ func buildPipelineProjectAllIdentityForPreflight(
 			return identity, err
 		}
 	}
+	var resumeGeneration *domain.PlanningGenerationV2
+	if !restarting {
+		candidate, err := pipelineGenerationForActivationAttempt(st, baseChapter, first, last, resumeAttempt)
+		if err != nil {
+			return identity, err
+		}
+		if candidate != nil && candidate.CharacterActivationPolicy == domain.CharacterActivationCyclePolicyV3 {
+			resumeGeneration = candidate
+		}
+	}
 	foundationSnapshotRoot, err := pipelineProjectAllFoundationSnapshotRoot(cfg.OutputDir)
 	if err != nil {
 		return identity, err
@@ -529,22 +566,51 @@ func buildPipelineProjectAllIdentityForPreflight(
 	if err != nil {
 		return identity, err
 	}
-	dependencyRoot, err := pipelineProjectAllDependencyRootWithSourceRoots(
-		cfg,
-		promptBundle,
-		identity.Preplan,
-		foundationSnapshotRoot,
-		ragSnapshotRoot,
-	)
+	dependencyFor := func(selected bootstrap.Config) (string, error) {
+		root, err := pipelineProjectAllDependencyRootWithSourceRoots(selected, promptBundle, identity.Preplan, foundationSnapshotRoot, ragSnapshotRoot)
+		if err != nil {
+			return "", err
+		}
+		if successorPlan != nil {
+			root = pipelineProjectAllDigest(struct {
+				Version            string `json:"version"`
+				BaseDependencyRoot string `json:"base_dependency_root"`
+				SuccessorDigest    string `json:"successor_digest"`
+			}{"character-agent-successor-dependency.v1", root, successorPlan.Digest})
+		}
+		if detailWindow != nil {
+			return domain.PlanningDetailWindowDependencyRootV1(root, *detailWindow)
+		}
+		return root, nil
+	}
+	if resumeGeneration != nil {
+		matched := false
+		for _, producer := range agents.CharacterActivationProducerCandidates(resumeGeneration.CharacterActivationPolicy) {
+			candidate := cfg
+			candidate.CharacterAgents.FrozenActivationProducer = producer
+			root, err := dependencyFor(candidate)
+			if err != nil {
+				return identity, err
+			}
+			if root != resumeGeneration.PlanningDependencyRoot {
+				continue
+			}
+			if matched {
+				return identity, fmt.Errorf("project-all generation has ambiguous executable producer identity")
+			}
+			cfg, matched = candidate, true
+		}
+		if !matched {
+			return identity, fmt.Errorf("project-all generation %s frozen producer/model/source dependency drift; no cursor or evidence was changed", resumeGeneration.GenerationID)
+		}
+	}
+	dependencyRoot, err := dependencyFor(cfg)
 	if err != nil {
 		return identity, err
 	}
-	if successorPlan != nil {
-		dependencyRoot = pipelineProjectAllDigest(struct {
-			Version            string `json:"version"`
-			BaseDependencyRoot string `json:"base_dependency_root"`
-			SuccessorDigest    string `json:"successor_digest"`
-		}{"character-agent-successor-dependency.v1", dependencyRoot, successorPlan.Digest})
+	identity.FrozenActivationProducer = agents.CharacterActivationProtocolWithProducer(cfg.CharacterActivationPolicy(), cfg.CharacterAgents.FrozenActivationProducer)
+	if cfg.CharacterActivationLimit() > 1 && identity.FrozenActivationProducer == "" {
+		return identity, fmt.Errorf("project-all has an unknown activation producer")
 	}
 	seedRoot, err := domain.ComputePlanningSeedContractRootV2(pipelineProjectAllSeedContract)
 	if err != nil {
@@ -589,47 +655,58 @@ func buildPipelineProjectAllIdentityForPreflight(
 		}
 	}
 	if baseChapter > 0 {
-		if predecessorGenerationID == "" {
-			return identity, fmt.Errorf("project-all 第 %d 章弧边界缺少上一弧 generation", baseChapter)
+		if detailWindow != nil && detailWindow.AcceptedPredecessor != nil {
+			boundary, boundaryErr := projected.LoadAcceptedPlanningWindowBoundaryV1(predecessorGenerationID)
+			if boundaryErr != nil {
+				return identity, fmt.Errorf("project-all 上一细推窗口验收边界: %w", boundaryErr)
+			}
+			if boundary == nil || boundary.LastBundle.Chapter != baseChapter || boundary.LastOutcome.ReceiptDigest != detailWindow.AcceptedOutcomeDigest || boundary.LastBundle.BundleDigest != detailWindow.AcceptedPredecessor.BundleDigest {
+				return identity, fmt.Errorf("project-all 上一窗口真实验收与当前预演前驱不一致")
+			}
+			baseStateRoot = boundary.LastOutcome.ActualPostStateRoot
+		} else {
+			if predecessorGenerationID == "" {
+				return identity, fmt.Errorf("project-all 第 %d 章弧边界缺少上一弧 generation", baseChapter)
+			}
+			previous, previousErr := projected.LoadSealedGeneration(predecessorGenerationID)
+			if previousErr != nil || previous == nil {
+				return identity, fmt.Errorf("project-all 读取上一弧 sealed generation: %w", previousErr)
+			}
+			completion, completionErr := requirePipelineArcCompletion(st, previous)
+			if completionErr != nil {
+				return identity, fmt.Errorf("project-all 上一弧完成证明无效: %w", completionErr)
+			}
+			cursor, cursorErr := projected.LoadRealizationCursor()
+			if cursorErr != nil || cursor == nil {
+				return identity, fmt.Errorf("project-all 读取上一弧 realization cursor: %w", cursorErr)
+			}
+			if cursor.ActiveGenerationID != active.GenerationID ||
+				previous.LastProjectedChapter != baseChapter ||
+				cursor.LastAcceptedChapter != baseChapter ||
+				strings.TrimSpace(cursor.LastOutcomeReceiptDigest) == "" {
+				return identity, fmt.Errorf("project-all 上一弧未在第 %d 章形成完整 actual outcome 边界", baseChapter)
+			}
+			outcome, outcomeErr := projected.LoadActualOutcomeReceipt(
+				previous.GenerationID,
+				baseChapter,
+				cursor.LastOutcomeReceiptDigest,
+			)
+			if outcomeErr != nil || outcome == nil {
+				return identity, fmt.Errorf("project-all 读取上一弧末章 actual outcome: %w", outcomeErr)
+			}
+			previousBundles, bundlesErr := projected.LoadProjectedChapterBundles(previous.GenerationID)
+			if bundlesErr != nil || len(previousBundles) == 0 {
+				return identity, fmt.Errorf("project-all 读取上一弧 bundle chain: %w", bundlesErr)
+			}
+			lastBundle := previousBundles[len(previousBundles)-1]
+			if lastBundle.Chapter != baseChapter ||
+				outcome.ActualPostStateRoot != lastBundle.ProjectedPostStateRoot ||
+				completion.FinalActualPostStateRoot != outcome.ActualPostStateRoot ||
+				completion.FinalOutcomeReceiptDigest != outcome.ReceiptDigest {
+				return identity, fmt.Errorf("project-all 上一弧 actual post-state 与末章 sealed projected state 不一致")
+			}
+			baseStateRoot = outcome.ActualPostStateRoot
 		}
-		previous, previousErr := projected.LoadSealedGeneration(predecessorGenerationID)
-		if previousErr != nil || previous == nil {
-			return identity, fmt.Errorf("project-all 读取上一弧 sealed generation: %w", previousErr)
-		}
-		completion, completionErr := requirePipelineArcCompletion(st, previous)
-		if completionErr != nil {
-			return identity, fmt.Errorf("project-all 上一弧完成证明无效: %w", completionErr)
-		}
-		cursor, cursorErr := projected.LoadRealizationCursor()
-		if cursorErr != nil || cursor == nil {
-			return identity, fmt.Errorf("project-all 读取上一弧 realization cursor: %w", cursorErr)
-		}
-		if cursor.ActiveGenerationID != active.GenerationID ||
-			previous.LastProjectedChapter != baseChapter ||
-			cursor.LastAcceptedChapter != baseChapter ||
-			strings.TrimSpace(cursor.LastOutcomeReceiptDigest) == "" {
-			return identity, fmt.Errorf("project-all 上一弧未在第 %d 章形成完整 actual outcome 边界", baseChapter)
-		}
-		outcome, outcomeErr := projected.LoadActualOutcomeReceipt(
-			previous.GenerationID,
-			baseChapter,
-			cursor.LastOutcomeReceiptDigest,
-		)
-		if outcomeErr != nil || outcome == nil {
-			return identity, fmt.Errorf("project-all 读取上一弧末章 actual outcome: %w", outcomeErr)
-		}
-		previousBundles, bundlesErr := projected.LoadProjectedChapterBundles(previous.GenerationID)
-		if bundlesErr != nil || len(previousBundles) == 0 {
-			return identity, fmt.Errorf("project-all 读取上一弧 bundle chain: %w", bundlesErr)
-		}
-		lastBundle := previousBundles[len(previousBundles)-1]
-		if lastBundle.Chapter != baseChapter ||
-			outcome.ActualPostStateRoot != lastBundle.ProjectedPostStateRoot ||
-			completion.FinalActualPostStateRoot != outcome.ActualPostStateRoot ||
-			completion.FinalOutcomeReceiptDigest != outcome.ReceiptDigest {
-			return identity, fmt.Errorf("project-all 上一弧 actual post-state 与末章 sealed projected state 不一致")
-		}
-		baseStateRoot = outcome.ActualPostStateRoot
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	scopeID := domain.DeriveArcCycleID(
@@ -653,6 +730,7 @@ func buildPipelineProjectAllIdentityForPreflight(
 		return identity, err
 	}
 	generation := domain.PlanningGenerationV2{
+		DetailWindow:           detailWindow,
 		Version:                domain.PlanningGenerationV2Version,
 		GenerationID:           generationID,
 		ParentGenerationID:     parent,
@@ -689,6 +767,11 @@ func buildPipelineProjectAllIdentityForPreflight(
 	if err != nil {
 		return identity, err
 	}
+	if resumeGeneration != nil {
+		if err := validatePipelineProjectAllGenerationIdentity(*resumeGeneration, generation); err != nil {
+			return identity, err
+		}
+	}
 	if parent != "" {
 		generation, registry, err = projected.PrepareCarriedArcGeneration(parent, generation)
 		if err != nil {
@@ -696,6 +779,7 @@ func buildPipelineProjectAllIdentityForPreflight(
 		}
 	}
 	source := domain.PlanningSourceSnapshotV2{
+		DetailWindow:           detailWindow,
 		Version:                domain.PlanningSourceSnapshotV2Version,
 		GenerationID:           generationID,
 		BaseCanonChapter:       baseChapter,

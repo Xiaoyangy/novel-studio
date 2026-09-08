@@ -1555,6 +1555,9 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		if domain.HasCharacterResourceObservationTimePolicyV1(observation.Sources) {
 			characterPrompt += characterResourceObservationTimePromptV1
 		}
+		if domain.HasCharacterWorkContinuationHistoryPolicyV1(observation.Sources) {
+			characterPrompt += characterCarryAPIHelpV1
+		}
 	}
 	var executionTool agentcore.Tool = tool
 	if domain.HasCharacterSelfChronologyPolicyV1(observation.Sources) {
@@ -1720,7 +1723,7 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 	}
 	protocolDigest := CharacterAgentProtocolDigestForVersion(characterProtocolForStimulus(inputs.Stimulus))
 	if cycleSession != nil {
-		protocolDigest = characterActivationProtocolForPolicy(characterActivationPolicyForStimulus(inputs.Stimulus))
+		protocolDigest = characterActivationProtocolForStimulus(inputs.Stimulus)
 	}
 	tool := tools.NewResolveChapterWorldTool(st, inputs.Stimulus, inputs.Activation, proposals, protocolDigest, inputs.Sources, cfg.CharacterAgents.MaxRevisionRounds)
 	if inputs.ArbitrationV3 != nil {

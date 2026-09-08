@@ -55,7 +55,7 @@ func characterActivationProtocolForPolicy(policy string) string {
 	return "sha256:" + hash
 }
 
-func prepareCharacterActivationChronology(stimulus *domain.WorldStimulusPacket, session domain.CharacterActivationSession, policies ...string) error {
+func prepareCharacterActivationChronology(stimulus *domain.WorldStimulusPacket, session domain.CharacterActivationSession, policy, producer string) error {
 	if stimulus.PhysicalState == nil {
 		return fmt.Errorf("new activation policy lacks physical baseline")
 	}
@@ -76,11 +76,11 @@ func prepareCharacterActivationChronology(stimulus *domain.WorldStimulusPacket, 
 	if err != nil {
 		return err
 	}
-	if len(policies) > 1 {
-		return fmt.Errorf("ambiguous activation chronology policy")
-	}
-	if len(policies) == 1 && domain.CharacterActivationUsesRoundSources(policies[0]) {
+	if domain.CharacterActivationUsesRoundSources(policy) {
 		selected := characterActivationV3Policies()
+		if policy == domain.CharacterActivationCyclePolicyV3 && producer == characterActivationProtocolV3LegacyDigest() {
+			selected = characterActivationV3LegacyPolicies()
+		}
 		stimulus.Sources = compactAgentStrings(append(stimulus.Sources, selected...))
 	} else {
 		stimulus.Sources = compactAgentStrings(append(stimulus.Sources, domain.CharacterActivationCyclePolicyV2,
@@ -89,13 +89,22 @@ func prepareCharacterActivationChronology(stimulus *domain.WorldStimulusPacket, 
 	return nil
 }
 
-func validateCharacterActivationInputPolicy(input domain.CharacterActivationInputSet, session domain.CharacterActivationSession, policy string) error {
+func validateCharacterActivationInputPolicy(input domain.CharacterActivationInputSet, session domain.CharacterActivationSession, policy string, producers ...string) error {
 	if characterActivationPolicyForStimulus(input.Stimulus) != policy {
 		return fmt.Errorf("stored activation input uses a different frozen execution policy")
 	}
 	if domain.CharacterActivationUsesVerifiedPrefix(policy) {
 		if domain.CharacterActivationUsesRoundSources(policy) {
+			if err := validateCharacterActivationProducerSource(input.Stimulus); err != nil {
+				return err
+			}
+			if len(producers) > 1 || (len(producers) == 1 && characterActivationProtocolForStimulus(input.Stimulus) != CharacterActivationProtocolWithProducer(policy, producers[0])) {
+				return fmt.Errorf("stored activation input differs from the generation's frozen producer")
+			}
 			selected := characterActivationV3Policies()
+			if policy == domain.CharacterActivationCyclePolicyV3 && !domain.HasCharacterWorkContinuationHistoryPolicyV1(input.Stimulus.Sources) {
+				selected = characterActivationV3LegacyPolicies()
+			}
 			for _, p := range selected {
 				found := false
 				for _, s := range input.Stimulus.Sources {

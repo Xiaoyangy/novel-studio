@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chenhongyang/novel-studio/assets"
+	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -879,6 +880,17 @@ func validatePipelineSealedGenerationDependencies(
 	if err != nil {
 		return err
 	}
+	var successor *domain.CharacterAgentSuccessorPlan
+	if candidate, err := store.NewStore(cfg.OutputDir).CharacterAgents.LoadCurrentSuccessorPlan(); err != nil {
+		return err
+	} else if candidate != nil && candidate.BaseCanonChapter == generation.BaseCanonChapter && candidate.ArcFirstChapter == generation.FirstProjectedChapter && candidate.ArcLastChapter == generation.LastProjectedChapter && strings.HasSuffix(generation.AttemptID, "|"+candidate.Digest) {
+		successor = candidate
+		stableRoot = pipelineProjectAllDigest(struct {
+			Version         string `json:"version"`
+			BaseOutlineRoot string `json:"base_outline_root"`
+			SuccessorDigest string `json:"successor_digest"`
+		}{"character-agent-successor-outline.v1", stableRoot, candidate.Digest})
+	}
 	if stableRoot != generation.StableOutlineRoot {
 		return fmt.Errorf("sealed generation stable outline 已漂移；禁止继续提升")
 	}
@@ -887,20 +899,44 @@ func validatePipelineSealedGenerationDependencies(
 	if err != nil || source == nil {
 		return fmt.Errorf("promote 读取 generation captured source snapshot: %w", err)
 	}
-	dependencyRoot, err := pipelineProjectAllDependencyRootWithSourceRoots(
-		cfg,
-		promptBundle,
-		receipt,
-		source.FoundationSnapshotRoot,
-		source.RAGSnapshotRoot,
-	)
-	if err != nil {
-		return err
+	dependencyFor := func(selected bootstrap.Config) (string, error) {
+		root, err := pipelineProjectAllDependencyRootWithSourceRoots(selected, promptBundle, receipt, source.FoundationSnapshotRoot, source.RAGSnapshotRoot)
+		if err != nil {
+			return "", err
+		}
+		if successor != nil {
+			root = pipelineProjectAllDigest(struct {
+				Version            string `json:"version"`
+				BaseDependencyRoot string `json:"base_dependency_root"`
+				SuccessorDigest    string `json:"successor_digest"`
+			}{"character-agent-successor-dependency.v1", root, successor.Digest})
+		}
+		if generation.DetailWindow != nil {
+			return domain.PlanningDetailWindowDependencyRootV1(root, *generation.DetailWindow)
+		}
+		return root, nil
 	}
-	if dependencyRoot != generation.PlanningDependencyRoot {
-		return fmt.Errorf("sealed generation 模型/provider/prompt/资料依赖已漂移；禁止继续提升")
+	producers := []string{cfg.CharacterAgents.FrozenActivationProducer}
+	if generation.CharacterActivationPolicy == domain.CharacterActivationCyclePolicyV3 {
+		if cfg.CharacterAgentsProtocolVersion() != generation.CharacterAgentProtocol {
+			return fmt.Errorf("sealed generation character protocol differs from current configuration")
+		}
+		cfg.CharacterAgents.ExecutionPolicy = "v3"
+		cfg.CharacterAgents.MaxActivationCycles = generation.MaxCharacterActivationCycles
+		producers = agents.CharacterActivationProducerCandidates(generation.CharacterActivationPolicy)
 	}
-	return nil
+	for _, producer := range producers {
+		selected := cfg
+		selected.CharacterAgents.FrozenActivationProducer = producer
+		root, err := dependencyFor(selected)
+		if err != nil {
+			return err
+		}
+		if root == generation.PlanningDependencyRoot {
+			return nil
+		}
+	}
+	return fmt.Errorf("sealed generation 模型/provider/prompt/资料依赖已漂移；禁止继续提升")
 }
 
 func verifyPipelineProjectAllStage(

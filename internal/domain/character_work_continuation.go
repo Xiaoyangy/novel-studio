@@ -9,6 +9,11 @@ import (
 
 const CharacterWorkContinuationPolicyV1 = "character-work-continuation:explicit.v1"
 
+// This policy changes only the continuation information root, not saved grants
+// or receipts. An origin without it always retains the original display-based
+// formula, including when its ledger is restored by a newer binary.
+const CharacterWorkContinuationHistoryPolicyV1 = "character-work-continuation-history:full-owner.v1"
+
 // This grant is part of the ORIGINAL independently submitted proposal. A task
 // requirement alone is never permission to keep executing it. MaxEffectiveMinutes
 // counts work after that proposal, including work in its original cycle.
@@ -81,6 +86,10 @@ type CharacterWorkContinuationLedgerV1 struct {
 
 func HasCharacterWorkContinuationPolicyV1(sources []string) bool {
 	return planningV2ContainsExactString(sources, CharacterWorkContinuationPolicyV1)
+}
+
+func HasCharacterWorkContinuationHistoryPolicyV1(sources []string) bool {
+	return planningV2ContainsExactString(sources, CharacterWorkContinuationHistoryPolicyV1)
 }
 
 func ValidateCharacterWorkContinuationIntentV1(p CharacterDecisionProposal, o CharacterObservationPacket) error {
@@ -431,6 +440,10 @@ func evaluateWorkContinuationV1(ledger CharacterWorkContinuationLedgerV1, state 
 }
 
 func continuationInformationRootV1(o CharacterObservationPacket, state continuationStateV1, physical *WorldPhysicalStateV2) (string, error) {
+	fullHistory := HasCharacterWorkContinuationHistoryPolicyV1(state.observation.Sources)
+	if HasCharacterWorkContinuationHistoryPolicyV1(o.Sources) != fullHistory {
+		return "", fmt.Errorf("continuation history policy differs from verified origin")
+	}
 	o = continuationCloneV1(o)
 	// Envelope/time changes and verified normal work feedback are not new
 	// knowledge. Never suppress arbitrary memory merely because its kind says
@@ -441,8 +454,25 @@ func continuationInformationRootV1(o CharacterObservationPacket, state continuat
 			memories = append(memories, m)
 		}
 	}
+	experiences := o.SelfExperiences
+	if fullHistory {
+		// Both callers bind physical to the verified origin or predecessor state.
+		// Never reconstruct missing history from the bounded model-facing view.
+		found := false
+		if physical != nil {
+			for _, actor := range physical.Actors {
+				if actor.AgentID == o.AgentID {
+					experiences, found = actor.SelfExperiences, true
+					break
+				}
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("continuation history lacks verified owner physical source")
+		}
+	}
 	var otherExperiences []CharacterSelfExperienceV2
-	for _, exp := range o.SelfExperiences {
+	for _, exp := range experiences {
 		if exp.TaskID != state.task.TaskID {
 			otherExperiences = append(otherExperiences, exp)
 		}
@@ -461,7 +491,7 @@ func continuationInformationRootV1(o CharacterObservationPacket, state continuat
 			actualOwnerObservations = actor.OperationalObservations
 		}
 	}
-	return characterAgentDigest(struct {
+	root, err := characterAgentDigest(struct {
 		Agent, Character, Location, Goal, Pressure string
 		Facts, Events, Rules                       []CharacterAgentFact
 		Mechanisms                                 []CodexMechanism
@@ -474,6 +504,10 @@ func continuationInformationRootV1(o CharacterObservationPacket, state continuat
 		Received                                   []CharacterReceivedFactV2
 		ActualOwnerObservations                    []CharacterOperationalObservationV1
 	}{o.AgentID, o.Character, o.Location, o.CurrentGoal, o.Pressure, o.KnownFacts, o.PerceivedEvents, o.PublicRules, o.PublicMechanisms, o.ResourceViews, o.Relationships, o.Commitments, memories, otherExperiences, otherTasks, o.OperationalObservations, received, actualOwnerObservations})
+	if err != nil || !fullHistory {
+		return root, err
+	}
+	return characterAgentDigest(struct{ Policy, Root string }{CharacterWorkContinuationHistoryPolicyV1, root})
 }
 
 func AppendCharacterWorkContinuationExecutionV1(ledger CharacterWorkContinuationLedgerV1, current CharacterActivationInputSet, receipt CharacterWorkContinuationReceiptV1, arbitration WorldArbitrationReceipt, boundaries []VerifiedCharacterWorkContinuationBoundaryV1, freshPeerProposals ...CharacterDecisionProposal) (CharacterWorkContinuationLedgerV1, error) {

@@ -45,7 +45,11 @@ func savePipelineArcPlanningManifest(
 	if err := domain.ValidateProjectedChapterBundleChain(generation, bundles, *registry); err != nil {
 		return nil, fmt.Errorf("arc planning manifest requires a valid explicit bundle chain: %w", err)
 	}
-	causalLinks, turns, payoffs, err := pipelineArcNarrativeEvidence(bundles)
+	var acceptedPredecessor *domain.ProjectedPlanningPredecessorContractV2
+	if generation.DetailWindow != nil {
+		acceptedPredecessor = generation.DetailWindow.AcceptedPredecessor
+	}
+	causalLinks, turns, payoffs, err := pipelineArcNarrativeEvidence(bundles, acceptedPredecessor)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +67,7 @@ func savePipelineArcPlanningManifest(
 	}
 
 	manifest := domain.ArcPlanningManifest{
+		DetailWindow:      generation.DetailWindow,
 		Version:           domain.ArcPlanningManifestVersion,
 		ArcID:             identity.Generation.ScopeID,
 		GenerationID:      generation.GenerationID,
@@ -144,12 +149,16 @@ func savePipelineArcPlanningManifest(
 
 func pipelineArcNarrativeEvidence(
 	bundles []domain.ProjectedChapterBundle,
+	acceptedPredecessors ...*domain.ProjectedPlanningPredecessorContractV2,
 ) ([]domain.ArcCausalLink, []domain.ArcNarrativeMarker, []domain.ArcNarrativeMarker, error) {
 	var links []domain.ArcCausalLink
 	var turns []domain.ArcNarrativeMarker
 	var payoffs []domain.ArcNarrativeMarker
 	for i, bundle := range bundles {
 		var predecessor *domain.ProjectedPlanningPredecessorContractV2
+		if i == 0 && len(acceptedPredecessors) > 0 {
+			predecessor = acceptedPredecessors[0]
+		}
 		if i > 0 {
 			value := bundles[i-1]
 			contract := value.ChapterPlan.CausalSimulation.ArcTransition
@@ -164,7 +173,7 @@ func pipelineArcNarrativeEvidence(
 		if err := domain.ValidateArcChapterTransitionContract(bundle.ChapterPlan, predecessor); err != nil {
 			return nil, nil, nil, fmt.Errorf("arc planning manifest chapter %d transition: %w", bundle.Chapter, err)
 		}
-		if predecessor != nil {
+		if predecessor != nil && i > 0 {
 			contract := bundle.ChapterPlan.CausalSimulation.ArcTransition
 			links = append(links, domain.ArcCausalLink{
 				ID:          predecessor.OutgoingConsequenceID,
@@ -234,7 +243,11 @@ func validatePipelineArcPlanningManifestEvidence(
 			return fmt.Errorf("arc planning manifest chapter %d sealed render capacity is invalid: %w", bundle.Chapter, err)
 		}
 	}
-	links, turns, payoffs, err := pipelineArcNarrativeEvidence(bundles)
+	var acceptedPredecessor *domain.ProjectedPlanningPredecessorContractV2
+	if generation.DetailWindow != nil {
+		acceptedPredecessor = generation.DetailWindow.AcceptedPredecessor
+	}
+	links, turns, payoffs, err := pipelineArcNarrativeEvidence(bundles, acceptedPredecessor)
 	if err != nil {
 		return err
 	}
@@ -513,7 +526,7 @@ func validatePipelineArcOutcomeChain(
 	return outcomes, nil
 }
 
-func completePipelineArcCycle(
+func completePipelineSingleWindowArcCycle(
 	st *store.Store,
 	generation *domain.PlanningGenerationV2,
 	cursor *domain.RealizationCursorV2,
@@ -572,7 +585,7 @@ func completePipelineArcCycle(
 	return &receipt, nil
 }
 
-func requirePipelineArcCompletion(
+func requirePipelineSingleWindowArcCompletion(
 	st *store.Store,
 	generation *domain.PlanningGenerationV2,
 ) (*domain.ArcCompletionReceipt, error) {

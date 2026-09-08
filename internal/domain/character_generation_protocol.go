@@ -2,6 +2,18 @@ package domain
 
 import "fmt"
 
+func validateGenerationContinuationHistoryPredecessor(previous, current ProjectedChapterBundle) error {
+	old := HasCharacterWorkContinuationHistoryPolicyV1(previous.ChapterWorldSimulation.Sources)
+	new := HasCharacterWorkContinuationHistoryPolicyV1(current.ChapterWorldSimulation.Sources)
+	if old != new {
+		return fmt.Errorf("generation continuation history policy cannot change between chapters")
+	}
+	if new && (previous.CharacterActivationEvidence == nil || current.CharacterActivationEvidence == nil || previous.CharacterActivationEvidence.ProtocolDigest != current.CharacterActivationEvidence.ProtocolDigest) {
+		return fmt.Errorf("generation continuation history producer cannot change between chapters")
+	}
+	return nil
+}
+
 // ValidateGenerationCharacterProtocolV2 binds an explicitly selected generation
 // protocol to every complete simulation. Missing metadata is historical, not a
 // request to reinterpret or upgrade its already valid evidence.
@@ -59,10 +71,17 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 	wantV3 := CharacterActivationUsesRoundSources(policy)
 	wantNew := policy == CharacterActivationCyclePolicyV2 || wantV3
 	wantTimedResources := HasCharacterResourceObservationTimePolicyV1(bundle.ChapterWorldSimulation.Sources)
+	wantFullHistory := HasCharacterWorkContinuationHistoryPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	if wantFullHistory && !wantV3 {
+		return fmt.Errorf("full-owner continuation history requires a v3 generation")
+	}
 	if wantTimedResources && !wantV3 {
 		return fmt.Errorf("timed resource observations require a v3 generation")
 	}
 	check := func(label string, sources []string) error {
+		if HasCharacterWorkContinuationHistoryPolicyV1(sources) != wantFullHistory {
+			return fmt.Errorf("generation continuation history policy differs from %s", label)
+		}
 		if HasCharacterResourceObservationTimePolicyV1(sources) != wantTimedResources {
 			return fmt.Errorf("generation resource observation time policy differs from %s", label)
 		}

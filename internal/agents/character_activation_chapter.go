@@ -37,6 +37,13 @@ func runCharacterActivationChapter(ctx context.Context, cfg bootstrap.Config, st
 	if st == nil || models == nil || maxCycles < 1 || maxCycles > 64 || cfg.CharacterAgents.MaxRevisionRounds < 0 || cfg.CharacterAgents.MaxRevisionRounds > 1 {
 		return nil, fmt.Errorf("chapter activation dependencies/limits are invalid")
 	}
+	if boundary.FrozenActivationProducer == "" {
+		boundary.FrozenActivationProducer = cfg.CharacterAgents.FrozenActivationProducer
+	}
+	producer := CharacterActivationProtocolWithProducer(characterActivationPolicyForBoundary(boundary), boundary.FrozenActivationProducer)
+	if producer == "" {
+		return nil, fmt.Errorf("chapter activation has an unknown frozen producer")
+	}
 	if projected.Version != "" {
 		if err := domain.ValidateProjectedPlanningContextV2(projected); err != nil {
 			return nil, err
@@ -48,7 +55,7 @@ func runCharacterActivationChapter(ctx context.Context, cfg bootstrap.Config, st
 	if existing, err := st.LoadCharacterActivationChapterEvidence(generation, chapter); err != nil {
 		return nil, err
 	} else if existing != nil {
-		if existing.ProtocolDigest != characterActivationProtocolForPolicy(characterActivationPolicyForBoundary(boundary)) || existing.Session.MaxCycles != maxCycles {
+		if existing.ProtocolDigest != producer || existing.Session.MaxCycles != maxCycles {
 			return nil, fmt.Errorf("completed chapter activation uses different frozen protocol/limits")
 		}
 		if existing.Context.ArcLastChapter != boundary.LastChapter || existing.Context.BookLastChapter != boundary.BookLastChapter || existing.Context.ProjectionContextDigest != projected.ContextDigest {

@@ -51,6 +51,7 @@ type ProjectedArcBoundary struct {
 	CharacterActivationPolicy    string
 	MaxCharacterActivationCycles int
 	CharacterProtocolPinned      bool
+	FrozenActivationProducer     string
 }
 
 // A simulator turn is intentionally bounded, but every successful tool call
@@ -571,6 +572,7 @@ func RunProjectedChapterPlanning(
 		return nil, err
 	}
 	arcBoundary.CharacterProtocolPinned = true
+	arcBoundary.FrozenActivationProducer = cfg.CharacterAgents.FrozenActivationProducer
 	st := store.NewStore(isolatedOutputDir)
 	if err := st.Init(); err != nil {
 		return nil, fmt.Errorf("init project-all workspace: %w", err)

@@ -48,13 +48,16 @@ func runCharacterActivationCycleV3(ctx context.Context, cfg bootstrap.Config, st
 				continuations = append(continuations, *eligible.Receipt)
 			}
 		}
-		view, err = st.PrepareCharacterArbitrationV3(session, continuations, characterActivationProtocolForPolicy(policy))
+		view, err = st.PrepareCharacterArbitrationV3(session, continuations, characterActivationProtocolForStimulus(frozen.Stimulus))
 		if err != nil {
 			return empty, err
 		}
 	}
 	if !sameCharacterCycleValue(view.Input(), *frozen) {
 		return empty, fmt.Errorf("v3 admission differs from frozen current input")
+	}
+	if view.ProtocolDigest() != characterActivationProtocolForStimulus(frozen.Stimulus) {
+		return empty, fmt.Errorf("v3 admission uses a different frozen producer")
 	}
 	continued := map[string]bool{}
 	for _, c := range view.Continuations() {

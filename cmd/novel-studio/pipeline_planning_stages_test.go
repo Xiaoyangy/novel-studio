@@ -250,7 +250,7 @@ func TestResolvePipelinePlanningStageAliasesAndPreservesDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got, []string{
-		"architect", "outline-all", "zero-init", "preplan", "project-all", "seal", "promote", "render",
+		"architect", "outline-all", "zero-init", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render",
 	}) {
 		t.Fatalf("default pipeline changed: %v", got)
 	}

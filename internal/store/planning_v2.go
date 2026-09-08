@@ -562,6 +562,12 @@ func (s *ProjectedStoreV2) CreateBuildingGeneration(
 	}
 
 	return s.withProjectedWriteLock(func() error {
+		if err := s.validatePlanningDetailWindowSourcesUnlocked(generation, source); err != nil {
+			return err
+		}
+		if err := s.validatePlanningDetailWindowRegistryUnlocked(generation, registry, true); err != nil {
+			return err
+		}
 		if err := s.ensureBaseDirsUnlocked(); err != nil {
 			return err
 		}
@@ -650,6 +656,22 @@ func (s *ProjectedStoreV2) loadGenerationAtUnlocked(base string) (*domain.Planni
 	}
 	if err := domain.ValidatePlanningGenerationV2(generation); err != nil {
 		return nil, err
+	}
+	if generation.DetailWindow != nil {
+		source, err := s.loadSourceAtUnlocked(base)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.validatePlanningDetailWindowSourcesUnlocked(generation, *source); err != nil {
+			return nil, err
+		}
+		registry, err := s.loadRegistryAtUnlocked(base)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.validatePlanningDetailWindowRegistryUnlocked(generation, *registry, false); err != nil {
+			return nil, err
+		}
 	}
 	return &generation, nil
 }

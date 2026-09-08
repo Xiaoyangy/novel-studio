@@ -42,7 +42,11 @@ func requirePipelineArcChapterAcceptances(
 			generation.LastProjectedChapter,
 		)
 	}
-	for chapter := generation.FirstProjectedChapter; chapter <= generation.LastProjectedChapter; chapter++ {
+	firstChapter := generation.FirstProjectedChapter
+	if pipelineArcRequiresWindowAggregate(generation) && generation.LastProjectedChapter == generation.DetailWindow.ArcLastChapter {
+		firstChapter = generation.DetailWindow.ArcFirstChapter
+	}
+	for chapter := firstChapter; chapter <= generation.LastProjectedChapter; chapter++ {
 		if !slices.Contains(progress.CompletedChapters, chapter) {
 			return fmt.Errorf("arc generation %s chapter %d is not committed", generation.GenerationID, chapter)
 		}
@@ -180,9 +184,6 @@ func requirePipelinePreviousArcFullyRealized(st *store.Store, baseChapter int) e
 		}
 		return nil
 	}
-	if err := requirePipelineCompletedArcBoundary(st, baseChapter); err != nil {
-		return err
-	}
 	projected := st.ProjectedV2()
 	active, err := projected.LoadActiveGeneration()
 	if err != nil {
@@ -210,6 +211,19 @@ func requirePipelinePreviousArcFullyRealized(st *store.Store, baseChapter int) e
 			generation.GenerationID,
 			baseChapter,
 		)
+	}
+	if window := generation.DetailWindow; window != nil && generation.LastProjectedChapter < window.ArcLastChapter {
+		boundary, err := projected.LoadAcceptedPlanningWindowBoundaryV1(generation.GenerationID)
+		if err != nil {
+			return err
+		}
+		if boundary == nil || boundary.LastOutcome.ReceiptDigest != cursor.LastOutcomeReceiptDigest {
+			return fmt.Errorf("上一细推窗口的完整验收证明与当前正史游标不一致")
+		}
+		return nil // This unlocks the next in-arc window, never the next arc.
+	}
+	if err := requirePipelineCompletedArcBoundary(st, baseChapter); err != nil {
+		return err
 	}
 	completion, err := requirePipelineArcCompletion(st, generation)
 	if err != nil {

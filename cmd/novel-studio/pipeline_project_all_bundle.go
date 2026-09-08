@@ -102,7 +102,9 @@ func buildPipelineProjectedChapterBundle(
 	}
 	if domain.IsArcPlanningGenerationV2(generation) {
 		var predecessor *domain.ProjectedPlanningPredecessorContractV2
-		if chapter > generation.FirstProjectedChapter {
+		if chapter == generation.FirstProjectedChapter && generation.DetailWindow != nil {
+			predecessor = generation.DetailWindow.AcceptedPredecessor
+		} else if chapter > generation.FirstProjectedChapter {
 			incoming := plan.CausalSimulation.ArcTransition
 			predecessor = &domain.ProjectedPlanningPredecessorContractV2{
 				Chapter:                 chapter - 1,
