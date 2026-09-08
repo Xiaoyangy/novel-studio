@@ -37,7 +37,7 @@ check_partition() {
         invoke "$inventory" "$shard" "$tmp/capture.$shard" || fail "valid shard $shard failed"
         mapfile -t args < "$tmp/capture.$shard"
         [[ ${#args[@]} -eq 7 && ${args[0]} == test && ${args[1]} == -race && \
-            ${args[2]} == -count=1 && ${args[3]} == -timeout=10m && \
+            ${args[2]} == -count=1 && ${args[3]} == -timeout=20m && \
             ${args[4]} == -run && ${args[6]} == ./internal/agents ]] || fail 'race flags/package changed'
         pattern=${args[5]}
         [[ $pattern == '^('*')$' && $pattern != */* ]] || fail 'top-level anchors or unrestricted subtests lost'

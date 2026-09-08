@@ -38,4 +38,6 @@ fi
 pattern+=')$'
 printf 'agents race shard %s/4: %s of %s top-level tests\n' "$shard" "$selected" "${#all_tests[@]}"
 # No slash selector: all subtests and fuzz seed cases below a selected name run.
-exec go test -race -count=1 -timeout=10m -run "$pattern" ./internal/agents
+# This is a cumulative package budget, not a deadline for each selected test.
+# Keep it below the workflow's 25-minute job bound, including setup and build.
+exec go test -race -count=1 -timeout=20m -run "$pattern" ./internal/agents

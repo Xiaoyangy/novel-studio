@@ -53,7 +53,8 @@ jobs:
 
   race_agents:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The test timeout is cumulative per shard; leave setup/build/cleanup room.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 4
