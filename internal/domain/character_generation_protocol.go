@@ -3,6 +3,9 @@ package domain
 import "fmt"
 
 func validateGenerationContinuationHistoryPredecessor(previous, current ProjectedChapterBundle) error {
+	if HasCharacterSurfaceInspectionPolicyV1(previous.ChapterWorldSimulation.Sources) != HasCharacterSurfaceInspectionPolicyV1(current.ChapterWorldSimulation.Sources) {
+		return fmt.Errorf("generation surface inspection policy cannot change between chapters")
+	}
 	old := HasCharacterWorkContinuationHistoryPolicyV1(previous.ChapterWorldSimulation.Sources)
 	new := HasCharacterWorkContinuationHistoryPolicyV1(current.ChapterWorldSimulation.Sources)
 	if old != new {
@@ -73,6 +76,10 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 	wantTimedResources := HasCharacterResourceObservationTimePolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantFullHistory := HasCharacterWorkContinuationHistoryPolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantCompletions := HasCharacterSelfCompletionViewPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	wantSurfaces := HasCharacterSurfaceInspectionPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	if wantSurfaces && !wantV3 {
+		return fmt.Errorf("surface inspection observations require a v3 generation")
+	}
 	if wantCompletions && (!wantV3 || !wantFullHistory) {
 		return fmt.Errorf("completed self-task view requires a full-owner v3 generation")
 	}
@@ -83,6 +90,9 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 		return fmt.Errorf("timed resource observations require a v3 generation")
 	}
 	check := func(label string, sources []string) error {
+		if HasCharacterSurfaceInspectionPolicyV1(sources) != wantSurfaces {
+			return fmt.Errorf("generation surface inspection policy differs from %s", label)
+		}
 		if HasCharacterSelfCompletionViewPolicyV1(sources) != wantCompletions {
 			return fmt.Errorf("generation self completion view policy differs from %s", label)
 		}

@@ -178,11 +178,15 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, c
 		if current == nil {
 			return input, fmt.Errorf("rehearsal character lacks accepted physical state: %s", character.Name)
 		}
-		views, err := domain.BuildCharacterResourceViewsV2(*input.WorldState, record.AgentID)
+		var observationSources []string
+		if input.ExecutionCapabilities.Policy == domain.ArcRehearsalCapabilityPolicyV2 {
+			observationSources = []string{domain.CharacterSurfaceInspectionPolicyV1}
+		}
+		views, err := domain.BuildCharacterResourceViewsForSourcesV2(*input.WorldState, record.AgentID, observationSources)
 		if err != nil {
 			return input, err
 		}
-		o := domain.CharacterObservationPacket{Version: domain.CharacterObservationV2Version, GenerationID: "arc_rehearsal", Chapter: input.BaseCanonChapter + 1, Round: 1, AgentID: record.AgentID, Character: record.Character, Location: current.Location, CurrentGoal: character.InitialState.CurrentGoal, Pressure: character.InitialState.Pressure, StimulusDigest: input.SourceRoot, ResourceViews: views}
+		o := domain.CharacterObservationPacket{Version: domain.CharacterObservationV2Version, GenerationID: "arc_rehearsal", Chapter: input.BaseCanonChapter + 1, Round: 1, AgentID: record.AgentID, Character: record.Character, Location: current.Location, CurrentGoal: character.InitialState.CurrentGoal, Pressure: character.InitialState.Pressure, StimulusDigest: input.SourceRoot, ResourceViews: views, Sources: observationSources}
 		o.KnownFacts = []domain.CharacterAgentFact{newCharacterAgentFact("self_profile", "身份："+character.Name+"；岗位："+character.Role, "characters.json", "private")}
 		if input.BaseCanonChapter == 0 {
 			for _, fact := range character.InitialState.KnownFacts {
@@ -236,6 +240,9 @@ func ArcRehearsalExecutionCapabilities(cfg bootstrap.Config) (domain.ArcRehearsa
 	}
 	if cfg.CharacterAgents.ExecutionPolicy != "" && cfg.CharacterAgents.ExecutionPolicy != "v1" && policy == "" {
 		return domain.ArcRehearsalExecutionCapabilitiesV1{}, fmt.Errorf("rehearsal execution selection is not a valid activation configuration")
+	}
+	if policy == domain.CharacterActivationCyclePolicyV3 && domain.HasCharacterSurfaceInspectionPolicyV1(characterActivationV3PoliciesForProducer(producer)) {
+		return domain.BuildArcRehearsalExecutionCapabilitiesV2(cfg.CharacterAgentsProtocolVersion(), policy, producer)
 	}
 	return domain.BuildArcRehearsalExecutionCapabilitiesV1(cfg.CharacterAgentsProtocolVersion(), policy, producer)
 }

@@ -62,7 +62,7 @@ func validateCharacterObservationSourceRefsV2(observation CharacterObservationPa
 		return fmt.Errorf("opaque character source policy rejects raw %s", field)
 	}
 	for _, ref := range observation.Sources {
-		if ref != CharacterSelfCompletionViewPolicyV1 && ref != CharacterWorkContinuationHistoryPolicyV1 && ref != CharacterResourceObservationTimePolicyV1 && ref != CharacterSourceRefPolicyV2 && ref != CharacterSelfExperiencePolicyV2 && ref != CharacterOperationalAvailabilityPolicyV1 && ref != CharacterSelfChronologyPolicyV1 && ref != CharacterWorkContinuationPolicyV1 && ref != CharacterActivationCyclePolicyV3 && ref != CharacterArbitrationRoundSourcesPolicyV1 && ref != CharacterWorkArtifactPolicyV1 && ref != CharacterRevisionFeedbackPolicyV1 {
+		if ref != CharacterSurfaceInspectionPolicyV1 && ref != CharacterSelfCompletionViewPolicyV1 && ref != CharacterWorkContinuationHistoryPolicyV1 && ref != CharacterResourceObservationTimePolicyV1 && ref != CharacterSourceRefPolicyV2 && ref != CharacterSelfExperiencePolicyV2 && ref != CharacterOperationalAvailabilityPolicyV1 && ref != CharacterSelfChronologyPolicyV1 && ref != CharacterWorkContinuationPolicyV1 && ref != CharacterActivationCyclePolicyV3 && ref != CharacterArbitrationRoundSourcesPolicyV1 && ref != CharacterWorkArtifactPolicyV1 && ref != CharacterRevisionFeedbackPolicyV1 {
 			if err := require(ref, false, "sources"); err != nil {
 				return err
 			}
@@ -145,7 +145,7 @@ func validateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacke
 	if HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) && (!HasCharacterWorkContinuationPolicyV1(stimulus.Sources) || !HasCharacterSelfChronologyPolicyV1(stimulus.Sources) || !physicalContainsRefV2(stimulus.Sources, CharacterActivationCyclePolicyV3)) {
 		return fmt.Errorf("full-owner continuation history requires the v3 continuation and chronology policies")
 	}
-	for _, policy := range []string{CharacterSelfCompletionViewPolicyV1, CharacterWorkContinuationHistoryPolicyV1, CharacterResourceObservationTimePolicyV1, CharacterActivationCyclePolicyV3, CharacterArbitrationRoundSourcesPolicyV1, CharacterRevisionFeedbackPolicyV1} {
+	for _, policy := range []string{CharacterSurfaceInspectionPolicyV1, CharacterSelfCompletionViewPolicyV1, CharacterWorkContinuationHistoryPolicyV1, CharacterResourceObservationTimePolicyV1, CharacterActivationCyclePolicyV3, CharacterArbitrationRoundSourcesPolicyV1, CharacterRevisionFeedbackPolicyV1} {
 		if physicalContainsRefV2(stimulus.Sources, policy) != physicalContainsRefV2(observation.Sources, policy) {
 			return fmt.Errorf("character observation round-source policy differs from its stimulus")
 		}
@@ -188,14 +188,14 @@ func validateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacke
 	if opaque != HasCharacterSourceRefPolicyV2(observation.Sources) {
 		return fmt.Errorf("character observation source policy differs from its stimulus")
 	}
-	views, err := BuildCharacterResourceViewsV2(*stimulus.PhysicalState, observation.AgentID)
+	views, err := BuildCharacterResourceViewsForSourcesV2(*stimulus.PhysicalState, observation.AgentID, stimulus.Sources)
 	if err != nil {
 		return err
 	}
 	if samePhysicalValueV2(views, observation.ResourceViews) || (len(views) == 0 && len(observation.ResourceViews) == 0) {
 		return nil
 	}
-	if !opaque {
+	if !opaque && !HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) {
 		legacy, err := buildCharacterResourceViewsV2(*stimulus.PhysicalState, observation.AgentID, false)
 		if err != nil {
 			return err

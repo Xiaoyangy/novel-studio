@@ -145,7 +145,7 @@ func applyCharacterPhysicalObservation(observation *domain.CharacterObservationP
 	if actor == nil || actor.Character != profile.Character.Name {
 		return fmt.Errorf("v2 physical state is missing character %s", profile.Character.Name)
 	}
-	views, err := domain.BuildCharacterResourceViewsV2(*stimulus.PhysicalState, profile.Record.AgentID)
+	views, err := domain.BuildCharacterResourceViewsForSourcesV2(*stimulus.PhysicalState, profile.Record.AgentID, stimulus.Sources)
 	if err != nil {
 		return err
 	}

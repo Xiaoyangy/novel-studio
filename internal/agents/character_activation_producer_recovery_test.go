@@ -13,9 +13,13 @@ import (
 )
 
 // Keep these adjacent top-level names so deterministic race shards distribute
-// the same three deep cases instead of accumulating them in one shard entry.
+// the deep cases instead of accumulating them in one shard entry.
+func TestContinuationProducerRuntimeRecoversOldAndNewFrozenWorkSurfaceInspection(t *testing.T) {
+	testContinuationProducerRuntimeRecovery(t, "surface-inspection", characterActivationProtocolV3Digest(), true, true)
+}
+
 func TestContinuationProducerRuntimeRecoversOldAndNewFrozenWorkCompletionView(t *testing.T) {
-	testContinuationProducerRuntimeRecovery(t, "completion-view", characterActivationProtocolV3Digest(), true, true)
+	testContinuationProducerRuntimeRecovery(t, "completion-view", characterActivationProtocolV3CompletionDigest(), true, true)
 }
 
 func TestContinuationProducerRuntimeRecoversOldAndNewFrozenWorkFullOwner(t *testing.T) {
@@ -54,6 +58,9 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 		if domain.HasCharacterSelfCompletionViewPolicyV1(view.Input().Stimulus.Sources) != completions {
 			t.Fatal("initial source changed its frozen completion strategy")
 		}
+		if domain.HasCharacterSurfaceInspectionPolicyV1(view.Input().Stimulus.Sources) != (producer == characterActivationProtocolV3Digest()) {
+			t.Fatal("initial source changed its frozen surface strategy")
+		}
 		proof, err := runCharacterActivationChapter(context.Background(), cfg, store.NewStore(st.Dir()), models, generation, 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 		selectionMust(t, err)
 		if proof.ProtocolDigest != producer || model.actorCalls != 8 || model.revisionCalls != 3 || model.arbiterCalls != 4 {
@@ -62,6 +69,9 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 		for _, cycle := range proof.Cycles {
 			if cycle.Evidence.ProtocolDigest != producer || domain.HasCharacterWorkContinuationHistoryPolicyV1(cycle.Evidence.Stimulus.Sources) != full || domain.HasCharacterSelfCompletionViewPolicyV1(cycle.Evidence.Stimulus.Sources) != completions {
 				t.Fatal("cycle evidence upgraded or downgraded its frozen producer")
+			}
+			if domain.HasCharacterSurfaceInspectionPolicyV1(cycle.Evidence.Stimulus.Sources) != (producer == characterActivationProtocolV3Digest()) {
+				t.Fatal("cycle evidence changed its frozen surface strategy")
 			}
 		}
 		calls := model.actorCalls + model.arbiterCalls + int(model.readiness.readiness.Load())

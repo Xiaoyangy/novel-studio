@@ -444,6 +444,9 @@ func ComputeWorldStimulusPacketDigest(p WorldStimulusPacket) (string, error) {
 }
 
 func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, error) {
+	if err := validateSurfaceInspectionStimulusV1(p); err != nil {
+		return p, err
+	}
 	if err := validateWorkArtifactStimulusV1(p); err != nil {
 		return p, err
 	}

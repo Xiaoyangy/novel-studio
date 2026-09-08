@@ -40,7 +40,7 @@ func ArcRehearsalProtocolDigest() (string, error) {
 		Schema          map[string]any `json:"schema"`
 		Transport       string         `json:"transport"`
 		Capabilities    string         `json:"capabilities"`
-	}{"arc-rehearsal-delivery-policy.v2", arcRehearsalPrompt + arcRehearsalCapabilityPromptV1, arcRehearsalReviewPrompt, tool.Description(), tool.Schema(), modelinput.ExactAgentPacketPolicy, domain.ArcRehearsalCapabilityPolicyV1})
+	}{"arc-rehearsal-delivery-policy.v3", arcRehearsalPrompt + arcRehearsalCapabilityPromptV1 + arcRehearsalSurfaceCapabilityPromptV1, arcRehearsalReviewPrompt, tool.Description(), tool.Schema(), modelinput.ExactAgentPacketPolicy, domain.ArcRehearsalCapabilityPolicyV2})
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +179,7 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 	if err != nil {
 		return domain.ArcRehearsalBody{}, call, err
 	}
-	prompt := arcRehearsalPrompt + arcRehearsalCapabilityPromptV1
+	prompt := arcRehearsalPrompt + arcRehearsalCapabilityPromptV1 + arcRehearsalSurfaceCapabilityPromptV1
 	if role == "world_arbiter" {
 		prompt += arcRehearsalReviewPrompt
 	}

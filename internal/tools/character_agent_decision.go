@@ -92,6 +92,10 @@ func (t *SubmitCharacterDecisionTool) Schema() map[string]any {
 		properties["resource_reads"] = characterResourceReadsSchema()
 		if domain.HasCharacterSelfExperiencePolicyV2(t.observation.Sources) {
 			properties["self_tasks"] = characterSelfTasksSchema(domain.HasCharacterOperationalAvailabilityPolicyV1(t.observation.Sources))
+			if domain.HasCharacterSurfaceInspectionPolicyV1(t.observation.Sources) {
+				tasks := properties["self_tasks"].(map[string]any)
+				tasks["items"].(map[string]any)["properties"].(map[string]any)["observation_requests"] = characterSurfaceInspectionRequestsSchemaV1()
+			}
 			if domain.HasCharacterWorkArtifactPolicyV1(t.observation.Sources) {
 				tasks := properties["self_tasks"].(map[string]any)
 				tasks["items"].(map[string]any)["properties"].(map[string]any)["output_requests"] = characterWorkOutputRequestsSchema()
@@ -382,6 +386,10 @@ func (t *ResolveChapterWorldTool) Schema() map[string]any {
 		resolution["required"] = append(resolution["required"].([]string), "post_state")
 		if selfPolicy {
 			resolution["properties"].(map[string]any)["self_executions"] = characterSelfExecutionsSchema(domain.HasCharacterOperationalAvailabilityPolicyV1(t.stimulus.Sources))
+			if domain.HasCharacterSurfaceInspectionPolicyV1(t.stimulus.Sources) {
+				executions := resolution["properties"].(map[string]any)["self_executions"].(map[string]any)
+				executions["items"].(map[string]any)["properties"].(map[string]any)["observation_results"] = characterSurfaceInspectionResultsSchemaV1()
+			}
 			if domain.HasCharacterWorkArtifactPolicyV1(t.stimulus.Sources) {
 				properties := resolution["properties"].(map[string]any)
 				executions := properties["self_executions"].(map[string]any)

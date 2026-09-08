@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -32,11 +32,17 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
+		if domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) && (!domain.HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) || !domain.HasCharacterSelfCompletionViewPolicyV1(stimulus.Sources)) {
+			return "" // No older producer can acquire only the new wire marker.
+		}
 		if !domain.HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3LegacyDigest()
 		}
 		if !domain.HasCharacterSelfCompletionViewPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3HistoryDigest()
+		}
+		if !domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3CompletionDigest()
 		}
 	}
 	return characterActivationProtocolForPolicy(policy)
@@ -48,6 +54,8 @@ func characterActivationV3PoliciesForProducer(producer string) []string {
 		return characterActivationV3LegacyPolicies()
 	case characterActivationProtocolV3HistoryDigest():
 		return characterActivationV3HistoryPolicies()
+	case characterActivationProtocolV3CompletionDigest():
+		return characterActivationV3CompletionPolicies()
 	case characterActivationProtocolV3Digest():
 		return characterActivationV3Policies()
 	}

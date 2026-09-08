@@ -10,6 +10,7 @@ import (
 )
 
 const ArcRehearsalCapabilityPolicyV1 = "arc-rehearsal-execution-capabilities.v1"
+const ArcRehearsalCapabilityPolicyV2 = "arc-rehearsal-execution-capabilities.v2"
 
 // Host-built API inventory, not evidence that an operation has happened. The
 // existing WorldState is the sole resource/actor inventory. No background actor
@@ -36,6 +37,7 @@ type ArcRehearsalCapabilityRequirementV1 struct {
 	ArtifactRef    string                         `json:"artifact_ref,omitempty"`
 	DependsOn      []string                       `json:"depends_on,omitempty"`
 	MaterialInputs []CharacterWorkMaterialInputV1 `json:"material_inputs,omitempty"`
+	Surface        string                         `json:"surface,omitempty"`
 }
 
 func BuildArcRehearsalExecutionCapabilitiesV1(protocol, policy, producer string) (ArcRehearsalExecutionCapabilitiesV1, error) {
@@ -62,11 +64,33 @@ func BuildArcRehearsalExecutionCapabilitiesV1(protocol, policy, producer string)
 	return p, nil
 }
 
+// V1 remains frozen for historical reports. Only a surface-enabled producer's
+// host selection builds V2; a declared surface is inspectability, never a result.
+func BuildArcRehearsalExecutionCapabilitiesV2(protocol, policy, producer string) (ArcRehearsalExecutionCapabilitiesV1, error) {
+	p, err := BuildArcRehearsalExecutionCapabilitiesV1(protocol, policy, producer)
+	if err != nil {
+		return p, err
+	}
+	if policy != CharacterActivationCyclePolicyV3 {
+		return p, fmt.Errorf("surface inspection rehearsal requires a V3 execution producer")
+	}
+	p.Policy = ArcRehearsalCapabilityPolicyV2
+	p.ActionKinds = append(p.ActionKinds, "surface_inspection")
+	p.ResourceKinds = append(p.ResourceKinds, "existing_inspectable_surface")
+	slices.Sort(p.ActionKinds)
+	slices.Sort(p.ResourceKinds)
+	return p, nil
+}
+
 func validateArcRehearsalExecutionCapabilitiesV1(p *ArcRehearsalExecutionCapabilitiesV1) error {
 	if p == nil { // Historical bytes retain the historical validation path.
 		return nil
 	}
-	want, err := BuildArcRehearsalExecutionCapabilitiesV1(p.CharacterProtocol, p.ActivationPolicy, p.ProducerDigest)
+	build := BuildArcRehearsalExecutionCapabilitiesV1
+	if p.Policy == ArcRehearsalCapabilityPolicyV2 {
+		build = BuildArcRehearsalExecutionCapabilitiesV2
+	}
+	want, err := build(p.CharacterProtocol, p.ActivationPolicy, p.ProducerDigest)
 	if err != nil || !samePhysicalValueV2(want, *p) {
 		return fmt.Errorf("rehearsal execution capability inventory is not the exact host profile")
 	}
@@ -156,6 +180,9 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 		readDependency := false
 		for j, r := range m.CapabilityRequirements {
 			requirementIndex, diagnosticRequirement = j, r
+			if r.Surface != "" && (input.ExecutionCapabilities.Policy != ArcRehearsalCapabilityPolicyV2 || r.Kind != "surface_inspection" || !IsCharacterInspectableSurfaceV1(r.Surface)) {
+				return fmt.Errorf("surface requires the surface-enabled profile and an explicit exterior inspection, not contents, quantities or permission")
+			}
 			if !rehearsalCapabilityKeyV1(r.Key) || prior[r.Key].value.Key != "" || len(prior) >= 128 || len(r.DependsOn) > 16 || len(r.ResourceRefs) > 16 || len(r.MechanismRefs) > 16 || len(r.MaterialInputs) > 16 {
 				return fmt.Errorf("capability dependency has duplicate, invalid or unbounded identity")
 			}
@@ -217,6 +244,10 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 				resource = resources[r.ResourceRefs[0]]
 			}
 			switch r.Kind {
+			case "surface_inspection":
+				if !single || !HasInspectableSurfaceV1(resource, r.Surface) || len(r.MechanismRefs) == 0 {
+					return fmt.Errorf("surface_inspection requires one existing resource's declared inspectable surface and a public mechanism; no current condition or permission is inferred")
+				}
 			case "resource_read":
 				if !single || resource.Artifact != nil || len(resource.ReadableFacts) == 0 || !m.RequiresReadable {
 					return fmt.Errorf("resource_read requires one existing readable document and requires_readable=true")

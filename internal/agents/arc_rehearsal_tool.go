@@ -51,11 +51,12 @@ func (*submitArcRehearsalTool) Schema() map[string]any {
 	)
 	dependency := schema.Object(
 		schema.Property("key", schema.String("全报告唯一声明键；不是resource_id，后续depends_on按此引用")).Required(),
-		schema.Property("kind", schema.Enum("执行API类型；self_work/resource_use不产生新观察或许可", "resource_read", "resource_measurement", "operational_observation", "communication", "resource_delivery", "resource_use", "self_work", "artifact_write", "artifact_read", "artifact_sign", "unsupported")).Required(),
+		schema.Property("kind", schema.Enum("执行API类型；须列于input.execution_capabilities.action_kinds；self_work/resource_use不产生新观察或许可", "resource_read", "resource_measurement", "operational_observation", "surface_inspection", "communication", "resource_delivery", "resource_use", "self_work", "artifact_write", "artifact_read", "artifact_sign", "unsupported")).Required(),
 		schema.Property("actor_ref", schema.String("world_state.actors中的agent_id；未知/不支持岗位只能missing/unclear")).Required(),
 		schema.Property("recipient_ref", schema.String("通信/交付必须指定不同的现有actor；不接受背景职务名")),
 		schema.Property("resource_refs", texts("本动作的实际现有resource_id；读取/测量/局部设备检查各一个，未来产物不填假ID")),
 		schema.Property("mechanism_refs", texts("实际公开机制ID；测量/局部设备检查必填，机制不能代替对象")),
+		schema.Property("surface", schema.Enum("仅surface_inspection：同一resource_id已定义的inspectable_surfaces项；不是当前完好、内文或许可结论", "container_exterior", "seal_exterior")),
 		schema.Property("artifact_ref", schema.String("较早artifact_write的key，表示未来预期版本；同时列入depends_on，与resource_refs互斥")),
 		schema.Property("depends_on", texts("较早依赖key；不同actor的未来产物使用还需实际交付路径，签认需本人读过该预期版本")),
 		schema.Property("material_inputs", schema.Array("仅首次写成未来产物分配现有量化材料，不造新资源；修改不重复分配", schema.Object(

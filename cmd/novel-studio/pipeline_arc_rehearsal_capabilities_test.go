@@ -27,7 +27,18 @@ func TestPipelineArcRehearsalCapabilitiesUseActualConfigAcrossBoundaries(t *test
 	}
 	defaultInput, err := buildPipelineArcRehearsalInput(st)
 	publicationArtifactMust(t, err)
-	if input.InputDigest == defaultInput.InputDigest || input.SourceRoot != defaultInput.SourceRoot || !reflect.DeepEqual(input.CharacterObservations, defaultInput.CharacterObservations) {
+	// A surface-enabled producer adds only its policy marker to this fixture,
+	// which has no inspectable resources; all character knowledge stays exact.
+	observations := append([]domain.CharacterObservationPacket(nil), input.CharacterObservations...)
+	for i := range observations {
+		if len(observations[i].Sources) != 0 && !reflect.DeepEqual(observations[i].Sources, []string{domain.CharacterSurfaceInspectionPolicyV1}) {
+			t.Fatal("rehearsal added unrelated observation sources")
+		}
+		observations[i].Sources, observations[i].Digest = nil, ""
+		observations[i], err = domain.FinalizeCharacterObservationPacket(observations[i])
+		publicationArtifactMust(t, err)
+	}
+	if input.InputDigest == defaultInput.InputDigest || input.SourceRoot != defaultInput.SourceRoot || !reflect.DeepEqual(observations, defaultInput.CharacterObservations) {
 		t.Fatal("actual profile did not alter only rehearsal identity (not foundation or character knowledge)")
 	}
 	body := domain.ArcRehearsalBody{Summary: "测试仅确认条件性本人行动，无新外部材料结论", MaterialChecks: []domain.ArcRehearsalMaterialCheck{{Operation: "本测试无外部资料读取", Status: "not_required", Explanation: "只核配置传递，不认证真实故事可达"}}}

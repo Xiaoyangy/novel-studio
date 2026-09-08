@@ -16,6 +16,7 @@ const CharacterOperationalObservationByteLimitV1 = 16 * 1024
 
 // Purpose is the owner's unverified intended use, never a newly observed fact.
 type CharacterOperationalObservationRequestV1 struct {
+	Surface       string   `json:"surface,omitempty"`
 	RequestID     string   `json:"request_id"`
 	ResourceID    string   `json:"resource_id"`
 	Purpose       string   `json:"purpose"`
@@ -23,6 +24,7 @@ type CharacterOperationalObservationRequestV1 struct {
 	KnowledgeRefs []string `json:"knowledge_refs"`
 }
 type CharacterOperationalObservationResultV1 struct {
+	Surface       string   `json:"surface,omitempty"`
 	RequestID     string   `json:"request_id"`
 	Result        string   `json:"result"`
 	ObservedAtDay *float64 `json:"observed_at_day"`
@@ -31,6 +33,7 @@ type CharacterOperationalObservationResultV1 struct {
 // This host-derived owner receipt does not modify physical balances, access,
 // capacity, or task completion. Its conclusion applies only at ObservedAtDay.
 type CharacterOperationalObservationV1 struct {
+	Surface              string   `json:"surface,omitempty"`
 	ID                   string   `json:"id"`
 	AgentID              string   `json:"agent_id"`
 	GenerationID         string   `json:"generation_id"`
@@ -74,6 +77,12 @@ func validateCharacterOperationalRequestsV1(task CharacterSelfTaskV2) error {
 	}
 	seen := map[string]bool{}
 	for _, request := range task.ObservationRequests {
+		if request.Surface != "" && !IsCharacterInspectableSurfaceV1(request.Surface) {
+			return fmt.Errorf("surface inspection request names an unsupported exterior facet")
+		}
+		if request.Surface != "" && !physicalContainsRefV2(task.ResourceIDs, request.ResourceID) {
+			return fmt.Errorf("surface inspection work must explicitly include the inspected resource_id")
+		}
 		if !physicalIdentityV2(request.RequestID) || !operationalBoundedV1(request.RequestID, 128) || seen[request.RequestID] || !physicalResourceIDV2(request.ResourceID) || !operationalBoundedV1(request.Purpose, 200) || !operationalBoundedV1(request.MechanismRef, 128) || len(request.KnowledgeRefs) == 0 || len(request.KnowledgeRefs) > 16 {
 			return fmt.Errorf("operational observation request identity, purpose or evidence is invalid")
 		}
@@ -90,7 +99,7 @@ func validateCharacterOperationalResultsV1(execution CharacterSelfExecutionV2) e
 	}
 	seen := map[string]bool{}
 	for _, result := range execution.ObservationResults {
-		if !physicalIdentityV2(result.RequestID) || seen[result.RequestID] || !operationalResultV1(result.Result) || !physicalAmountV2(result.ObservedAtDay) || *result.ObservedAtDay < *execution.StartDay || *result.ObservedAtDay > *execution.EndDay {
+		if !physicalIdentityV2(result.RequestID) || seen[result.RequestID] || !validOperationalResultForSurfaceV1(result.Surface, result.Result) || !physicalAmountV2(result.ObservedAtDay) || *result.ObservedAtDay < *execution.StartDay || *result.ObservedAtDay > *execution.EndDay || (result.Surface != "" && *execution.StartDay >= *execution.EndDay) {
 			return fmt.Errorf("operational observation result must be unique, restricted and inside its actual execution interval")
 		}
 		seen[result.RequestID] = true
@@ -122,7 +131,10 @@ func ValidateCharacterOperationalObservationIntentV1(proposal CharacterDecisionP
 		for _, request := range task.ObservationRequests {
 			view, visible := views[request.ResourceID]
 			_, public := mechanisms[request.MechanismRef]
-			if seen[request.RequestID] || !visible || view.Access == "none" || view.Perception.Kind == "unaware" || view.Unit != "" || perceptionHasNumberV2(view.Perception) || !public || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
+			if request.Surface != "" && (!HasCharacterSurfaceInspectionPolicyV1(observation.Sources) || !physicalContainsRefV2(view.InspectableSurfaces, request.Surface)) {
+				return fmt.Errorf("surface inspection requires the explicit policy and the exact visible inspectable facet")
+			}
+			if seen[request.RequestID] || !visible || view.Access == "none" || view.Perception.Kind == "unaware" || (request.Surface == "" && (view.Unit != "" || perceptionHasNumberV2(view.Perception))) || !public || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
 				return fmt.Errorf("operational observation requires a unique known accessible nonquantitative resource and invoked public mechanism")
 			}
 			seen[request.RequestID] = true
@@ -174,7 +186,10 @@ func ValidateCharacterOperationalObservationSourcesV1(proposal CharacterDecision
 			resource, known := catalog[request.ResourceID]
 			holding, visible := holdings[request.ResourceID]
 			mechanism, public := mechanisms[request.MechanismRef]
-			if seen[request.RequestID] || !known || !operationalResourceV1(resource) || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
+			if request.Surface != "" && !HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) {
+				return fmt.Errorf("surface inspection requires its explicit frozen policy")
+			}
+			if seen[request.RequestID] || !known || !operationalRequestResourceV1(resource, request.Surface) || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
 				// Only repeat identifiers supplied by this owner. Do not reveal
 				// which hidden resource property failed or any readable facts.
 				return fmt.Errorf("operational request %q for resource %q is not supported by this observation API; submit an owner-chosen task without this request or use the dedicated reading/measurement protocol when applicable", request.RequestID, request.ResourceID)
@@ -212,10 +227,14 @@ func operationalRequestCanReviseV1(receipt WorldArbitrationReceipt, stimulus Wor
 
 func CharacterOperationalObservationIDV1(observation CharacterOperationalObservationV1) string {
 	observation.ID = ""
+	policy := CharacterOperationalAvailabilityPolicyV1
+	if observation.Surface != "" {
+		policy = CharacterSurfaceInspectionPolicyV1
+	}
 	digest, _ := characterAgentDigest(struct {
 		Policy      string                            `json:"policy"`
 		Observation CharacterOperationalObservationV1 `json:"observation"`
-	}{CharacterOperationalAvailabilityPolicyV1, observation})
+	}{policy, observation})
 	return "oper_" + strings.TrimPrefix(digest, "sha256:")
 }
 
@@ -226,17 +245,20 @@ func validateCharacterOperationalStateV1(actor CharacterPhysicalStateV2, catalog
 	}
 	seen := map[string]bool{}
 	for _, observation := range actor.OperationalObservations {
-		if observation.AgentID != actor.AgentID || !operationalBoundedV1(observation.GenerationID, 256) || observation.Chapter <= 0 || !physicalIdentityV2(observation.TaskID) || !physicalIdentityV2(observation.RequestID) || !physicalResourceIDV2(observation.ResourceID) || !operationalBoundedV1(observation.Purpose, 200) || !operationalBoundedV1(observation.MechanismRef, 128) || validateCharacterPerceivedLabelV2(observation.ResourceLabel) != nil || strings.TrimSpace(observation.ResourceLabel) == "" || !operationalResultV1(observation.Result) || !physicalAmountV2(observation.ObservedAtDay) || !characterSourceDigestPatternV2.MatchString(observation.SourceProposalDigest) || seen[observation.ID] || observation.ID != CharacterOperationalObservationIDV1(observation) {
+		if observation.AgentID != actor.AgentID || !operationalBoundedV1(observation.GenerationID, 256) || observation.Chapter <= 0 || !physicalIdentityV2(observation.TaskID) || !physicalIdentityV2(observation.RequestID) || !physicalResourceIDV2(observation.ResourceID) || !operationalBoundedV1(observation.Purpose, 200) || !operationalBoundedV1(observation.MechanismRef, 128) || validateCharacterPerceivedLabelV2(observation.ResourceLabel) != nil || strings.TrimSpace(observation.ResourceLabel) == "" || !validOperationalResultForSurfaceV1(observation.Surface, observation.Result) || !physicalAmountV2(observation.ObservedAtDay) || !characterSourceDigestPatternV2.MatchString(observation.SourceProposalDigest) || seen[observation.ID] || observation.ID != CharacterOperationalObservationIDV1(observation) {
 			return fmt.Errorf("owner operational observation identity or restricted result is invalid")
 		}
 		seen[observation.ID] = true
 		if catalog != nil {
 			resource, exists := catalog[observation.ResourceID]
-			if !exists || !operationalResourceV1(resource) {
+			if !exists || !operationalRequestResourceV1(resource, observation.Surface) {
 				return fmt.Errorf("operational observation cannot attest quantities or document contents")
 			}
 		}
 		experience, exists := experiences[observation.SourceExperienceID]
+		if observation.Surface != "" && (!exists || !physicalContainsRefV2(experience.ResourceIDs, observation.ResourceID) || experience.StartDay == nil || experience.EndDay == nil || *experience.StartDay >= *experience.EndDay) {
+			return fmt.Errorf("surface observation lacks its owner's positive work on that exact target")
+		}
 		if !exists || experience.Kind != "work" || !selfExecutionActiveV2(experience.Status) || experience.Chapter != observation.Chapter || experience.TaskID != observation.TaskID || experience.SourceProposalDigest != observation.SourceProposalDigest || experience.StartDay == nil || experience.EndDay == nil || *observation.ObservedAtDay < *experience.StartDay || *observation.ObservedAtDay > *experience.EndDay {
 			return fmt.Errorf("operational observation lacks its owner's actual work execution")
 		}
@@ -246,11 +268,17 @@ func validateCharacterOperationalStateV1(actor CharacterPhysicalStateV2, catalog
 
 func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, stimulus WorldStimulusPacket, before WorldPhysicalStateV2, after *WorldPhysicalStateV2, proposals map[string]CharacterDecisionProposal, resolutions map[string]CharacterDecisionResolution) error {
 	policy := HasCharacterOperationalAvailabilityPolicyV1(stimulus.Sources)
+	surfacePolicy := HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources)
 	if policy && !HasCharacterSelfExperiencePolicyV2(stimulus.Sources) {
 		return fmt.Errorf("operational observations require self-experience execution policy")
 	}
 	for _, proposal := range proposals {
 		for _, task := range proposal.SelfTasks {
+			for _, request := range task.ObservationRequests {
+				if request.Surface != "" && !surfacePolicy {
+					return fmt.Errorf("surface requests require the explicit frozen surface policy")
+				}
+			}
 			if len(task.ObservationRequests) > 0 && !policy {
 				return fmt.Errorf("operational requests are forbidden without the explicit policy")
 			}
@@ -258,6 +286,11 @@ func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, st
 	}
 	for _, resolution := range resolutions {
 		for _, execution := range resolution.SelfExecutions {
+			for _, result := range execution.ObservationResults {
+				if result.Surface != "" && !surfacePolicy {
+					return fmt.Errorf("surface results require the explicit frozen surface policy")
+				}
+			}
 			if len(execution.ObservationResults) > 0 && !policy {
 				return fmt.Errorf("operational results are forbidden without the explicit policy")
 			}
@@ -306,7 +339,10 @@ func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, st
 				if owners[request.RequestID] != "" || !known || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
 					return fmt.Errorf("operational request is not a unique known accessible qualitative resource/public mechanism")
 				}
-				if !operationalResourceV1(resource) && !operationalRequestCanReviseV1(receipt, stimulus, before, *after, actor.AgentID) {
+				if request.Surface != "" && !operationalRequestResourceV1(resource, request.Surface) {
+					return fmt.Errorf("surface request requires the exact explicitly defined inspectable facet")
+				}
+				if request.Surface == "" && !operationalResourceV1(resource) && !operationalRequestCanReviseV1(receipt, stimulus, before, *after, actor.AgentID) {
 					return fmt.Errorf("operational request is not a unique known accessible qualitative resource/public mechanism; owner %q request %q requires an unchanged zero-time nonfinal R1 rule/resource conflict before owner revision; no operational result or physical failure may be invented", actor.AgentID, request.RequestID)
 				}
 				requests[request.RequestID], owners[request.RequestID] = request, task.TaskID
@@ -327,7 +363,7 @@ func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, st
 			}
 			for _, result := range execution.ObservationResults {
 				request, exists := requests[result.RequestID]
-				if !receipt.Finalized || !exists || owners[result.RequestID] != execution.TaskID || covered[result.RequestID] || !physicalContainsRefV2(resolution.MechanismRefs, request.MechanismRef) {
+				if !receipt.Finalized || !exists || owners[result.RequestID] != execution.TaskID || covered[result.RequestID] || result.Surface != request.Surface || !physicalContainsRefV2(resolution.MechanismRefs, request.MechanismRef) {
 					return fmt.Errorf("operational result must bind one executed owner request and invoked mechanism")
 				}
 				covered[result.RequestID] = true
@@ -349,7 +385,7 @@ func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, st
 				if label == "" {
 					label = UnidentifiedResourceNameV2
 				}
-				observation := CharacterOperationalObservationV1{AgentID: actor.AgentID, GenerationID: receipt.GenerationID, Chapter: receipt.Chapter, TaskID: execution.TaskID, RequestID: request.RequestID, ResourceID: request.ResourceID, ResourceLabel: label, Purpose: request.Purpose, MechanismRef: request.MechanismRef, Result: result.Result, ObservedAtDay: physicalNumberCopyV2(result.ObservedAtDay), SourceProposalDigest: proposal.Digest, SourceExperienceID: sourceID}
+				observation := CharacterOperationalObservationV1{Surface: request.Surface, AgentID: actor.AgentID, GenerationID: receipt.GenerationID, Chapter: receipt.Chapter, TaskID: execution.TaskID, RequestID: request.RequestID, ResourceID: request.ResourceID, ResourceLabel: label, Purpose: request.Purpose, MechanismRef: request.MechanismRef, Result: result.Result, ObservedAtDay: physicalNumberCopyV2(result.ObservedAtDay), SourceProposalDigest: proposal.Digest, SourceExperienceID: sourceID}
 				observation.ID = CharacterOperationalObservationIDV1(observation)
 				derived = append(derived, observation)
 			}
@@ -374,6 +410,9 @@ func selectCharacterOperationalObservationsV1(history []CharacterOperationalObse
 	latest := map[string]CharacterOperationalObservationV1{}
 	for _, observation := range history {
 		key := observation.ResourceID + "\x00" + observation.Purpose
+		if observation.Surface != "" {
+			key = observation.ResourceID + "\x00surface\x00" + observation.Surface
+		}
 		previous, exists := latest[key]
 		if !exists || *observation.ObservedAtDay > *previous.ObservedAtDay || (*observation.ObservedAtDay == *previous.ObservedAtDay && observation.ID > previous.ID) {
 			latest[key] = observation
@@ -415,6 +454,9 @@ func BuildCharacterOperationalObservationsV1(state WorldPhysicalStateV2, agentID
 }
 
 func validateCharacterOperationalObservationPacketV1(observation CharacterObservationPacket) error {
+	if err := validateSurfaceInspectionObservationV1(observation); err != nil {
+		return err
+	}
 	if !HasCharacterOperationalAvailabilityPolicyV1(observation.Sources) {
 		if len(observation.OperationalObservations) > 0 {
 			return fmt.Errorf("owner operational observations require the explicit policy")
@@ -444,6 +486,9 @@ func validateCharacterOperationalObservationPacketV1(observation CharacterObserv
 }
 
 func validateCharacterOperationalObservationBindingV1(stimulus WorldStimulusPacket, observation CharacterObservationPacket) error {
+	if HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) != HasCharacterSurfaceInspectionPolicyV1(observation.Sources) {
+		return fmt.Errorf("surface observation policy differs from stimulus")
+	}
 	policy := HasCharacterOperationalAvailabilityPolicyV1(stimulus.Sources)
 	if policy != HasCharacterOperationalAvailabilityPolicyV1(observation.Sources) {
 		return fmt.Errorf("operational observation policy differs from stimulus")
@@ -471,6 +516,10 @@ func FormatCharacterOperationalObservationsV1(observations []CharacterOperationa
 	var out []string
 	for _, observation := range observations {
 		if observation.ObservedAtDay == nil {
+			continue
+		}
+		if observation.Surface != "" {
+			out = append(out, formatSurfaceInspectionV1(observation))
 			continue
 		}
 		label := map[string]string{"available": "局部可操作", "unavailable": "局部不可操作", "inconclusive": "未能确定局部可操作性"}[observation.Result]

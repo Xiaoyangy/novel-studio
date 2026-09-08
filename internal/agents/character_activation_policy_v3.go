@@ -37,6 +37,10 @@ func hasCharacterActivationPolicyV3(sources []string) bool {
 }
 
 func characterActivationV3Policies() []string {
+	return append(characterActivationV3CompletionPolicies(), domain.CharacterSurfaceInspectionPolicyV1)
+}
+
+func characterActivationV3CompletionPolicies() []string {
 	return append(characterActivationV3HistoryPolicies(), domain.CharacterSelfCompletionViewPolicyV1)
 }
 
@@ -51,6 +55,23 @@ func characterActivationV3LegacyPolicies() []string {
 }
 
 func characterActivationProtocolV3Digest() string {
+	policies := append(characterActivationV3Policies(), domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterPassiveReceptionPolicyV2)
+	submit := tools.NewSubmitCharacterDecisionTool(nil, domain.CharacterObservationPacket{Version: domain.CharacterObservationV2Version, Sources: policies})
+	token, _ := domain.CharacterActivationCycleSourceToken("pg2_surface_schema", 1, 1, "sha256:0000000000000000000000000000000000000000000000000000000000000000", "")
+	resolve := tools.NewResolveChapterWorldTool(nil, domain.WorldStimulusPacket{Version: domain.WorldStimulusPacketV2Version, PhysicalState: &domain.WorldPhysicalStateV2{}, StoryClock: &domain.StoryClockContext{}, Sources: append(policies, token)}, domain.CharacterAgentActivation{}, nil, "", nil, 1)
+	digest, err := domain.DeterministicPlanningHash(struct {
+		Base, SurfacePolicy, CharacterPrompt, ArbiterPrompt string
+		Submit, Resolve                                     map[string]any
+	}{characterActivationProtocolV3CompletionDigest(), domain.CharacterSurfaceInspectionPolicyV1, characterSurfaceInspectionPromptV1, worldArbiterSurfaceInspectionPromptV1, submit.Schema(), resolve.Schema()})
+	if err != nil {
+		return ""
+	}
+	return "sha256:" + digest
+}
+
+// Keep the exact 19eca2-era completion-view producer executable without the
+// new surface request/result wire fields or observation capability projection.
+func characterActivationProtocolV3CompletionDigest() string {
 	digest, err := domain.DeterministicPlanningHash(struct{ Base, CompletionView, CompletionPrompt string }{characterActivationProtocolV3HistoryDigest(), domain.CharacterSelfCompletionViewPolicyV1, characterSelfCompletionViewPromptV1})
 	if err != nil {
 		return ""

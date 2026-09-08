@@ -19,13 +19,14 @@ const (
 )
 
 type WorldResourceBalanceV2 struct {
-	Artifact          *CharacterWorkArtifactV1 `json:"artifact,omitempty"`
-	ResourceID        string                   `json:"resource_id"`
-	Name              string                   `json:"name"`
-	Unit              string                   `json:"unit"`
-	ActualAmount      *float64                 `json:"actual_amount"`
-	ReadableFacts     []ResourceReadableFactV2 `json:"readable_facts,omitempty"`
-	AccessRequiresAny []string                 `json:"access_requires_any,omitempty"`
+	Artifact            *CharacterWorkArtifactV1 `json:"artifact,omitempty"`
+	ResourceID          string                   `json:"resource_id"`
+	Name                string                   `json:"name"`
+	Unit                string                   `json:"unit"`
+	ActualAmount        *float64                 `json:"actual_amount"`
+	ReadableFacts       []ResourceReadableFactV2 `json:"readable_facts,omitempty"`
+	InspectableSurfaces []string                 `json:"inspectable_surfaces,omitempty"`
+	AccessRequiresAny   []string                 `json:"access_requires_any,omitempty"`
 }
 
 type ResourcePerceptionV2 struct {
@@ -71,28 +72,30 @@ type WorldPhysicalStateV2 struct {
 // This is deliberately a separate type: observations cannot serialize actual
 // world balances by copying an arbiter-only catalog entry.
 type CharacterResourceViewV2 struct {
-	ResourceID     string                        `json:"resource_id"`
-	Name           string                        `json:"name"`
-	Unit           string                        `json:"unit"`
-	Access         string                        `json:"access"`
-	Perception     ResourcePerceptionV2          `json:"perception"`
-	EvidenceRefs   []string                      `json:"evidence_refs,omitempty"`
-	KnownPlacement *CharacterResourcePlacementV2 `json:"known_placement,omitempty"`
+	InspectableSurfaces []string                      `json:"inspectable_surfaces,omitempty"`
+	ResourceID          string                        `json:"resource_id"`
+	Name                string                        `json:"name"`
+	Unit                string                        `json:"unit"`
+	Access              string                        `json:"access"`
+	Perception          ResourcePerceptionV2          `json:"perception"`
+	EvidenceRefs        []string                      `json:"evidence_refs,omitempty"`
+	KnownPlacement      *CharacterResourcePlacementV2 `json:"known_placement,omitempty"`
 }
 
 type InitialCharacterResourceV2 struct {
-	ResourceID        string                   `json:"resource_id"`
-	PerceivedName     string                   `json:"perceived_name,omitempty"`
-	PerceivedLabel    string                   `json:"perceived_label,omitempty"`
-	PerceivedUnit     string                   `json:"perceived_unit,omitempty"`
-	Name              string                   `json:"name"`
-	Unit              string                   `json:"unit"`
-	ActualAmount      *float64                 `json:"actual_amount"`
-	ReadableFacts     []ResourceReadableFactV2 `json:"readable_facts,omitempty"`
-	AccessRequiresAny []string                 `json:"access_requires_any,omitempty"`
-	Access            string                   `json:"access"`
-	Perception        ResourcePerceptionV2     `json:"perception"`
-	EvidenceRefs      []string                 `json:"evidence_refs,omitempty"`
+	InspectableSurfaces []string                 `json:"inspectable_surfaces,omitempty"`
+	ResourceID          string                   `json:"resource_id"`
+	PerceivedName       string                   `json:"perceived_name,omitempty"`
+	PerceivedLabel      string                   `json:"perceived_label,omitempty"`
+	PerceivedUnit       string                   `json:"perceived_unit,omitempty"`
+	Name                string                   `json:"name"`
+	Unit                string                   `json:"unit"`
+	ActualAmount        *float64                 `json:"actual_amount"`
+	ReadableFacts       []ResourceReadableFactV2 `json:"readable_facts,omitempty"`
+	AccessRequiresAny   []string                 `json:"access_requires_any,omitempty"`
+	Access              string                   `json:"access"`
+	Perception          ResourcePerceptionV2     `json:"perception"`
+	EvidenceRefs        []string                 `json:"evidence_refs,omitempty"`
 }
 
 type ResourceSettlementV2 struct {
@@ -196,6 +199,9 @@ func ValidateWorldPhysicalStateV2(state WorldPhysicalStateV2) error {
 }
 
 func validateWorldResourceBalanceV2(balance WorldResourceBalanceV2) error {
+	if err := ValidateInspectableSurfacesV1(balance.InspectableSurfaces); err != nil {
+		return err
+	}
 	if balance.Artifact != nil {
 		if err := validateCharacterWorkArtifactV1(balance); err != nil {
 			return err
@@ -382,9 +388,9 @@ func BuildWorldPhysicalStateFromInitialV2(characters []Character, registry Chara
 		}
 		actor := CharacterPhysicalStateV2{AgentID: record.AgentID, Character: record.Character, Location: character.InitialState.Location, Resources: []CharacterResourceHoldingV2{}}
 		for _, initial := range character.InitialState.ResourceBalances {
-			balance := WorldResourceBalanceV2{ResourceID: initial.ResourceID, Name: initial.Name, Unit: initial.Unit, ActualAmount: initial.ActualAmount, ReadableFacts: initial.ReadableFacts, AccessRequiresAny: initial.AccessRequiresAny}
+			balance := WorldResourceBalanceV2{ResourceID: initial.ResourceID, Name: initial.Name, Unit: initial.Unit, ActualAmount: initial.ActualAmount, ReadableFacts: initial.ReadableFacts, AccessRequiresAny: initial.AccessRequiresAny, InspectableSurfaces: initial.InspectableSurfaces}
 			if previous, ok := catalog[balance.ResourceID]; ok {
-				if previous.Name != balance.Name || previous.Unit != balance.Unit || !samePhysicalNumberV2(previous.ActualAmount, balance.ActualAmount) || !samePhysicalValueV2(previous.ReadableFacts, balance.ReadableFacts) || !samePhysicalValueV2(normalizeV2Strings(previous.AccessRequiresAny), normalizeV2Strings(balance.AccessRequiresAny)) {
+				if previous.Name != balance.Name || previous.Unit != balance.Unit || !samePhysicalNumberV2(previous.ActualAmount, balance.ActualAmount) || !samePhysicalValueV2(previous.ReadableFacts, balance.ReadableFacts) || !samePhysicalValueV2(normalizeV2Strings(previous.AccessRequiresAny), normalizeV2Strings(balance.AccessRequiresAny)) || !samePhysicalValueV2(normalizeV2Strings(previous.InspectableSurfaces), normalizeV2Strings(balance.InspectableSurfaces)) {
 					return state, fmt.Errorf("physical initial state conflicts on shared resource %q name/unit/actual amount", balance.ResourceID)
 				}
 			} else {

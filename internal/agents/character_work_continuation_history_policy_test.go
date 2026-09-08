@@ -27,12 +27,7 @@ func TestContinuationHistoryPolicyHasNewProducerIdentity(t *testing.T) {
 	// Freeze the exact pre-history producer formula independently of the new
 	// marker. Tool wire schemas have not changed; this host policy must still
 	// change the generation identity, rather than reinterpreting old grants.
-	var oldPolicies []string
-	for _, policy := range policies {
-		if policy != domain.CharacterWorkContinuationHistoryPolicyV1 {
-			oldPolicies = append(oldPolicies, policy)
-		}
-	}
+	oldPolicies := characterActivationV3LegacyPolicies()
 	oldPolicies = append(oldPolicies, domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterPassiveReceptionPolicyV2)
 	submit := tools.NewSubmitCharacterDecisionTool(nil, domain.CharacterObservationPacket{Version: domain.CharacterObservationV2Version, Sources: oldPolicies})
 	token, err := domain.CharacterActivationCycleSourceToken("pg2_v3_schema", 1, 1, "sha256:0000000000000000000000000000000000000000000000000000000000000000", "")

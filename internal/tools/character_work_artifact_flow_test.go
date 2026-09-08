@@ -42,7 +42,7 @@ type artifactFlowFixture struct {
 	author, peer string
 }
 
-func newArtifactFlowFixture(t *testing.T) *artifactFlowFixture {
+func newArtifactFlowFixture(t *testing.T, prepare ...func(*domain.CharacterActivationInputSet)) *artifactFlowFixture {
 	t.Helper()
 	_, input := testutil.CharacterActivationV3Inputs(t)
 	author := input.Observations[0].AgentID
@@ -69,6 +69,12 @@ func newArtifactFlowFixture(t *testing.T) *artifactFlowFixture {
 	input.Memories = append(input.Memories, peerMemory)
 	input.Activation.RegistryRoot = input.Registry.RegistryRoot
 	input.Activation.Entries = append(input.Activation.Entries, domain.CharacterAgentActivationEntry{AgentID: record.AgentID, Character: record.Character, Tier: "core", State: domain.CharacterAgentActive, Reasons: []string{"fixture_peer"}})
+	for _, configure := range prepare {
+		configure(&input)
+	}
+	physical, err = domain.FinalizeWorldPhysicalStateV2(*input.Stimulus.PhysicalState)
+	artifactFlowMust(t, err)
+	input.Stimulus.PhysicalState = &physical
 	readiness, err := domain.FinalizeCharacterReadinessContext(domain.CharacterReadinessContext{GenerationID: input.Stimulus.GenerationID, Chapter: 1, POVCharacter: "甲", ArcLastChapter: 1, BookLastChapter: 2, TargetWords: 2250, SoftOutline: domain.OutlineEntry{Chapter: 1, Title: "文书工作", CoreEvent: "独立决定与实际产物"}, HardContracts: []string{"只使用真实发生的产物和实际读签结果"}})
 	artifactFlowMust(t, err)
 	session, err := domain.NewCharacterActivationSession(input.Stimulus.GenerationID, 1, readiness.Digest, physical, input.Stimulus.StoryClock.CurrentDay, 8)
@@ -92,7 +98,11 @@ func artifactFlowRebind(t *testing.T, input domain.CharacterActivationInputSet, 
 	}
 	token, err := domain.CharacterActivationCycleSourceToken(session.GenerationID, session.Chapter, len(session.CycleDigests)+1, session.ChapterContextDigest, previous)
 	artifactFlowMust(t, err)
-	input.Stimulus.Sources = append(append([]string(nil), artifactFlowPolicies...), token)
+	policies := append([]string(nil), artifactFlowPolicies...)
+	if domain.HasCharacterSurfaceInspectionPolicyV1(input.Stimulus.Sources) {
+		policies = append(policies, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterSurfaceInspectionPolicyV1)
+	}
+	input.Stimulus.Sources = append(append([]string(nil), policies...), token)
 	input.Stimulus.SelfEvaluationContext, err = domain.NewCharacterSelfEvaluationContextV1(session)
 	artifactFlowMust(t, err)
 	input.Stimulus.StoryClock.CurrentDay = session.CurrentDay
@@ -107,7 +117,7 @@ func artifactFlowRebind(t *testing.T, input domain.CharacterActivationInputSet, 
 		o := &input.Observations[i]
 		o.Round = 1
 		o.ConflictFeedback = nil
-		o.Sources = append([]string(nil), artifactFlowPolicies...)
+		o.Sources = append([]string(nil), policies...)
 		o.CycleContext = cycleContext
 		o.StimulusDigest = input.Stimulus.Digest
 		for _, actor := range input.Stimulus.PhysicalState.Actors {
@@ -115,12 +125,16 @@ func artifactFlowRebind(t *testing.T, input domain.CharacterActivationInputSet, 
 				o.Location = actor.Location
 			}
 		}
-		o.ResourceViews, err = domain.BuildCharacterResourceViewsV2(*input.Stimulus.PhysicalState, o.AgentID)
+		o.ResourceViews, err = domain.BuildCharacterResourceViewsForSourcesV2(*input.Stimulus.PhysicalState, o.AgentID, policies)
 		artifactFlowMust(t, err)
 		o.ArtifactViews, err = domain.BuildCharacterArtifactViewsV1(*input.Stimulus.PhysicalState, o.AgentID)
 		artifactFlowMust(t, err)
 		o.SelfExperiences, o.TaskProgress, err = domain.BuildCharacterSelfObservationV2(*input.Stimulus.PhysicalState, o.AgentID)
 		artifactFlowMust(t, err)
+		if domain.HasCharacterOperationalAvailabilityPolicyV1(policies) {
+			o.OperationalObservations, err = domain.BuildCharacterOperationalObservationsV1(*input.Stimulus.PhysicalState, o.AgentID)
+			artifactFlowMust(t, err)
+		}
 		for _, memory := range input.Memories {
 			if memory.AgentID == o.AgentID {
 				o.MemoryRoot = memory.MemoryRoot
