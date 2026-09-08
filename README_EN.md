@@ -25,14 +25,14 @@ Simulate the world and its characters, seal the chapter plan, then render only t
 
 novel-studio is designed for novels, serialized fiction, complete short books, and story-production teams. It turns outlines, character state, world state, RAG, reviews, and rewrites from fragile chat history into a local, verifiable, recoverable production pipeline.
 
-It is not a “continue the previous paragraph” chat wrapper, nor a WYSIWYG desktop editor. The system freezes the book-wide navigation first, then lets important characters make independent decisions inside the current arc. Only after those consequences are arbitrated and the arc is sealed does it render and review prose chapter by chapter. Only accepted prose and observed outcomes become canon.
+It is not a “continue the previous paragraph” chat wrapper, nor a WYSIWYG desktop editor. New planning freezes the book-wide navigation and rehearses the whole arc conditionally, then lets important characters make independent decisions within the next window of at most three chapters. Only after those consequences are arbitrated and the window is sealed does it render and review prose chapter by chapter. Only accepted prose and observed outcomes become canon.
 
 ## Core capabilities
 
 | Problem | How novel-studio handles it |
 |---|---|
 | Characters become irrational for plot convenience or know secrets too early | Important characters in the current arc have stable Agent identities, private observations, and structured memory; the World Arbiter may resolve outcomes but cannot rewrite intent |
-| The outline and prose drift apart | Book-wide chapter slots are frozen first; each arc then closes character decisions, cross-chapter causality, POV boundaries, and render capacity into immutable chapter contracts |
+| The outline and prose drift apart | Book-wide chapter slots are frozen first; each detailed planning window then binds character decisions, cross-chapter causality, POV boundaries, and render capacity into immutable chapter contracts |
 | RAG retrieves plenty but the prose does not use it | Every hit is bound to an exact source and content digest, transformed into a fact anchor or craft method, and only then admitted to the sealed render packet |
 | Voice, facts, resources, and relationships drift over a long serialization | Accepted prose, continuity, relationships, resources, foreshadowing, and world changes are persisted as structured ledgers |
 | A rewrite is reviewed against the wrong body | Plans, candidates, reviews, actual deltas, and publication are bound to digests and the exact body SHA-256 |
@@ -121,7 +121,7 @@ For a long-running project, keep the creative contract in a file; this command p
 novel-studio --pipeline --new-novel --init-only --prompt-file prompt.md
 ```
 
-New projects are written under `data/runs/<book>`. One pipeline invocation advances only the currently legal phase and at most the next chapter's render-and-accept cycle. It does not place an entire book inside one unbounded conversation.
+New projects are written under `data/runs/<book>`. After initialization, the default is `preplan → rehearse-arc → project-all → seal → promote → render`: rehearse the whole arc conditionally, then detail and seal the next at most three chapters (or the remaining chapters at the arc's end). One invocation still completes at most the next chapter's render-and-accept cycle; repeat the same command to continue.
 
 ### 4. Resume, inspect, and deliver
 
@@ -157,26 +157,33 @@ flowchart LR
     I["Idea / Prompt"] --> B["Brainstorm"]
     B --> A["Architect<br/>world + book outline"]
     A --> Z["Zero-init<br/>initial state"]
-    Z --> C["Current-arc Character Agents<br/>parallel decisions"]
+    Z --> F["Preplan<br/>book skeleton"]
+    F --> H["Rehearse-arc<br/>conditional whole-arc forecast"]
+    H --> C["Next at most 3 chapters<br/>independent character decisions"]
     C --> W["World Arbiter<br/>resolved outcomes"]
     W --> P["Planner<br/>POV chapter plans"]
-    P --> S["Seal current arc"]
+    P --> S["Seal current planning window"]
     S --> M["Promote next chapter"]
     M --> D["Drafter<br/>chapter render"]
     D --> R["Exact-body Review"]
     R -->|accepted| K["Accepted Canon"]
     R -->|rejected| D
-    K -->|more chapters in arc| M
-    K -->|next arc| C
+    K -->|more chapters in window| M
+    K -->|window accepted, arc unfinished| F
+    K -->|arc accepted, another arc remains| F
 ```
 
 Five hard boundaries keep recovery and quality compatible:
 
 1. **Freeze book navigation first.** Volumes, arcs, and chapter slots define global direction but do not pretend to be formal chapter plans.
-2. **Plan one complete arc at a time.** Character choices, cross-chapter consequences, POV visibility, and render capacity must close before sealing.
+2. **Rehearse the arc, detail one window.** `rehearse-arc` uses Architect and World Arbiter model calls to produce and review a conditional forecast—not character decisions or events that have occurred. The next at most three chapters are then fully planned before sealing.
 3. **Produce prose chapter by chapter.** Each run promotes only the next sealed bundle; draft and review work stays in an isolated candidate directory.
 4. **Only accepted bodies become canon.** Rejected drafts retain diagnostics but cannot contaminate live canon or canonical character memory.
-5. **Complete the arc before opening the next one.** Missing chapters, receipts, mismatched state roots, or body-SHA drift fail closed.
+5. **An accepted window is not a completed arc.** After every chapter in a window is accepted, actual outcomes update the remaining arc's rehearsal before the next window is planned. Only a complete acceptance aggregate covering every window of the original logical arc unlocks the next arc; a partial window set is insufficient.
+
+Existing generations retain their original planning range and protocol; the new default does not silently insert a rehearsal or shorten them to three chapters. Default recovery preserves state and reports input drift it cannot authenticate. Explicit `--stages` does not automatically add `rehearse-arc`. `--init-only` still performs initialization only, and `finalize,deliver` remains explicit.
+
+A rehearsal or sealed plan does not mean prose has been delivered or that real end-to-end acceptance has passed. Completion requires the corresponding prose and acceptance receipts.
 
 | Role | Responsibility |
 |---|---|
@@ -327,7 +334,7 @@ Then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When using the Compo
 | `novel-studio --pipeline --new-novel --init-only --prompt "..."` | Initialize the world, characters, book outline, and opening state, then exit |
 | `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the full workflow |
 | `novel-studio --pipeline --dir <RUN>` | Resume from trusted evidence |
-| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Formally project and seal the current arc without writing prose |
+| `novel-studio --pipeline --dir <RUN> --stages preplan,rehearse-arc,project-all,seal` | At a new planning boundary, rehearse the whole arc and detail/seal the next at most three chapters without writing prose |
 | `novel-studio --pipeline --dir <RUN> --stages promote,render` | Render and review the next sealed chapter bundle |
 | `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | Run whole-book review and delivery for an eligible short book |
 | `novel-studio --build-rag --dir <RUN>/output/novel` | Build the project RAG index |

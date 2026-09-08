@@ -25,14 +25,14 @@
 
 novel-studio 面向长篇小说、网文连载、短篇整书和故事工作室。它把大纲、人物、世界状态、RAG、正文审核与返工从易丢失的聊天上下文，转换成保存在本机、可验证、可恢复的生产流水线。
 
-它不是“续写上一段”的聊天壳，也不是所见即所得的桌面编辑器。系统先冻结全书导航，再按弧让重要角色独立决策并裁决后果；当前弧封存后，才逐章渲染、逐章审核。只有通过审核的正文和实际结果会进入正史。
+它不是“续写上一段”的聊天壳，也不是所见即所得的桌面编辑器。新规划先冻结全书导航并完成整弧条件预演，再让重要角色在接下来至多 3 章的窗口内独立决策并裁决后果；窗口封存后，才逐章渲染、逐章审核。只有通过审核的正文和实际结果会进入正史。
 
 ## 核心能力
 
 | 问题 | novel-studio 的处理方式 |
 |---|---|
 | 角色为了剧情突然降智或提前知道秘密 | 当前弧的重要角色拥有稳定 Agent 身份、私有观察和结构化记忆；World Arbiter 只能裁决结果，不能替角色改意图 |
-| 大纲与正文逐渐脱节 | 全书章位先冻结，当前弧再完成角色决定、跨章因果、POV 边界和承载力校验，生成不可变章节合同 |
+| 大纲与正文逐渐脱节 | 全书章位先冻结，当前细推窗口再完成角色决定、跨章因果、POV 边界和承载力校验，生成不可变章节合同 |
 | RAG 命中很多但正文没有真正使用 | 命中必须绑定来源和内容摘要，先转化为事实锚点或写法方法，再进入 sealed render packet |
 | 连载越长，声口、事实和资源越容易漂移 | 已验收正文、人物连续性、关系、资源、伏笔和世界变化都写入结构化台账，下一章按权威状态恢复 |
 | 返工后审核了错误版本 | 计划、候选正文、审核、实际变化和发布都绑定 digest 与正文 SHA-256 |
@@ -121,7 +121,7 @@ novel-studio --pipeline --new-novel \
 novel-studio --pipeline --new-novel --init-only --prompt-file prompt.md
 ```
 
-新项目默认写入 `data/runs/<书名>`。一次 pipeline 调用只推进当前合法阶段，并最多完成下一章的渲染与验收；它不会把整本书塞进一个无限增长的会话。
+新项目默认写入 `data/runs/<书名>`。初始化后默认走 `preplan → rehearse-arc → project-all → seal → promote → render`：先整弧条件预演，再细推并封存接下来至多 3 章（弧尾不足 3 章时取剩余章节）。一次 pipeline 调用仍最多完成下一章的渲染与验收，需重复同一命令继续。
 
 ### 4. 继续、查看和交付
 
@@ -157,26 +157,33 @@ flowchart LR
     I["Idea / Prompt"] --> B["Brainstorm"]
     B --> A["Architect<br/>世界与全书章纲"]
     A --> Z["Zero-init<br/>初始状态"]
-    Z --> C["当前弧角色 Agent<br/>并行决策"]
+    Z --> F["Preplan<br/>全书骨架"]
+    F --> H["Rehearse-arc<br/>整弧条件预演"]
+    H --> C["接下来至多 3 章<br/>角色独立决策"]
     C --> W["World Arbiter<br/>裁决结果"]
     W --> P["Planner<br/>生成 POV 章节计划"]
-    P --> S["Seal 当前弧"]
+    P --> S["Seal 当前细推窗口"]
     S --> M["Promote 下一章"]
     M --> D["Drafter<br/>逐章渲染"]
     D --> R["Exact-body Review"]
     R -->|通过| K["Accepted Canon"]
     R -->|拒绝| D
-    K -->|本弧未完| M
-    K -->|进入下一弧| C
+    K -->|窗口内还有章节| M
+    K -->|窗口验收完但本弧未完| F
+    K -->|整弧验收完且有下一弧| F
 ```
 
 五条硬边界保证恢复和质量不会互相冲突：
 
 1. **全书导航先冻结**：卷、弧、章位提供全局方向，但不冒充各章正式计划。
-2. **一次规划当前整弧**：角色决定、跨章后果、POV 可见性与章节承载力全部闭合后才允许 seal。
+2. **整弧预演，窗口细推**：`rehearse-arc` 由 Architect 与 World Arbiter 的模型调用产生并复核条件预演；它不是角色决定或已发生事实。随后完整细推接下来至多 3 章，才允许 seal。
 3. **正文仍逐章生产**：每次只提升下一份 sealed bundle，候选正文始终在隔离目录内生成和审核。
 4. **审核通过才进入正史**：失败稿保留诊断，但不会污染 live canon 或正式角色记忆。
-5. **弧完成才能进入下一弧**：缺章、缺 acceptance receipt、状态根不一致或正文 SHA 漂移都会失败关闭。
+5. **窗口接受不等于整弧完成**：窗口逐章验收后，依据真实结果更新剩余弧的预演，再细推下一窗口；只有原逻辑弧的全部窗口形成完整验收汇总，才能进入下一弧。部分窗口不能代替整弧完成证明。
+
+已有 generation 保留原规划范围与协议，不因新默认流程静默插入预演或缩成 3 章。默认恢复遇到无法核实的输入漂移会保留状态并报错；显式 `--stages` 不会自动插入 `rehearse-arc`。`--init-only` 仍只初始化，`finalize,deliver` 仍需显式执行。
+
+预演或封存不代表正文已交付，也不证明真实端到端验收已通过；完成状态以对应正文及验收回执为准。
 
 | 角色 | 职责 |
 |---|---|
@@ -346,7 +353,7 @@ docker compose run --rm --service-ports novel-studio service start --host 0.0.0.
 | `novel-studio --pipeline --new-novel --init-only --prompt "..."` | 仅初始化世界、人物、全书导航和初始状态，完成后退出 |
 | `novel-studio --pipeline --new-novel --prompt "..."` | 创建书目并启动完整流程 |
 | `novel-studio --pipeline --dir <RUN>` | 从可信证据恢复下一步 |
-| `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | 只完成当前弧正式推演与封存，不写正文 |
+| `novel-studio --pipeline --dir <RUN> --stages preplan,rehearse-arc,project-all,seal` | 在新规划边界完成整弧条件预演与接下来至多 3 章的细推封存，不写正文 |
 | `novel-studio --pipeline --dir <RUN> --stages promote,render` | 渲染并审核下一份 sealed chapter bundle |
 | `novel-studio --pipeline --dir <RUN> --stages finalize,deliver` | 为符合范围的短篇执行全文终审和交付 |
 | `novel-studio --architect-check --dir <RUN>/output/novel` | 生成并验证世界自洽证明，不进入正文 |
