@@ -101,20 +101,31 @@ novel-studio --check
 
 ### 3. 创建一本书
 
+只准备世界、人物、全书导航和初始状态，使用 `--init-only`。完成后命令会退出，不进入整弧角色推演，也不会生成正文：
+
+```bash
+novel-studio --pipeline --new-novel --init-only \
+  --prompt "写一部 12 章完结的双女主都市悬疑短篇；每章 2000—2500 字"
+```
+
+如果希望初始化后继续进入规划与写作，省略 `--init-only`：
+
 ```bash
 novel-studio --pipeline --new-novel \
   --prompt "写一部 12 章完结的双女主都市悬疑短篇；每章 2000—2500 字；人物边界和结局回收先在章纲中冻结"
 ```
 
-长期项目更适合把完整创作合同放进文件：
+长期项目更适合把完整创作合同放进文件；下面的命令只完成初始化：
 
 ```bash
-novel-studio --pipeline --new-novel --prompt-file prompt.md
+novel-studio --pipeline --new-novel --init-only --prompt-file prompt.md
 ```
 
 新项目默认写入 `data/runs/<书名>`。一次 pipeline 调用只推进当前合法阶段，并最多完成下一章的渲染与验收；它不会把整本书塞进一个无限增长的会话。
 
 ### 4. 继续、查看和交付
+
+初始化完成后，对生成的同一书目目录执行下面的恢复命令，继续规划和写作；不要再加 `--new-novel`、`--init-only` 或 `--restart`。
 
 ```bash
 # 从落盘证据继续下一步
@@ -332,6 +343,7 @@ docker compose run --rm --service-ports novel-studio service start --host 0.0.0.
 |---|---|
 | `novel-studio doctor [--dir <RUN>]` | 不调用模型，检查环境并给出修复建议 |
 | `novel-studio --check` | 验证 provider、model 和 fallback 连通性 |
+| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | 仅初始化世界、人物、全书导航和初始状态，完成后退出 |
 | `novel-studio --pipeline --new-novel --prompt "..."` | 创建书目并启动完整流程 |
 | `novel-studio --pipeline --dir <RUN>` | 从可信证据恢复下一步 |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | 只完成当前弧正式推演与封存，不写正文 |

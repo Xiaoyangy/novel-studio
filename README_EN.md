@@ -101,20 +101,31 @@ Global configuration lives at `~/.novel-studio/config.json`; `./.novel-studio/co
 
 ### 3. Start a book
 
+To prepare the world, characters, book outline, and opening state only, add `--init-only`. The command exits after initialization; it does not simulate the arc or generate prose:
+
+```bash
+novel-studio --pipeline --new-novel --init-only \
+  --prompt "A complete 12-chapter dual-protagonist urban mystery, 2,000–2,500 Chinese characters per chapter."
+```
+
+Omit `--init-only` to continue into planning and writing after initialization:
+
 ```bash
 novel-studio --pipeline --new-novel \
   --prompt "Write a complete 12-chapter dual-protagonist urban mystery, 2,000–2,500 Chinese characters per chapter; freeze character boundaries and ending payoffs in the outline first."
 ```
 
-For a long-running project, keep the creative contract in a file:
+For a long-running project, keep the creative contract in a file; this command performs initialization only:
 
 ```bash
-novel-studio --pipeline --new-novel --prompt-file prompt.md
+novel-studio --pipeline --new-novel --init-only --prompt-file prompt.md
 ```
 
 New projects are written under `data/runs/<book>`. One pipeline invocation advances only the currently legal phase and at most the next chapter's render-and-accept cycle. It does not place an entire book inside one unbounded conversation.
 
 ### 4. Resume, inspect, and deliver
+
+After initialization, run the resume command below against the same generated book directory to continue planning and writing. Leave out `--new-novel`, `--init-only`, and `--restart`.
 
 ```bash
 # Resume from durable evidence
@@ -313,6 +324,7 @@ Then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When using the Compo
 |---|---|
 | `novel-studio doctor [--dir <RUN>]` | Check the environment without calling a model |
 | `novel-studio --check` | Verify provider, model, and fallback connectivity |
+| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | Initialize the world, characters, book outline, and opening state, then exit |
 | `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the full workflow |
 | `novel-studio --pipeline --dir <RUN>` | Resume from trusted evidence |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,project-all,seal` | Formally project and seal the current arc without writing prose |
