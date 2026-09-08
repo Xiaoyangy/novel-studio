@@ -50,6 +50,7 @@ var knownPipelineStages = map[string]bool{
 
 type pipelineFlags struct {
 	Stages              string
+	InitializeOnly      bool
 	Prompt              string
 	PromptFile          string
 	Restart             bool
@@ -88,6 +89,7 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	}
 	var f pipelineFlags
 	fs.StringVar(&f.Stages, "stages", "", "逗号分隔的阶段列表，缺省 "+strings.Join(defaultPipelineStages, ","))
+	fs.BoolVar(&f.InitializeOnly, "init-only", false, "只完成世界/人物/全书导航及零章初态，不进入角色推演、封存或正文生成")
 	fs.StringVar(&f.Prompt, "prompt", "", "创作指令（write 阶段用）")
 	fs.StringVar(&f.PromptFile, "prompt-file", "", "从文件读创作指令，'-' 表示 stdin")
 	fs.BoolVar(&f.Restart, "restart", false, "清空已保存的流水线状态，从头重跑")
@@ -109,6 +111,12 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.StringVar(&f.OutlineRepairFile, "outline-repair-file", "", "fresh outline-all 前在隔离候选中应用 chapter-zero 定向大纲修复 manifest")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
+	}
+	if f.InitializeOnly {
+		if strings.TrimSpace(f.Stages) != "" || f.Start != 0 || f.End != 0 || f.WriteTo != 0 || f.ForceRerender || f.RefreshRenderInput || f.RebaseAllChapters {
+			return f, nil, fmt.Errorf("--init-only 不与 --stages、章节范围、正文返工或全书重置一起使用")
+		}
+		f.Stages = "architect,outline-all,zero-init"
 	}
 	return f, fs.Args(), nil
 }
@@ -182,7 +190,13 @@ func pipelinePipeline(opts cliOptions, args []string) error {
 		flags.Restart = true
 	}
 
-	return runPipelineWithStages(opts, flags, stages, prompt, nil)
+	if err := runPipelineWithStages(opts, flags, stages, prompt, nil); err != nil {
+		return err
+	}
+	if flags.InitializeOnly {
+		fmt.Fprintln(os.Stderr, "[pipeline] 初始化完成：世界、人物、全书导航和零章初态已就绪；尚未进行角色推演或正文生成。继续写作请对同一目录运行 --pipeline，不加 --init-only 或 --restart。")
+	}
+	return nil
 }
 
 // runPipelineBrainstorm 跑头脑风暴子代理，产出 brainstorm.md，返回项目根目录。
