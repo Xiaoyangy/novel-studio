@@ -2,9 +2,81 @@ package modelinput
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestScopedArtifactDeliveryVersionUsesExistingScopeOnly(t *testing.T) {
+	// The production C6 source has this same shape: an existing resource
+	// version and the custodian's independently authored access authorization.
+	version := "sha256:" + strings.Repeat("b", 64)
+	resource := "res_" + strings.Repeat("c", 16)
+	input := map[string]any{
+		"world_stimulus": map[string]any{"physical_state": map[string]any{"resources": []any{map[string]any{"resource_id": resource, "artifact": map[string]any{"version_digest": version}}}}},
+		"proposals":      []any{map[string]any{"artifact_access": []any{map[string]any{"resource_id": resource, "version_digest": version, "to_character": "乙", "access": "shared"}}}},
+	}
+	before, _ := json.Marshal(input)
+	codec, err := NewScopedArtifactReferenceCodecV1(KindWorldArbitration, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := codec.Alias(version)
+	if alias == version || !strings.HasPrefix(alias, "@ref") {
+		t.Fatal("known artifact version was not scoped in the actual input shape")
+	}
+	canonical := map[string]any{"resource_deliveries": []any{map[string]any{"resource_id": resource, "artifact_version_digest": version}}}
+	raw := json.RawMessage(`{"resource_deliveries":[{"resource_id":"` + codec.Alias(resource) + `","artifact_version_digest":"` + alias + `"}]}`)
+	if err := codec.ValidateModelArguments(raw, codec.Binding()); err != nil {
+		t.Fatalf("existing delivery version was mistaken for a declaration: %v", err)
+	}
+	expanded, err := codec.ExpandArguments(raw, codec.Binding())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored map[string]any
+	if err := json.Unmarshal(expanded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored, canonical) {
+		t.Fatalf("delivery did not restore its exact original digest: %s", expanded)
+	}
+	// Direct canonical arguments stay byte-equivalent after JSON normalization.
+	canonicalRaw, _ := json.Marshal(canonical)
+	unchanged, err := codec.ExpandArguments(canonicalRaw, codec.Binding())
+	if err != nil || string(unchanged) != string(canonicalRaw) {
+		t.Fatal("canonical delivery version changed")
+	}
+	for _, bad := range []json.RawMessage{
+		json.RawMessage(`{"resource_deliveries":[{"artifact_version_digest":"@ref999999"}]}`),
+		json.RawMessage(`{"resource_deliveries":[{"artifact_version_digest":"prefix ` + alias + `"}]}`),
+		json.RawMessage(`{"output_requests":[{"artifact_version_digest":"` + alias + `"}]}`),
+		json.RawMessage(`{"resource_deliveries":[{"output_requests":[{"artifact_version_digest":"` + alias + `"}]}]}`),
+		json.RawMessage(`{"resource_deliveries":[{"output_key":"` + alias + `"}]}`),
+	} {
+		if codec.ValidateModelArguments(bad, codec.Binding()) == nil {
+			t.Fatalf("unknown/embedded handle or declaration accepted: %s", bad)
+		}
+	}
+	foreign, err := NewScopedArtifactReferenceCodecV1(KindWorldArbitration, map[string]any{"version_digest": "sha256:" + strings.Repeat("d", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codec.ExpandArguments(raw, foreign.Binding()); err == nil {
+		t.Fatal("foreign scope binding accepted")
+	}
+	legacy, err := NewScopedReferenceCodec(KindWorldArbitration, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ValidateModelArguments(raw, legacy.Binding()) == nil {
+		t.Fatal("legacy non-artifact codec changed its field semantics")
+	}
+	after, _ := json.Marshal(input)
+	if string(before) != string(after) {
+		t.Fatal("scoping/expansion rewrote the source artifact or proposal")
+	}
+}
 
 func TestScopedArtifactReferencesRoundTripWithoutAliasingDeclarations(t *testing.T) {
 	fact := "fact_" + strings.Repeat("a", 32)

@@ -30,6 +30,10 @@ func typedArtifactReferenceField(path []string, key string) bool {
 		return true
 	}
 	switch key {
+	case "artifact_version_digest":
+		// A delivery references the existing version authorized by the
+		// custodian's artifact_access; it does not declare a new version.
+		return len(path) > 0 && path[len(path)-1] == "resource_deliveries"
 	case "source_refs", "version_digest", "expected_version_digest", "previous_version_digest", "origin_proposal_digest", "creator_agent_id", "custodian_agent_id", "lineage_roots", "claim_ids":
 		return true
 	case "claim_id":
