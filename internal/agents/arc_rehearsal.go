@@ -24,7 +24,7 @@ const arcRehearsalPrompt = `你在进行整弧宏观预演，不是在写正文�
 material_checks只承载所选条件路径实际依赖的关键来源。未选择的可选分支缺口可以列入unresolved_items并说明为何不阻断当前路径，不将软纲额外的完整库存等式、运输方式、处分或心理动机证明升级为硬要求。对异常的解释仍须满足硬合同：以实际可取得的文书、经手陈述与可见行为交叉核验，不凭空加日志，不把唯一自白或作者秘密当证据。
 已接受章不得重写：conditional_forecast逐字复制对应accepted_summaries的summary，accepted_source_digest逐字复制accepted_evidence，assumptions注明已接受正史。只有未来章才可预测。
 检查关键操作的资料来源，特别是规程、许可、文书、钥匙和证据读取。“有交接夹/可查规定”不代表world_state已有可引用且具readable_facts的实体。material_checks写明operation、requires_readable、真实resource_refs及available/missing/unclear/not_required；无实体或条款就记missing/unclear，不能造ID、补历史凭据、默认开启时间或新人物。已有资源不代表已读或条件满足。不能保证穷尽自然语言缺口，但必须检查计划中关键操作。infeasible_prediction只是预测路径不通，不是实际hard_conflict。
-requires_readable=true的resource_refs只能引用实际读取且有非空readable_facts的文书。钥匙、燃油、照明或工具是物理依赖，不是文书；需要核查时另列requires_readable=false的操作。尚未执行的测量、签收或参与意愿应写为未来条件，不得仅因它尚未发生就推断资料缺失；是否另缺器具或来源须有具体依据。
+requires_readable=true的resource_refs只引用实际读取的既有文书或已生成产物：原始文书须有非空readable_facts，现有产物须有artifact并使用artifact_read；未来产物按后述声明键引用，不能填虚构resource_id。钥匙、燃油、照明或工具是物理依赖，不是文书；需要核查时另列requires_readable=false的操作。尚未执行的测量、签收或参与意愿应写为未来条件，不得仅因它尚未发生就推断资料缺失；是否另缺器具或来源须有具体依据。
 现有执行协议区分两种读取：文书读取消费readable_facts；资源数量测量绑定被测resource_id、mechanism_ref和本人work.task_id，并在实际self_execution结束时取得当时值，不额外要求独立仪表resource_id或文书readable_facts。数值测量目标必须已经存在，未定义目标不可伪造。现有规则、实际岗位权限和后续真实测量/签认可作为条件前提，不要求章零预先存在未来操作结果。
 只交简明结构化报告，不输出正文、post_state、world delta、self_executions、正式记忆或思维链。`
 
@@ -39,7 +39,8 @@ func ArcRehearsalProtocolDigest() (string, error) {
 		ToolDescription string         `json:"tool_description"`
 		Schema          map[string]any `json:"schema"`
 		Transport       string         `json:"transport"`
-	}{"arc-rehearsal-delivery-policy.v1", arcRehearsalPrompt, arcRehearsalReviewPrompt, tool.Description(), tool.Schema(), modelinput.ExactAgentPacketPolicy})
+		Capabilities    string         `json:"capabilities"`
+	}{"arc-rehearsal-delivery-policy.v2", arcRehearsalPrompt + arcRehearsalCapabilityPromptV1, arcRehearsalReviewPrompt, tool.Description(), tool.Schema(), modelinput.ExactAgentPacketPolicy, domain.ArcRehearsalCapabilityPolicyV1})
 	if err != nil {
 		return "", err
 	}
@@ -59,6 +60,13 @@ func RunArcRehearsal(ctx context.Context, cfg bootstrap.Config, models *bootstra
 	}
 	if input.ProtocolDigest != protocol {
 		return nil, fmt.Errorf("rehearsal execution policy changed; rebuild a new input without rewriting historical reports")
+	}
+	capabilities, err := ArcRehearsalExecutionCapabilities(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if input.ExecutionCapabilities == nil || !sameCharacterCycleValue(*input.ExecutionCapabilities, capabilities) {
+		return nil, fmt.Errorf("rehearsal execution capabilities differ from the actual configured producer; rebuild the input")
 	}
 	if len(accounting) == 1 {
 		ctx = context.WithValue(ctx, projectedPlanningAccountingKey{}, accounting[0])
@@ -171,7 +179,7 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 	if err != nil {
 		return domain.ArcRehearsalBody{}, call, err
 	}
-	prompt := arcRehearsalPrompt
+	prompt := arcRehearsalPrompt + arcRehearsalCapabilityPromptV1
 	if role == "world_arbiter" {
 		prompt += arcRehearsalReviewPrompt
 	}

@@ -5,11 +5,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func loadPipelineDetailWindow(st *store.Store, arc pipelineArcScope, base int) (*domain.PlanningDetailWindowV1, error) {
+func loadPipelineDetailWindow(st *store.Store, arc pipelineArcScope, base int, configs ...bootstrap.Config) (*domain.PlanningDetailWindowV1, error) {
 	// Absence preserves historical generations and their exact full-arc source
 	// digest. Once this project has rehearsals, missing/stale reports are an
 	// explicit prerequisite failure, not permission to fall back silently.
@@ -18,7 +19,7 @@ func loadPipelineDetailWindow(st *store.Store, arc pipelineArcScope, base int) (
 	} else if err != nil {
 		return nil, err
 	}
-	input, err := buildPipelineArcRehearsalInput(st)
+	input, err := buildPipelineArcRehearsalInput(st, configs...)
 	if err != nil {
 		return nil, err
 	}

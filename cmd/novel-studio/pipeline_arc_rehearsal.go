@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/assets"
 	"github.com/chenhongyang/novel-studio/internal/agents"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -19,7 +20,7 @@ var pipelineArcRehearsalRunner = agents.RunArcRehearsal
 
 // A rehearsal is an author-side conditional forecast for the whole logical
 // arc, never a character decision, formal chapter plan, or canonical event.
-func buildPipelineArcRehearsalInput(st *store.Store) (domain.ArcRehearsalInput, error) {
+func buildPipelineArcRehearsalInput(st *store.Store, configs ...bootstrap.Config) (domain.ArcRehearsalInput, error) {
 	var input domain.ArcRehearsalInput
 	if st == nil {
 		return input, fmt.Errorf("rehearse-arc requires a store")
@@ -55,7 +56,7 @@ func buildPipelineArcRehearsalInput(st *store.Store) (domain.ArcRehearsalInput, 
 	if err != nil {
 		return input, err
 	}
-	return agents.BuildArcRehearsalInput(st, input)
+	return agents.BuildArcRehearsalInput(st, input, configs...)
 }
 
 func pipelineRehearseArc(opts cliOptions, flags pipelineFlags) (returnErr error) {
@@ -94,7 +95,7 @@ func pipelineRehearseArc(opts cliOptions, flags pipelineFlags) (returnErr error)
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, st.Runtime.ReleasePipelineExecution(owner)) }()
-	input, err := buildPipelineArcRehearsalInput(st)
+	input, err := buildPipelineArcRehearsalInput(st, cfg)
 	if err != nil {
 		return err
 	}
@@ -126,7 +127,7 @@ func pipelineRehearseArc(opts cliOptions, flags pipelineFlags) (returnErr error)
 	if err != nil {
 		return err
 	}
-	current, err := buildPipelineArcRehearsalInput(st)
+	current, err := buildPipelineArcRehearsalInput(st, cfg)
 	if err != nil {
 		return err
 	}
@@ -147,15 +148,26 @@ func requirePipelineArcRehearsalReady(report *domain.ArcRehearsalReport) error {
 	return nil
 }
 
-func verifyPipelineArcRehearsalStage(outputDir string, evidence domain.PipelineStageEvidence) (domain.PipelineStageEvidence, error) {
+func verifyPipelineArcRehearsalStage(outputDir string, evidence domain.PipelineStageEvidence, configs ...bootstrap.Config) (domain.PipelineStageEvidence, error) {
 	st := store.NewStore(outputDir)
-	input, inputErr := buildPipelineArcRehearsalInput(st)
 	var report *domain.ArcRehearsalReport
-	if inputErr == nil {
+	if len(configs) == 1 {
 		var err error
-		report, err = st.LoadVerifiedArcRehearsalForInput(input.InputDigest)
+		report, err = loadPipelineBuildingArcRehearsalForRecovery(st, configs[0])
 		if err != nil {
 			return evidence, err
+		}
+	}
+	var inputErr error
+	if report == nil {
+		var input domain.ArcRehearsalInput
+		input, inputErr = buildPipelineArcRehearsalInput(st, configs...)
+		if inputErr == nil {
+			var err error
+			report, err = st.LoadVerifiedArcRehearsalForInput(input.InputDigest)
+			if err != nil {
+				return evidence, err
+			}
 		}
 	}
 	if report == nil {
@@ -197,4 +209,53 @@ func verifyPipelineArcRehearsalStage(outputDir string, evidence domain.PipelineS
 		evidence.Artifacts = append(evidence.Artifacts, filepath.ToSlash(filepath.Join(store.ArcRehearsalRoot, artifact.kind, strings.TrimPrefix(artifact.digest, "sha256:")+".json")))
 	}
 	return evidence, nil
+}
+
+// A policy upgrade changes fresh rehearsal inputs, not a building generation's
+// already frozen window. Reuse only its exact verified identity/source/report;
+// an arbitrary old report or directory is never recovery authority.
+func loadPipelineBuildingArcRehearsalForRecovery(st *store.Store, cfg bootstrap.Config) (*domain.ArcRehearsalReport, error) {
+	if filepath.Clean(cfg.OutputDir) != filepath.Clean(st.Dir()) {
+		return nil, fmt.Errorf("rehearsal recovery configuration belongs to another store")
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil || progress.LatestCompleted() >= progress.TotalChapters {
+		return nil, nil
+	}
+	arc, err := locatePipelineArcScope(st, progress.LatestCompleted()+1)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := pipelineExistingAttemptBeforeDetailWindow(st, progress.LatestCompleted(), arc)
+	if err != nil {
+		return nil, err
+	}
+	if candidate == nil || candidate.Status != domain.PlanningGenerationBuildingV2 || candidate.DetailWindow == nil {
+		return nil, nil
+	}
+	if len(progress.PendingRewrites) != 0 {
+		return nil, fmt.Errorf("building rehearsal recovery requires unchanged accepted canon")
+	}
+	bundle, _ := assets.LoadWithOverrides(cfg.Style, assets.DefaultPromptOverrideDirs()...)
+	identity, err := buildPipelineProjectAllIdentity(cfg, bundle, st, progress)
+	if err != nil {
+		return nil, fmt.Errorf("building rehearsal recovery inputs drifted: %w", err)
+	}
+	if err := validatePipelineProjectAllGenerationIdentity(*candidate, identity.Generation); err != nil {
+		return nil, err
+	}
+	if err := st.ProjectedV2().ValidatePlanningDetailWindowSourcesV1(*candidate, identity.Source); err != nil {
+		return nil, err
+	}
+	report, input, err := st.LoadVerifiedArcRehearsal(candidate.DetailWindow.RehearsalDigest)
+	if err != nil {
+		return nil, err
+	}
+	if report == nil || input == nil || input.InputDigest != candidate.DetailWindow.RehearsalInputDigest {
+		return nil, fmt.Errorf("building window lost its exact historical rehearsal input")
+	}
+	return report, nil
 }

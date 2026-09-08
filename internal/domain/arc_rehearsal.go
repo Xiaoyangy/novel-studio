@@ -10,26 +10,27 @@ const ArcRehearsalVersion = "arc-rehearsal.v1"
 
 // Rehearsal is an author-side conditional forecast, never an execution receipt.
 type ArcRehearsalInput struct {
-	Version               string                       `json:"version"`
-	ProtocolDigest        string                       `json:"protocol_digest,omitempty"`
-	ArcID                 string                       `json:"arc_id"`
-	ArcFirstChapter       int                          `json:"arc_first_chapter"`
-	ArcLastChapter        int                          `json:"arc_last_chapter"`
-	BaseCanonChapter      int                          `json:"base_canon_chapter"`
-	BaseCanonRoot         string                       `json:"base_canon_root"`
-	SourceRoot            string                       `json:"source_root"`
-	SourceFiles           map[string]string            `json:"source_files"`
-	Outline               []OutlineEntry               `json:"outline"`
-	CharacterObservations []CharacterObservationPacket `json:"character_observations"`
-	WorldRules            []WorldRule                  `json:"world_rules"`
-	WorldCodex            *WorldCodex                  `json:"world_codex"`
-	BookWorld             *BookWorld                   `json:"book_world"`
-	WorldState            *WorldPhysicalStateV2        `json:"world_state"`
-	HardContracts         []string                     `json:"hard_contracts"`
-	UserRules             json.RawMessage              `json:"user_rules"`
-	AcceptedSummaries     []ChapterSummary             `json:"accepted_summaries,omitempty"`
-	AcceptedEvidence      map[int]string               `json:"accepted_evidence,omitempty"`
-	InputDigest           string                       `json:"input_digest"`
+	Version               string                               `json:"version"`
+	ProtocolDigest        string                               `json:"protocol_digest,omitempty"`
+	ExecutionCapabilities *ArcRehearsalExecutionCapabilitiesV1 `json:"execution_capabilities,omitempty"`
+	ArcID                 string                               `json:"arc_id"`
+	ArcFirstChapter       int                                  `json:"arc_first_chapter"`
+	ArcLastChapter        int                                  `json:"arc_last_chapter"`
+	BaseCanonChapter      int                                  `json:"base_canon_chapter"`
+	BaseCanonRoot         string                               `json:"base_canon_root"`
+	SourceRoot            string                               `json:"source_root"`
+	SourceFiles           map[string]string                    `json:"source_files"`
+	Outline               []OutlineEntry                       `json:"outline"`
+	CharacterObservations []CharacterObservationPacket         `json:"character_observations"`
+	WorldRules            []WorldRule                          `json:"world_rules"`
+	WorldCodex            *WorldCodex                          `json:"world_codex"`
+	BookWorld             *BookWorld                           `json:"book_world"`
+	WorldState            *WorldPhysicalStateV2                `json:"world_state"`
+	HardContracts         []string                             `json:"hard_contracts"`
+	UserRules             json.RawMessage                      `json:"user_rules"`
+	AcceptedSummaries     []ChapterSummary                     `json:"accepted_summaries,omitempty"`
+	AcceptedEvidence      map[int]string                       `json:"accepted_evidence,omitempty"`
+	InputDigest           string                               `json:"input_digest"`
 }
 
 type ArcRehearsalChapter struct {
@@ -55,11 +56,12 @@ type ArcRehearsalContractCheck struct {
 }
 
 type ArcRehearsalMaterialCheck struct {
-	Operation        string   `json:"operation"`
-	RequiresReadable bool     `json:"requires_readable"`
-	ResourceRefs     []string `json:"resource_refs"`
-	Status           string   `json:"status"` // available / missing / unclear / not_required
-	Explanation      string   `json:"explanation"`
+	CapabilityRequirements []ArcRehearsalCapabilityRequirementV1 `json:"capability_requirements,omitempty"`
+	Operation              string                                `json:"operation"`
+	RequiresReadable       bool                                  `json:"requires_readable"`
+	ResourceRefs           []string                              `json:"resource_refs"`
+	Status                 string                                `json:"status"` // available / missing / unclear / not_required
+	Explanation            string                                `json:"explanation"`
 }
 
 type ArcRehearsalBody struct {
@@ -120,6 +122,12 @@ func FinalizeArcRehearsalInput(input ArcRehearsalInput) (ArcRehearsalInput, erro
 	if input.ProtocolDigest != "" && !characterSourceDigestPatternV2.MatchString(input.ProtocolDigest) {
 		return input, fmt.Errorf("arc rehearsal has an invalid protocol digest")
 	}
+	if err := validateArcRehearsalExecutionCapabilitiesV1(input.ExecutionCapabilities); err != nil {
+		return input, err
+	}
+	if input.ExecutionCapabilities != nil && input.ProtocolDigest == "" {
+		return input, fmt.Errorf("execution capabilities require a policy-bound rehearsal input")
+	}
 	if len(input.Outline) != input.ArcLastChapter-input.ArcFirstChapter+1 || len(input.CharacterObservations) == 0 || len(input.HardContracts) == 0 || input.WorldState == nil {
 		return input, fmt.Errorf("arc rehearsal input lacks complete arc slots, current characters, hard contracts or world state")
 	}
@@ -166,6 +174,9 @@ func FinalizeArcRehearsalInput(input ArcRehearsalInput) (ArcRehearsalInput, erro
 }
 
 func ValidateArcRehearsalBody(input ArcRehearsalInput, body ArcRehearsalBody) error {
+	if err := validateArcRehearsalCapabilitiesV1(input, body); err != nil {
+		return err
+	}
 	if strings.TrimSpace(body.Summary) == "" || len(body.Chapters) != len(input.Outline) || len(body.MaterialChecks) == 0 {
 		return fmt.Errorf("rehearsal requires a substantive conditional forecast for the whole arc and explicit material checks")
 	}
@@ -228,7 +239,7 @@ func ValidateArcRehearsalBody(input ArcRehearsalInput, body ArcRehearsalBody) er
 		default:
 			return fmt.Errorf("invalid rehearsal material status")
 		}
-		if m.RequiresReadable && (m.Status == "not_required" || (m.Status == "available" && len(m.ResourceRefs) == 0)) {
+		if m.RequiresReadable && (m.Status == "not_required" || (input.ExecutionCapabilities == nil && m.Status == "available" && len(m.ResourceRefs) == 0)) {
 			return fmt.Errorf("read-dependent operation cannot claim availability without an existing readable resource")
 		}
 		for _, ref := range m.ResourceRefs {
@@ -236,7 +247,7 @@ func ValidateArcRehearsalBody(input ArcRehearsalInput, body ArcRehearsalBody) er
 			if !ok {
 				return fmt.Errorf("rehearsal cannot invent resource reference %q", ref)
 			}
-			if m.Status == "available" && m.RequiresReadable && len(r.ReadableFacts) == 0 {
+			if m.Status == "available" && m.RequiresReadable && len(r.ReadableFacts) == 0 && (input.ExecutionCapabilities == nil || r.Artifact == nil) {
 				return fmt.Errorf("rehearsal resource %q has no readable facts", ref)
 			}
 		}
@@ -291,6 +302,12 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 				found = true
 				if prior.RequiresReadable && !current.RequiresReadable {
 					return report, fmt.Errorf("review cannot remove a declared readable-material dependency")
+				}
+				if input.ExecutionCapabilities != nil && !samePhysicalValueV2(prior.CapabilityRequirements, current.CapabilityRequirements) {
+					return report, fmt.Errorf("review cannot rewrite declared execution dependencies for %q", prior.Operation)
+				}
+				if input.ExecutionCapabilities != nil && prior.Status != "not_required" && current.Status == "not_required" {
+					return report, fmt.Errorf("review cannot discard a selected material dependency")
 				}
 			}
 		}

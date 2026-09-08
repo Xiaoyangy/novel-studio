@@ -473,7 +473,7 @@ func buildPipelineProjectAllIdentityForPreflight(
 	if originalAttempt != nil {
 		detailWindow = originalAttempt.DetailWindow
 	} else {
-		detailWindow, err = loadPipelineDetailWindow(st, arcScope, baseChapter)
+		detailWindow, err = loadPipelineDetailWindow(st, arcScope, baseChapter, cfg)
 		if err != nil {
 			return identity, err
 		}

@@ -434,13 +434,13 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			evidence := storedEvidence
 			err := verifyStoredPipelineArtifactDigests(cfg.OutputDir, storedEvidence)
 			if err == nil {
-				evidence, err = verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+				evidence, err = verifyPipelineStage(stage, cfg.OutputDir, flags, state, cfg)
 			}
 			if err == nil {
 				evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
 				state.MarkDone(stage, evidence)
 				if stage == "outline-all" && state.Done("architect") {
-					architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state)
+					architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state, cfg)
 					if verifyErr != nil {
 						return fmt.Errorf("outline-all refreshed architect evidence invalid: %w", verifyErr)
 					}
@@ -489,7 +489,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 				recordPipelineStageTiming(cfg.OutputDir, timingInvocationID, state.RunIdentity, stage, stageStarted, "watchdog_progress_error", err)
 				return fmt.Errorf("记录阶段 %s watchdog execution completion 失败: %w", stage, err)
 			}
-			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+			evidence, err := verifyPipelineStage(stage, cfg.OutputDir, flags, state, cfg)
 			if err != nil {
 				evidence.Status = "invalid"
 				evidence.Message = err.Error()
@@ -505,7 +505,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			evidence = stampPipelineArtifactDigests(cfg.OutputDir, evidence)
 			state.MarkDone(stage, evidence)
 			if stage == "outline-all" && state.Done("architect") {
-				architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state)
+				architectEvidence, verifyErr := verifyPipelineStage("architect", cfg.OutputDir, flags, state, cfg)
 				if verifyErr != nil {
 					return fmt.Errorf("outline-all refreshed architect evidence invalid: %w", verifyErr)
 				}
@@ -552,7 +552,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 		if !state.Done(stage) {
 			continue
 		}
-		evidence, verifyErr := verifyPipelineStage(stage, cfg.OutputDir, flags, state)
+		evidence, verifyErr := verifyPipelineStage(stage, cfg.OutputDir, flags, state, cfg)
 		if verifyErr != nil {
 			evidence.Status = "stale"
 			evidence.Message = verifyErr.Error()

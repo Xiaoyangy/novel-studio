@@ -17,13 +17,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/reviewreport"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
-func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *domain.PipelineState) (evidence domain.PipelineStageEvidence, returnErr error) {
+func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *domain.PipelineState, configs ...bootstrap.Config) (evidence domain.PipelineStageEvidence, returnErr error) {
 	evidence = domain.PipelineStageEvidence{
 		Stage:     stage,
 		Status:    "verified",
@@ -53,7 +54,7 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 	case "preplan":
 		return verifyPipelinePreplanStage(outputDir, evidence)
 	case "rehearse-arc":
-		return verifyPipelineArcRehearsalStage(outputDir, evidence)
+		return verifyPipelineArcRehearsalStage(outputDir, evidence, configs...)
 	case "project-all":
 		return verifyPipelineProjectAllStage(outputDir, evidence)
 	case "seal":

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
@@ -16,7 +17,7 @@ import (
 
 // BuildArcRehearsalInput only reads authored foundation and accepted state.
 // It never reads preplan projections, draft plans or its own rehearsal files.
-func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput) (domain.ArcRehearsalInput, error) {
+func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, configs ...bootstrap.Config) (domain.ArcRehearsalInput, error) {
 	input := domain.ArcRehearsalInput{Version: domain.ArcRehearsalVersion, ArcID: binding.ArcID, ArcFirstChapter: binding.ArcFirstChapter, ArcLastChapter: binding.ArcLastChapter, BaseCanonChapter: binding.BaseCanonChapter, BaseCanonRoot: binding.BaseCanonRoot, SourceRoot: binding.SourceRoot, SourceFiles: map[string]string{}}
 	if st == nil {
 		return input, fmt.Errorf("rehearsal requires a source Store")
@@ -26,6 +27,20 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput) (
 		return input, err
 	}
 	input.ProtocolDigest = protocol
+	if len(configs) > 1 {
+		return input, fmt.Errorf("rehearsal accepts one actual execution configuration")
+	}
+	// Omission is only the standalone/default API path. Production CLI callers
+	// pass their resolved config; Run independently checks the same selection.
+	var cfg bootstrap.Config
+	if len(configs) == 1 {
+		cfg = configs[0]
+	}
+	capabilities, err := ArcRehearsalExecutionCapabilities(cfg)
+	if err != nil {
+		return input, err
+	}
+	input.ExecutionCapabilities = &capabilities
 	read := func(rel string, out any) error {
 		raw, err := os.ReadFile(filepath.Join(st.Dir(), rel))
 		if err != nil {
@@ -209,4 +224,18 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput) (
 		return input.CharacterObservations[i].AgentID < input.CharacterObservations[j].AgentID
 	})
 	return domain.FinalizeArcRehearsalInput(input)
+}
+
+func ArcRehearsalExecutionCapabilities(cfg bootstrap.Config) (domain.ArcRehearsalExecutionCapabilitiesV1, error) {
+	policy := cfg.CharacterActivationPolicy()
+	producer := CharacterAgentProtocolDigestForVersion(cfg.CharacterAgentsProtocolVersion())
+	if policy != "" {
+		producer = CharacterActivationProtocolWithProducer(policy, cfg.CharacterAgents.FrozenActivationProducer)
+	} else if cfg.CharacterAgents.FrozenActivationProducer != "" {
+		return domain.ArcRehearsalExecutionCapabilitiesV1{}, fmt.Errorf("one-shot rehearsal cannot claim a frozen activation producer")
+	}
+	if cfg.CharacterAgents.ExecutionPolicy != "" && cfg.CharacterAgents.ExecutionPolicy != "v1" && policy == "" {
+		return domain.ArcRehearsalExecutionCapabilitiesV1{}, fmt.Errorf("rehearsal execution selection is not a valid activation configuration")
+	}
+	return domain.BuildArcRehearsalExecutionCapabilitiesV1(cfg.CharacterAgentsProtocolVersion(), policy, producer)
 }

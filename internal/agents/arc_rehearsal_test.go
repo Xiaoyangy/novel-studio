@@ -47,6 +47,9 @@ func arcRehearsalTestBody(input domain.ArcRehearsalInput, missing bool) domain.A
 		body.ContractChecks = append(body.ContractChecks, domain.ArcRehearsalContractCheck{Contract: text, Assessment: "conditional", Conditions: []string{"所需资料实际可用且人物自主选择"}})
 	}
 	check := domain.ArcRehearsalMaterialCheck{Operation: "核读既有账本", RequiresReadable: true, ResourceRefs: []string{"res_1111111111111111"}, Status: "available", Explanation: "输入有账本实体及原始readable_facts"}
+	if input.ExecutionCapabilities != nil {
+		check.CapabilityRequirements = []domain.ArcRehearsalCapabilityRequirementV1{{Key: "read_ledger", Kind: "resource_read", ActorRef: input.CharacterObservations[0].AgentID, ResourceRefs: check.ResourceRefs}}
+	}
 	if missing {
 		check = domain.ArcRehearsalMaterialCheck{Operation: "核读交接夹", RequiresReadable: true, Status: "missing", Explanation: "文字提到交接夹，但world_state没有对应实体和条款"}
 	}
@@ -58,6 +61,7 @@ func TestArcRehearsalPolicyChangePreservesHistoryButRequiresNewExecutionInput(t 
 	st, input := arcRehearsalTestInput(t)
 	legacy := input
 	legacy.ProtocolDigest = ""
+	legacy.ExecutionCapabilities = nil
 	legacy, err := domain.FinalizeArcRehearsalInput(legacy)
 	selectionMust(t, err)
 	if input.ProtocolDigest == "" || input.InputDigest == legacy.InputDigest {
@@ -84,10 +88,11 @@ func TestArcRehearsalPolicyChangePreservesHistoryButRequiresNewExecutionInput(t 
 }
 
 type arcRehearsalFakeModel struct {
-	calls      int
-	failReview bool
-	missing    bool
-	roles      []string
+	calls       int
+	failReview  bool
+	missing     bool
+	roles       []string
+	bodyFactory func(domain.ArcRehearsalInput) domain.ArcRehearsalBody
 }
 
 func decodeArcRehearsalFakePayload(raw []byte, target any) error {
@@ -201,7 +206,11 @@ func (m *arcRehearsalFakeModel) Generate(_ context.Context, messages []agentcore
 		m.failReview = false
 		return nil, context.Canceled
 	}
-	raw, err := json.Marshal(arcRehearsalTestBody(payload.Input, m.missing))
+	body := arcRehearsalTestBody(payload.Input, m.missing)
+	if m.bodyFactory != nil {
+		body = m.bodyFactory(payload.Input)
+	}
+	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
