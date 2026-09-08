@@ -1391,6 +1391,16 @@ func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Confi
 	if len(requestedIDs) == 0 {
 		return nil, nil
 	}
+	// This capability is created only after this pool has authenticated every
+	// pending owner's exact observation and admission. It never leaves this
+	// dispatch or replaces the Store's write-time refresh/source checks.
+	var dispatchView *characterDispatchViewV3
+	if v3View != nil {
+		dispatchView = &characterDispatchViewV3{view: v3View, sessionDigest: cycleSession.Digest, round: round, observations: make(map[string]string, len(pending))}
+		for _, observation := range pending {
+			dispatchView.observations[observation.AgentID] = observation.Digest
+		}
+	}
 	limit := cfg.CharacterAgents.MaxConcurrency
 	if limit <= 0 {
 		limit = 4
@@ -1413,7 +1423,7 @@ func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Confi
 				if runCtx.Err() != nil {
 					return
 				}
-				if err := runOneCharacterAgent(runCtx, cfg, st, model, observation, cycleSession); err != nil {
+				if err := runOneCharacterAgentWithDispatchView(runCtx, cfg, st, model, observation, dispatchView, cycleSession); err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -1452,6 +1462,30 @@ dispatch:
 }
 
 func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observation domain.CharacterObservationPacket, sessions ...*domain.CharacterActivationSession) error {
+	return runOneCharacterAgentWithDispatchView(ctx, cfg, st, model, observation, nil, sessions...)
+}
+
+// Private, non-serializable authority held only by one proposal pool. A caller
+// cannot turn JSON, a digest, or a zero Store view into an authenticated view.
+type characterDispatchViewV3 struct {
+	view          *store.CharacterArbitrationV3
+	sessionDigest string
+	round         int
+	observations  map[string]string
+}
+
+func (d *characterDispatchViewV3) validate(st *store.Store, session *domain.CharacterActivationSession, observation domain.CharacterObservationPacket) error {
+	if d == nil || d.view == nil || !d.view.BelongsTo(st) || session == nil || d.sessionDigest != session.Digest || d.round != observation.Round || d.observations[observation.AgentID] != observation.Digest || observation.Digest == "" {
+		return fmt.Errorf("character worker lacks its exact pool-owned dispatch view")
+	}
+	input := d.view.Input()
+	if input.Stimulus.SelfEvaluationContext == nil || input.Stimulus.SelfEvaluationContext.SessionDigest != session.Digest || input.Stimulus.Digest != observation.StimulusDigest || input.Stimulus.GenerationID != observation.GenerationID || input.Stimulus.Chapter != observation.Chapter {
+		return fmt.Errorf("character worker dispatch view differs from its frozen input/session")
+	}
+	return nil
+}
+
+func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observation domain.CharacterObservationPacket, dispatch *characterDispatchViewV3, sessions ...*domain.CharacterActivationSession) error {
 	proofs, cycleSession, err := characterExecutionProofs(st, sessions...)
 	if err != nil {
 		return err
@@ -1462,9 +1496,18 @@ func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.S
 	tool := tools.NewSubmitCharacterDecisionTool(st, observation)
 	if cycleSession != nil {
 		if hasCharacterActivationPolicyV3(observation.Sources) {
-			view, loadErr := st.LoadCharacterArbitrationV3(observation.GenerationID, observation.Chapter)
-			if loadErr != nil {
-				return loadErr
+			var view *store.CharacterArbitrationV3
+			if dispatch != nil {
+				if err := dispatch.validate(st, cycleSession, observation); err != nil {
+					return err
+				}
+				view = dispatch.view
+			} else {
+				var loadErr error
+				view, loadErr = st.LoadCharacterArbitrationV3(observation.GenerationID, observation.Chapter)
+				if loadErr != nil {
+					return loadErr
+				}
 			}
 			if view == nil {
 				return fmt.Errorf("v3 character call requires its prior immutable admission")
