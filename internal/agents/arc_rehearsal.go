@@ -184,6 +184,12 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 		prompt += arcRehearsalReviewPrompt
 	}
 	tool := &submitArcRehearsalTool{input: input}
+	if role == "world_arbiter" {
+		if draft == nil {
+			return domain.ArcRehearsalBody{}, call, fmt.Errorf("rehearsal review requires its host-bound draft")
+		}
+		tool.draft = draft
+	}
 	inputMessage, err := modelinput.NewExactAgentPacketMessage(modelinput.KindArcRehearsal, string(payload))
 	if err != nil {
 		return domain.ArcRehearsalBody{}, call, err

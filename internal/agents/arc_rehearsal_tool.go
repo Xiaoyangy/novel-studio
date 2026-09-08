@@ -13,6 +13,7 @@ import (
 
 type submitArcRehearsalTool struct {
 	input domain.ArcRehearsalInput
+	draft *domain.ArcRehearsalDraft // Host-only; never decoded from submission.
 	body  *domain.ArcRehearsalBody
 }
 
@@ -88,6 +89,15 @@ func (t *submitArcRehearsalTool) Execute(_ context.Context, raw json.RawMessage)
 	}
 	if err := domain.ValidateArcRehearsalBody(t.input, body); err != nil {
 		return nil, err
+	}
+	if t.draft != nil {
+		verified, err := domain.FinalizeArcRehearsalDraft(t.input, *t.draft)
+		if err != nil || !sameCharacterCycleValue(verified, *t.draft) {
+			return nil, fmt.Errorf("rehearsal review lacks its exact verified draft")
+		}
+		if err := domain.ValidateArcRehearsalReviewBody(t.input, t.draft.Body, body); err != nil {
+			return nil, err
+		}
 	}
 	if t.body != nil {
 		return nil, fmt.Errorf("rehearsal stage already submitted")

@@ -292,28 +292,8 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 	if err != nil || !samePhysicalValueV2(valid, draft) {
 		return report, fmt.Errorf("rehearsal review lacks its exact verified draft")
 	}
-	if err := ValidateArcRehearsalBody(input, report.Body); err != nil {
+	if err := ValidateArcRehearsalReviewBody(input, draft.Body, report.Body); err != nil {
 		return report, err
-	}
-	for _, prior := range draft.Body.MaterialChecks {
-		found := false
-		for _, current := range report.Body.MaterialChecks {
-			if current.Operation == prior.Operation {
-				found = true
-				if prior.RequiresReadable && !current.RequiresReadable {
-					return report, fmt.Errorf("review cannot remove a declared readable-material dependency")
-				}
-				if input.ExecutionCapabilities != nil && !samePhysicalValueV2(prior.CapabilityRequirements, current.CapabilityRequirements) {
-					return report, fmt.Errorf("review cannot rewrite declared execution dependencies for %q", prior.Operation)
-				}
-				if input.ExecutionCapabilities != nil && prior.Status != "not_required" && current.Status == "not_required" {
-					return report, fmt.Errorf("review cannot discard a selected material dependency")
-				}
-			}
-		}
-		if !found {
-			return report, fmt.Errorf("review omitted draft material check %q", prior.Operation)
-		}
 	}
 	if !validArcRehearsalCall(report.Call, "world_arbiter") {
 		return report, fmt.Errorf("rehearsal review lacks actual Arbiter response/usage sources")
@@ -344,4 +324,46 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 	digest, err := DeterministicPlanningHash(report)
 	report.ReportDigest = "sha256:" + digest
 	return report, err
+}
+
+// ValidateArcRehearsalReviewBody validates the full review and preserves every
+// original dependency by key. Additions remain subject to the same typed/global
+// checks; independent display order is not a new execution constraint. Callers
+// authenticate the host-bound draft separately; this cannot create Call data.
+func ValidateArcRehearsalReviewBody(input ArcRehearsalInput, draft, review ArcRehearsalBody) error {
+	if err := ValidateArcRehearsalBody(input, review); err != nil {
+		return err
+	}
+	for _, prior := range draft.MaterialChecks {
+		found := false
+		for _, current := range review.MaterialChecks {
+			if current.Operation == prior.Operation {
+				found = true
+				if prior.RequiresReadable && !current.RequiresReadable {
+					return fmt.Errorf("review cannot remove a declared readable-material dependency")
+				}
+				if input.ExecutionCapabilities != nil {
+					for _, original := range prior.CapabilityRequirements {
+						preserved := false
+						for _, requirement := range current.CapabilityRequirements {
+							if original.Key == requirement.Key && samePhysicalValueV2(original, requirement) {
+								preserved = true
+								break
+							}
+						}
+						if !preserved {
+							return fmt.Errorf("review cannot rewrite declared execution dependencies for %q", prior.Operation)
+						}
+					}
+				}
+				if input.ExecutionCapabilities != nil && prior.Status != "not_required" && current.Status == "not_required" {
+					return fmt.Errorf("review cannot discard a selected material dependency")
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("review omitted draft material check %q", prior.Operation)
+		}
+	}
+	return nil
 }
