@@ -189,6 +189,11 @@ func (t *SubmitCharacterDecisionTool) Execute(_ context.Context, args json.RawMe
 	if err != nil {
 		return nil, fmt.Errorf("character decision rejected: %w: %w", err, errs.ErrToolPrecondition)
 	}
+	if t.arbitrationV3 != nil {
+		if err := domain.ValidateCharacterOperationalObservationSourcesV1(finalized, t.arbitrationV3.Input().Stimulus); err != nil {
+			return nil, fmt.Errorf("character decision rejected: %w: %w", err, errs.ErrToolPrecondition)
+		}
+	}
 	save := func(value domain.CharacterDecisionProposal) error { return t.proofs.SaveProposal(value, t.observation) }
 	if t.arbitrationV3 != nil {
 		save = t.arbitrationV3.SaveProposal

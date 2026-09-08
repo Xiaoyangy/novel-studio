@@ -136,6 +136,80 @@ func ValidateCharacterOperationalObservationIntentV1(proposal CharacterDecisionP
 	return nil
 }
 
+// ValidateCharacterOperationalObservationSourcesV1 is a host-only preflight.
+// A redacted resource view intentionally omits document contents and unknown
+// actual quantities, so view-only intent validation cannot establish this
+// capability. Call with the already verified frozen stimulus, never model data.
+// Replaying an older proposal still uses its original view-only validator.
+func ValidateCharacterOperationalObservationSourcesV1(proposal CharacterDecisionProposal, stimulus WorldStimulusPacket) error {
+	requested := false
+	for _, task := range proposal.SelfTasks {
+		requested = requested || len(task.ObservationRequests) > 0
+	}
+	if !requested {
+		return nil
+	}
+	if stimulus.PhysicalState == nil || proposal.GenerationID != stimulus.GenerationID || proposal.Chapter != stimulus.Chapter {
+		return fmt.Errorf("operational request lacks its frozen host input")
+	}
+	catalog := map[string]WorldResourceBalanceV2{}
+	for _, resource := range stimulus.PhysicalState.Resources {
+		catalog[resource.ResourceID] = resource
+	}
+	holdings := map[string]CharacterResourceHoldingV2{}
+	for _, actor := range stimulus.PhysicalState.Actors {
+		if actor.AgentID == proposal.AgentID && actor.Character == proposal.Character {
+			for _, holding := range actor.Resources {
+				holdings[holding.ResourceID] = holding
+			}
+		}
+	}
+	mechanisms := map[string]CodexMechanism{}
+	for _, mechanism := range stimulus.Mechanisms {
+		mechanisms[mechanism.ID] = mechanism
+	}
+	seen := map[string]bool{}
+	for _, task := range proposal.SelfTasks {
+		for _, request := range task.ObservationRequests {
+			resource, known := catalog[request.ResourceID]
+			holding, visible := holdings[request.ResourceID]
+			mechanism, public := mechanisms[request.MechanismRef]
+			if seen[request.RequestID] || !known || !operationalResourceV1(resource) || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
+				// Only repeat identifiers supplied by this owner. Do not reveal
+				// which hidden resource property failed or any readable facts.
+				return fmt.Errorf("operational request %q for resource %q is not supported by this observation API; submit an owner-chosen task without this request or use the dedicated reading/measurement protocol when applicable", request.RequestID, request.ResourceID)
+			}
+			seen[request.RequestID] = true
+		}
+	}
+	return nil
+}
+
+// An already saved, view-valid request can be ineligible in the hidden world
+// catalog. Permit only a genuine no-op R1 revision, not a fabricated physical
+// failure or an operational result. The ordinary arbiter/prefix validators
+// still authenticate all proposals, conflicts and the unchanged state.
+func operationalRequestCanReviseV1(receipt WorldArbitrationReceipt, stimulus WorldStimulusPacket, before, after WorldPhysicalStateV2, owner string) bool {
+	if receipt.Finalized || receipt.Round != 1 || receipt.HardContractStatus != "feasible" ||
+		!physicalContainsRefV2(stimulus.Sources, CharacterActivationCyclePolicyV3) || !physicalContainsRefV2(stimulus.Sources, CharacterArbitrationRoundSourcesPolicyV1) ||
+		receipt.StoryTime == nil || stimulus.StoryClock == nil || receipt.StoryTime.StartDay != stimulus.StoryClock.CurrentDay || receipt.StoryTime.EndDay != stimulus.StoryClock.CurrentDay ||
+		len(receipt.ResourceSettlements)+len(receipt.ResourceDeliveries)+len(receipt.PassiveReceptions) != 0 ||
+		!samePhysicalValueV2(before, after) {
+		return false
+	}
+	for _, resolution := range receipt.Resolutions {
+		if len(resolution.SelfExecutions)+len(resolution.ArtifactReadResults)+len(resolution.ArtifactSignatures) != 0 {
+			return false
+		}
+	}
+	for _, conflict := range receipt.Conflicts {
+		if !conflict.Resolved && (conflict.Kind == "rule" || conflict.Kind == "resource") && physicalContainsRefV2(conflict.AffectedAgentIDs, owner) {
+			return true
+		}
+	}
+	return false
+}
+
 func CharacterOperationalObservationIDV1(observation CharacterOperationalObservationV1) string {
 	observation.ID = ""
 	digest, _ := characterAgentDigest(struct {
@@ -229,8 +303,11 @@ func applyCharacterOperationalObservationsV1(receipt WorldArbitrationReceipt, st
 				resource, known := catalog[request.ResourceID]
 				holding, visible := oldHoldings[request.ResourceID]
 				mechanism, public := mechanisms[request.MechanismRef]
-				if owners[request.RequestID] != "" || !known || !operationalResourceV1(resource) || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
+				if owners[request.RequestID] != "" || !known || !visible || holding.Access == "none" || holding.Perception.Kind == "unaware" || !public || CodexMechanismVisibility(mechanism) == "secret" || !physicalContainsRefV2(proposal.MechanismRefs, request.MechanismRef) {
 					return fmt.Errorf("operational request is not a unique known accessible qualitative resource/public mechanism")
+				}
+				if !operationalResourceV1(resource) && !operationalRequestCanReviseV1(receipt, stimulus, before, *after, actor.AgentID) {
+					return fmt.Errorf("operational request is not a unique known accessible qualitative resource/public mechanism; owner %q request %q requires an unchanged zero-time nonfinal R1 rule/resource conflict before owner revision; no operational result or physical failure may be invented", actor.AgentID, request.RequestID)
 				}
 				requests[request.RequestID], owners[request.RequestID] = request, task.TaskID
 			}
