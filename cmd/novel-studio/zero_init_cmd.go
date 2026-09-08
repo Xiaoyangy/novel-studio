@@ -1649,8 +1649,13 @@ var zeroStoryDurationRE = regexp.MustCompile(
 
 var zeroStoryDurationScopeMarkers = []string{
 	"现在线", "主线时间跨度", "主线跨度", "全书故事跨度", "故事时间跨度", "故事跨度", "正文时间跨度", "叙事跨度",
-	"全书时限", "故事时限", "主线时限", "全书时间窗口", "故事时间窗口", "倒计时", "开局距",
+	"全书时限", "故事时限", "主线时限", "全书时间窗口", "故事时间窗口", "全书倒计时", "故事倒计时", "主线倒计时",
 }
+
+var zeroStoryDurationEndPrefixRE = regexp.MustCompile(`^(?:(?:全书(?:故事)?|整个故事|故事|主线|正文)(?:必须|须|需|应当)?在?|(?:必须|须|需|应当)在)$`)
+var zeroStoryDurationEndSuffixRE = regexp.MustCompile(`^(?:以|之)?内(?:结束|完结|收束|完成(?:全书|整个故事|故事|主线|正文))$`)
+var zeroStoryFinalDeadlinePrefixRE = regexp.MustCompile(`^开局距(?:最后|最终)(?:截止时点|截止时间|期限)$`)
+var zeroStoryFinalDeadlineScopeRE = regexp.MustCompile(`适用范围\s*[:：为]?\s*全书|正文(?:不得|不能|不)跨过(?:该|最后|最终)?截止时点`)
 
 type zeroStoryDurationCandidate struct {
 	MinDays float64
@@ -1738,6 +1743,8 @@ func zeroStoryDurationCandidates(text string, requireScope bool) ([]zeroStoryDur
 func zeroStoryDurationHasScope(text string, start, end int) bool {
 	// Scope belongs to the same clause: a nearby "story duration" must not
 	// turn a later journey/cooldown in another clause into a second book span.
+	// A rule applying throughout the book is not necessarily a book-duration
+	// bound: "开局距停航90分钟" only closes departure, not every later action.
 	const separators = "，,；;。!！?？\n\r"
 	prefix, suffix := text[:start], text[end:]
 	if cut := strings.LastIndexAny(prefix, separators); cut >= 0 {
@@ -1745,6 +1752,19 @@ func zeroStoryDurationHasScope(text string, start, end int) bool {
 	}
 	if cut := strings.IndexAny(suffix, separators); cut >= 0 {
 		suffix = suffix[:cut]
+	}
+	endingPrefix := strings.TrimSpace(strings.TrimLeft(prefix, separators))
+	if cut := strings.LastIndexAny(endingPrefix, "｜|：:"); cut >= 0 {
+		endingPrefix = strings.TrimLeft(endingPrefix[cut:], "｜|：: \t")
+	}
+	if zeroStoryDurationEndPrefixRE.MatchString(endingPrefix) && zeroStoryDurationEndSuffixRE.MatchString(strings.TrimSpace(suffix)) {
+		return true
+	}
+	// Preserve the older unqualified final-deadline wording when this same
+	// contract expressly binds the entire story. A named departure/cutoff
+	// event does not match this prefix, even if its rule applies book-wide.
+	if zeroStoryFinalDeadlinePrefixRE.MatchString(endingPrefix) && zeroStoryFinalDeadlineScopeRE.MatchString(text) {
+		return true
 	}
 	before := []rune(prefix)
 	after := []rune(suffix)
