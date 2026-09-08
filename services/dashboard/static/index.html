@@ -711,7 +711,7 @@ function fmtCharacterCost(usage = {}) {
 }
 const phaseName = { init: "初始化", premise: "前提设计", outline: "大纲规划", writing: "写作中", complete: "已完结", unknown: "未知" };
 const stepName = { rag: "RAG 重建", simulate: "推演", plan: "计划", draft: "落稿", check: "校验", commit: "提交", review: "评审", rewrite: "返工", deliver: "交付" };
-const stageName = { "rag-build": "RAG 重建", foundation: "基础冻结", "outline-all": "全书分层大纲", preplan: "弧规划准备", "project-all": "正式弧推演规划", seal: "弧规划封存", render: "正文渲染" };
+const stageName = { "rag-build": "RAG 重建", foundation: "基础冻结", "outline-all": "全书分层大纲", preplan: "弧规划准备", "rehearse-arc": "整弧条件预演（非正式章节计划）", "project-all": "正式弧推演规划", seal: "弧规划封存", render: "正文渲染" };
 const runtimeName = { running: "运行中", error: "运行异常", attention: "待处理", idle: "空闲", complete: "已完结" };
 const healthName = { ok: "数据一致", warning: "有差异", error: "数据冲突" };
 const ago = ts => {

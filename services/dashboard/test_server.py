@@ -221,6 +221,90 @@ class DashboardDataTest(unittest.TestCase):
         self.assertFalse(data["runtime"]["execution"]["active"])
         self.assertFalse(data["runtime"]["execution"]["process_alive"])
 
+    def test_rehearsal_owner_identifies_nonformal_planning_and_preserves_stage_token(self):
+        now = datetime.now().astimezone()
+        self.write_json("meta/progress.json", {"phase": "writing", "current_chapter": 1,
+                                                "total_chapters": 3, "completed_chapters": []})
+        # An explicit retry's live owner takes precedence over an older
+        # completed-stage list whose next pending entry is project-all.
+        self.write_json("meta/pipeline.json", {"stages": ["preplan", "rehearse-arc", "project-all"],
+                                               "completed": ["preplan", "rehearse-arc"]})
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1, "mode": "project_all", "target_chapter": 1, "process_id": os.getpid(),
+            "owner": f"pipeline-rehearse-arc-ch000001-pid{os.getpid()}-1788847200000000000",
+            "acquired_at": now.isoformat(), "expires_at": (now + timedelta(hours=1)).isoformat(),
+        })
+        data = server.summarize_run(self.run)
+        self.assertEqual(data["runtime"]["status"], "running")
+        self.assertEqual(data["runtime"]["execution"]["mode"], "project_all")
+        self.assertEqual(data["runtime"]["current_stage"], "rehearse-arc")
+        self.assertEqual(data["working"]["mode"], "planning")
+        self.assertEqual(data["working"]["chapter"], 0)
+        self.assertEqual(data["working"]["step"], "rehearse-arc")
+        self.assertNotEqual(data["formal_planning"]["state"], "building")
+
+    def test_only_exact_matching_rehearsal_owner_overrides_project_all_mode(self):
+        now = datetime.now().astimezone()
+        pid = os.getpid()
+        owners = [
+            f"pipeline-project-all-ch000001-pid{pid}-1788847200000000000",
+            f"prefix-pipeline-rehearse-arc-ch000001-pid{pid}-1788847200000000000",
+            f"pipeline-rehearse-arc-extra-ch000001-pid{pid}-1788847200000000000",
+            f"pipeline-rehearse-arc-ch1-pid{pid}-1788847200000000000",
+            f"pipeline-rehearse-arc-ch000002-pid{pid}-1788847200000000000",
+            f"pipeline-rehearse-arc-ch000001-pid{pid + 1}-1788847200000000000",
+            f"pipeline-rehearse-arc-ch000001-pid{pid}-1788847200000000000-extra",
+            f"pipeline-rehearse-arc-ch000001-pid{pid}-1٢3",
+        ]
+        self.write_json("meta/pipeline.json", {"stages": ["rehearse-arc", "project-all"], "completed": []})
+        for owner in owners:
+            with self.subTest(owner=owner):
+                self.write_json("meta/runtime/pipeline_execution.json", {
+                    "version": 1, "mode": "project_all", "target_chapter": 1, "process_id": pid,
+                    "owner": owner, "acquired_at": now.isoformat(),
+                    "expires_at": (now + timedelta(hours=1)).isoformat(),
+                })
+                self.assertEqual(server.pipeline_execution_state(self.nd)["stage"], "project-all")
+                self.assertEqual(server.runtime_state(self.nd, {})["current_stage"], "project-all")
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1, "mode": "foundation", "target_chapter": 1, "process_id": pid,
+            "owner": f"pipeline-rehearse-arc-ch000001-pid{pid}-1788847200000000000",
+            "acquired_at": now.isoformat(), "expires_at": (now + timedelta(hours=1)).isoformat(),
+        })
+        self.assertEqual(server.pipeline_execution_state(self.nd)["stage"], "foundation")
+
+    def test_rehearsal_timing_failure_and_pending_stage_keep_recovery_identifier(self):
+        now = datetime.now().astimezone()
+        self.write_json("meta/progress.json", {"phase": "writing", "current_chapter": 1, "total_chapters": 3})
+        self.write_json("meta/pipeline.json", {"stages": ["preplan", "rehearse-arc", "project-all"],
+                                               "completed": ["preplan"]})
+        failed = {"schema": "pipeline-timing.v1", "scope": "stage", "stage": "rehearse-arc",
+                  "status": "error", "finished_at": (now - timedelta(minutes=1)).isoformat(),
+                  "error": "整弧预演资料缺口 <script>bad()</script>"}
+        (self.nd / "meta/pipeline_timings.jsonl").write_text(json.dumps(failed) + "\n", encoding="utf-8")
+        # An expired rehearsal owner must not count as a new live retry.
+        self.write_json("meta/runtime/pipeline_execution.json", {
+            "version": 1, "mode": "project_all", "target_chapter": 1, "process_id": os.getpid(),
+            "owner": f"pipeline-rehearse-arc-ch000001-pid{os.getpid()}-1788847200000000000",
+            "acquired_at": (now - timedelta(hours=2)).isoformat(),
+            "expires_at": (now - timedelta(hours=1)).isoformat(),
+        })
+        data = server.summarize_run(self.run)
+        self.assertEqual(data["runtime"]["status"], "error")
+        self.assertFalse(data["runtime"]["execution"]["active"])
+        self.assertFalse(data["runtime"]["last_error_recovered"])
+        self.assertEqual(data["runtime"]["current_stage"], "rehearse-arc")
+        self.assertEqual(data["working"]["step"], "rehearse-arc")
+        self.assertEqual(data["working"]["mode"], "planning")
+        self.assertEqual(server.next_pipeline_stage({"stages": data["pipeline_stages"],
+                                                    "completed": data["pipeline_completed"]}), "rehearse-arc")
+        (self.nd / "meta/runtime/pipeline_execution.json").unlink()
+        (self.nd / "meta/pipeline_timings.jsonl").unlink()
+        pending = server.summarize_run(self.run)
+        self.assertFalse(pending["runtime"]["execution"]["active"])
+        self.assertEqual(pending["runtime"]["current_stage"], "rehearse-arc")
+        self.assertEqual(pending["working"]["step"], "rehearse-arc")
+
     def test_build_rag_process_is_reported_without_advancing_chapter_zero(self):
         now = datetime.now().astimezone()
         self.write_json("meta/progress.json", {

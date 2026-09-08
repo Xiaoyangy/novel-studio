@@ -54,6 +54,28 @@ test("planning fallback does not invent a cycle or promote heartbeat to business
   assert.equal(vm.runInContext("planningWorkTitle(data.working, data.runtime)", context), "整弧规划");
 });
 
+test("arc rehearsal keeps its stage token and never renders formal chapter progress", () => {
+  const stages = page.match(/^const stageName = .*;$/m)[0];
+  const context = vm.createContext({ esc: String, shortTime: String,
+    data: { working: { mode: "planning", target_chapter: 1, cycle: 9 },
+      runtime: { current_stage: "rehearse-arc", status: "running", execution: { active: true } },
+      formal_planning: { planned_chapters: 2, expected_chapters: 3 } },
+  });
+  vm.runInContext(stages + "\n" + planningProgress, context);
+  assert.equal(vm.runInContext("planningWorkTitle(data.working, data.runtime)", context),
+    "整弧条件预演（非正式章节计划）");
+  assert.equal(vm.runInContext("renderPlanningProgress(data)", context), "");
+  context.data.runtime.status = "error";
+  context.data.runtime.execution.active = false;
+  assert.equal(vm.runInContext("planningWorkTitle(data.working, data.runtime)", context),
+    "整弧条件预演（非正式章节计划）");
+  assert.equal(context.data.runtime.current_stage, "rehearse-arc");
+  context.data.runtime.current_stage = "project-all";
+  context.data.runtime.execution.active = true;
+  assert.match(vm.runInContext("renderPlanningProgress(data)", context), /正式计划 2\/3/);
+  assert.match(vm.runInContext("planningWorkTitle(data.working, data.runtime)", context), /正在推演第 1 章／周期 9/);
+});
+
 test("current character planning is labeled as projected and escapes source identity", () => {
   const context = vm.createContext({
     esc: value => String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"),

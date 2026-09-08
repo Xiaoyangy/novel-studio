@@ -322,7 +322,7 @@ PIPELINE_STAGE_BY_MODE = {
     "project_all": "project-all",
     "render": "render",
 }
-PLANNING_PIPELINE_STAGES = {"foundation", "outline-all", "preplan", "project-all", "seal"}
+PLANNING_PIPELINE_STAGES = {"foundation", "outline-all", "preplan", "rehearse-arc", "project-all", "seal"}
 RAG_PROCESS_CACHE_SECONDS = 1.0
 _rag_process_cache_at = 0.0
 _rag_process_cache: list[dict] = []
@@ -338,6 +338,8 @@ def normalize_step(value: str) -> str:
         return ""
     if raw in ("rag", "rag-build", "build-rag"):
         return "rag"
+    if raw == "rehearse-arc":
+        return raw
     if ("simulate-chapter-world" in raw or "chapter-world-simulation" in raw or
             "world-simulation" in raw or raw == "project-all"):
         return "simulate"
@@ -514,11 +516,20 @@ def pipeline_execution_state(nd: Path, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     # RuntimeStore 对没有 PID 的 legacy/custom owner 仍按租约保护；这里保持同一语义。
     active = valid and expires_ts > now and alive is not False
+    stage = PIPELINE_STAGE_BY_MODE.get(mode, "") if valid else ""
+    if valid and mode == "project_all":
+        # Rehearsal reuses the planning permission boundary, not its formal
+        # chapter meaning. Match the complete Host owner format and identity;
+        # stale pipeline lists or incidental owner text cannot rename a lock.
+        rehearsal_owner = re.fullmatch(r"pipeline-rehearse-arc-ch([0-9]{6,})-pid([1-9][0-9]*)-([1-9][0-9]*)", owner)
+        if (rehearsal_owner and rehearsal_owner.group(1) == f"{target:06d}"
+                and int(rehearsal_owner.group(2)) == pid):
+            stage = "rehearse-arc"
     state.update({
         "valid": valid,
         "active": active,
         "mode": mode if valid else "",
-        "stage": PIPELINE_STAGE_BY_MODE.get(mode, "") if valid else "",
+        "stage": stage,
         "target_chapter": target if valid_target else 0,
         "owner": owner if valid else "",
         "process_id": pid,
@@ -737,6 +748,7 @@ def working_state(nd: Path, prog: dict, runtime=None) -> dict:
     last_scope = last.get("scope") or {}
     planning_execution = (
         execution.get("active") and execution.get("mode") != "render" or
+        pipeline_stage == "rehearse-arc" or
         pipeline_stage in PLANNING_PIPELINE_STAGES and prog.get("phase") != "writing"
     )
     if activity.get("kind") == "rag":
@@ -1295,6 +1307,7 @@ def current_character_planning_workspace(nd: Path, formal: dict) -> tuple[Path |
                         if contained_regular_path(run, workspace / "meta/runtime/pipeline_execution.json") else {})
     active = (live_execution.get("active") and shadow_execution.get("active") and
               live_execution.get("mode") == shadow_execution.get("mode") == "project_all" and
+              live_execution.get("stage") == shadow_execution.get("stage") == "project-all" and
               live_execution.get("process_id") == shadow_execution.get("process_id") and
               live_execution.get("process_id", 0) > 0 and
               first <= int_value(shadow_execution.get("target_chapter")) <= last)

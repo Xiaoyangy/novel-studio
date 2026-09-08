@@ -140,6 +140,20 @@ class CharacterPlanningProjectionTest(unittest.TestCase):
         self.assertEqual(payload["planning_projection"]["state"], "paused")
         self.assertEqual(payload["characters"][0]["memory_chapter"], 1)
 
+    def test_rehearsal_lock_cannot_mark_existing_formal_shadow_as_running(self):
+        for root in (self.nd, self.ws):
+            with self.subTest(root=root):
+                path = root / "meta/runtime/pipeline_execution.json"
+                original = json.loads(path.read_text(encoding="utf-8"))
+                changed = dict(original, owner=f"pipeline-rehearse-arc-ch000002-pid{os.getpid()}-1788847200000000000")
+                self.write(root, "meta/runtime/pipeline_execution.json", changed)
+                workspace, projection = server.current_character_planning_workspace(self.nd, self.formal)
+                self.assertEqual(workspace, self.ws)
+                self.assertEqual(projection["state"], "paused")
+                self.write(root, "meta/runtime/pipeline_execution.json", original)
+        _, projection = server.current_character_planning_workspace(self.nd, self.formal)
+        self.assertEqual(projection["state"], "running")
+
     def test_generation_directory_symlink_is_rejected_before_evidence_reads(self):
         generation_root = self.ws.parent.parent
         outside = Path(self.tmp.name) / "outside-generation"
