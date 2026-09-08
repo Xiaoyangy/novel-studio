@@ -30,6 +30,7 @@ type architectReadiness struct {
 	GeneratorVersion     string                       `json:"generator_version,omitempty"`
 	Missing              []string                     `json:"missing,omitempty"`
 	Issues               []string                     `json:"issues,omitempty"`
+	SourceFindings       []architectSourceFinding     `json:"source_findings,omitempty"`
 	Warnings             []string                     `json:"warnings,omitempty"`
 	Stats                map[string]int               `json:"stats,omitempty"`
 	WorldCoherenceDigest string                       `json:"world_coherence_digest,omitempty"`
@@ -239,6 +240,10 @@ func assessArchitectReadiness(dir string) architectReadiness {
 	}
 
 	coherence := domain.AuditWorldCoherence(rules, codex, world)
+	sourceFindings := architectCharacterInitialStateFindings(chars, codex, world)
+	for _, finding := range sourceFindings {
+		issues = appendUniqueArchitectMessages(issues, finding.blockingMessage())
+	}
 	issues = appendUniqueArchitectMessages(issues, coherence.BlockingIssues()...)
 	warnings = appendUniqueArchitectMessages(warnings, coherence.Warnings()...)
 	stats["world_codex_sections"] = coherence.Stats.CodexSections
@@ -252,6 +257,7 @@ func assessArchitectReadiness(dir string) architectReadiness {
 		GeneratorVersion:     buildversion.Resolve(buildversion.Info{Version: version}).Version,
 		Missing:              missing,
 		Issues:               issues,
+		SourceFindings:       sourceFindings,
 		Warnings:             warnings,
 		Stats:                stats,
 		WorldCoherenceDigest: coherence.ReportDigest,
@@ -503,6 +509,15 @@ func architectReadinessState(dir string) (bool, string) {
 	}
 	if !report.Ready {
 		return false, "world_coherence_report ready=false；请修正世界设定后重跑 --architect-check"
+	}
+	if codex != nil && codex.CharacterViewVersion == domain.CurrentWorldCharacterViewVersion {
+		characters, err := st.Characters.Load()
+		if err != nil {
+			return false, "characters.json 不可读，无法复核角色开局态"
+		}
+		if findings := architectCharacterInitialStateFindings(characters, codex, world); len(findings) > 0 {
+			return false, "角色开局态尚未就绪：" + findings[0].blockingMessage() + "；请重跑 --architect-check"
+		}
 	}
 	generatedAt, err := time.Parse(time.RFC3339, r.GeneratedAt)
 	if err != nil {

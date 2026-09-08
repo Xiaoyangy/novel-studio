@@ -48,7 +48,11 @@ func TestProjectAllWorldSimulationPromptCarriesDurableRecoveryGaps(t *testing.T)
 
 func TestProjectAllPlanningProtocolDigestKeepsRuntimeRecoveryOutOfIdentity(t *testing.T) {
 	const plannerFixture = "planner-protocol-fixture.v1"
-	const want = "f285334bc78f9f51d274f1a1efb9e5ab36c7dddc28c4f754fc236b2903fc911e"
+	// Explicit world views and receipt-backed clocks change the actor knowledge
+	// contract, so they intentionally receive a new protocol identity.
+	// Runtime-only recovery prompts must remain outside this digest.
+	// Identity-correct projection is a compiler contract, not runtime recovery.
+	const want = "17259892f0629a0bc712f270003e3204dd29f7e2809f1efcfa776ccb6d895844"
 	if got := ProjectAllPlanningProtocolDigest(plannerFixture); got != want {
 		t.Fatalf("project-all planning protocol digest changed: got %s want %s", got, want)
 	}

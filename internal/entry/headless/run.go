@@ -24,7 +24,11 @@ import (
 var ErrFoundationChangeIncomplete = errors.New("foundation change incomplete")
 
 type Options struct {
-	Prompt                 string
+	Prompt string
+	// UserRulesPrompt carries the author's creative requirements separately
+	// from host workflow instructions in Prompt. Empty keeps the ordinary
+	// quick-start behavior; PreserveUserRules always suppresses normalization.
+	UserRulesPrompt        string
 	StopAfterChapter       int
 	StopAfterPlanChapter   int
 	StopAfterRewriteCommit int
@@ -136,10 +140,8 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		fmt.Fprintf(stderr, "headless 启动: %s\n", eng.Dir())
 		// 新书启动时生成用户规则快照；pipeline 内部的 Architect 刷新提示只是阶段指令，
 		// 不能覆盖已经沉淀的长期用户规则。
-		if !opts.PreserveUserRules {
-			if err := eng.PrepareUserRules(plan.RawPrompt); err != nil {
-				return err
-			}
+		if err := prepareUserRules(opts, plan.RawPrompt, eng.PrepareUserRules); err != nil {
+			return err
 		}
 		if err := eng.StartPrepared(plan.StartPrompt); err != nil {
 			return err
@@ -168,6 +170,17 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	}
 
 	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
+}
+
+func prepareUserRules(opts Options, rawPrompt string, prepare func(string) error) error {
+	if opts.PreserveUserRules {
+		return nil
+	}
+	rulesPrompt := opts.UserRulesPrompt
+	if strings.TrimSpace(rulesPrompt) == "" {
+		rulesPrompt = rawPrompt
+	}
+	return prepare(rulesPrompt)
 }
 
 func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool, stopAfterChapter, stopAfterPlanChapter int, initialPlanSeq int64, stopAfterRewriteCommit int, initialRewriteCommitSeq int64, stopAfterGlobalReviewChapter int, initialGlobalReviewSeq int64, stopOnRenderReplanChapter, stopOnSealedConvergencePreconditionChapter int, stopAfterFoundation, stopAfterFoundationChange bool, foundationChangeArtifacts []string, foundationRefreshTarget, foundationChangeCheckpointStep string, initialFoundationCheckpointSeq int64, initialFoundationDigest string, stopAfterInitialWorldTick bool, initialRenderDraftSeq int64) error {

@@ -192,7 +192,11 @@ func runSealedConvergencePlannerContinuation(
 	if err != nil {
 		return fmt.Errorf("sealed convergence Planner continuation model set: %w", err)
 	}
-	model := models.ForRole("writer")
+	accounting, err := bindSealedConvergenceUsage(ctx, outputDir, models)
+	if err != nil {
+		return err
+	}
+	model := WithDirectUsageAgentModel(models.ForRole("writer"), agentName)
 	provider, name, _ := models.CurrentSelection("writer")
 	if model == nil || strings.TrimSpace(provider) == "" || strings.TrimSpace(name) == "" {
 		return fmt.Errorf("sealed convergence Planner continuation writer model is unavailable")
@@ -214,7 +218,7 @@ func runSealedConvergencePlannerContinuation(
 		model,
 		provider,
 		name,
-		tools.NewPlanDetailsTool(st),
+		tools.NewPlanDetailsTool(st).WithGroundingReviewer(NewPlanGroundingReviewer(cfg, models, accounting.RecordUsage)),
 		agentName,
 	)
 }

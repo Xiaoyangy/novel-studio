@@ -148,7 +148,11 @@ func runSealedConvergencePlannerCompactFinalize(
 	if err != nil {
 		return fmt.Errorf("sealed convergence seeded compact finalize model set: %w", err)
 	}
-	model := models.ForRole("writer")
+	accounting, err := bindSealedConvergenceUsage(ctx, outputDir, models)
+	if err != nil {
+		return err
+	}
+	model := WithDirectUsageAgentModel(models.ForRole("writer"), agentName)
 	provider, modelName, _ := models.CurrentSelection("writer")
 	if model == nil || strings.TrimSpace(provider) == "" || strings.TrimSpace(modelName) == "" {
 		return fmt.Errorf("sealed convergence seeded compact finalize writer model is unavailable")
@@ -159,6 +163,10 @@ func runSealedConvergencePlannerCompactFinalize(
 		return fmt.Errorf("sealed convergence seeded compact finalize store: %w", err)
 	}
 	if err := validateSealedConvergenceContinuationLock(st, chapter); err != nil {
+		return err
+	}
+	planDetailsTool, err = bindSealedConvergenceGrounding(planDetailsTool, NewPlanGroundingReviewer(bound, models, accounting.RecordUsage))
+	if err != nil {
 		return err
 	}
 

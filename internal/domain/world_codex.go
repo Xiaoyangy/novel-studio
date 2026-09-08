@@ -17,6 +17,10 @@ import "strings"
 // “第二次修订”和“第二版结构”混为一谈。旧文件未携带该字段时按 v1 读取。
 const CurrentWorldCodexSchemaVersion = 2
 
+// CurrentWorldCharacterViewVersion opts a foundation into explicit character
+// projections. Zero remains the historical, unmodified audit protocol.
+const CurrentWorldCharacterViewVersion = 1
+
 // CodexAbilityTier 能力分级的一级：从量级、晋升、边界、代价四面锁死。
 type CodexAbilityTier struct {
 	Order     int      `json:"order"`              // 层级序号，1 起
@@ -97,6 +101,25 @@ type CodexMechanism struct {
 	Observability []string `json:"observability"`      // 谁能通过何种证据感知
 	Timing        string   `json:"timing"`             // 生效/传播耗时；即时也要显式写明
 	Cooldown      string   `json:"cooldown,omitempty"` // 冷却、恢复或再次触发条件
+	// CharacterView must be authored independently of the full mechanism;
+	// omitted fields never inherit omniscient author facts.
+	CharacterView *CharacterMechanismView `json:"character_view,omitempty"`
+}
+
+// CharacterMechanismView contains only operational knowledge explicitly
+// authorized for characters. Stable ID and visibility belong to the enclosing
+// mechanism; author section references, private facts and probes are excluded.
+type CharacterMechanismView struct {
+	Name          string   `json:"name"`
+	ActorScope    []string `json:"actor_scope"`
+	Trigger       string   `json:"trigger"`
+	Preconditions []string `json:"preconditions"`
+	Inputs        []string `json:"inputs"`
+	Costs         []string `json:"costs"`
+	Effects       []string `json:"effects"`
+	FailureModes  []string `json:"failure_modes"`
+	Observability []string `json:"observability"`
+	Timing        string   `json:"timing"`
 }
 
 // CodexMechanismVisibility 统一新旧法典的可见性口径。旧工件没有
@@ -127,6 +150,9 @@ type WorldCodex struct {
 	SchemaVersion int    `json:"schema_version,omitempty"`
 	NovelName     string `json:"novel_name,omitempty"`
 	GeneratedAt   string `json:"generated_at,omitempty"`
+	// CharacterViewVersion is independent of authored revision/schema numbers:
+	// version 1 requires explicit public views, while zero preserves old seals.
+	CharacterViewVersion int `json:"character_view_version,omitempty"`
 
 	// 用户九类硬设定（强类型）
 	AbilityTiers        []CodexAbilityTier    `json:"ability_tiers"`        // 能力分级

@@ -566,7 +566,7 @@ func loadZeroInitProjectWithArchitectReadiness(
 	firstCast := zeroFirstChapterCast(outline[0], chars)
 	firstMentions := zeroCharacterFirstMentions(outline, chars)
 	generatedAt := time.Now().Format(time.RFC3339)
-	return zeroInitProject{
+	project := zeroInitProject{
 		Dir:           dir,
 		Name:          projectName,
 		GenerationID:  zeroSimulationGenerationID(generatedAt),
@@ -580,7 +580,13 @@ func loadZeroInitProjectWithArchitectReadiness(
 		FirstCast:     firstCast,
 		FirstMentions: firstMentions,
 		GeneratedAt:   generatedAt,
-	}, nil
+	}
+	if requireArchitectReadiness {
+		if err := zeroValidateCharacterInitialStates(project); err != nil {
+			return zeroInitProject{}, err
+		}
+	}
+	return project, nil
 }
 
 func zeroInitResolvedProjectName(st *store.Store, dir, premise string) (string, error) {
@@ -602,6 +608,9 @@ func zeroInitResolvedProjectName(st *store.Store, dir, premise string) (string, 
 }
 
 func writeZeroInitArtifacts(dir string, project *zeroInitProject, overwrite bool) error {
+	if err := zeroValidateCharacterInitialStates(*project); err != nil {
+		return err
+	}
 	if project.BookWorld == nil {
 		world := zeroInitBookWorld(*project)
 		project.BookWorld = &world
@@ -1242,7 +1251,7 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 		firstMention := project.FirstMentions[name]
 		isProtagonist := strings.TrimSpace(protagonist.Name) == name
 		firstChapterActive := zeroFirstChapterCharacterActive(project, c)
-		location := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "故事开局地点待补")
+		location := zeroInitialCharacterLocation(project, c)
 		if !firstChapterActive {
 			if firstMention > 1 {
 				location = fmt.Sprintf("离屏/未定；预计第%d章首次入场前按当下生活线与交通规则补足位置", firstMention)
@@ -1277,7 +1286,7 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 		if !firstChapterActive {
 			preStoryRelationship = "与主角未相识/未建立可用关系；首次联系或见面前不得预设互信、亏欠、承诺或协作。"
 		}
-		currentPressure := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, "第一章开局压力")
+		currentPressure := "自身职责、已知关系与现有资源构成当前压力；未来章纲不是已经感知的事实。"
 		currentAction := "按自身开局目标行动或被自身场景压力困住。"
 		if !firstChapterActive {
 			currentPressure = "第一章同时段只承受其个人日程、职责与资源约束，不接触主角现场事件。"
@@ -1353,6 +1362,7 @@ func zeroInitCharacterDossiers(project zeroInitProject) []domain.CharacterDossie
 			GeneratedAt: project.GeneratedAt,
 			Sources:     []string{"characters.json", "outline.json", "book_world.json", "world_rules.json"},
 		})
+		zeroApplyExplicitInitialDossier(&out[len(out)-1], c)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Character < out[j].Character })
 	return out
@@ -1376,8 +1386,11 @@ func zeroOptionalPeople(name string) []string {
 }
 
 func zeroNextIndependentMove(c domain.Character, firstMention int, project zeroInitProject) string {
+	if c.InitialState != nil {
+		return c.InitialState.CurrentGoal
+	}
 	if zeroIsProtagonist(c) || firstMention == 1 {
-		return "进入第一章现场选择，并在章末产生可回填状态变化。"
+		return zeroCurrentGoal(project, c, c.Role)
 	}
 	if firstMention > 1 {
 		return fmt.Sprintf("第%d章前保持自身位置/职责/风险推进，不提前抢主线。", firstMention)
@@ -1527,13 +1540,7 @@ func zeroEnsureStoryTimeContract(st *store.Store, project *zeroInitProject) (*do
 			if existing.CoreDigest == expected.CoreDigest {
 				return existing, false, nil
 			}
-			if len(existing.ArcSchedule) > 0 || len(existing.ChapterSchedule) > 0 {
-				return nil, false, fmt.Errorf("outline-all story time core drifted while a structured schedule is already frozen")
-			}
-			// Same chapter count from a different completed attempt is not the
-			// same time promise. With no schedule to invalidate, rebind below to
-			// the exact current receipt scale instead of trusting the old core.
-			existing = nil
+			return nil, false, fmt.Errorf("sealed outline-all story time core drifted from %.9f-%.9f days to %.9f-%.9f days; use an authorized successor/rebase to regenerate time artifacts, do not overwrite the frozen contract", existing.DurationDaysMin, existing.DurationDaysMax, expected.DurationDaysMin, expected.DurationDaysMax)
 		}
 		if existing != nil && (len(existing.ArcSchedule) > 0 || len(existing.ChapterSchedule) > 0) {
 			return nil, false, fmt.Errorf("pre-outline story time contract has schedules and cannot be silently rebound to completed outline-all")
@@ -1637,11 +1644,12 @@ func zeroCompletedOutlineAllTimeSource(st *store.Store) (int, string, bool, erro
 }
 
 var zeroStoryDurationRE = regexp.MustCompile(
-	`(?i)(?:约为|大约|约|大致)?\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+)(?:\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+))?\s*(日|天|年|years?|days?)`,
+	`(?i)(?:约为|大约|约|大致)?\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+)(?:\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+))?\s*(日|天|年|years?|days?|小时|hours?|hrs?|分钟|minutes?|mins?|秒钟?|seconds?|secs?)`,
 )
 
 var zeroStoryDurationScopeMarkers = []string{
 	"现在线", "主线时间跨度", "主线跨度", "全书故事跨度", "故事时间跨度", "故事跨度", "正文时间跨度", "叙事跨度",
+	"全书时限", "故事时限", "主线时限", "全书时间窗口", "故事时间窗口", "倒计时", "开局距",
 }
 
 type zeroStoryDurationCandidate struct {
@@ -1656,9 +1664,10 @@ func zeroOutlineAllReceiptStoryTimeHint(receipt domain.OutlineAllExecutionReceip
 			return "", err
 		}
 		if len(candidates) == 0 {
-			// Preserve legacy free-form hints. The downstream parser will either
-			// understand them or retain its historical nominal fallback.
-			return raw, nil
+			return "", fmt.Errorf("outline-all explicit story_time_hint cannot be parsed; supply a duration in years/days/hours/minutes/seconds instead of using the nominal fallback")
+		}
+		if len(candidates) > 1 {
+			return "", fmt.Errorf("outline-all story_time_hint contains conflicting story durations")
 		}
 		return zeroCanonicalStoryDuration(candidates[0]), nil
 	}
@@ -1708,6 +1717,15 @@ func zeroStoryDurationCandidates(text string, requireScope bool) ([]zeroStoryDur
 		if unit == "年" || strings.HasPrefix(unit, "year") {
 			min *= domain.StoryDaysPerYear
 			max *= domain.StoryDaysPerYear
+		} else if unit == "小时" || strings.HasPrefix(unit, "hour") || strings.HasPrefix(unit, "hr") {
+			min /= domain.StoryHoursPerDay
+			max /= domain.StoryHoursPerDay
+		} else if unit == "分钟" || strings.HasPrefix(unit, "min") {
+			min /= domain.StoryMinutesPerDay
+			max /= domain.StoryMinutesPerDay
+		} else if strings.HasPrefix(unit, "秒") || strings.HasPrefix(unit, "sec") {
+			min /= domain.StorySecondsPerDay
+			max /= domain.StorySecondsPerDay
 		}
 		if min > max {
 			min, max = max, min
@@ -1718,8 +1736,18 @@ func zeroStoryDurationCandidates(text string, requireScope bool) ([]zeroStoryDur
 }
 
 func zeroStoryDurationHasScope(text string, start, end int) bool {
-	before := []rune(text[:start])
-	after := []rune(text[end:])
+	// Scope belongs to the same clause: a nearby "story duration" must not
+	// turn a later journey/cooldown in another clause into a second book span.
+	const separators = "，,；;。!！?？\n\r"
+	prefix, suffix := text[:start], text[end:]
+	if cut := strings.LastIndexAny(prefix, separators); cut >= 0 {
+		prefix = prefix[cut:]
+	}
+	if cut := strings.IndexAny(suffix, separators); cut >= 0 {
+		suffix = suffix[:cut]
+	}
+	before := []rune(prefix)
+	after := []rune(suffix)
 	if len(before) > 16 {
 		before = before[len(before)-16:]
 	}

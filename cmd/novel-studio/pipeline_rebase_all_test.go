@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/store"
+	"github.com/chenhongyang/novel-studio/internal/tools"
 )
 
 func TestResetPipelineAllChapterCandidatePreservesChapterZeroSeedsAndIsIdempotent(t *testing.T) {
@@ -651,6 +652,13 @@ func TestPipelineRebaseAllChaptersArchivesExactCanonAndPublishesChapterZero(t *t
 	}
 	if err := store.NewStore(live).ValidateOutlineAllChapterZeroWorkspace(); err != nil {
 		t.Fatalf("rebased live tree is not a valid outline-all chapter-zero workspace: %v", err)
+	}
+	refreshRoot, _ := store.DirectoryContentRoot(live)
+	if err := tools.RequireChapterZeroFoundationRefreshState(store.NewStore(live)); err != nil {
+		t.Fatalf("actual explicit rebase could not continue to a chapter-zero Architect refresh: %v", err)
+	}
+	if after, _ := store.DirectoryContentRoot(live); after != refreshRoot {
+		t.Fatal("post-rebase refresh authorization mutated the live tree")
 	}
 	for rel := range oldChapterBodies {
 		if strings.HasPrefix(rel, "chapters/") {

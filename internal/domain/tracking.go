@@ -176,23 +176,26 @@ type LocationBaseline struct {
 // 它保存主角视角之外的生活、工作、过去经历、资源、通信边界和关系引入记录，
 // 支撑 RAG 在任意章节直接推演该角色自己经历了什么。
 type CharacterDossier struct {
-	Version               int                     `json:"version"`
-	Character             string                  `json:"character"`
-	Role                  string                  `json:"role,omitempty"`
-	Tier                  string                  `json:"tier,omitempty"`
-	Aliases               []string                `json:"aliases,omitempty"`
-	Profile               CharacterDossierProfile `json:"profile,omitempty"`
-	LifeAnchors           []LifeAnchor            `json:"life_anchors,omitempty"`
-	PreStoryTimeline      []CharacterPastEvent    `json:"pre_story_timeline,omitempty"`
-	Resources             []CharacterResource     `json:"resources,omitempty"`
-	Relationships         []CharacterRelationNote `json:"relationships,omitempty"`
-	CommunicationBoundary CommunicationBoundary   `json:"communication_boundary,omitempty"`
-	KnowledgeBoundary     string                  `json:"knowledge_boundary,omitempty"`
-	DecisionModel         string                  `json:"decision_model,omitempty"`
-	CurrentAtStoryStart   CharacterStartState     `json:"current_at_story_start,omitempty"`
-	RAGHints              []string                `json:"rag_hints,omitempty"`
-	GeneratedAt           string                  `json:"generated_at,omitempty"`
-	Sources               []string                `json:"sources,omitempty"`
+	Version          int                     `json:"version"`
+	Character        string                  `json:"character"`
+	Role             string                  `json:"role,omitempty"`
+	Tier             string                  `json:"tier,omitempty"`
+	Aliases          []string                `json:"aliases,omitempty"`
+	Profile          CharacterDossierProfile `json:"profile,omitempty"`
+	LifeAnchors      []LifeAnchor            `json:"life_anchors,omitempty"`
+	PreStoryTimeline []CharacterPastEvent    `json:"pre_story_timeline,omitempty"`
+	// KnownFactsAtStoryStart records information available to this character
+	// at the opening, not events asserted to have happened at opening time.
+	KnownFactsAtStoryStart []string                `json:"known_facts_at_story_start,omitempty"`
+	Resources              []CharacterResource     `json:"resources,omitempty"`
+	Relationships          []CharacterRelationNote `json:"relationships,omitempty"`
+	CommunicationBoundary  CommunicationBoundary   `json:"communication_boundary,omitempty"`
+	KnowledgeBoundary      string                  `json:"knowledge_boundary,omitempty"`
+	DecisionModel          string                  `json:"decision_model,omitempty"`
+	CurrentAtStoryStart    CharacterStartState     `json:"current_at_story_start,omitempty"`
+	RAGHints               []string                `json:"rag_hints,omitempty"`
+	GeneratedAt            string                  `json:"generated_at,omitempty"`
+	Sources                []string                `json:"sources,omitempty"`
 }
 
 type CharacterDossierProfile struct {

@@ -715,21 +715,26 @@ func pipelineSealedConvergenceContinuePaidPlannerAttempt(
 	if err != nil {
 		return fmt.Errorf("sealed convergence Planner continuation bind planning receipt: %w", err)
 	}
+	usageCtx, usageScope, err := newPipelineSealedConvergenceUsage(cfg, st, intent)
+	if err != nil {
+		return err
+	}
 	continuation.InitialAccessReceiptDigest = receipt.ReceiptDigest
 	continuation.InitialPromptSHA256 = pipelineBytesSHA([]byte(steer))
 	continuation.Dispatches = 1
 	continuation.DispatchedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := saveUpdatedPipelineSealedConvergenceReplanIntent(st.Dir(), intent, eligibility); err != nil {
-		return fmt.Errorf("sealed convergence Planner continuation persist dispatch 1/1: %w", err)
+		return usageScope.Finish(fmt.Errorf("sealed convergence Planner continuation persist dispatch 1/1: %w", err))
 	}
 	runErr := agents.RunSealedConvergencePlannerContinuation(
-		context.Background(),
+		usageCtx,
 		cfg,
 		promptBundle,
 		st.Dir(),
 		chapter,
 		steer,
 	)
+	runErr = usageScope.Finish(runErr)
 	if runErr != nil {
 		if agents.SealedConvergencePlannerTimedOutBeforeSideEffects(runErr) {
 			if proofErr := pipelineSealedConvergenceRecordTypedTimeoutOutcome(

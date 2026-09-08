@@ -595,6 +595,12 @@ func directoryHasRegularFile(root string) (bool, error) {
 // are intentionally outside this root; chapter and draft trees are included
 // even though the entry gate requires them to be empty.
 func pipelineOutlineAllProtectedCanonRoot(outputDir string) (string, error) {
+	return pipelineOutlineAllProtectedCanonRootWithProgress(outputDir, nil)
+}
+
+// A non-nil progress override is only used to verify an exact legacy host
+// rollback before writing it. Normal canon checks always hash the actual file.
+func pipelineOutlineAllProtectedCanonRootWithProgress(outputDir string, progressRaw []byte) (string, error) {
 	components := make(map[string]string)
 	err := filepath.WalkDir(outputDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -638,7 +644,13 @@ func pipelineOutlineAllProtectedCanonRoot(outputDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	stableProgress, err := pipelineOutlineAllStableProgressRoot(outputDir)
+	if progressRaw == nil {
+		progressRaw, err = os.ReadFile(filepath.Join(outputDir, "meta", "progress.json"))
+		if err != nil {
+			return "", err
+		}
+	}
+	stableProgress, err := pipelineOutlineAllStableProgressRawRoot(progressRaw)
 	if err != nil {
 		return "", err
 	}
@@ -657,6 +669,10 @@ func pipelineOutlineAllStableProgressRoot(outputDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("outline-all stable progress requires meta/progress.json: %w", err)
 	}
+	return pipelineOutlineAllStableProgressRawRoot(raw)
+}
+
+func pipelineOutlineAllStableProgressRawRoot(raw []byte) (string, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return "", fmt.Errorf("parse outline-all stable progress: %w", err)

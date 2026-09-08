@@ -787,15 +787,23 @@ func pipelineCompactText(s string, limit int) string {
 }
 
 func chapterNumbersFromFiles(dir string) ([]int, error) {
-	matches, err := filepath.Glob(filepath.Join(dir, "[0-9][0-9].md"))
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("列章节失败: %w", err)
 	}
-	chapters := make([]int, 0, len(matches))
-	for _, path := range matches {
-		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	chapters := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		base := strings.TrimSuffix(entry.Name(), ".md")
 		n, err := strconv.Atoi(base)
-		if err != nil || n <= 0 {
+		// %02d is a minimum width, not a two-digit chapter limit. Only accept
+		// canonical names so aliases such as 001.md cannot duplicate chapter 1.
+		if err != nil || n <= 0 || base != fmt.Sprintf("%02d", n) {
 			continue
 		}
 		chapters = append(chapters, n)
@@ -817,7 +825,7 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 	if err != nil {
 		return err
 	}
-	if err := ensurePipelineRAGReady(cfg); err != nil {
+	if err := ensureArchitectRAGReady(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] RAG 检查失败：%v\n", err)
 		return err
 	}
@@ -856,21 +864,20 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 			}
 		}
 		fmt.Fprintln(os.Stderr, "[pipeline:architect] foundation 已齐，检查 Architect readiness")
-		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
-			return nil
-		} else {
-			fmt.Fprintf(os.Stderr, "[pipeline:architect] Architect readiness 未通过，进入 foundation 修复：%v\n", err)
-			return pipelineRepairArchitectReadiness(opts, cfg, bundle, state.Prompt, err)
-		}
+		return pipelineEnsureOrRepairArchitectReadiness(opts, cfg, bundle, state.Prompt)
 	}
 	prompt, err := pipelineArchitectPrompt(cfg.OutputDir, state.Prompt)
+	if err != nil {
+		return err
+	}
+	authorPrompt, err := pipelineArchitectSourcePrompt(cfg.OutputDir, state.Prompt)
 	if err != nil {
 		return err
 	}
 	const maxArchitectRuns = 4
 	for run := 1; run <= maxArchitectRuns; run++ {
 		if tools.FoundationCoreComplete(cfg.OutputDir) {
-			return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+			return pipelineEnsureOrRepairArchitectReadiness(opts, cfg, bundle, authorPrompt)
 		}
 		runPrompt := ""
 		if run == 1 {
@@ -879,21 +886,77 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		} else {
 			fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次恢复 Architect 补齐 foundation\n", run, maxArchitectRuns)
 		}
-		if err := headless.Run(cfg, bundle, pipelineArchitectInitialHeadlessOptions(runPrompt)); err != nil {
+		if err := headless.Run(cfg, bundle, pipelineArchitectInitialHeadlessOptions(runPrompt, authorPrompt)); err != nil {
 			return err
 		}
 	}
 	if !tools.FoundationCoreComplete(cfg.OutputDir) {
 		return fmt.Errorf("architect 阶段运行 %d 次后 foundation 仍未齐：missing=%s", maxArchitectRuns, strings.Join(tools.FoundationCoreMissing(cfg.OutputDir), ", "))
 	}
-	return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+	return pipelineEnsureOrRepairArchitectReadiness(opts, cfg, bundle, authorPrompt)
 }
 
-func pipelineArchitectInitialHeadlessOptions(prompt string) headless.Options {
+func pipelineEnsureOrRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string) error {
+	if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] Architect readiness 未通过，进入 foundation 修复：%v\n", err)
+		return pipelineRepairArchitectReadiness(opts, cfg, bundle, prompt, err)
+	}
+	return nil
+}
+
+// Architect creates the sources that RAG indexes. A genuinely empty project
+// can start from its prompt; later planning stages still require a ready index.
+// Existing/corrupt artifacts never qualify for this bootstrap exception.
+func ensureArchitectRAGReady(cfg bootstrap.Config) error {
+	err := ensurePipelineRAGReady(cfg)
+	if !errors.Is(err, errNoRAGSourceFiles) && !errors.Is(err, errNoRAGFactChunks) {
+		return err
+	}
+	st := store.NewStore(cfg.OutputDir)
+	index, loadErr := st.RAG.LoadIndexState()
+	if loadErr != nil {
+		return loadErr
+	}
+	vectors, loadErr := st.RAG.LoadVectorStore()
+	if loadErr != nil {
+		return loadErr
+	}
+	pending, loadErr := st.RAG.LoadPendingUpserts()
+	if loadErr != nil {
+		return loadErr
+	}
+	progress, loadErr := st.Progress.Load()
+	if loadErr != nil {
+		return loadErr
+	}
+	chapters, loadErr := chapterNumbersFromFiles(filepath.Join(cfg.OutputDir, "chapters"))
+	if loadErr != nil {
+		return loadErr
+	}
+	designOnly := index != nil && len(index.Chunks) > 0
+	if index != nil {
+		for _, chunk := range index.Chunks {
+			if !rag.IsDesignOnlySourceKind(chunk.SourceKind) || rag.IsForbiddenChunk(chunk) {
+				designOnly = false
+				break
+			}
+		}
+	}
+	if (index != nil && !designOnly) || vectors != nil || (pending != nil && len(pending.Chunks) > 0) || len(chapters) > 0 ||
+		(progress != nil && (progress.CurrentChapter > 0 || len(progress.CompletedChapters) > 0)) {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "[pipeline:architect] 新项目尚无本书 RAG 事实，先从创作合同与可用写法资料建立 foundation；后续阶段再验证事实索引")
+	return nil
+}
+
+func pipelineArchitectInitialHeadlessOptions(prompt, authorPrompt string) headless.Options {
 	return headless.Options{
-		Prompt:              prompt,
-		StopAfterFoundation: true,
-		DisableFlowRouter:   true,
+		Prompt:                     prompt,
+		UserRulesPrompt:            authorPrompt,
+		StopAfterFoundation:        true,
+		PreserveCheckpointsOnStart: true,
+		DisableFlowRouter:          true,
 	}
 }
 
@@ -1252,30 +1315,46 @@ func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bun
 	if pipelineArchitectCompassNeedsRepair(cfg.OutputDir) {
 		return pipelineRepairArchitectCompass(opts, cfg, bundle, prompt, cause)
 	}
-	if repaired, err := pipelineAutoRepairBookWorldStructure(cfg.OutputDir); err != nil {
-		return err
-	} else if repaired {
-		fmt.Fprintln(os.Stderr, "[pipeline:architect] 已自动修复 book_world 悬空关系/别名，重新检查 readiness")
-		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
-			return nil
-		} else {
-			cause = err
-		}
-	}
 	const maxRepairRuns = 3
+	seenFailures := make(map[string]bool)
 	for run := 1; run <= maxRepairRuns; run++ {
-		repairPrompt, err := pipelineArchitectRepairPrompt(cfg.OutputDir, prompt, cause)
+		readiness := assessArchitectReadiness(cfg.OutputDir)
+		if readiness.Ready {
+			return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+		}
+		target, err := pipelineArchitectReadinessRepairTarget(readiness)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次 Architect readiness 修复\n", run, maxRepairRuns)
-		if err := headless.Run(cfg, bundle, headless.Options{
-			Prompt:                     repairPrompt,
-			PreserveUserRules:          true,
-			PreserveCheckpointsOnStart: true,
-			DisableFlowRouter:          true,
-		}); err != nil {
+		if target.Type == "book_world" {
+			if repaired, err := pipelineAutoRepairBookWorldStructure(cfg.OutputDir); err != nil {
+				return err
+			} else if repaired {
+				fmt.Fprintln(os.Stderr, "[pipeline:architect] 已修复旧 v1 book_world 悬空关系，重新检查 readiness")
+				readiness = assessArchitectReadiness(cfg.OutputDir)
+				if readiness.Ready {
+					return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
+				}
+				target, err = pipelineArchitectReadinessRepairTarget(readiness)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		findings := pipelineArchitectRepairFindings(readiness, target.Type)
+		failureJSON, _ := json.Marshal(findings)
+		failureKey := target.Type + ":" + string(failureJSON)
+		if seenFailures[failureKey] {
+			return fmt.Errorf("Architect readiness 的 %s 错误在单次修复后未改善，停止重复模型调用：%s", target.Type, failureJSON)
+		}
+		seenFailures[failureKey] = true
+		repairOpts, err := pipelineArchitectRepairHeadlessOptions(cfg.OutputDir, prompt, cause, readiness, target)
+		if err != nil {
 			return err
+		}
+		fmt.Fprintf(os.Stderr, "[pipeline:architect] 第 %d/%d 次受限 readiness 修复，仅允许 %s\n", run, maxRepairRuns, target.Type)
+		if err := headless.Run(cfg, bundle, repairOpts); err != nil {
+			return fmt.Errorf("Architect readiness 单次修复 %s 失败: %w", target.Type, err)
 		}
 		if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err == nil {
 			return nil
@@ -1300,7 +1379,7 @@ func pipelineRepairArchitectCompass(opts cliOptions, cfg bootstrap.Config, bundl
 	var b strings.Builder
 	b.WriteString("[Pipeline Architect compass 受限迁移]\n")
 	b.WriteString("当前 foundation 除 compass.non_negotiables 外均已完成。本轮只允许派 architect_long，最多读取一次 novel_context，然后只调用一次 save_foundation(type=\"update_compass\", scale=\"short\", content=<完整 compass JSON>)。严禁保存 premise、characters、world_rules、book_world、world_codex 或 outline，严禁写正文。\n")
-	b.WriteString("完整 compass 必须保留当前 ending_direction、open_threads、estimated_scale，并新增 non_negotiables 数组。数组写 6—10 条从本项目创作总令与当前 foundation 逐项提取的具体硬合同，每条都必须能被 outline-all 映射到明确章位或兑现事件；至少覆盖用户明确指定的篇幅/章数、主角身份与能力边界、核心关系、故事发动机、关键时限或数字机关、反转与证据公平性、现实处置边界以及结局承诺。没有出现在本项目输入中的题材、角色、机制或结局不得补入；不得只写抽象主题词。保存后立即停止。\n")
+	b.WriteString("完整 compass 必须保留当前 ending_direction、open_threads、estimated_scale，并新增 non_negotiables 数组。逐项提取用户原始创作合同中明确要求的不可协商约束，条数由实际要求决定，不为凑数补造约束。仅保留用户明确指定的篇幅/章数、角色身份与能力边界、关系、时限、反转公平性及结局要求；模型自己设计的动作、取证方法、所在章节和具体代价均属软方案，除非用户逐字指定，不得升级成硬合同。已有 foundation 的具体剧情不能反向冒充用户意图。每条硬合同应可映射到明确的验证证据，不得只写抽象主题词。保存后立即停止。\n")
 	if cause != nil {
 		b.WriteString("\n[当前 readiness 错误]\n" + cause.Error() + "\n")
 	}
@@ -1342,6 +1421,18 @@ func pipelineAutoRepairBookWorldStructure(outputDir string) (bool, error) {
 	world, err := st.World.LoadBookWorld()
 	if err != nil || world == nil {
 		return false, err
+	}
+	if world.Version >= domain.CurrentBookWorldSchemaVersion {
+		// A dangling reference is not evidence that a new v2 faction, its
+		// resources and clock exist. Let the source-bound Architect repair it.
+		return false, nil
+	}
+	codex, err := st.LoadWorldCodex()
+	if err != nil {
+		return false, err
+	}
+	if codex != nil && codex.SchemaVersion >= domain.CurrentWorldCodexSchemaVersion {
+		return false, nil
 	}
 	changed := false
 	known := pipelineBookWorldFactionNames(*world)
@@ -1426,7 +1517,9 @@ func pipelineDisplayNameForFactionID(id string) string {
 	return strings.ReplaceAll(strings.TrimSpace(id), "_", " ")
 }
 
-func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
+// pipelineArchitectSourcePrompt contains only author-provided material. Host
+// tool instructions must not become permanent narrative rules for every agent.
+func pipelineArchitectSourcePrompt(outputDir, prompt string) (string, error) {
 	brainstormPath := filepath.Join(ragProjectRoot(outputDir), "brainstorm.md")
 	brainstorm := ""
 	if data, err := os.ReadFile(brainstormPath); err == nil {
@@ -1438,6 +1531,21 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	if prompt == "" && brainstorm == "" {
 		return "", fmt.Errorf("architect 阶段需要创作指令：用 --prompt/--prompt-file，或提供项目根 brainstorm.md")
 	}
+	var b strings.Builder
+	if prompt != "" {
+		b.WriteString("[创作指令]\n" + prompt + "\n")
+	}
+	if brainstorm != "" {
+		b.WriteString("\n[brainstorm.md]\n" + brainstorm + "\n")
+	}
+	return b.String(), nil
+}
+
+func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
+	authorPrompt, err := pipelineArchitectSourcePrompt(outputDir, prompt)
+	if err != nil {
+		return "", err
+	}
 
 	var b strings.Builder
 	b.WriteString("[Pipeline Architect 阶段]\n")
@@ -1448,21 +1556,13 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	b.WriteString("[本次断点资产清单]\n")
 	b.WriteString("已存在且本轮禁止重存：" + strings.Join(existing, "、") + "。\n")
 	b.WriteString("本轮只允许保存的缺失类型：" + strings.Join(missing, "、") + "。若缺失列表为空，直接结束并交给宿主 readiness，不得重放任何资产。\n")
-	b.WriteString("保存 compass（save_foundation type=update_compass）时必须同时包含 ending_direction、open_threads、estimated_scale 和非空 non_negotiables；estimated_scale 必须包含机器可读的显式范围，例如固定单卷12章也要写成“1-1卷，12-12章”，不能只写“单卷12章”；non_negotiables 应是 6—10 条可由 outline-all 逐章映射、不得推迟或删除的本书具体硬合同，禁止只写抽象主题。\n")
-	b.WriteString("下游 outline-all 要求 layered_outline 的每个弧占 8—16 章。若全书是 8—16 章短篇，必须保存为一卷一弧并让该弧覆盖全书（例如 12 章短篇只能是一卷一弧 12 章），不得拆成三个 4 章弧；起承转合仍写进逐章事件，不靠短弧分组表达。\n")
+	b.WriteString("保存 compass（save_foundation type=update_compass）时必须同时包含 ending_direction、open_threads、estimated_scale 和非空 non_negotiables；estimated_scale 必须包含机器可读的显式范围，例如固定单卷12章也要写成“1-1卷，12-12章”，不能只写“单卷12章”。non_negotiables 仅来自用户原始创作合同中明确要求的不可协商约束，条数由真实要求决定，不为凑数增加。不得把模型设计的具体动作、所在章节、取证方法或代价形式升级为硬合同；这些属于可随角色选择重算的软剧情。每条硬约束应可验证，不写抽象主题。\n")
+	b.WriteString("新 world_codex 使用 character_view_version=1；world_rules 的每条非 secret 规则须提供 character_view，非 secret mechanisms 须提供独立 character_view 对象。角色视图只描述角色本来可知的一般程序、触发条件、有限资源规律和可能后果，不能包含本案秘密、未揭示的事实、未来剧情、终局要求或其他角色私有信息。完整作者态和 secret 资料仅供世界裁决，结局硬合同留在 compass。\n")
+	b.WriteString("全书卷数、章数和完结范围以用户创作合同为准；每弧至少包含一个章位，弧跨度由故事因果和明确篇幅决定，不强制每弧 8—16 章。三章单卷短篇可以是一卷一弧三章，不得为套用长篇默认值扩充用户明确的章数。每弧章号连续、范围不重叠，并完整覆盖所属卷。\n")
 	b.WriteString("book_world 的形状固定：protagonist_position 必须是一句话字符串；vision_pillars 必须是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 必须是对象 {economic:{base,controlled_by,tension}, cultural:{...}, political:{...}, historical:{...}}，不得把两个 pillars 写成数组。\n")
 	b.WriteString("完成 foundation 后立即停止，宿主会在下一阶段执行 zero-init；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter。\n")
 	b.WriteString("请特别落实用户硬规则：复杂项目按现实时间尺度合理压缩，不得把复杂工程写成和小项目同一时间节奏。\n")
-	if prompt != "" {
-		b.WriteString("\n[创作指令]\n")
-		b.WriteString(prompt)
-		b.WriteString("\n")
-	}
-	if brainstorm != "" {
-		b.WriteString("\n[brainstorm.md]\n")
-		b.WriteString(brainstorm)
-		b.WriteString("\n")
-	}
+	b.WriteString("\n" + authorPrompt)
 	return b.String(), nil
 }
 
@@ -1557,43 +1657,130 @@ func pipelineArchitectShortChapterZero(outputDir string) (bool, int, error) {
 }
 
 func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
-	_ = prompt
-	readinessPath := filepath.Join(outputDir, "meta", "architect_readiness.md")
-	readiness := ""
-	if data, err := os.ReadFile(readinessPath); err == nil {
-		readiness = strings.TrimSpace(string(data))
+	readiness := assessArchitectReadiness(outputDir)
+	target, err := pipelineArchitectReadinessRepairTarget(readiness)
+	if err != nil {
+		return "", err
 	}
-	bookWorldPath := filepath.Join(outputDir, "book_world.json")
-	bookWorld := ""
-	if data, err := os.ReadFile(bookWorldPath); err == nil {
-		bookWorld = strings.TrimSpace(string(data))
-	} else {
-		return "", fmt.Errorf("读取 book_world.json 失败，无法执行 Architect readiness 修复: %w", err)
+	opts, err := pipelineArchitectRepairHeadlessOptions(outputDir, prompt, cause, readiness, target)
+	return opts.Prompt, err
+}
+
+func pipelineArchitectRepairSubjectRoot(subject string) string {
+	for _, root := range []string{"world_rules", "world_codex", "book_world"} {
+		if subject == root || strings.HasPrefix(subject, root+".") || strings.HasPrefix(subject, root+"[") {
+			return root
+		}
+	}
+	return ""
+}
+
+func pipelineArchitectReadinessRepairTarget(readiness architectReadiness) (pipelineArchitectShortRefreshTarget, error) {
+	if readiness.Ready || len(readiness.Missing) > 0 || readiness.WorldCoherence == nil && len(readiness.SourceFindings) == 0 {
+		return pipelineArchitectShortRefreshTarget{}, fmt.Errorf("Architect readiness 无明确可修复的世界源错误：missing=%v issues=%v", readiness.Missing, readiness.Issues)
+	}
+	roots := make(map[string]bool)
+	knownIssues := make(map[string]bool)
+	if readiness.WorldCoherence != nil {
+		for _, issue := range readiness.WorldCoherence.BlockingIssues() {
+			knownIssues[issue] = true
+		}
+		for _, finding := range readiness.WorldCoherence.Findings {
+			if finding.Severity != domain.WorldCoherenceSeverityError {
+				continue
+			}
+			root := pipelineArchitectRepairSubjectRoot(finding.Subject)
+			if root == "" {
+				return pipelineArchitectShortRefreshTarget{}, fmt.Errorf("Architect readiness 无法安全归属错误源 %q (%s)，未授予自动修复权限", finding.Subject, finding.Code)
+			}
+			roots[root] = true
+		}
+	}
+	for _, finding := range readiness.SourceFindings {
+		if finding.Severity != domain.WorldCoherenceSeverityError {
+			continue
+		}
+		root := architectSourceFindingRepairRoot(finding)
+		if root == "" {
+			return pipelineArchitectShortRefreshTarget{}, fmt.Errorf("Architect readiness 不支持结构化来源 %q 的错误 %q (%s)，未授予自动修复权限", finding.Source, finding.Subject, finding.Code)
+		}
+		roots[root] = true
+		knownIssues[finding.blockingMessage()] = true
+	}
+	for _, issue := range readiness.Issues {
+		if !knownIssues[issue] {
+			return pipelineArchitectShortRefreshTarget{}, fmt.Errorf("Architect readiness 包含未归属的错误，未授予自动修复权限：%s", issue)
+		}
+	}
+	for _, root := range []string{"world_rules", "world_codex", "book_world", "characters"} {
+		if !roots[root] {
+			continue
+		}
+		for _, target := range pipelineArchitectShortRefreshTargets {
+			if target.Type == root {
+				return target, nil
+			}
+		}
+	}
+	return pipelineArchitectShortRefreshTarget{}, fmt.Errorf("Architect readiness 没有可归属的阻断项，未授予自动修复权限")
+}
+
+func pipelineArchitectRepairFindings(readiness architectReadiness, target string) []domain.WorldCoherenceFinding {
+	var findings []domain.WorldCoherenceFinding
+	if readiness.WorldCoherence != nil {
+		for _, finding := range readiness.WorldCoherence.Findings {
+			if finding.Severity == domain.WorldCoherenceSeverityError && pipelineArchitectRepairSubjectRoot(finding.Subject) == target {
+				findings = append(findings, finding)
+			}
+		}
+	}
+	for _, finding := range readiness.SourceFindings {
+		if architectSourceFindingRepairRoot(finding) == target {
+			findings = append(findings, finding.WorldCoherenceFinding)
+		}
+	}
+	return findings
+}
+
+func pipelineArchitectRepairHeadlessOptions(outputDir, prompt string, cause error, readiness architectReadiness, target pipelineArchitectShortRefreshTarget) (headless.Options, error) {
+	allowed, err := pipelineArchitectReadinessRepairTarget(readiness)
+	if err != nil {
+		return headless.Options{}, err
+	}
+	if target.Type != allowed.Type {
+		return headless.Options{}, fmt.Errorf("Architect readiness 仅授权修复 %s，不允许 %s", allowed.Type, target.Type)
+	}
+	if len(target.Artifacts) != 1 || target.Artifacts[0] != target.Type+".json" ||
+		(pipelineArchitectRepairSubjectRoot(target.Type) != target.Type && target.Type != "characters") {
+		return headless.Options{}, fmt.Errorf("Architect readiness 修复目标不受支持：%q", target.Type)
+	}
+	source, err := os.ReadFile(filepath.Join(outputDir, target.Artifacts[0]))
+	if err != nil {
+		return headless.Options{}, fmt.Errorf("读取 %s 失败，无法执行受限 Architect readiness 修复: %w", target.Artifacts[0], err)
+	}
+	findings, err := json.Marshal(pipelineArchitectRepairFindings(readiness, target.Type))
+	if err != nil {
+		return headless.Options{}, err
 	}
 	var b strings.Builder
 	b.WriteString("[Pipeline Architect readiness 修复阶段]\n")
-	b.WriteString("当前 foundation 文件已经齐全，但 Architect readiness 未通过。本轮只修复 book_world 结构，不重新设计 premise/characters/world_rules/outline/compass，不进入 zero-init，不写章节，不调用 writer/drafter/editor。\n")
-	b.WriteString("必须派 architect_long，并要求它最多读一次 novel_context；随后只调用一次 save_foundation(type=\"book_world\", scale=\"long\", content=<完整修复后的 book_world JSON>) 落盘。\n")
-	b.WriteString("修复规则：\n")
-	b.WriteString("1. book_world.factions 的每个 relation.target 必须指向已存在 faction 的 id/name/aliases；不得悬空。\n")
-	b.WriteString("2. 每个 faction 必须保留或补齐 clock（segments/progress/consequence/pace）。新增 faction 时必须给 clock。\n")
-	b.WriteString("3. 从当前 book_world.factions 的 id/name/aliases 与当前 outline 实际使用的称呼逐项核对：outline 中已出现的组织简称、系统名、群聊名或空间简称必须补进对应 faction.aliases；不得添加当前资产里没有的示例专名。\n")
-	b.WriteString("4. 保留当前 book_world 的事实、名称、目标、地点、路线和既有进度钟，只做必要结构修复；如果 relation.target 指向缺失势力，优先按该 target 的原值新增势力，而不是删除关系。\n")
-	b.WriteString("5. 保存后不得继续生成正文或 zero-init；等待宿主做 architect-check。\n")
+	fmt.Fprintf(&b, "当前仅授权修复 %s；只处理下方结构化 findings 指向的字段，并输出本源文件的完整 JSON。保留作者硬合同、稳定身份、已有事实、机制和运行态进度；其他源文件只可读，禁止改写。\n", target.Artifacts[0])
+	b.WriteString("悬空引用只能依据现有资产和作者要求纠正；不得凭空新增势力、资源、能力或世界机制，不得为了通过检查降低 schema 版本。若证据不足或必须改写其他来源才能闭合，明确报告未完成并停止。world_codex 修订必须提供 change_reason=修复确定性世界自洽错误，以及 change_evidence=下方 findings 的具体 Subject/Code；禁止将修复说明当作新的作者偏好。\n")
+	b.WriteString("\n[本轮唯一修复依据：当前确定性 findings]\n" + string(findings) + "\n")
+	if target.Type == "characters" {
+		b.WriteString("仅为 findings 指向的角色补正 initial_state：{time?,location,current_goal,current_action?,pressure,known_facts,resources,relationships,commitments}；前五项字符串，后四项字符串数组。location/current_goal/pressure 非空，known_facts 至少一条且不能重复。角色位置必须使用 book_world.places 的现有 id/name；写这个人开局真正已知、持有、承担的事实，不能从未来 arc、完整章节 core_event、终局或他人秘密反推目标和压力。time/current_action 未知可省略，资源、关系、承诺未知留空数组；保留全部角色身份和未被 findings 指向的字段。\n")
+	}
 	if cause != nil {
-		b.WriteString("\n[当前 readiness 错误]\n")
-		b.WriteString(cause.Error())
-		b.WriteString("\n")
+		b.WriteString("\n[宿主错误摘要，仅供诊断]\n" + cause.Error() + "\n")
 	}
-	if readiness != "" {
-		b.WriteString("\n[meta/architect_readiness.md]\n")
-		b.WriteString(readiness)
-		b.WriteString("\n")
+	if strings.TrimSpace(prompt) != "" {
+		b.WriteString("\n[已有创作合同，只读]\n" + prompt + "\n")
 	}
-	b.WriteString("\n[当前 book_world.json]\n```json\n")
-	b.WriteString(bookWorld)
-	b.WriteString("\n```\n")
-	return b.String(), nil
+	fmt.Fprintf(&b, "\n[当前 %s]\n```json\n%s\n```\n", target.Artifacts[0], source)
+	target.Description = "只修复确定性 findings 明确定位的本类型字段；保留其余作者设定与全部其他源文件"
+	return pipelineArchitectRefreshHeadlessOptions(
+		pipelineArchitectShortRefreshTargetPrompt(b.String(), target), target.Artifacts, target.Type, false,
+	), nil
 }
 
 func pipelineZeroInit(opts cliOptions, flags pipelineFlags, state *domain.PipelineState) (returnErr error) {
@@ -4062,7 +4249,7 @@ func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) s
 		ContextWindow:   contextWindow,
 		Role:            writer,
 		PlannerPrompt:   bundle.Prompts.Planner,
-		AgentProtocol:   agents.ProjectAllPlanningProtocolDigest(bundle.Prompts.Planner),
+		AgentProtocol:   agents.ProjectAllPlanningProtocolWithActivation(bundle.Prompts.Planner, cfg.CharacterAgentsProtocolVersion(), cfg.CharacterActivationLimit(), cfg.CharacterActivationPolicy()),
 		References:      bundle.References,
 		Embedding: struct {
 			Enabled   bool   `json:"enabled"`
@@ -4080,7 +4267,14 @@ func pipelineProjectAllInputDigest(cfg bootstrap.Config, bundle assets.Bundle) s
 		SeedContract: pipelineProjectAllSeedContract,
 	})
 	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	base := "sha256:" + hex.EncodeToString(sum[:])
+	if cfg.CharacterActivationLimit() <= 1 {
+		return base
+	}
+	return pipelineProjectAllDigest(struct {
+		Base                          string
+		Character, Arbiter, Architect bootstrap.RoleConfig
+	}{base, resolvedPipelineRoleConfig(cfg, "character"), resolvedPipelineRoleConfig(cfg, "world_arbiter"), resolvedPipelineRoleConfig(cfg, "architect")})
 }
 
 // pipelineRenderInputDigest binds every model/prompt/protocol that can change

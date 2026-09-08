@@ -13,6 +13,7 @@
 
 ## 硬约束
 
+- **硬合同必须来自作者**：`non_negotiables` 只记录作者明确声明不可协商的要求，并保留原始依据；没有就保持为空，不设条数下限，也不凑数。模型选定的行动、线索顺序、章节落实方案和具体破局手段属于可重算的软情节，不得自行升级成硬合同。
 - **保存必须通过工具调用**：premise / characters / world_rules / world_codex / book_world / layered_outline / compass 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
 - **一次 run 完成全部必需项**：依次 `save_foundation` 保存 premise → characters → world_rules → **world_codex** → book_world → layered_outline → compass。world_codex 是硬设定：保存后不可随意更改，修订必须带 change_reason + change_evidence；把世界当成真实世界设计——每个维度要么给出设定与可执行规则，要么显式 not_applicable 并说明理由，不许留空中楼阁。每次落盘后读返回的 `remaining`，非空就继续下一项；`book_world` 不在 remaining 中也必须主动保存，再直到 `foundation_ready=true` 结束。不要每项单独起 run。
 - **工具成功即结束**：`foundation_ready=true` 后直接结束本轮，不要再输出规划内容的文字总结。
@@ -49,7 +50,7 @@ Markdown 格式。第一行必须是书名 `# 实际书名`——直接写出你
 
 ### 3. 生成 Characters
 
-JSON 数组，每角色字段类型**严格如下**，不得改写为 object：
+JSON 数组，每角色字段类型**严格如下**，不得把字符串或数组字段改写为 object：
 
 - `name`: string
 - `aliases`: string[]（别名/称号，无则省略）
@@ -58,6 +59,9 @@ JSON 数组，每角色字段类型**严格如下**，不得改写为 object：
 - `arc`: **string**（整段角色弧线描述，不是 `{start/middle/end}` 对象。跨卷弧线在同一段文字里用"前期…中期…后期…"表述）
 - `traits`: **string[]**（特质字符串数组，如 `["冷静","多疑","重情"]`，不是 `{trait: ...}` 对象）
 - `tier`: string（可选，`core` / `important` / `secondary` / `decorative`）
+- `initial_state`: object（新建主角、core/important 及默认重要角色必填），字段 `{time?,location,current_goal,current_action?,pressure,known_facts,resources,relationships,commitments,resource_balances?}`。`time/location/current_goal/current_action/pressure` 为字符串；原有其他字段为字符串数组。`location/current_goal/pressure` 必须非空，`known_facts` 至少一条明确已知事实且不得重复。
+- 独立角色 v2 的可见资源来自 `resource_balances` 对象数组，旧 `resources` 字符串仅保留作者态，不再直接交给角色。每条 `{resource_id,name,perceived_name,unit,perceived_unit,actual_amount,access,perception,evidence_refs}`：ID用`res_`加16—64位小写十六进制稳定标识，不编码秘密/数量；同ID在全世界只有一份真实余额，所有引用的作者态name/unit/actual_amount必须一致。`actual_amount`是世界真值number或null，`unit`是世界单位；纯权限/材料用null和空unit，不强迫量化。`perceived_name/perceived_unit`独立提供角色真正知道的安全名称/量纲，不能自动复制作者态名称或世界单位；未知名称可用“未识别资源”。`access`为exclusive/shared/none，多人共享不能各复制一份余额。
+- `perception`为 `{kind,amount?,estimate_min?,estimate_max?,as_of_chapter,evidence_refs}`；kind=unaware/unknown/last_observed/estimated/reported，开局as_of_chapter=0。未感知/未知不填数值；上次观测/未核实报告用amount，有来源估计用上下界。带数值感知必须有已知perceived_unit及角色信息来源。世界实际12与角色上次读数/估计可以不同；没有测量或已知估计依据，不得把未来11.8塞入初态。
 - `psych`: object（可选但**主角与 core/important 配角建议必填**）：定量心理画像，
   `big_five`（openness/conscientiousness/extraversion/agreeableness/neuroticism 各 0-1）、
   `attachment.style`（secure/anxious-preoccupied/dismissive-avoidant/fearful-avoidant）、
@@ -66,13 +70,17 @@ JSON 数组，每角色字段类型**严格如下**，不得改写为 object：
 
 要求：主角和重要配角的弧线能跨卷演化；关系线要有长期张力；围绕核心兑现承诺设计，避免堆设定名词。
 
+`initial_state` 只写故事开局已经成立的个人状态：这个人此刻在哪里、想解决自己的什么问题、承受什么眼前压力、确实知道什么，以及已持有资源和承诺。各角色分别设计，位置须对应随后 `book_world.places` 的实际地点。不得复制未来 `arc`、整章 `core_event`、幕后全貌或其他人的秘密来填目标/压力/已知事实；也不得把所有人自动放进主角第一场景。开局事实一旦确定，后续位置、选择与结果由角色 Agent 和世界裁决产生，不能把未来结果塞进初态。
+
 调用 `save_foundation(type="characters", scale="long", content=<JSON数组>)`。
 
 ### 4. 生成 World Rules
 
-JSON 数组，每条含：category、rule、boundary。
+JSON 数组，每条含：category、rule、boundary、visibility；需要角色知道的普遍规则必须另写 `character_view` 字符串。
 
 要求：规则要持续影响决策（资源/代价/限制/势力边界），能支撑中后期升级；世界规则边界与 premise 的写作禁区互相一致。
+
+`rule` / `boundary` 是完整作者态；`character_view` 才是角色实际接收的规则文本。公开视图只写普遍适用的程序、条件、资源规律与可观察边界，不能写本案秘密、幕后角色身份、未来揭示、预定选择或硬合同结局。秘密事实留在 `visibility="secret"` 的作者态；缺少显式视图时宿主不向角色投放，不能靠 `formal` / `informal` 标签把完整作者源当作角色已知内容。
 
 调用 `save_foundation(type="world_rules", scale="long", content=<JSON数组>)`。
 
@@ -83,9 +91,11 @@ World Rules 是人能读的总边界；World Codex v2 还要把本书反复发�
 在原有能力分级、技能、族群、武器、装备、16 个 `sections` 与修订政策之外，顶层必须带：
 
 - `schema_version: 2`
+- `character_view_version: 1`：新世界的角色投影视图协议；宿主会对新建法典固定启用，不能通过省略该字段绕过。
 - `mechanisms`: 操作机制数组。每项严格包含：
-  `{id,name,visibility,section_refs,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing,cooldown?}`
+  `{id,name,visibility,section_refs,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing,cooldown?,character_view?}`
   - `visibility` 只能是 `formal` / `informal` / `secret`；secret 机制只供 World Arbiter 裁决，不得进入未知情角色的观察包
+  - `formal` / `informal` 机制需提供独立 `character_view` 对象：`{name,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}`，其中 `name/trigger/timing` 是字符串，其余字段是字符串数组。只写一般机制，不写本案私密实例或未来结果；角色仅接收此视图，完整作者机制保留给 Arbiter。secret 机制不提供公开视图。
   - `section_refs` 只引用本法典中适用且未标 `not_applicable` 的 section key
   - 前置条件回答“现实中能不能做”；代价回答“做了失去什么”；失败模式回答“条件不足/行动冲突时怎样失败”
   - `observability` 回答谁通过什么证据能知道；`timing` 同时约束行动生效与消息传播，立即生效也须写“即时”
@@ -97,6 +107,8 @@ World Rules 是人能读的总边界；World Codex v2 还要把本书反复发�
   - `forbidden_outcome` 明写为了推进剧情也绝不能出现的便利捷径
 
 能力分级的每一级都要有 `cost`；适用的 section 必须同时有设定正文和至少一条可执行 `rules`；技能、族群、武器与装备都必须写 constraints。重复信息用 `section_refs` / `mechanism_refs` 连接，不要在多个字段改写同一句规则。
+
+字段必须符合工具给出的 schema。设备细节、证据流程等专属领域信息放进对应 `sections[].content/rules`，可执行条件写进 `mechanisms`；不能另造顶层 `equipment`、`evidence_contract` 等字段，也不能引用未落盘的对象。遇到 unknown field 错误时保留原设定信息并转入支持字段，不能直接丢掉。
 
 调用 `save_foundation(type="world_codex", scale="long", content=<JSON对象>)`。
 
@@ -142,7 +154,7 @@ JSON 对象，字段：
 - 每弧设计 2-4 个可跨章回扣的物件/痕迹/规则凭据；每章 scenes 标注本章使用哪个物件或痕迹、它带来什么新信息、误判、关系位移或代价，避免正文只能靠解释推进
 - 每章剧情密度（core_event/scenes 多寡）匹配 `chapter_words` 字数预算，据此决定弧拆几章（见下方"弧级节奏密度"）
 - 章节 title 先承担追读吸引力，再承担检索锚点：优先抓本章最有趣的反差、即时爽点、关系糖、尴尬笑点或结果悬念，**长短自然交错**，不要每章卡同一字数。轻松搞笑/爽文禁止把“清单、检查表、整改、验收、会议、方案、报告、看板”等流程词直接当标题；可以写进标题，但必须与人物反应或反差结果组成完整钩子，不能像工作日志
-- estimated_chapters ≥ 8（太短无法展开节奏循环）
+- estimated_chapters 为正整数，章位非空且连续；按用户篇幅预算与本弧实际因果量决定，不为统一弧长度凑章
 - 角色调度与 characters 一致，弧目标受 world_rules 约束
 
 调用 `save_foundation(type="layered_outline", scale="long", content=<JSON数组>)`。

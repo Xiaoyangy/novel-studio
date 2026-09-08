@@ -157,7 +157,7 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 		return fmt.Errorf("全书 rebase 读取 chapter-zero foundation: %w", err)
 	}
 	project.GenerationID = zeroSimulationGenerationID(time.Now().UTC().Format(time.RFC3339Nano))
-	if err := resetPipelineAllChapterCandidate(candidate, &project); err != nil {
+	if err := resetPipelineAllChapterCandidate(candidate, &project, archiveOutput); err != nil {
 		return err
 	}
 	rebasedRAGAuthorityRoot, err := pipelineRebaseRAGAuthorityRoot(candidate)
@@ -283,6 +283,9 @@ func pipelineChapterZeroHasRestartState(outputDir string) (bool, error) {
 		"meta/scene_dynamics",
 		"meta/delivery_snapshots",
 		"meta/rewrite_recovery",
+		"meta/character_agents/memory",
+		"meta/character_agents/projected",
+		"meta/character_agents/successors",
 	} {
 		hasFiles, err := pipelineRebaseTreeHasFiles(
 			filepath.Join(outputDir, filepath.FromSlash(rel)),
@@ -292,6 +295,17 @@ func pipelineChapterZeroHasRestartState(outputDir string) (bool, error) {
 		}
 		if hasFiles {
 			return true, nil
+		}
+	}
+	registry, err := store.NewStore(outputDir).CharacterAgents.LoadRegistry()
+	if err != nil {
+		return false, err
+	}
+	if registry != nil {
+		for _, actor := range registry.Entries {
+			if actor.Status != domain.CharacterAgentSleeping || actor.LastActivatedChapter > 0 || actor.MemoryVersion > 0 || actor.FirstRegisteredChapter > 0 {
+				return true, nil
+			}
 		}
 	}
 	workspaceRoot := filepath.Join(pipelineRebaseRunRoot(outputDir), ".project-all")
@@ -575,10 +589,24 @@ func recoverPipelineRebasePublishesWithControlHeld(live string) error {
 func resetPipelineAllChapterCandidate(
 	outputDir string,
 	project *zeroInitProject,
+	archiveOutputs ...string,
 ) error {
 	ragAuthorityRoot, err := pipelineRebaseRAGAuthorityRoot(outputDir)
 	if err != nil {
 		return fmt.Errorf("全书 rebase 读取冻结 RAG authority: %w", err)
+	}
+	archiveOutput := ""
+	if len(archiveOutputs) > 1 {
+		return fmt.Errorf("全书 rebase 角色状态重置只接受一个已验证归档")
+	}
+	if len(archiveOutputs) == 1 {
+		archiveOutput = archiveOutputs[0]
+	}
+	if err := store.NewStore(outputDir).CharacterAgents.ResetForChapterZeroRebase(archiveOutput); err != nil {
+		return fmt.Errorf("全书 rebase 重置候选角色 Agent 状态: %w", err)
+	}
+	if err := resetPipelineRebaseRuntimePreservingUsage(outputDir); err != nil {
+		return err
 	}
 	for _, rel := range []string{
 		"chapters",
@@ -587,7 +615,6 @@ func resetPipelineAllChapterCandidate(
 		"reviews",
 		"reviews_ai",
 		"meta/planning",
-		"meta/runtime",
 		"meta/quarantine",
 		"meta/chapter_world_deltas",
 		"meta/character_stage",

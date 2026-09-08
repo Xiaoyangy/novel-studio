@@ -14,6 +14,9 @@ import (
 const (
 	StoryTimeContractVersion = 1
 	StoryDaysPerYear         = 365.2425
+	StoryHoursPerDay         = 24
+	StoryMinutesPerDay       = 24 * 60
+	StorySecondsPerDay       = 24 * 60 * 60
 
 	StoryTimeSourceExplicit              = "explicit"
 	StoryTimeSourceOutlineAll            = "outline_all"
@@ -71,22 +74,44 @@ type ParsedStoryScale struct {
 }
 
 var (
-	storyChapterRangeRE    = regexp.MustCompile(`([0-9]+)\s*(?:-|—|–|~|～|至|到)\s*([0-9]+)\s*章`)
-	storyChapterSingleRE   = regexp.MustCompile(`([0-9]+)\s*章`)
-	storyYearRangeRE       = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*年`)
-	storyYearSingleRE      = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年`)
-	storyDayRangeRE        = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
-	storyDaySingleRE       = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
-	storyArabicHalfYearRE  = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年半`)
-	storyChineseHalfYearRE = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年半`)
-	storyChineseYearRE     = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年`)
+	storyChapterRangeRE            = regexp.MustCompile(`([0-9]+)\s*(?:-|—|–|~|～|至|到)\s*([0-9]+)\s*章`)
+	storyChapterSingleRE           = regexp.MustCompile(`([0-9]+)\s*章`)
+	storyYearRangeRE               = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*年`)
+	storyYearSingleRE              = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年`)
+	storyDayRangeRE                = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
+	storyDaySingleRE               = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(?:日|天)`)
+	storyArabicHalfYearRE          = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*年半`)
+	storyChineseHalfYearRE         = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年半`)
+	storyChineseYearRE             = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*年`)
+	storySubdayChineseRE           = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)\s*(小时|分钟|秒钟|秒)`)
+	storySubdayChineseRangeStartRE = regexp.MustCompile(`([零〇一二三四五六七八九十两]+)(\s*(?:-|—|–|~|～|至|到)\s*(?:[0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+)\s*(?:小时|分钟|秒钟|秒))`)
+	storyHourRangeRE               = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:小时|hours?|hrs?)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:小时|hours?|hrs?)`)
+	storyHourSingleRE              = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:小时|hours?|hrs?)`)
+	storyMinuteRangeRE             = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:分钟|minutes?|mins?)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:分钟|minutes?|mins?)`)
+	storyMinuteSingleRE            = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:分钟|minutes?|mins?)`)
+	storySecondRangeRE             = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:秒钟?|seconds?|secs?)?\s*(?:-|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:秒钟?|seconds?|secs?)`)
+	storySecondSingleRE            = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:秒钟?|seconds?|secs?)`)
 )
 
-// ParseStoryScale extracts only explicit chapter/year contracts. Word-count
-// and volume ranges are deliberately ignored. It supports both "3.5-4年" and
-// the common Chinese form "3年半到4年".
+// ParseStoryScale extracts explicit chapter/time contracts. Durations below a
+// day remain fractional days; short countdown stories must not become two-day
+// chapters merely because the author used hours, minutes or seconds.
 func ParseStoryScale(raw string) ParsedStoryScale {
 	normalized := normalizeStoryYearExpressions(strings.TrimSpace(raw))
+	normalized = storySubdayChineseRangeStartRE.ReplaceAllStringFunc(normalized, func(value string) string {
+		match := storySubdayChineseRangeStartRE.FindStringSubmatch(value)
+		if number, ok := parseSmallChineseNumber(match[1]); ok {
+			return strconv.Itoa(number) + match[2]
+		}
+		return value
+	})
+	normalized = storySubdayChineseRE.ReplaceAllStringFunc(normalized, func(value string) string {
+		match := storySubdayChineseRE.FindStringSubmatch(value)
+		if number, ok := parseSmallChineseNumber(match[1]); ok {
+			return strconv.Itoa(number) + match[2]
+		}
+		return value
+	})
 	var out ParsedStoryScale
 	if match := storyChapterRangeRE.FindStringSubmatch(normalized); len(match) == 3 {
 		out.ChapterMin, _ = strconv.Atoi(match[1])
@@ -117,6 +142,32 @@ func ParseStoryScale(raw string) ParsedStoryScale {
 	}
 	if out.DurationYearsMin > out.DurationYearsMax {
 		out.DurationYearsMin, out.DurationYearsMax = out.DurationYearsMax, out.DurationYearsMin
+	}
+	if out.DurationDaysMin == 0 && out.DurationYearsMin == 0 {
+		for _, unit := range []struct {
+			rangeRE, singleRE *regexp.Regexp
+			perDay            float64
+		}{
+			{storyHourRangeRE, storyHourSingleRE, StoryHoursPerDay},
+			{storyMinuteRangeRE, storyMinuteSingleRE, StoryMinutesPerDay},
+			{storySecondRangeRE, storySecondSingleRE, StorySecondsPerDay},
+		} {
+			if match := unit.rangeRE.FindStringSubmatch(normalized); len(match) == 3 {
+				out.DurationDaysMin, _ = strconv.ParseFloat(match[1], 64)
+				out.DurationDaysMax, _ = strconv.ParseFloat(match[2], 64)
+			} else if match := unit.singleRE.FindStringSubmatch(normalized); len(match) == 2 {
+				out.DurationDaysMin, _ = strconv.ParseFloat(match[1], 64)
+				out.DurationDaysMax = out.DurationDaysMin
+			} else {
+				continue
+			}
+			out.DurationDaysMin /= unit.perDay
+			out.DurationDaysMax /= unit.perDay
+			if out.DurationDaysMin > out.DurationDaysMax {
+				out.DurationDaysMin, out.DurationDaysMax = out.DurationDaysMax, out.DurationDaysMin
+			}
+			break
+		}
 	}
 	return out
 }

@@ -5,14 +5,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/modelinput"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
@@ -22,6 +27,8 @@ const characterAgentSystemPrompt = `你是一个小说角色本人的决策 Agen
 
 你只能使用用户消息里的 character_observation_packet：
 - 只依据其中明确列出的自身目标、压力、资源、关系、承诺、已知事实、感知事件、公共规则、公开机制和记忆。
+- public_rules 与 public_mechanisms 仅是显式角色可知投影；缺失的机制细节不代表没有世界约束，实际成败由裁判确定，不得自行补写隐藏条件或预定结果。
+- 作者侧人物弧和知识禁区描述不是本人记忆；角色知识只来自明确列出的已知事实、自身状态、实际感知与有来源的个人记忆。
 - 不得猜测未来大纲、章节钩子、叙事任务、其他角色秘密或未被你感知的世界事实。
 - 先考虑至少两个当下真实可行的选项，再以此角色的性格、误判、利益和风险承受作出选择。
 - knowledge_refs 只能逐字引用 observation 中存在的 fact id。
@@ -35,6 +42,8 @@ const worldArbiterSystemPrompt = `你是单一世界的规则裁判，不是作�
 - decision 与 intended_action 必须逐字复制对应提案，绝对不得替角色改意图。
 - 只裁决行动顺序、时间、地点、资源、知识、物理/社会规则、碰撞、完成度和结果。
 - operational_world 是地点、路线耗时、势力资源与进度钟的权威快照；mechanisms 给出触发、前置、输入、代价、效果、失败、可观测性和时间。每条 resolution 用 mechanism_refs 记录实际适用的机制。
+- stimulus.story_clock 存在时，current_day 是宿主绑定的实际开局时刻（单位天），不是章均估算。必须提交 story_time 的 chapter/start_day/end_day；start_day 原样等于 current_day，end_day 根据并行、顺序、移动和等待的实际耗时裁决，不超过全书最大期限。分钟除以1440，秒除以86400，不能把章号当已过去时间。
+- story_clock.nominal_budget=true 时，duration_days_min/max 只是未明确时限项目的密度估算，不是作者硬期限，不得因此阻断角色行动或强制时长；current_day 仍只来自已确认的实际时间。
 - counterfactual_tests.forbidden_outcome 是硬性反捷径约束；即使软大纲需要，也不能裁决出该结果。
 - 软方向不是预定结果；角色选择破坏软情节时，保留真实结果交给 Planner 重算。
 - 不得把一个角色的私有理由或知识泄露给另一个角色。
@@ -100,7 +109,7 @@ func (t *characterAgentSimulationFacade) Execute(ctx context.Context, args json.
 		"version":             simulation.Version,
 		"simulation_id":       simulation.SimulationID,
 		"checkpoint_sequence": checkpoint.Seq,
-		"protocol":            domain.CharacterAgentDecisionProtocolVersion,
+		"protocol":            simulation.CharacterAgentProtocol.Version,
 	})
 }
 
@@ -194,6 +203,12 @@ type characterAgentChapterInputs struct {
 	Activation   domain.CharacterAgentActivation
 	Observations map[string]domain.CharacterObservationPacket
 	Sources      []string
+	// Host-only execution binding, never included in a character model packet.
+	CycleSession          *domain.CharacterActivationSession
+	ContinuationSelection *CharacterWorkContinuationSelection
+	ContinuationProof     *store.CharacterContinuationArbitration
+	ArbitrationV3         *store.CharacterArbitrationV3
+	ArbitrationRoundV3    int
 }
 
 // CharacterAgentHardContractConflictError carries the immutable Architect
@@ -220,21 +235,23 @@ func CharacterAgentProtocolDigest() string {
 	resolve := tools.NewResolveChapterWorldTool(nil, domain.WorldStimulusPacket{}, domain.CharacterAgentActivation{}, nil, "", nil, 1)
 	successor := tools.NewSubmitCharacterAgentSuccessorPlanTool(nil, domain.CharacterAgentSuccessorPlan{}, nil)
 	digest, err := domain.DeterministicPlanningHash(struct {
-		Version             string         `json:"version"`
-		CharacterPrompt     string         `json:"character_prompt"`
-		ArbiterPrompt       string         `json:"arbiter_prompt"`
-		SuccessorPrompt     string         `json:"successor_prompt"`
-		SubmitSchema        map[string]any `json:"submit_schema"`
-		ResolveSchema       map[string]any `json:"resolve_schema"`
-		SuccessorPlanSchema map[string]any `json:"successor_plan_schema"`
+		Version               string         `json:"version"`
+		ObservationProjection string         `json:"observation_projection"`
+		CharacterPrompt       string         `json:"character_prompt"`
+		ArbiterPrompt         string         `json:"arbiter_prompt"`
+		SuccessorPrompt       string         `json:"successor_prompt"`
+		SubmitSchema          map[string]any `json:"submit_schema"`
+		ResolveSchema         map[string]any `json:"resolve_schema"`
+		SuccessorPlanSchema   map[string]any `json:"successor_plan_schema"`
 	}{
-		Version:             domain.CharacterAgentDecisionProtocolVersion,
-		CharacterPrompt:     characterAgentSystemPrompt,
-		ArbiterPrompt:       worldArbiterSystemPrompt,
-		SuccessorPrompt:     characterAgentSuccessorArchitectPrompt,
-		SubmitSchema:        submit.Schema(),
-		ResolveSchema:       resolve.Schema(),
-		SuccessorPlanSchema: successor.Schema(),
+		Version:               domain.CharacterAgentDecisionProtocolVersion,
+		ObservationProjection: "character-observation-view.v3-actual-story-clock",
+		CharacterPrompt:       characterAgentSystemPrompt,
+		ArbiterPrompt:         worldArbiterSystemPrompt,
+		SuccessorPrompt:       characterAgentSuccessorArchitectPrompt,
+		SubmitSchema:          submit.Schema(),
+		ResolveSchema:         resolve.Schema(),
+		SuccessorPlanSchema:   successor.Schema(),
 	})
 	if err != nil {
 		return ""
@@ -254,22 +271,33 @@ func runCharacterAgentWorldSimulation(
 	if st == nil || models == nil || contextTool == nil {
 		return nil, nil, fmt.Errorf("character-agent simulation dependencies are incomplete")
 	}
-	contextArgs, _ := json.Marshal(map[string]any{"chapter": chapter, "profile": "world_simulation"})
-	contextRaw, err := contextTool.Execute(ctx, contextArgs)
+	// Reject an incompatible stored protocol before novel_context can append
+	// an access receipt, and before canonical registration, usage or proposals
+	// can be written. Normal project-all derives a new generation identity from
+	// the changed prompt; direct/interactive recovery needs the same boundary.
+	preflightGeneration, err := characterAgentExecutionGeneration(st, chapter)
+	if err != nil {
+		return nil, nil, err
+	}
+	protocol := cfg.CharacterAgentsProtocolVersion()
+	activationLimit, err := characterActivationExecutionLimit(st, cfg, preflightGeneration, arcBoundary)
+	if err != nil {
+		return nil, nil, err
+	}
+	if activationLimit <= 1 {
+		if err := requireCharacterAgentGenerationProtocol(st, preflightGeneration, chapter, protocol); err != nil {
+			return nil, nil, err
+		}
+	}
+	executionContext, err := contextTool.PrepareCharacterAgentExecutionContext(ctx, chapter)
 	if err != nil {
 		return nil, nil, fmt.Errorf("prepare character-agent world context: %w", err)
 	}
-	var envelope struct {
-		Access struct {
-			SourceToken string `json:"source_token"`
-		} `json:"planning_context_access_receipt"`
-		ProjectAllToken string                            `json:"project_all_state_source_token"`
-		ProjectAllState domain.ProjectedPlanningContextV2 `json:"project_all_state"`
+	var projected domain.ProjectedPlanningContextV2
+	if executionContext.ProjectAllState != nil {
+		projected = *executionContext.ProjectAllState
 	}
-	if err := json.Unmarshal(contextRaw, &envelope); err != nil {
-		return nil, nil, fmt.Errorf("decode character-agent world context: %w", err)
-	}
-	generationID := strings.TrimSpace(envelope.ProjectAllState.GenerationID)
+	generationID := strings.TrimSpace(projected.GenerationID)
 	if generationID == "" {
 		if progress, loadErr := st.Progress.Load(); loadErr == nil && progress != nil {
 			generationID = strings.TrimSpace(progress.GenerationID)
@@ -278,72 +306,37 @@ func runCharacterAgentWorldSimulation(
 	if generationID == "" {
 		generationID = "live_v1"
 	}
+	if generationID != preflightGeneration {
+		return nil, nil, fmt.Errorf("character-agent generation changed during context preparation: before=%s after=%s", preflightGeneration, generationID)
+	}
 	sources := compactAgentStrings([]string{
-		strings.TrimSpace(envelope.ProjectAllToken),
-		strings.TrimSpace(envelope.Access.SourceToken),
-		"character-agent-protocol:" + CharacterAgentProtocolDigest(),
+		strings.TrimSpace(executionContext.ProjectAllSourceToken),
+		strings.TrimSpace(executionContext.AccessSourceToken),
+		"character-agent-protocol:" + CharacterAgentProtocolDigestForVersion(protocol),
 	})
-	inputs, err := loadOrPrepareCharacterAgentInputs(st, generationID, chapter, arcBoundary, envelope.ProjectAllState, sources)
+	if activationLimit > 1 {
+		if !arcBoundary.CharacterProtocolPinned && arcBoundary.CharacterActivationPolicy == "" {
+			arcBoundary.CharacterActivationPolicy = cfg.CharacterActivationPolicy()
+		}
+		if _, err := runCharacterActivationChapter(ctx, cfg, st, models, generationID, chapter, arcBoundary, projected, sources, activationLimit); err != nil {
+			var conflict *CharacterActivationChapterConflictError
+			if errors.As(err, &conflict) {
+				return characterActivationHardContractFailure(ctx, cfg, st, models, arcBoundary, *conflict)
+			}
+			return nil, nil, err
+		}
+		return tools.PublishCharacterActivationSimulation(ctx, st, generationID, chapter, sources)
+	}
+	inputs, err := loadOrPrepareCharacterAgentInputs(st, generationID, chapter, arcBoundary, projected, sources, protocol)
 	if err != nil {
 		return nil, nil, err
 	}
-	activeIDs := activeCharacterAgentIDs(inputs.Activation)
-	if len(activeIDs) == 0 {
-		return nil, nil, fmt.Errorf("character-agent activation has no active character")
-	}
-	proposals, err := runCharacterProposalRound(ctx, cfg, st, models, inputs.Observations, activeIDs, 1)
-	if err != nil {
-		return nil, nil, err
-	}
-	receipt, err := runWorldArbitration(ctx, cfg, st, models, inputs, proposals)
+	proposals, receipt, err := runCharacterAgentDecisionProtocol(ctx, cfg, st, models, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
 	if receipt.HardContractStatus == "infeasible" {
 		return characterAgentHardContractFailure(ctx, cfg, st, models, arcBoundary, inputs, proposals, *receipt)
-	}
-	if !receipt.Finalized {
-		if cfg.CharacterAgents.MaxRevisionRounds < 1 {
-			return nil, nil, fmt.Errorf("world arbitration requires a revision but revisions are disabled")
-		}
-		feedback := arbitrationFeedbackByAgent(*receipt)
-		revisionIDs := make([]string, 0, len(feedback))
-		for agentID, items := range feedback {
-			base, ok := inputs.Observations[agentID]
-			if !ok {
-				return nil, nil, fmt.Errorf("arbiter requested unknown character revision %s", agentID)
-			}
-			base.Round = 2
-			base.ConflictFeedback = items
-			base.GeneratedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			base.Digest = ""
-			revised, finalizeErr := domain.FinalizeCharacterObservationPacket(base)
-			if finalizeErr != nil {
-				return nil, nil, finalizeErr
-			}
-			if err := st.CharacterAgents.SaveObservation(revised); err != nil {
-				return nil, nil, err
-			}
-			inputs.Observations[agentID] = revised
-			revisionIDs = append(revisionIDs, agentID)
-		}
-		if len(revisionIDs) == 0 {
-			return nil, nil, fmt.Errorf("non-final arbitration supplied no affected character")
-		}
-		if _, err := runCharacterProposalRound(ctx, cfg, st, models, inputs.Observations, revisionIDs, 2); err != nil {
-			return nil, nil, err
-		}
-		proposals, err = st.CharacterAgents.LoadLatestProposals(generationID, chapter, 2, activeIDs)
-		if err != nil || len(proposals) != len(activeIDs) {
-			return nil, nil, fmt.Errorf("load revised character proposals: %w", err)
-		}
-		receipt, err = runWorldArbitration(ctx, cfg, st, models, inputs, proposals)
-		if err != nil {
-			return nil, nil, err
-		}
-		if receipt.HardContractStatus == "infeasible" {
-			return characterAgentHardContractFailure(ctx, cfg, st, models, arcBoundary, inputs, proposals, *receipt)
-		}
 	}
 	if receipt == nil || !receipt.Finalized {
 		return nil, nil, fmt.Errorf("world arbitration did not finalize")
@@ -388,10 +381,22 @@ func runCharacterAgentSuccessorArchitect(
 	proposals []domain.CharacterDecisionProposal,
 	receipt domain.WorldArbitrationReceipt,
 ) (*domain.CharacterAgentSuccessorPlan, error) {
+	return runCharacterAgentSuccessorArchitectForCause(ctx, cfg, st, models, boundary, inputs, proposals, receipt, nil)
+}
+
+func runCharacterAgentSuccessorArchitectForCause(ctx context.Context, cfg bootstrap.Config, st *store.Store, models *bootstrap.ModelSet, boundary ProjectedArcBoundary, inputs characterAgentChapterInputs, proposals []domain.CharacterDecisionProposal, receipt domain.WorldArbitrationReceipt, cause *characterActivationSuccessorCause) (*domain.CharacterAgentSuccessorPlan, error) {
+	readinessDigest := ""
+	conflicts := receipt.HardContractConflicts
+	if cause != nil {
+		readinessDigest, conflicts = cause.Readiness.Digest, cause.Conflicts
+	}
 	if existing, err := st.CharacterAgents.LoadCurrentSuccessorPlan(); err != nil {
 		return nil, err
-	} else if existing != nil && existing.ParentGenerationID == receipt.GenerationID && existing.ArbitrationDigest == receipt.Digest {
+	} else if existing != nil && existing.ParentGenerationID == receipt.GenerationID && existing.ArbitrationDigest == receipt.Digest && existing.ReadinessDigest == readinessDigest {
 		return existing, nil
+	}
+	if err := projectedAccountingBefore(ctx); err != nil {
+		return nil, err
 	}
 	model := models.ForRole("architect")
 	if model == nil {
@@ -411,6 +416,9 @@ func runCharacterAgentSuccessorArchitect(
 	}
 	ending := "保留既有结局方向"
 	nonNegotiables := append([]string(nil), inputs.Stimulus.HardContracts...)
+	if cause != nil {
+		nonNegotiables = append(nonNegotiables, cause.NonNegotiables...)
+	}
 	if compass != nil {
 		ending = firstAgentText(compass.EndingDirection, ending)
 		nonNegotiables = append(nonNegotiables, compass.NonNegotiables...)
@@ -428,7 +436,7 @@ func runCharacterAgentSuccessorArchitect(
 		BaseCanonChapter: max(0, boundary.BaseCanonChapter), TriggerChapter: receipt.Chapter,
 		ArcFirstChapter: boundary.FirstChapter, ArcLastChapter: boundary.LastChapter, BookLastChapter: boundary.BookLastChapter,
 		ArbitrationDigest: receipt.Digest, AcceptedCanonRoot: acceptedRoot, EndingDirection: ending,
-		NonNegotiables: nonNegotiables, HardContractConflicts: append([]string(nil), receipt.HardContractConflicts...),
+		NonNegotiables: nonNegotiables, HardContractConflicts: append([]string(nil), conflicts...), ReadinessDigest: readinessDigest,
 	}
 	tool := tools.NewSubmitCharacterAgentSuccessorPlanTool(st, base, original)
 	payload, _ := json.Marshal(struct {
@@ -436,13 +444,24 @@ func runCharacterAgentSuccessorArchitect(
 		Original    []domain.OutlineEntry              `json:"current_soft_outline"`
 		Proposals   []domain.CharacterDecisionProposal `json:"character_choices"`
 		Arbitration domain.WorldArbitrationReceipt     `json:"world_arbitration"`
-	}{base, original, proposals, receipt})
+		Readiness   *domain.CharacterChapterReadiness  `json:"readiness,omitempty"`
+	}{base, original, proposals, receipt, func() *domain.CharacterChapterReadiness {
+		if cause != nil {
+			return &cause.Readiness
+		}
+		return nil
+	}()})
+	inputMessage, err := modelinput.NewExactAgentPacketMessage(modelinput.KindCharacterSuccessor, "只重排软章位并提交 successor plan：\n<successor_input>\n"+string(payload)+"\n</successor_input>")
+	if err != nil {
+		return nil, err
+	}
+	accounted, onMessage := projectedAccountingModel(ctx, model, "character_successor_architect", "")
 	events := agentcore.AgentLoop(
 		ctx,
-		[]agentcore.AgentMessage{agentcore.UserMsg("只重排软章位并提交 successor plan：\n<successor_input>\n" + string(payload) + "\n</successor_input>")},
+		[]agentcore.AgentMessage{inputMessage},
 		agentcore.AgentContext{SystemPrompt: characterAgentSuccessorArchitectPrompt, Tools: []agentcore.Tool{tool}},
 		agentcore.LoopConfig{
-			Model: model, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns("architect", 8), 10), MaxRetries: subagentMaxRetries,
+			Model: accounted, OnMessage: onMessage, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns("architect", 8), 10), MaxRetries: subagentMaxRetries,
 			MaxToolErrors: 0, ThinkingLevel: resolvedRoleThinking(model, cfg, "architect"), ToolsAreIdempotent: false,
 			CacheLastMessage: promptCacheControl,
 			PromptCacheKey:   agentPromptCacheKey("character_successor_architect", st.Dir(), receipt.GenerationID, receipt.Digest),
@@ -455,14 +474,17 @@ func runCharacterAgentSuccessorArchitect(
 			runErr = event.Err
 		}
 	}
-	if runErr != nil {
-		return nil, runErr
+	if err := errors.Join(runErr, projectedAccountingAfter(ctx)); err != nil {
+		return nil, err
 	}
 	plan, err := st.CharacterAgents.LoadCurrentSuccessorPlan()
-	if err != nil || plan == nil {
-		return nil, fmt.Errorf("Architect returned without a successor plan: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("load Architect successor plan after execution: %w", err)
 	}
-	if plan.ParentGenerationID != receipt.GenerationID || plan.ArbitrationDigest != receipt.Digest {
+	if plan == nil {
+		return nil, errors.New("Architect returned without a successor plan")
+	}
+	if plan.ParentGenerationID != receipt.GenerationID || plan.ArbitrationDigest != receipt.Digest || plan.ReadinessDigest != readinessDigest {
 		return nil, fmt.Errorf("Architect successor plan is not bound to failed arbitration")
 	}
 	return plan, nil
@@ -475,7 +497,15 @@ func loadOrPrepareCharacterAgentInputs(
 	arcBoundary ProjectedArcBoundary,
 	projected domain.ProjectedPlanningContextV2,
 	sources []string,
+	protocols ...string,
 ) (characterAgentChapterInputs, error) {
+	protocol := domain.CharacterAgentDecisionProtocolVersion
+	if len(protocols) > 0 {
+		protocol = protocols[0]
+	}
+	if err := requireCharacterAgentGenerationProtocol(st, generationID, chapter, protocol); err != nil {
+		return characterAgentChapterInputs{}, err
+	}
 	if stimulus, err := st.CharacterAgents.LoadStimulus(generationID, chapter); err != nil {
 		return characterAgentChapterInputs{}, err
 	} else if stimulus != nil {
@@ -491,6 +521,11 @@ func loadOrPrepareCharacterAgentInputs(
 			observation, observationErr := st.CharacterAgents.LoadObservation(generationID, chapter, 1, entry.AgentID)
 			if observationErr != nil || observation == nil || observation.Digest != entry.ObservationDigest {
 				return characterAgentChapterInputs{}, fmt.Errorf("load character observation %s: %w", entry.AgentID, observationErr)
+			}
+			if stimulus.Version == domain.WorldStimulusPacketV2Version {
+				if err := domain.ValidateCharacterResourceViewsAgainstStimulusV2(*stimulus, *observation); err != nil {
+					return characterAgentChapterInputs{}, fmt.Errorf("cached character observation source binding: %w", err)
+				}
 			}
 			observations[entry.AgentID] = *observation
 		}
@@ -531,7 +566,7 @@ func loadOrPrepareCharacterAgentInputs(
 			return characterAgentChapterInputs{}, err
 		}
 	}
-	stimulus, err := buildWorldStimulus(st, generationID, chapter, arcBoundary, projected, sources, now)
+	stimulus, err := buildWorldStimulus(st, generationID, chapter, arcBoundary, projected, sources, now, protocol)
 	if err != nil {
 		return characterAgentChapterInputs{}, err
 	}
@@ -595,6 +630,104 @@ func loadOrPrepareCharacterAgentInputs(
 		return characterAgentChapterInputs{}, err
 	}
 	return characterAgentChapterInputs{Stimulus: stimulus, Activation: activation, Observations: observations, Sources: sources}, nil
+}
+
+func characterAgentExecutionGeneration(st *store.Store, chapter int) (string, error) {
+	projected, _, err := tools.LoadProjectAllStateForExecution(st, chapter)
+	if err != nil {
+		return "", err
+	}
+	if projected != nil {
+		return projected.GenerationID, nil
+	}
+	progress, err := st.Progress.Load()
+	if err != nil {
+		return "", err
+	}
+	if progress != nil && strings.TrimSpace(progress.GenerationID) != "" {
+		return strings.TrimSpace(progress.GenerationID), nil
+	}
+	return "live_v1", nil
+}
+
+func requireCharacterAgentGenerationProtocol(st *store.Store, generationID string, chapter int, protocols ...string) error {
+	protocol := domain.CharacterAgentDecisionProtocolVersion
+	if len(protocols) > 0 {
+		protocol = protocols[0]
+	}
+	current := CharacterAgentProtocolDigestForVersion(protocol)
+	if current == "" {
+		return fmt.Errorf("character-agent current protocol digest is unavailable")
+	}
+	check := func(stimulus *domain.WorldStimulusPacket, storedChapter int) error {
+		if stimulus != nil && characterProtocolForStimulus(*stimulus) != protocol {
+			return fmt.Errorf("character-agent protocol mismatch: generation=%s chapter=%d existing=%s requested=%s；已保留旧观察和提案。请用生成这些工件的原版 novel-studio 恢复，或通过 --pipeline --stages preplan,project-all,seal 在合法弧边界创建新 generation；已封存弧使用 successor/rebase 流程，不要手改 JSON", generationID, storedChapter, characterProtocolForStimulus(*stimulus), protocol)
+		}
+		stored := ""
+		if stimulus != nil {
+			for _, source := range stimulus.Sources {
+				const prefix = "character-agent-protocol:"
+				if !strings.HasPrefix(source, prefix) {
+					continue
+				}
+				digest := strings.TrimPrefix(source, prefix)
+				if stored != "" && stored != digest {
+					stored = "ambiguous"
+					break
+				}
+				stored = digest
+			}
+		}
+		if stored != current {
+			return fmt.Errorf("character-agent protocol mismatch: generation=%s chapter=%d stored=%q current=%q；已保留旧观察和提案。请用生成这些工件的原版 novel-studio 恢复，或通过 --pipeline --stages preplan,project-all,seal 在合法弧边界创建新 generation；已封存弧使用 successor/rebase 流程，不要手改 JSON", generationID, storedChapter, stored, current)
+		}
+		if protocol == domain.CharacterAgentDecisionProtocolV2Version && !domain.HasCharacterSourceRefPolicyV2(stimulus.Sources) {
+			return fmt.Errorf("character-agent source-ref policy mismatch: generation=%s chapter=%d；已保留旧观察和提案。请通过 --pipeline --stages preplan,project-all,seal 在合法弧边界创建新 generation，不要重签或复用旧观察", generationID, storedChapter)
+		}
+		if protocol == domain.CharacterAgentDecisionProtocolV2Version && !domain.HasCharacterSelfExperiencePolicyV2(stimulus.Sources) {
+			return fmt.Errorf("character-agent self-experience policy mismatch: generation=%s chapter=%d；旧观察保留审计，请通过 --pipeline 在合法边界创建新 generation，不得重签复用", generationID, storedChapter)
+		}
+		return nil
+	}
+	// LoadStimulus validates the generation path before using it for the
+	// read-only inventory below. Do not infer a fresh protocol from a missing
+	// first-chapter receipt: inspect every existing chapter in this generation,
+	// including the latest surviving evidence after an interrupted recovery.
+	stimulus, err := st.CharacterAgents.LoadStimulus(generationID, chapter)
+	if err != nil {
+		return err
+	}
+	if stimulus != nil {
+		if err := check(stimulus, chapter); err != nil {
+			return err
+		}
+	}
+	root := filepath.Join(st.Dir(), "meta", "character_agents", "projected", generationID, "chapters")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		storedChapter, parseErr := strconv.Atoi(entry.Name())
+		if !entry.IsDir() || parseErr != nil || storedChapter <= 0 || entry.Name() != fmt.Sprintf("%06d", storedChapter) {
+			continue
+		}
+		if storedChapter == chapter && stimulus != nil {
+			continue
+		}
+		stored, err := st.CharacterAgents.LoadStimulus(generationID, storedChapter)
+		if err != nil {
+			return err
+		}
+		if err := check(stored, storedChapter); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func selectCharacterAgentRoster(st *store.Store, chapter int, boundary ProjectedArcBoundary) ([]characterAgentProfile, string, error) {
@@ -702,10 +835,42 @@ func characterAgentIsCrowdOrDecorative(character domain.Character) bool {
 	return false
 }
 
-func buildWorldStimulus(st *store.Store, generationID string, chapter int, boundary ProjectedArcBoundary, projected domain.ProjectedPlanningContextV2, sources []string, now string) (domain.WorldStimulusPacket, error) {
+func buildWorldStimulus(st *store.Store, generationID string, chapter int, boundary ProjectedArcBoundary, projected domain.ProjectedPlanningContextV2, sources []string, now string, protocols ...string) (domain.WorldStimulusPacket, error) {
+	packet, err := buildWorldStimulusDraft(st, generationID, chapter, boundary, projected, sources, now, protocols...)
+	if err != nil {
+		return packet, err
+	}
+	return domain.FinalizeWorldStimulusPacket(packet)
+}
+
+// Host-only two-phase assembly lets a new policy install its exact session
+// binding before finalization. No unfinalized packet is sent to a model/store.
+func buildWorldStimulusDraft(st *store.Store, generationID string, chapter int, boundary ProjectedArcBoundary, projected domain.ProjectedPlanningContextV2, sources []string, now string, protocols ...string) (domain.WorldStimulusPacket, error) {
 	packet := domain.WorldStimulusPacket{
 		Version: domain.WorldStimulusPacketVersion, GenerationID: generationID, Chapter: chapter,
 		TimeWindow: fmt.Sprintf("chapter-%06d", chapter), Sources: sources, GeneratedAt: now,
+	}
+	if len(protocols) > 0 && protocols[0] == domain.CharacterAgentDecisionProtocolV2Version {
+		physical, err := loadCharacterPhysicalPreState(st, chapter, projected)
+		if err != nil {
+			return packet, err
+		}
+		physical, err = domain.PrepareCharacterSelfExperienceStateV2(physical)
+		if err != nil {
+			return packet, err
+		}
+		packet.Version = domain.WorldStimulusPacketV2Version
+		packet.PhysicalState = &physical
+		packet.Sources = append(packet.Sources, domain.CharacterSourceRefPolicyV2, domain.CharacterSelfExperiencePolicyV2, domain.PlanGroundingPolicyV1)
+	}
+	clock, clockSources, err := buildCharacterStoryClock(st, chapter, projected)
+	if err != nil {
+		return packet, err
+	}
+	packet.StoryClock = clock
+	packet.Sources = append(packet.Sources, clockSources...)
+	if clock != nil {
+		packet.TimeWindow = characterStoryClockText(clock.CurrentDay)
 	}
 	if entry, _ := st.Outline.GetChapterOutline(chapter); entry != nil {
 		packet.SoftGuidance = append(packet.SoftGuidance, entry.Title, entry.CoreEvent)
@@ -725,12 +890,16 @@ func buildWorldStimulus(st *store.Store, generationID string, chapter int, bound
 	if len(rules) > 0 {
 		for _, rule := range rules {
 			text := strings.TrimSpace(rule.Rule + "；边界：" + rule.Boundary)
-			if domain.WorldRuleVisibility(rule) == "secret" {
-				packet.HardContracts = append(packet.HardContracts, text)
-				continue
-			}
-			packet.PublicFacts = append(packet.PublicFacts, newCharacterAgentFact("world_rule", text, "world_rules.json", domain.WorldRuleVisibility(rule)))
 			packet.HardContracts = append(packet.HardContracts, text)
+			// Visibility describes an authored rule, not permission to reveal
+			// its entire narrative contract. Only the explicit character-facing
+			// view can become shared character knowledge; keep the complete
+			// original exclusively in the Arbiter's hard contracts.
+			view := strings.TrimSpace(rule.CharacterView)
+			visibility, public := characterViewVisibility(rule.Visibility)
+			if view != "" && public {
+				packet.PublicFacts = append(packet.PublicFacts, newCharacterAgentFact(characterWorldRuleViewFactKind, view, "world_rules.json", visibility))
+			}
 		}
 	}
 	codex, err := st.LoadWorldCodex()
@@ -768,7 +937,7 @@ func buildWorldStimulus(st *store.Store, generationID string, chapter int, bound
 		text := strings.TrimSpace(fmt.Sprintf("%s的%s=%s", fact.Subject, fact.Field, fact.Value))
 		packet.CurrentEvents = append(packet.CurrentEvents, newCharacterAgentFact("projected_state", text, fact.StableID, "arbiter"))
 	}
-	return domain.FinalizeWorldStimulusPacket(packet)
+	return packet, nil
 }
 
 func characterAgentOperationalWorld(world *domain.BookWorld) *domain.WorldOperationalState {
@@ -802,7 +971,54 @@ func characterAgentOperationalWorld(world *domain.BookWorld) *domain.WorldOperat
 	return state
 }
 
+const characterWorldRuleViewFactKind = "world_rule_character_view"
+
+func characterViewVisibility(value string) (string, bool) {
+	visibility := strings.ToLower(strings.TrimSpace(value))
+	if visibility == "" {
+		// Explicit views keep the legacy domain default of formal. Missing
+		// views never reach this publication path, and unknown nonempty labels
+		// must not inherit that permissive legacy default.
+		visibility = "formal"
+	}
+	return visibility, visibility == "formal" || visibility == "informal"
+}
+
+// Rebuild the public object from the explicit view. Copying the authored
+// mechanism and blanking effects is insufficient: secrets or planned outcomes
+// can also appear in names, prerequisites, input names and failure conditions.
+func characterFacingMechanism(mechanism domain.CodexMechanism) (domain.CodexMechanism, bool) {
+	visibility, public := characterViewVisibility(mechanism.Visibility)
+	view := mechanism.CharacterView
+	if view == nil || strings.TrimSpace(view.Name) == "" || !public {
+		return domain.CodexMechanism{}, false
+	}
+	return domain.CodexMechanism{
+		ID: mechanism.ID, Name: view.Name, Visibility: visibility,
+		ActorScope:    append([]string(nil), view.ActorScope...),
+		Trigger:       view.Trigger,
+		Preconditions: append([]string(nil), view.Preconditions...),
+		Inputs:        append([]string(nil), view.Inputs...),
+		Costs:         append([]string(nil), view.Costs...),
+		Effects:       append([]string(nil), view.Effects...),
+		FailureModes:  append([]string(nil), view.FailureModes...),
+		Observability: append([]string(nil), view.Observability...),
+		Timing:        view.Timing,
+	}, true
+}
+
 func buildCharacterObservation(st *store.Store, generationID string, chapter int, profile characterAgentProfile, stimulus domain.WorldStimulusPacket, projected domain.ProjectedPlanningContextV2, now string) (domain.CharacterObservationPacket, error) {
+	observation, err := buildCharacterObservationDraft(st, generationID, chapter, profile, stimulus, projected, now)
+	if err != nil {
+		return observation, err
+	}
+	return domain.FinalizeCharacterObservationPacket(observation)
+}
+
+// A cycle-aware caller must bind its current host clock before finalizing:
+// prior-chapter self evaluations cannot be authorized by a nil cycle context.
+func buildCharacterObservationDraft(st *store.Store, generationID string, chapter int, profile characterAgentProfile, stimulus domain.WorldStimulusPacket, projected domain.ProjectedPlanningContextV2, now string) (domain.CharacterObservationPacket, error) {
+	physicalV2 := stimulus.Version == domain.WorldStimulusPacketV2Version
 	observation := domain.CharacterObservationPacket{
 		Version: domain.CharacterObservationVersion, GenerationID: generationID, Chapter: chapter, Round: 1,
 		AgentID: profile.Record.AgentID, Character: profile.Character.Name, Tier: profile.Character.Tier,
@@ -812,14 +1028,34 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 	selfProfile := strings.TrimSpace(strings.Join(compactAgentStrings([]string{
 		"身份：" + profile.Character.Name,
 		"角色：" + profile.Character.Role,
-		"人物弧：" + profile.Character.Arc,
 		"特征：" + strings.Join(profile.Character.Traits, "、"),
 	}), "；"))
 	observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("self_profile", selfProfile, "characters.json", "private"))
-	if profile.Dossier != nil {
+	if initial := profile.Character.InitialState; initial != nil && chapter == 1 {
+		if stimulus.StoryClock == nil {
+			observation.TimeWindow = firstAgentText(initial.Time, observation.TimeWindow)
+		} else if initial.Time != "" {
+			observation.TimeWindow = initial.Time + "；" + observation.TimeWindow
+		}
+		observation.Location = initial.Location
+		observation.CurrentGoal = firstAgentText(initial.CurrentGoal, initial.CurrentAction)
+		observation.Pressure = initial.Pressure
+		observation.Resources = append([]string(nil), initial.Resources...)
+		observation.Relationships = append([]string(nil), initial.Relationships...)
+		observation.Commitments = append([]string(nil), initial.Commitments...)
+		for _, fact := range initial.KnownFacts {
+			observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("initial_known", fact, "characters.json#initial_state", "private"))
+		}
+		if strings.TrimSpace(initial.CurrentAction) != "" {
+			observation.PerceivedEvents = append(observation.PerceivedEvents, newCharacterAgentFact("own_current_action", initial.CurrentAction, "characters.json#initial_state", "private"))
+		}
+	}
+	// Story-start dossiers are a legacy chapter-one fallback, never a source
+	// that resets the actor to starting resources/location on later chapters.
+	if profile.Dossier != nil && profile.Character.InitialState == nil && chapter == 1 {
 		dossier := profile.Dossier
 		observation.Location = dossier.CurrentAtStoryStart.Location
-		observation.CurrentGoal = firstAgentText(dossier.CurrentAtStoryStart.NextIndependentMove, dossier.Profile.Arc, profile.Character.Arc)
+		observation.CurrentGoal = firstAgentText(dossier.CurrentAtStoryStart.NextIndependentMove, dossier.CurrentAtStoryStart.CurrentAction)
 		observation.Pressure = firstAgentText(dossier.CurrentAtStoryStart.Pressure, "按自身目标与已知边界行动")
 		for _, resource := range dossier.Resources {
 			observation.Resources = append(observation.Resources, strings.TrimSpace(resource.Name+" "+resource.Status))
@@ -832,16 +1068,20 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 				observation.Commitments = append(observation.Commitments, anchor.Obligation)
 			}
 		}
-		if dossier.KnowledgeBoundary != "" {
-			observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("knowledge_boundary", dossier.KnowledgeBoundary, "character_dossier", "private"))
+		for _, fact := range compactAgentStrings(dossier.KnownFactsAtStoryStart) {
+			observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("initial_known", fact, "character_dossier#known_facts_at_story_start", "private"))
 		}
 	}
-	if profile.Continuity != nil {
+	if profile.Continuity != nil && (profile.Character.InitialState == nil || chapter > 1 || profile.Continuity.LastSeenChapter > 0) {
 		dynamics := profile.Continuity.Dynamics
-		observation.CurrentGoal = firstAgentText(dynamics.CurrentGoal, observation.CurrentGoal, profile.Character.Arc)
+		observation.CurrentGoal = firstAgentText(dynamics.CurrentGoal, observation.CurrentGoal)
 		observation.Pressure = firstAgentText(dynamics.PrimaryPressure, observation.Pressure, "按自身利益行动")
-		observation.Resources = append(observation.Resources, dynamics.Resources...)
-		observation.Relationships = append(observation.Relationships, dynamics.RelationshipForces...)
+		if !physicalV2 && (chapter > 1 || dynamics.Resources != nil) {
+			observation.Resources = append([]string(nil), dynamics.Resources...)
+		}
+		if chapter > 1 || dynamics.RelationshipForces != nil {
+			observation.Relationships = append([]string(nil), dynamics.RelationshipForces...)
+		}
 		for _, relation := range dynamics.RelationshipContract {
 			if relation.Promise != "" {
 				observation.Commitments = append(observation.Commitments, relation.Counterpart+"："+relation.Promise)
@@ -860,13 +1100,13 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 			observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("self_state", fact, "character_continuity", "private"))
 		}
 	}
-	if profile.Agenda != nil {
+	if profile.Agenda != nil && (profile.Character.InitialState == nil || chapter > 1) {
 		observation.CurrentGoal = firstAgentText(profile.Agenda.CurrentGoal, observation.CurrentGoal)
 		observation.Pressure = firstAgentText(profile.Agenda.BlockedBy, profile.Agenda.Motivation, observation.Pressure)
 		observation.PerceivedEvents = append(observation.PerceivedEvents, newCharacterAgentFact("own_agenda", profile.Agenda.CurrentGoal, "offscreen_agenda", "private"))
 	}
 	if observation.CurrentGoal == "" {
-		observation.CurrentGoal = firstAgentText(profile.Character.Arc, "维持自身处境并回应当前压力")
+		observation.CurrentGoal = "维持自身处境并回应当前压力"
 	}
 	if observation.Pressure == "" {
 		observation.Pressure = "信息与资源有限，必须自行权衡"
@@ -875,22 +1115,37 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 		observation.Location = "当前位置未知"
 	}
 	for _, fact := range stimulus.PublicFacts {
-		observation.PublicRules = append(observation.PublicRules, fact)
+		if fact.Kind == characterWorldRuleViewFactKind && (fact.Visibility == "formal" || fact.Visibility == "informal") {
+			observation.PublicRules = append(observation.PublicRules, fact)
+		}
 	}
 	for _, mechanism := range stimulus.Mechanisms {
-		if domain.CodexMechanismVisibility(mechanism) == "secret" {
-			continue
+		if publicView, ok := characterFacingMechanism(mechanism); ok {
+			observation.PublicMechanisms = append(observation.PublicMechanisms, publicView)
 		}
-		observation.PublicMechanisms = append(observation.PublicMechanisms, mechanism)
 	}
 	for _, fact := range projected.CumulativeState {
+		if physicalV2 {
+			continue
+		} // No arbitrary world StateAfter/encoded balance becomes owner knowledge.
 		if agentIdentityKey(fact.Subject) != agentIdentityKey(profile.Character.Name) {
 			continue
 		}
 		text := strings.TrimSpace(fmt.Sprintf("自身%s=%s", fact.Field, fact.Value))
 		observation.PerceivedEvents = append(observation.PerceivedEvents, newCharacterAgentFact("projected_self_state", text, fact.StableID, "private"))
+		switch strings.ToLower(strings.TrimSpace(fact.Field)) {
+		case "location", "current_location":
+			observation.Location = fact.Value
+		case "current_goal", "goal":
+			observation.CurrentGoal = fact.Value
+		case "pressure", "primary_pressure":
+			observation.Pressure = fact.Value
+		}
 	}
 	for _, transition := range projected.RecentTransitions {
+		if physicalV2 {
+			continue
+		} // v2 knowledge travels only through its explicit perception projection.
 		for _, mutations := range [][]domain.StateMutationV2{transition.Delta.CharacterState, transition.Delta.Resources, transition.Delta.Relationships, transition.Delta.Knowledge} {
 			for _, mutation := range mutations {
 				if agentIdentityKey(mutation.Subject) != agentIdentityKey(profile.Character.Name) && agentIdentityKey(mutation.Object) != agentIdentityKey(profile.Character.Name) {
@@ -906,10 +1161,33 @@ func buildCharacterObservation(st *store.Store, generationID string, chapter int
 		return observation, err
 	}
 	if memory != nil {
-		observation.Memory = append(observation.Memory, memory.Facts...)
+		for _, fact := range memory.Facts {
+			if profile.Dossier != nil && legacyKnowledgeBoundarySeed(fact, profile.Record.AgentID, profile.Dossier.KnowledgeBoundary) {
+				continue
+			}
+			observation.Memory = append(observation.Memory, fact)
+		}
 		observation.MemoryRoot = memory.MemoryRoot
 	}
-	return domain.FinalizeCharacterObservationPacket(observation)
+	if physicalV2 {
+		if err := applyCharacterPhysicalObservation(&observation, profile, stimulus); err != nil {
+			return observation, err
+		}
+	}
+	return observation, nil
+}
+
+// Old canon migration incorrectly treated the author's knowledge-boundary
+// paragraph as a positive character memory. Filter only that exact, provably
+// migration-created fact in fresh observations; never rewrite historical
+// memory, strip words, or suppress a character's legitimate known secrets.
+func legacyKnowledgeBoundarySeed(fact domain.CharacterAgentMemoryFact, agentID, boundary string) bool {
+	boundary = strings.TrimSpace(boundary)
+	if boundary == "" || fact.Kind != "accepted_continuity" || fact.Text != boundary {
+		return false
+	}
+	digest := sha256.Sum256([]byte("character-agent-memory-migration.v1\x00" + agentID + "\x00" + boundary))
+	return fact.ID == "mem_"+hex.EncodeToString(digest[:8]) && fact.SourceDigest == "sha256:"+hex.EncodeToString(digest[:])
 }
 
 func characterActivationReasons(st *store.Store, profile characterAgentProfile, protagonist string, chapter int, projected domain.ProjectedPlanningContextV2) []string {
@@ -974,15 +1252,27 @@ func ensureCharacterAgentMemory(st *store.Store, generationID string, profile ch
 			Version: domain.CharacterAgentMemoryVersion, AgentID: profile.Record.AgentID,
 			Character: profile.Character.Name, State: "canonical", UpdatedAt: now,
 		}
+		seenFacts := make(map[string]bool)
+		add := func(chapter int, kind, text, source string) {
+			text = strings.TrimSpace(text)
+			if text == "" || seenFacts[text] {
+				return
+			}
+			seenFacts[text] = true
+			memory.Facts = append(memory.Facts, newCharacterMemoryFact(chapter, kind, text, source, true))
+		}
 		if profile.Dossier != nil {
 			for _, event := range profile.Dossier.PreStoryTimeline {
-				memory.Facts = append(memory.Facts, newCharacterMemoryFact(max(1, chapter-1), "pre_story", event.Event, "character_dossier", true))
+				add(max(1, chapter-1), "pre_story", event.Event, "character_dossier")
+			}
+			for _, fact := range profile.Dossier.KnownFactsAtStoryStart {
+				add(max(1, chapter-1), "known_at_story_start", fact, "character_dossier#known_facts_at_story_start")
 			}
 		}
 		if profile.Continuity != nil {
 			memory.LastAcceptedChapter = profile.Continuity.LastSeenChapter
 			for _, fact := range profile.Continuity.CurrentFacts {
-				memory.Facts = append(memory.Facts, newCharacterMemoryFact(max(1, profile.Continuity.LastSeenChapter), "accepted_state", fact, "character_continuity", true))
+				add(max(1, profile.Continuity.LastSeenChapter), "accepted_state", fact, "character_continuity")
 			}
 		}
 		finalized, finalizeErr := domain.FinalizeCharacterAgentMemory(memory)
@@ -1009,20 +1299,94 @@ func ensureCharacterAgentMemory(st *store.Store, generationID string, profile ch
 	return st.CharacterAgents.SaveProjectedMemory(clone)
 }
 
-func runCharacterProposalRound(ctx context.Context, cfg bootstrap.Config, st *store.Store, models *bootstrap.ModelSet, observations map[string]domain.CharacterObservationPacket, agentIDs []string, round int) ([]domain.CharacterDecisionProposal, error) {
+func runCharacterProposalRound(ctx context.Context, cfg bootstrap.Config, st *store.Store, models *bootstrap.ModelSet, observations map[string]domain.CharacterObservationPacket, agentIDs []string, round int, sessions ...*domain.CharacterActivationSession) ([]domain.CharacterDecisionProposal, error) {
 	model := models.ForRole("character")
 	if model == nil {
 		return nil, fmt.Errorf("character model is unavailable")
 	}
-	return runCharacterProposalRoundWithModel(ctx, cfg, st, model, observations, agentIDs, round)
+	return runCharacterProposalRoundWithModel(ctx, cfg, st, model, observations, agentIDs, round, sessions...)
 }
 
-func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observations map[string]domain.CharacterObservationPacket, agentIDs []string, round int) ([]domain.CharacterDecisionProposal, error) {
+func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observations map[string]domain.CharacterObservationPacket, agentIDs []string, round int, sessions ...*domain.CharacterActivationSession) ([]domain.CharacterDecisionProposal, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	proofs, cycleSession, err := characterExecutionProofs(st, sessions...)
+	if err != nil {
+		return nil, err
+	}
 	requestedIDs := make([]string, 0, len(agentIDs))
+	pending := make([]domain.CharacterObservationPacket, 0, len(agentIDs))
+	seen := make(map[string]bool, len(agentIDs))
+	var first domain.CharacterObservationPacket
+	var sourceStimulus *domain.WorldStimulusPacket
+	var v3View *store.CharacterArbitrationV3
+	// Finish identity and persisted-evidence checks before starting any model
+	// calls. A late corrupt proposal must not leave earlier goroutines writing
+	// after this function has already returned to the generation coordinator.
 	for _, agentID := range agentIDs {
-		if observation, ok := observations[agentID]; ok && observation.Round == round {
-			requestedIDs = append(requestedIDs, agentID)
+		if seen[agentID] {
+			continue
 		}
+		seen[agentID] = true
+		observation, ok := observations[agentID]
+		if !ok || observation.Round != round || observation.AgentID != agentID {
+			return nil, fmt.Errorf("character agent %s has no matching observation for round %d", agentID, round)
+		}
+		if len(requestedIDs) == 0 {
+			first = observation
+			if hasCharacterActivationPolicyV3(observation.Sources) {
+				v3View, err = st.LoadCharacterArbitrationV3(observation.GenerationID, observation.Chapter)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if observation.Version == domain.CharacterObservationV2Version {
+				var err error
+				sourceStimulus, err = proofs.LoadStimulus(first.GenerationID, first.Chapter)
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else if observation.GenerationID != first.GenerationID || observation.Chapter != first.Chapter {
+			return nil, fmt.Errorf("character proposal round mixes generations or chapters")
+		}
+		verified, err := domain.FinalizeCharacterObservationPacket(observation)
+		if err != nil || verified.Digest != observation.Digest {
+			return nil, fmt.Errorf("character agent %s observation is invalid or has changed", agentID)
+		}
+		if hasCharacterActivationPolicyV3(observation.Sources) {
+			if err := validateCharacterDispatchV3(st, cycleSession, v3View, observation); err != nil {
+				return nil, err
+			}
+		}
+		if observation.Version == domain.CharacterObservationV2Version && (sourceStimulus != nil || domain.HasCharacterSourceRefPolicyV2(observation.Sources)) {
+			if sourceStimulus == nil {
+				return nil, fmt.Errorf("character agent %s lacks its source-bound world stimulus", agentID)
+			}
+			if err := domain.ValidateCharacterResourceViewsAgainstStimulusV2(*sourceStimulus, observation); err != nil {
+				return nil, fmt.Errorf("character agent %s source visibility is invalid: %w", agentID, err)
+			}
+		}
+		persisted, err := proofs.LoadObservation(observation.GenerationID, observation.Chapter, round, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if persisted == nil || persisted.Digest != observation.Digest {
+			return nil, fmt.Errorf("character agent %s observation is not bound to persisted evidence", agentID)
+		}
+		requestedIDs = append(requestedIDs, agentID)
+		existing, err := proofs.LoadProposal(observation.GenerationID, observation.Chapter, round, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if existing.ObservationDigest != observation.Digest {
+				return nil, fmt.Errorf("character agent %s proposal is bound to a different observation", agentID)
+			}
+			continue
+		}
+		pending = append(pending, observation)
 	}
 	if len(requestedIDs) == 0 {
 		return nil, nil
@@ -1033,54 +1397,96 @@ func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Confi
 	} else if limit > 4 {
 		limit = 4
 	}
-	sem := make(chan struct{}, limit)
+	jobs := make(chan domain.CharacterObservationPacket)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
-	for _, agentID := range requestedIDs {
-		observation, ok := observations[agentID]
-		if !ok || observation.Round != round {
-			continue
-		}
-		if existing, loadErr := st.CharacterAgents.LoadProposal(observation.GenerationID, observation.Chapter, round, agentID); loadErr != nil {
-			return nil, loadErr
-		} else if existing != nil {
-			continue
-		}
+	// A fixed worker pool bounds goroutines as well as provider concurrency;
+	// large casts do not allocate one waiting goroutine per character.
+	for range min(limit, len(pending)) {
 		wg.Add(1)
-		go func(observation domain.CharacterObservationPacket) {
+		go func() {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-runCtx.Done():
-				return
-			}
-			if err := runOneCharacterAgent(runCtx, cfg, st, model, observation); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-					cancel()
+			for observation := range jobs {
+				if runCtx.Err() != nil {
+					return
 				}
-				mu.Unlock()
+				if err := runOneCharacterAgent(runCtx, cfg, st, model, observation, cycleSession); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
 			}
-		}(observation)
+		}()
 	}
+dispatch:
+	for _, observation := range pending {
+		select {
+		case jobs <- observation:
+		case <-runCtx.Done():
+			break dispatch
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	first := observations[requestedIDs[0]]
-	return st.CharacterAgents.LoadLatestProposals(first.GenerationID, first.Chapter, round, requestedIDs)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	proposals, err := proofs.LoadProposals(first.GenerationID, first.Chapter, round, requestedIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(proposals) != len(requestedIDs) {
+		return nil, fmt.Errorf("character proposal round %d is incomplete: got %d of %d decisions", round, len(proposals), len(requestedIDs))
+	}
+	return proposals, nil
 }
 
-func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observation domain.CharacterObservationPacket) error {
+func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.Store, model agentcore.ChatModel, observation domain.CharacterObservationPacket, sessions ...*domain.CharacterActivationSession) error {
+	proofs, cycleSession, err := characterExecutionProofs(st, sessions...)
+	if err != nil {
+		return err
+	}
+	if hasCharacterActivationPolicyV3(observation.Sources) && cycleSession == nil {
+		return fmt.Errorf("v3 character call cannot use one-shot execution")
+	}
 	tool := tools.NewSubmitCharacterDecisionTool(st, observation)
+	if cycleSession != nil {
+		if hasCharacterActivationPolicyV3(observation.Sources) {
+			view, loadErr := st.LoadCharacterArbitrationV3(observation.GenerationID, observation.Chapter)
+			if loadErr != nil {
+				return loadErr
+			}
+			if view == nil {
+				return fmt.Errorf("v3 character call requires its prior immutable admission")
+			}
+			tool, err = tools.NewSubmitCharacterActivationV3DecisionTool(st, *cycleSession, observation, view)
+		} else {
+			tool, err = tools.NewSubmitCharacterActivationDecisionTool(st, *cycleSession, observation)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	ctx, usageRecord, prepareErr := prepareCharacterAccounting(ctx, domain.CharacterAgentUsage{
+		GenerationID: observation.GenerationID, Role: "character", AgentID: observation.AgentID, Character: observation.Character, Chapter: observation.Chapter, Round: observation.Round,
+		Cycle: proofs.ActivationCycleIndex(),
+	})
+	if prepareErr != nil {
+		return prepareErr
+	}
 	guardBlocks := 0
 	guard := func(_ context.Context, _ agentcore.StopInfo) agentcore.StopDecision {
-		proposal, _ := st.CharacterAgents.LoadProposal(observation.GenerationID, observation.Chapter, observation.Round, observation.AgentID)
+		proposal, _ := proofs.LoadProposal(observation.GenerationID, observation.Chapter, observation.Round, observation.AgentID)
 		if proposal != nil {
 			return agentcore.StopDecision{Allow: true}
 		}
@@ -1091,27 +1497,61 @@ func runOneCharacterAgent(ctx context.Context, cfg bootstrap.Config, st *store.S
 		return agentcore.StopDecision{InjectMessage: "尚未提交决定。现在只调用 submit_character_decision。"}
 	}
 	raw, _ := json.Marshal(observation)
+	characterPrompt := characterAgentSystemPrompt
+	if observation.Version == domain.CharacterObservationV2Version {
+		characterPrompt = characterAgentSystemPromptV2
+		if domain.HasCharacterSelfExperiencePolicyV2(observation.Sources) {
+			characterPrompt += characterSelfExperiencePromptV2
+		}
+		if domain.HasCharacterOperationalAvailabilityPolicyV1(observation.Sources) {
+			characterPrompt += characterOperationalAvailabilityPromptV1
+		}
+		if domain.HasCharacterWorkArtifactPolicyV1(observation.Sources) {
+			characterPrompt += characterWorkArtifactPromptV1
+		}
+		if domain.HasCharacterResourceObservationTimePolicyV1(observation.Sources) {
+			characterPrompt += characterResourceObservationTimePromptV1
+		}
+	}
+	var executionTool agentcore.Tool = tool
+	if domain.HasCharacterSelfChronologyPolicyV1(observation.Sources) {
+		makeCodec := modelinput.NewScopedReferenceCodec
+		if domain.HasCharacterWorkArtifactPolicyV1(observation.Sources) {
+			makeCodec = modelinput.NewScopedArtifactReferenceCodecV1
+		}
+		codec, err := makeCodec(modelinput.KindCharacterObservation, observation)
+		if err != nil {
+			return err
+		}
+		executionTool, err = newScopedReferenceTool(tool, codec)
+		if err != nil {
+			return err
+		}
+		raw, err = json.Marshal(codec.ModelView())
+		if err != nil {
+			return err
+		}
+		characterPrompt += scopedReferencePrompt + characterWorkContinuationPrompt
+	}
 	usage, err := runCharacterAgentTerminalLoop(
-		ctx, model, characterAgentSystemPrompt,
+		withCharacterToolDiagnosticScope(ctx, usageRecord), model, characterPrompt,
 		"你是 "+observation.Character+"。这是你唯一可见的观察包：\n<character_observation_packet>\n"+string(raw)+"\n</character_observation_packet>\n现在只调用 submit_character_decision。",
-		tool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("character", 6), 8), roleThinking(cfg, "character"), guard,
-		agentPromptCacheKey("character", st.Dir(), observation.GenerationID, fmt.Sprint(observation.Chapter), fmt.Sprint(observation.Round), observation.AgentID),
+		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("character", 6), 8), roleThinking(cfg, "character"), guard,
+		characterCyclePromptCacheKey(agentPromptCacheKey("character", st.Dir(), observation.GenerationID, fmt.Sprint(observation.Chapter), fmt.Sprint(observation.Round), observation.AgentID), proofs),
+		st,
 	)
-	if err != nil {
-		return err
+	proposal, loadErr := proofs.LoadProposal(observation.GenerationID, observation.Chapter, observation.Round, observation.AgentID)
+	if err == nil {
+		if loadErr != nil {
+			err = loadErr
+		} else if proposal == nil {
+			err = fmt.Errorf("character agent %s did not submit a proposal", observation.AgentID)
+		}
 	}
-	proposal, err := st.CharacterAgents.LoadProposal(observation.GenerationID, observation.Chapter, observation.Round, observation.AgentID)
-	if err != nil || proposal == nil {
-		return fmt.Errorf("character agent %s did not submit a proposal: %w", observation.AgentID, err)
+	if loadErr == nil && proposal != nil {
+		reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: proposal.GenerationID, Chapter: proposal.Chapter, Cycle: proofs.ActivationCycleIndex(), Round: proposal.Round, Kind: PlanningProposalCommitted, ArtifactDigest: proposal.Digest})
 	}
-	usageRecord := domain.CharacterAgentUsage{
-		GenerationID: observation.GenerationID, Role: "character", AgentID: observation.AgentID, Character: observation.Character, Chapter: observation.Chapter, Round: observation.Round,
-		Input: usage.Input, Output: usage.Output, CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
-	}
-	if usage.Cost != nil {
-		usageRecord.CostUSD = usage.Cost.Total
-	}
-	return st.CharacterAgents.AppendUsage(usageRecord)
+	return errors.Join(err, appendCharacterLoopUsage(st, usageRecord, usage, err, projectedAccounting(ctx).ImportCharacterUsage), projectedAccountingAfter(ctx))
 }
 
 func runCharacterAgentTerminalLoop(
@@ -1124,38 +1564,78 @@ func runCharacterAgentTerminalLoop(
 	thinking agentcore.ThinkingLevel,
 	guard agentcore.StopGuard,
 	promptCacheKey string,
-) (agentcore.Usage, error) {
+	diagnosticStores ...*store.Store,
+) (characterAgentLoopUsage, error) {
+	inputMessage := agentcore.UserMsg(prompt)
+	var packetKind modelinput.ExactAgentPacketKind
+	switch terminalTool {
+	case "submit_character_decision":
+		packetKind = modelinput.KindCharacterObservation
+	case "resolve_chapter_world":
+		packetKind = modelinput.KindWorldArbitration
+	case "submit_chapter_readiness":
+		packetKind = modelinput.KindChapterReadiness
+	}
+	if packetKind != "" {
+		var err error
+		inputMessage, err = modelinput.NewExactAgentPacketMessage(packetKind, prompt)
+		if err != nil {
+			return characterAgentLoopUsage{}, err
+		}
+	}
 	resolvedThinking, _ := ResolveThinkingForModel(model, thinking)
+	maxTurns = characterArbiterDiagnosticTurnLimit(terminalTool, maxTurns)
+	trackedModel := &characterUsageModel{ChatModel: model}
+	var onMessage func(agentcore.AgentMessage)
+	var loopModel agentcore.ChatModel = trackedModel
+	if group, ok := ctx.Value(characterAccountingGroupKey{}).(domain.CharacterAgentUsage); ok {
+		agentName := group.Role
+		if group.Role == "character" {
+			agentName = "character_" + group.AgentID
+		}
+		loopModel, onMessage = projectedAccountingModel(ctx, trackedModel, agentName, group.UsageID)
+	}
 	events := agentcore.AgentLoop(
 		ctx,
-		[]agentcore.AgentMessage{agentcore.UserMsg(prompt)},
+		[]agentcore.AgentMessage{inputMessage},
 		agentcore.AgentContext{SystemPrompt: systemPrompt, Tools: []agentcore.Tool{tool}},
 		agentcore.LoopConfig{
-			Model: model, MaxTurns: maxTurns, MaxRetries: subagentMaxRetries, MaxToolErrors: 0,
+			Model: loopModel, OnMessage: onMessage, MaxTurns: maxTurns, MaxRetries: subagentMaxRetries, MaxToolErrors: 0,
 			ThinkingLevel: resolvedThinking, ToolsAreIdempotent: false, StopGuard: guard,
 			CacheLastMessage: promptCacheControl, PromptCacheKey: promptCacheKey,
 			StopAfterTool: func(name string) bool { return name == terminalTool },
 		},
 	)
-	var usage agentcore.Usage
+	var usage characterAgentLoopUsage
 	var runErr error
+	diagnostics := newCharacterToolDiagnosticObserver(ctx, terminalTool, diagnosticStores)
 	for event := range events {
+		diagnostics.observe(event)
 		if event.Type == agentcore.EventModelResponse {
 			switch message := event.Message.(type) {
 			case agentcore.Message:
-				usage.Add(message.Usage)
+				usage.observe(model, message.Usage, message.Metadata)
 			case *agentcore.Message:
-				usage.Add(message.Usage)
+				usage.observe(model, message.Usage, message.Metadata)
 			}
 		}
 		if event.Type == agentcore.EventError && event.Err != nil {
+			usage.observeError(model, event.Err)
 			runErr = event.Err
 		}
+		if event.Type == agentcore.EventRetry && event.RetryInfo != nil {
+			usage.observeError(model, event.RetryInfo.Err)
+		}
 	}
+	usage.finish(model, int(trackedModel.started.Load()))
 	return usage, runErr
 }
 
 func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.Store, models *bootstrap.ModelSet, inputs characterAgentChapterInputs, proposals []domain.CharacterDecisionProposal) (*domain.WorldArbitrationReceipt, error) {
+	proofs, cycleSession, err := characterExecutionProofs(st, inputs.CycleSession)
+	if err != nil {
+		return nil, err
+	}
 	model := models.ForRole("world_arbiter")
 	if model == nil {
 		return nil, fmt.Errorf("world arbiter model is unavailable")
@@ -1166,15 +1646,67 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 			round = proposal.Round
 		}
 	}
-	if existing, err := st.CharacterAgents.LoadArbitration(inputs.Stimulus.GenerationID, inputs.Stimulus.Chapter, round); err != nil {
+	if inputs.ArbitrationV3 != nil {
+		if cycleSession == nil || !hasCharacterActivationPolicyV3(inputs.Stimulus.Sources) || inputs.ArbitrationRoundV3 < 1 || inputs.ArbitrationRoundV3 > 2 {
+			return nil, fmt.Errorf("v3 arbiter requires its explicit current source coordinate")
+		}
+		round = inputs.ArbitrationRoundV3
+		sources, err := inputs.ArbitrationV3.Sources(round)
+		if err != nil {
+			return nil, err
+		}
+		if !sameCharacterCycleValue(proposals, sources.EffectiveProposals()) {
+			return nil, fmt.Errorf("v3 arbiter proposals differ from exact current sources")
+		}
+	} else if hasCharacterActivationPolicyV3(inputs.Stimulus.Sources) {
+		return nil, fmt.Errorf("v3 arbiter cannot use a legacy unbound source path")
+	}
+	loadArbitration := func() (*domain.WorldArbitrationReceipt, error) {
+		return proofs.LoadArbitration(inputs.Stimulus.GenerationID, inputs.Stimulus.Chapter, round)
+	}
+	if inputs.ContinuationProof != nil {
+		loadArbitration = inputs.ContinuationProof.LoadArbitration
+	}
+	if inputs.ArbitrationV3 != nil {
+		loadArbitration = func() (*domain.WorldArbitrationReceipt, error) { return inputs.ArbitrationV3.LoadArbitration(round) }
+	}
+	if existing, err := loadArbitration(); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return existing, nil
 	}
-	tool := tools.NewResolveChapterWorldTool(st, inputs.Stimulus, inputs.Activation, proposals, CharacterAgentProtocolDigest(), inputs.Sources, cfg.CharacterAgents.MaxRevisionRounds)
+	protocolDigest := CharacterAgentProtocolDigestForVersion(characterProtocolForStimulus(inputs.Stimulus))
+	if cycleSession != nil {
+		protocolDigest = characterActivationProtocolForPolicy(characterActivationPolicyForStimulus(inputs.Stimulus))
+	}
+	tool := tools.NewResolveChapterWorldTool(st, inputs.Stimulus, inputs.Activation, proposals, protocolDigest, inputs.Sources, cfg.CharacterAgents.MaxRevisionRounds)
+	if inputs.ArbitrationV3 != nil {
+		tool, err = tools.NewResolveCharacterArbitrationV3Tool(st, *cycleSession, inputs.ArbitrationV3, round, protocolDigest)
+		if err != nil {
+			return nil, err
+		}
+	} else if inputs.ContinuationProof != nil {
+		tool, err = tools.NewResolveCharacterContinuationTool(st, *cycleSession, inputs.ContinuationProof, protocolDigest)
+		if err != nil {
+			return nil, err
+		}
+	} else if cycleSession != nil {
+		tool, err = tools.NewResolveCharacterActivationTool(st, *cycleSession, inputs.Stimulus, inputs.Activation, proposals, protocolDigest, inputs.Sources, cfg.CharacterAgents.MaxRevisionRounds)
+		if err != nil {
+			return nil, err
+		}
+	}
+	ctx, usageRecord, prepareErr := prepareCharacterAccounting(ctx, domain.CharacterAgentUsage{
+		GenerationID: inputs.Stimulus.GenerationID, Role: "world_arbiter", AgentID: "world_arbiter", Character: "World Arbiter",
+		Chapter: inputs.Stimulus.Chapter, Round: round,
+		Cycle: proofs.ActivationCycleIndex(),
+	})
+	if prepareErr != nil {
+		return nil, prepareErr
+	}
 	guardBlocks := 0
 	guard := func(_ context.Context, _ agentcore.StopInfo) agentcore.StopDecision {
-		receipt, _ := st.CharacterAgents.LoadArbitration(inputs.Stimulus.GenerationID, inputs.Stimulus.Chapter, round)
+		receipt, _ := loadArbitration()
 		if receipt != nil {
 			return agentcore.StopDecision{Allow: true}
 		}
@@ -1184,38 +1716,55 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 		}
 		return agentcore.StopDecision{InjectMessage: "尚未完成裁决。现在只调用 resolve_chapter_world。"}
 	}
-	payload, _ := json.Marshal(struct {
-		Stimulus   domain.WorldStimulusPacket         `json:"world_stimulus"`
-		Activation domain.CharacterAgentActivation    `json:"activation"`
-		Proposals  []domain.CharacterDecisionProposal `json:"proposals"`
-	}{inputs.Stimulus, inputs.Activation, proposals})
-	usage, err := runCharacterAgentTerminalLoop(
-		ctx, model, worldArbiterSystemPrompt,
-		"裁决以下单一世界输入。soft_guidance 只能作为方向，不得覆盖角色选择：\n<world_arbitration_input>\n"+string(payload)+"\n</world_arbitration_input>\n现在只调用 resolve_chapter_world。",
-		tool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("world_arbiter", 6), 8), roleThinking(cfg, "world_arbiter"), guard,
-		agentPromptCacheKey("world_arbiter", st.Dir(), inputs.Stimulus.GenerationID, fmt.Sprint(inputs.Stimulus.Chapter), fmt.Sprint(round)),
-	)
+	arbiterPrompt, userPrompt, executionTool, err := prepareCharacterArbitrationRequest(inputs, proposals, tool)
 	if err != nil {
 		return nil, err
 	}
-	receipt, err := st.CharacterAgents.LoadArbitration(inputs.Stimulus.GenerationID, inputs.Stimulus.Chapter, round)
-	if err != nil || receipt == nil {
-		return nil, fmt.Errorf("world arbiter round %d did not persist a receipt: %w", round, err)
+	usage, err := runCharacterAgentTerminalLoop(
+		withCharacterToolDiagnosticScope(ctx, usageRecord), model, arbiterPrompt,
+		userPrompt,
+		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("world_arbiter", 6), 8), roleThinking(cfg, "world_arbiter"), guard,
+		characterCyclePromptCacheKey(agentPromptCacheKey("world_arbiter", st.Dir(), inputs.Stimulus.GenerationID, fmt.Sprint(inputs.Stimulus.Chapter), fmt.Sprint(round)), proofs),
+		st,
+	)
+	var receipt *domain.WorldArbitrationReceipt
+	if err == nil {
+		receipt, err = loadArbitration()
+		if err == nil && receipt == nil {
+			err = fmt.Errorf("world arbiter round %d did not persist a receipt", round)
+		}
 	}
-	usageRecord := domain.CharacterAgentUsage{
-		GenerationID: inputs.Stimulus.GenerationID, Role: "world_arbiter", AgentID: "world_arbiter", Character: "World Arbiter",
-		Chapter: inputs.Stimulus.Chapter, Round: round, Input: usage.Input, Output: usage.Output, CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
+	// The loop may fail after its terminal tool durably saved a valid result.
+	// Observing that result does not change the original business error.
+	observed, observeErr := receipt, error(nil)
+	if observed == nil {
+		observed, observeErr = loadArbitration()
 	}
-	if usage.Cost != nil {
-		usageRecord.CostUSD = usage.Cost.Total
+	if observeErr == nil && observed != nil {
+		reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: observed.GenerationID, Chapter: observed.Chapter, Cycle: proofs.ActivationCycleIndex(), Round: observed.Round, Kind: PlanningArbitrationCommitted, ArtifactDigest: observed.Digest})
 	}
-	if err := st.CharacterAgents.AppendUsage(usageRecord); err != nil {
+	if err := errors.Join(err, appendCharacterLoopUsage(st, usageRecord, usage, err, projectedAccounting(ctx).ImportCharacterUsage), projectedAccountingAfter(ctx)); err != nil {
 		return nil, err
 	}
 	return receipt, nil
 }
 
 func updateProjectedCharacterAgentMemories(st *store.Store, generationID string, chapter int, proposals []domain.CharacterDecisionProposal, receipt domain.WorldArbitrationReceipt) error {
+	var physical *domain.WorldPhysicalStateV2
+	if receipt.Version == domain.WorldArbitrationReceiptV2Version {
+		stimulus, err := st.CharacterAgents.LoadStimulus(generationID, chapter)
+		if err != nil {
+			return err
+		}
+		if stimulus == nil {
+			return fmt.Errorf("v2 memory lacks source stimulus")
+		}
+		state, err := domain.ApplyArbitrationPhysicalStateV2(receipt, *stimulus, proposals...)
+		if err != nil {
+			return err
+		}
+		physical = &state
+	}
 	byAgent := make(map[string]domain.CharacterDecisionProposal, len(proposals))
 	for _, proposal := range proposals {
 		byAgent[proposal.AgentID] = proposal
@@ -1228,10 +1777,14 @@ func updateProjectedCharacterAgentMemories(st *store.Store, generationID string,
 			return fmt.Errorf("load projected memory for %s: %w", resolution.AgentID, err)
 		}
 		text := strings.TrimSpace(proposal.Decision + "；" + resolution.ImmediateResult + "；" + resolution.StateAfter)
-		memory.Facts = append(memory.Facts, newCharacterMemoryFact(chapter, "projected_decision", text, receipt.Digest, false))
-		memory.UpdatedAt = now
-		memory.MemoryRoot = ""
-		if err := st.CharacterAgents.SaveProjectedMemory(*memory); err != nil {
+		if physical != nil {
+			var privateErr error
+			text, privateErr = domain.CharacterPrivateOutcomeV2(proposal, resolution, *physical, receipt)
+			if privateErr != nil {
+				return privateErr
+			}
+		}
+		if err := st.AppendProjectedCharacterMemoryFact(generationID, resolution.AgentID, newCharacterMemoryFact(chapter, "projected_decision", text, receipt.Digest, false), now); err != nil {
 			return err
 		}
 	}

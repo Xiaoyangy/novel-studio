@@ -1583,9 +1583,12 @@ func TestPipelineArchitectRefreshHeadlessOptionsAreStageBound(t *testing.T) {
 }
 
 func TestPipelineArchitectInitialHeadlessOptionsDisableWritingRouter(t *testing.T) {
-	opts := pipelineArchitectInitialHeadlessOptions("initialize foundation")
-	if opts.Prompt != "initialize foundation" || !opts.StopAfterFoundation || !opts.DisableFlowRouter {
+	opts := pipelineArchitectInitialHeadlessOptions("initialize foundation", "写三章渡口悬疑短篇")
+	if opts.Prompt != "initialize foundation" || !opts.StopAfterFoundation || !opts.DisableFlowRouter || !opts.PreserveCheckpointsOnStart {
 		t.Fatalf("initial Architect headless options lost the foundation-only boundary: %+v", opts)
+	}
+	if opts.UserRulesPrompt != "写三章渡口悬疑短篇" {
+		t.Fatalf("author requirements were replaced by host stage instructions: %+v", opts)
 	}
 	if opts.StopAfterFoundationChange || opts.AllowChapterZeroFoundationRefresh ||
 		opts.FoundationRefreshTarget != "" || opts.OneShotFoundationRefresh {
@@ -1662,15 +1665,21 @@ func TestPipelineArchitectShortTargetSelectionAndRevision(t *testing.T) {
 	}
 }
 
-func TestPipelineArchitectPromptLocksOutlineAllArcSpanForShortFiction(t *testing.T) {
-	prompt, err := pipelineArchitectPrompt(t.TempDir(), "写一篇12章现实悬疑短篇")
+func TestPipelineArchitectPromptPreservesAuthorScaleForShortFiction(t *testing.T) {
+	dir := t.TempDir()
+	const author = "写一篇3章现实悬疑短篇"
+	prompt, err := pipelineArchitectPrompt(dir, author)
 	if err != nil {
 		t.Fatalf("pipelineArchitectPrompt: %v", err)
 	}
-	for _, want := range []string{"每个弧占 8—16 章", "一卷一弧 12 章", "不得拆成三个 4 章弧"} {
+	for _, want := range []string{author, "每弧至少包含一个章位", "三章单卷短篇可以是一卷一弧三章", "不得为套用长篇默认值扩充"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("architect prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	authorPrompt, err := pipelineArchitectSourcePrompt(dir, author)
+	if err != nil || !strings.Contains(authorPrompt, author) || strings.Contains(authorPrompt, "save_foundation") || strings.Contains(authorPrompt, "8—16") {
+		t.Fatalf("author rules input contains host workflow: %q, %v", authorPrompt, err)
 	}
 }
 

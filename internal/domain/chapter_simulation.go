@@ -1,24 +1,43 @@
 package domain
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // ChapterWorldSimulation is the prewriting source of truth for one chapter.
 // The world advances first; the POV plan is derived from ProtagonistProjection.
 type ChapterWorldSimulation struct {
-	Version                int                            `json:"version"`
-	SimulationID           string                         `json:"simulation_id"`
-	Chapter                int                            `json:"chapter"`
-	GenerationID           string                         `json:"generation_id,omitempty"`
-	BaseTickID             string                         `json:"base_tick_id,omitempty"`
-	TimeWindow             string                         `json:"time_window"`
-	CharacterDecisions     []CharacterWorldDecision       `json:"character_decisions"`
-	ProtagonistProjection  ProtagonistDecisionProjection  `json:"protagonist_projection"`
-	RewriteSource          *ChapterRewriteSource          `json:"rewrite_source,omitempty"`
-	RewriteFactCoverage    []ChapterRewriteFactCoverage   `json:"rewrite_fact_coverage,omitempty"`
-	AuthorityReceipt       *SimulationAuthorityReceipt    `json:"authority_receipt,omitempty"`
-	CharacterAgentProtocol *CharacterAgentProtocolReceipt `json:"character_agent_protocol,omitempty"`
-	GeneratedAt            string                         `json:"generated_at,omitempty"`
-	Sources                []string                       `json:"sources,omitempty"`
+	Version                int                                   `json:"version"`
+	SimulationID           string                                `json:"simulation_id"`
+	Chapter                int                                   `json:"chapter"`
+	GenerationID           string                                `json:"generation_id,omitempty"`
+	BaseTickID             string                                `json:"base_tick_id,omitempty"`
+	TimeWindow             string                                `json:"time_window"`
+	StoryTime              *StoryTimeChapterSchedule             `json:"story_time,omitempty"`
+	PhysicalState          *WorldPhysicalStateV2                 `json:"physical_state,omitempty"`
+	CharacterDecisions     []CharacterWorldDecision              `json:"character_decisions"`
+	ProtagonistProjection  ProtagonistDecisionProjection         `json:"protagonist_projection"`
+	RewriteSource          *ChapterRewriteSource                 `json:"rewrite_source,omitempty"`
+	RewriteFactCoverage    []ChapterRewriteFactCoverage          `json:"rewrite_fact_coverage,omitempty"`
+	AuthorityReceipt       *SimulationAuthorityReceipt           `json:"authority_receipt,omitempty"`
+	CharacterAgentProtocol *CharacterAgentProtocolReceipt        `json:"character_agent_protocol,omitempty"`
+	CharacterActivation    *CharacterActivationSimulationBinding `json:"character_activation,omitempty"`
+	CharacterDecisionTrace []CharacterActivationDecisionTrace    `json:"character_decision_trace,omitempty"`
+	GeneratedAt            string                                `json:"generated_at,omitempty"`
+	Sources                []string                              `json:"sources,omitempty"`
+}
+
+// Keep the established simulation identity algorithm for both historical and
+// multi-cycle simulations. New optional fields are absent from old JSON.
+func ComputeChapterWorldSimulationID(sim ChapterWorldSimulation) string {
+	sim.SimulationID, sim.GeneratedAt = "", ""
+	raw, _ := json.Marshal(sim)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("ch%03d-%s", sim.Chapter, hex.EncodeToString(sum[:6]))
 }
 
 // CharacterAgentProtocolReceipt binds a v2 simulation to the independent
@@ -113,6 +132,7 @@ type CharacterWorldDecision struct {
 	CompletionState   string                    `json:"completion_state"` // instant / started / in_progress / completed / blocked
 	ImmediateResult   string                    `json:"immediate_result"`
 	StateAfter        string                    `json:"state_after"`
+	PostState         *CharacterPhysicalStateV2 `json:"post_state,omitempty"`
 	VisibleToPOV      bool                      `json:"visible_to_pov,omitempty"`
 	ButterflyEffects  []DecisionButterflyEffect `json:"butterfly_effects"`
 }

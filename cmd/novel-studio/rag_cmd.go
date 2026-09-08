@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -493,7 +494,11 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	if abs, err := filepath.Abs(cfg.OutputDir); err == nil {
 		cfg.OutputDir = abs
 	}
-	if err := ensureDefaultRAGIndex(cfg.OutputDir); err != nil {
+	defaultErr := ensureDefaultRAGIndex(cfg.OutputDir)
+	if defaultErr != nil && !errors.Is(defaultErr, errNoRAGSourceFiles) {
+		return defaultErr
+	}
+	if err := ensureConfiguredSharedRAGIndex(cfg); err != nil {
 		return err
 	}
 	if _, err := backfillChapterRAG(cfg.OutputDir, 1, 0); err != nil {
@@ -505,7 +510,25 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 		return err
 	}
 	if state == nil || len(state.Chunks) == 0 {
+		if defaultErr != nil {
+			return defaultErr
+		}
 		return fmt.Errorf("RAG index 为空，无法构建 Qdrant 向量索引")
+	}
+	// A prior Architect bootstrap may already have a shared-only catalog.
+	// ensureDefaultRAGIndex's existing-index shortcut must not hide foundation
+	// files that appeared after that catalog was created.
+	if !ragIndexHasFacts(state) {
+		result, buildErr := buildLocalRAGIndex(cfg.OutputDir, discoverDefaultRAGSources(cfg.OutputDir), 900, 600)
+		if buildErr != nil && !errors.Is(buildErr, errNoRAGSourceFiles) {
+			return buildErr
+		}
+		if buildErr == nil {
+			mergePendingRAGState(st, state, result.State.Chunks)
+			if err := st.RAG.SaveIndexState(*state); err != nil {
+				return err
+			}
+		}
 	}
 	pending, err := st.RAG.LoadPendingUpserts()
 	if err != nil {
@@ -515,6 +538,9 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	if pendingApplied {
 		mergePendingRAGState(st, state, pending.Chunks)
 		fmt.Fprintf(os.Stderr, "[build-rag] 检测到待回填 RAG chunks=%d，纳入本次恢复\n", len(pending.Chunks))
+	}
+	if !ragIndexHasFacts(state) {
+		return errNoRAGFactChunks
 	}
 	if _, enabled := bootstrap.ResolveRAGEmbeddingConfig(cfg, bootstrap.RAGEmbeddingConfig{}); !enabled {
 		if pendingApplied {
@@ -604,6 +630,18 @@ func ensurePipelineRAGReady(cfg bootstrap.Config) error {
 	}
 	fmt.Fprintf(os.Stderr, "[build-rag] 写作前 RAG 检查完成：chunks=%d embeddings=%d vector_points=%d collection=%s\n", len(result.State.Chunks), result.Embedded, result.Written, result.State.Config.Collection)
 	return nil
+}
+
+func ragIndexHasFacts(state *domain.RAGIndexState) bool {
+	if state == nil {
+		return false
+	}
+	for _, chunk := range state.Chunks {
+		if !rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			return true
+		}
+	}
+	return false
 }
 
 func pipelineRAGIncrementalPlan(
@@ -1095,6 +1133,14 @@ type localRAGBuildResult struct {
 	SkippedDup int
 }
 
+var errNoRAGSourceFiles = errors.New("未找到可索引的 RAG 来源文件")
+
+var errNoRAGSourceChunks = errors.New("RAG 来源文件存在，但没有切出有效 chunk")
+
+// A shared lexical catalog is sufficient for Architect research, but never
+// proves that the book's own fact/vector corpus is ready for later planning.
+var errNoRAGFactChunks = errors.New("RAG 事实层 chunk 为空，不能构建语义向量")
+
 func buildLocalRAGIndex(outputDir string, rawSources []string, maxChunkRunes, maxFiles int) (localRAGBuildResult, error) {
 	outputDir = cleanAbsRAGPath(outputDir)
 	files, err := collectRAGSourceFiles(outputDir, rawSources, maxFiles)
@@ -1102,7 +1148,7 @@ func buildLocalRAGIndex(outputDir string, rawSources []string, maxChunkRunes, ma
 		return localRAGBuildResult{}, err
 	}
 	if len(files) == 0 {
-		return localRAGBuildResult{}, fmt.Errorf("未找到可索引的 RAG 来源文件")
+		return localRAGBuildResult{}, errNoRAGSourceFiles
 	}
 	var chunks []domain.RAGChunk
 	seen := map[string]struct{}{}
@@ -1129,7 +1175,7 @@ func buildLocalRAGIndex(outputDir string, rawSources []string, maxChunkRunes, ma
 		}
 	}
 	if len(chunks) == 0 {
-		return localRAGBuildResult{}, fmt.Errorf("RAG 来源文件存在，但没有切出有效 chunk")
+		return localRAGBuildResult{}, errNoRAGSourceChunks
 	}
 	hashes := make([]string, 0, len(seen))
 	for h := range seen {
@@ -2166,6 +2212,77 @@ func appendConfiguredSharedLibraries(sources []string, cfg bootstrap.Config) []s
 	sources = appendSharedLibrary(sources, cfg.RAG.BenchmarkLibrary, "rag.benchmark_library", rag.IsBenchmarkLibraryPath)
 	sources = appendSharedLibrary(sources, cfg.RAG.CalibrationLibrary, "rag.calibration_library", rag.IsCalibrationPath)
 	return sources
+}
+
+// ensureConfiguredSharedRAGIndex imports missing configured design sources
+// before the first Architect recall. Existing source content belongs to the
+// local snapshot and is refreshed only by an explicit --build-rag; routine
+// readiness checks neither reread every library document nor embed the corpus.
+func ensureConfiguredSharedRAGIndex(cfg bootstrap.Config) error {
+	sources := appendConfiguredSharedLibraries(nil, cfg)
+	if len(sources) == 0 {
+		return nil
+	}
+	st := store.NewStore(cfg.OutputDir)
+	state, err := st.RAG.LoadIndexState()
+	if err != nil {
+		return err
+	}
+	if state != nil && len(state.Chunks) == 0 {
+		return fmt.Errorf("已有 RAG index 为空，不能用共享写法掩盖缺失的项目事实；请显式修复索引")
+	}
+	indexedSources := map[string]struct{}{}
+	if state != nil {
+		for _, chunk := range state.Chunks {
+			if !rag.IsDesignOnlySourceKind(chunk.SourceKind) || rag.IsForbiddenChunk(chunk) {
+				continue
+			}
+			source := chunk.SourcePath
+			if filepath.IsAbs(source) {
+				source = displayRAGSourcePath(source, cfg.OutputDir)
+			}
+			indexedSources[source] = struct{}{}
+		}
+	}
+	files, err := collectRAGSourceFiles(cfg.OutputDir, sources, 2000)
+	if err != nil {
+		return fmt.Errorf("准备共享写法来源: %w", err)
+	}
+	var missing []string
+	for _, file := range files {
+		if _, exists := indexedSources[displayRAGSourcePath(file, cfg.OutputDir)]; !exists {
+			missing = append(missing, file)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	result, err := buildLocalRAGIndex(cfg.OutputDir, missing, 900, 2000)
+	if errors.Is(err, errNoRAGSourceChunks) {
+		// Empty/short/filtered library files have no chunk source_path. They
+		// remain eligible for a later import if content is added, but must not
+		// make the second readiness check fail after all useful files are indexed.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("准备共享写法索引: %w", err)
+	}
+	for _, chunk := range result.State.Chunks {
+		if !rag.IsDesignOnlySourceKind(chunk.SourceKind) {
+			return fmt.Errorf("共享写法来源产生非设计 chunk: %s", chunk.SourcePath)
+		}
+	}
+	if state == nil {
+		state = &domain.RAGIndexState{SchemaVersion: domain.CurrentRAGIndexSchemaVersion, Config: domain.RAGIndexConfig{Collection: "local_keyword"}}
+	}
+	state.Chunks = append(state.Chunks, result.State.Chunks...)
+	state.ChunkHashes = rebuildRAGChunkHashList(state.Chunks)
+	state.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := st.RAG.SaveIndexState(*state); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[build-rag] 已准备共享写法词法索引：新增来源=%d chunks=%d（未调用 embedding）\n", len(missing), len(result.State.Chunks))
+	return nil
 }
 
 func appendSharedLibrary(sources []string, lib, label string, allowed func(string) bool) []string {

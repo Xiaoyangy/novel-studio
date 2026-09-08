@@ -3,7 +3,9 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 type characterConcurrencyProbeModel struct {
 	active atomic.Int32
 	peak   atomic.Int32
+	calls  atomic.Int32
 }
 
 func (m *characterConcurrencyProbeModel) response(messages []agentcore.Message) *agentcore.LLMResponse {
@@ -29,6 +32,7 @@ func (m *characterConcurrencyProbeModel) response(messages []agentcore.Message) 
 		}
 	}
 	active := m.active.Add(1)
+	m.calls.Add(1)
 	defer m.active.Add(-1)
 	for {
 		peak := m.peak.Load()
@@ -168,6 +172,149 @@ func TestCharacterProposalRoundBatchesMoreThanEightAtConcurrencyFour(t *testing.
 	}
 }
 
+func seedCharacterRound(t *testing.T, count int) (*store.Store, map[string]domain.CharacterObservationPacket, []string) {
+	t.Helper()
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	observations := make(map[string]domain.CharacterObservationPacket, count)
+	ids := make([]string, 0, count)
+	for i := range count {
+		id := fmt.Sprintf("ca_resume_%02d", i)
+		observation, err := domain.FinalizeCharacterObservationPacket(domain.CharacterObservationPacket{
+			Version: domain.CharacterObservationVersion, GenerationID: "pg2_resume", Chapter: 1, Round: 1,
+			AgentID: id, Character: fmt.Sprintf("角色%d", i), CurrentGoal: "赶车", Pressure: "时间紧迫",
+			StimulusDigest: "sha256:stimulus", KnownFacts: []domain.CharacterAgentFact{{ID: "fact-1", Kind: "known", Text: "车票有效"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.CharacterAgents.SaveObservation(observation); err != nil {
+			t.Fatal(err)
+		}
+		observations[id] = observation
+		ids = append(ids, id)
+	}
+	return st, observations, ids
+}
+
+func TestCharacterProposalRoundDeduplicatesAndResumesOnlyMissing(t *testing.T) {
+	st, observations, ids := seedCharacterRound(t, 3)
+	model := &characterConcurrencyProbeModel{}
+	if _, err := runCharacterProposalRoundWithModel(context.Background(), bootstrap.Config{}, st, model, observations, ids[:1], 1); err != nil {
+		t.Fatal(err)
+	}
+	requested := []string{ids[0], ids[1], ids[1], ids[2], ids[0]}
+	proposals, err := runCharacterProposalRoundWithModel(context.Background(), bootstrap.Config{}, st, model, observations, requested, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 3 || model.calls.Load() != 3 {
+		t.Fatalf("expected one provider call and proposal per unique character, proposals=%d calls=%d", len(proposals), model.calls.Load())
+	}
+	if _, err := runCharacterProposalRoundWithModel(context.Background(), bootstrap.Config{}, st, model, observations, requested, 1); err != nil {
+		t.Fatal(err)
+	}
+	if model.calls.Load() != 3 {
+		t.Fatal("completed proposal resume called the model again")
+	}
+}
+
+func TestCharacterProposalRoundRejectsInvalidBatchBeforeModelCalls(t *testing.T) {
+	for _, invalid := range []string{"missing", "identity", "generation", "round", "tampered", "unpersisted"} {
+		t.Run(invalid, func(t *testing.T) {
+			st, observations, ids := seedCharacterRound(t, 2)
+			last := observations[ids[1]]
+			switch invalid {
+			case "missing":
+				delete(observations, ids[1])
+			case "identity":
+				last.AgentID = ids[0]
+				observations[ids[1]] = last
+			case "generation":
+				last.GenerationID = "pg2_other"
+				observations[ids[1]] = last
+			case "round":
+				last.Round = 2
+				observations[ids[1]] = last
+			case "tampered":
+				last.CurrentGoal = "未落盘的新目标"
+				observations[ids[1]] = last
+			case "unpersisted":
+				last.CurrentGoal = "未落盘的新目标"
+				last, err := domain.FinalizeCharacterObservationPacket(last)
+				if err != nil {
+					t.Fatal(err)
+				}
+				observations[ids[1]] = last
+			}
+			model := &characterConcurrencyProbeModel{}
+			if _, err := runCharacterProposalRoundWithModel(context.Background(), bootstrap.Config{}, st, model, observations, ids, 1); err == nil {
+				t.Fatal("invalid batch was accepted")
+			}
+			if model.calls.Load() != 0 || model.active.Load() != 0 {
+				t.Fatal("invalid evidence batch started model work")
+			}
+		})
+	}
+}
+
+type characterCancellationProbeModel struct {
+	entered chan struct{}
+	active  atomic.Int32
+}
+
+func (m *characterCancellationProbeModel) Generate(ctx context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	m.active.Add(1)
+	defer m.active.Add(-1)
+	select {
+	case m.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *characterCancellationProbeModel) GenerateStream(ctx context.Context, messages []agentcore.Message, specs []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	_, err := m.Generate(ctx, messages, specs, opts...)
+	return nil, err
+}
+
+func (*characterCancellationProbeModel) SupportsTools() bool { return true }
+
+func TestCharacterProposalRoundCancellationDrainsWorkers(t *testing.T) {
+	st, observations, ids := seedCharacterRound(t, 12)
+	model := &characterCancellationProbeModel{entered: make(chan struct{}, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runCharacterProposalRoundWithModel(ctx, bootstrap.Config{}, st, model, observations, ids, 1)
+		done <- err
+	}()
+	select {
+	case <-model.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model worker never started")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want cancellation, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled round did not drain its workers")
+	}
+	if model.active.Load() != 0 {
+		t.Fatal("round returned with model work still active")
+	}
+	if proposals, err := st.CharacterAgents.LoadProposals("pg2_resume", 1, 1, ids); err != nil || len(proposals) != 0 {
+		t.Fatalf("canceled round persisted decisions: proposals=%d err=%v", len(proposals), err)
+	}
+}
+
 func TestWorldStimulusCarriesOperationalWorldAndRedactsSecretMechanisms(t *testing.T) {
 	st := store.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
@@ -175,7 +322,7 @@ func TestWorldStimulusCarriesOperationalWorldAndRedactsSecretMechanisms(t *testi
 	}
 	if err := st.SaveWorldCodex(domain.WorldCodex{
 		Mechanisms: []domain.CodexMechanism{
-			{ID: "public-route", Name: "公开通行", Visibility: "formal"},
+			{ID: "public-route", Name: "公开通行", Visibility: "formal", CharacterView: &domain.CharacterMechanismView{Name: "公开通行"}},
 			{ID: "secret-toll", Name: "隐秘追缴", Visibility: "secret"},
 		},
 		CounterfactualTests: []domain.CodexCounterfactualProbe{{ID: "no-pass", MechanismRefs: []string{"public-route"}}},
@@ -219,6 +366,42 @@ func TestWorldStimulusV2RequiresCoherenceProof(t *testing.T) {
 	}
 	if _, err := buildWorldStimulus(st, "pg2_unverified", 1, ProjectedArcBoundary{}, domain.ProjectedPlanningContextV2{}, nil, "now"); err == nil {
 		t.Fatal("v2 operational world entered arbitration without a coherence proof")
+	}
+}
+
+func TestCharacterObservationDoesNotExposeAuthoredCharacterArc(t *testing.T) {
+	const characterArc = "第二章拆封失去资格，第三章证明父亲只领六十升并原谅许岚。"
+	const dossierArc = "第三章证实许岚挪用三十升，完成全部人物成长。"
+	for _, currentAction := range []string{"", "核对眼前档案袋封条"} {
+		st := store.NewStore(t.TempDir())
+		profile := characterAgentProfile{
+			Character: domain.Character{Name: "林澄", Role: "值班员", Arc: characterArc, Traits: []string{"谨慎"}},
+			Record:    domain.CharacterAgentRecord{AgentID: "ca_lin", Character: "林澄"},
+			Dossier: &domain.CharacterDossier{
+				Profile:             domain.CharacterDossierProfile{Arc: dossierArc},
+				CurrentAtStoryStart: domain.CharacterStartState{CurrentAction: currentAction},
+			},
+			Continuity: &domain.CharacterContinuityEntry{},
+		}
+		observation, err := buildCharacterObservation(st, "pg2_no_future_arc", 1, profile, domain.WorldStimulusPacket{}, domain.ProjectedPlanningContextV2{}, "now")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{characterArc, dossierArc, "六十升", "三十升", "第三章"} {
+			if strings.Contains(string(raw), secret) {
+				t.Fatalf("authored future arc entered character observation: %s", raw)
+			}
+		}
+		if currentAction != "" && observation.CurrentGoal != currentAction {
+			t.Fatalf("current authored action was lost: %q", observation.CurrentGoal)
+		}
+		if observation.CurrentGoal == "" || !strings.Contains(string(raw), "谨慎") {
+			t.Fatal("safe current goal or established character traits were lost")
+		}
 	}
 }
 

@@ -87,7 +87,8 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 	// Task 051：initial_character_dynamics 必须覆盖 主角∪FirstCast∪core/important 全员（阻塞）。
 	issues = append(issues, zeroCheckDynamicsCoverage(dir)...)
 	issues = append(issues, zeroCheckInitialRelationshipState(dir)...)
-	issues = append(issues, zeroCheckStoryTimeContract(dir)...)
+	storyTimeIssues := zeroCheckStoryTimeContract(dir)
+	issues = append(issues, storyTimeIssues...)
 	issues = append(issues, zeroCheckWorldCoherenceReport(dir)...)
 	if _, err := tools.ValidateZeroInitUserRules(dir); err != nil {
 		issues = append(issues, fmt.Sprintf("user_rules 写前合同无效：%v", err))
@@ -107,7 +108,7 @@ func assessZeroInitReadiness(dir string, ragStats zeroInitRAGStats) zeroInitRead
 		Missing:          missing,
 		Issues:           issues,
 		Warnings:         warnings,
-		StoryTime:        zeroStoryTimeEvidence(dir),
+		StoryTime:        zeroStoryTimeEvidence(dir, len(storyTimeIssues) == 0),
 		RAG:              ragStats,
 		GeneratedAt:      time.Now().Format(time.RFC3339),
 		Path:             filepath.Join(dir, "meta", "first_chapter_generation_readiness.md"),
@@ -351,14 +352,14 @@ func zeroHasPositiveTopicUse(text, marker string) bool {
 	return false
 }
 
-func zeroStoryTimeEvidence(dir string) zeroInitStoryTimeEvidence {
+func zeroStoryTimeEvidence(dir string, consistent bool) zeroInitStoryTimeEvidence {
 	st := store.NewStore(dir)
 	contract, err := st.WorldSim.LoadStoryTimeContract()
 	if err != nil || contract == nil {
 		return zeroInitStoryTimeEvidence{}
 	}
 	evidence := zeroInitStoryTimeEvidence{
-		Validated:              true,
+		Validated:              consistent,
 		Source:                 contract.Source,
 		TargetChapters:         contract.TargetChapters,
 		DurationDaysMin:        contract.DurationDaysMin,

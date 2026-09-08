@@ -34,6 +34,10 @@ type Character struct {
 	// Psych 定量心理画像（大五/依恋/价值观/偏差/能力/DNA 等），Architect 落笔的作者源。
 	// 可选：缺失时所有消费方跳过。
 	Psych *CharacterPsychProfile `json:"psych,omitempty"`
+
+	// InitialState is the author's explicit opening baseline, separate from
+	// descriptive backstory and future Arc. Nil preserves historical projects.
+	InitialState *CharacterInitialState `json:"initial_state,omitempty"`
 }
 
 // VolumeOutline 卷级大纲（长篇分层模式）。
@@ -189,6 +193,9 @@ type WorldRule struct {
 	Visibility string `json:"visibility,omitempty"`
 	// Source 规则出处（朝廷 / 江湖 / 家族 / 门派），潜规则叙事时的归属线索。
 	Source string `json:"source,omitempty"`
+	// CharacterView 是作者明确授权给角色的公开规则文本。Rule/Boundary/Source
+	// 仍为作者态，可能含终局或秘密事实，不能用作角色视图缺失时的回退。
+	CharacterView string `json:"character_view,omitempty"`
 }
 
 // WorldRuleVisibility 归一化可见性：空值归 formal。

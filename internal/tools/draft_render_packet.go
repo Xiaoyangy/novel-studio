@@ -433,6 +433,8 @@ func compactWorldSimulationProjectAllState(result map[string]any) {
 			result["project_all_state"] = compact(*state)
 		}
 	case map[string]any:
+		state = cloneProjectAllStateViewMap(state)
+		result["project_all_state"] = state
 		switch transitions := state["recent_transitions"].(type) {
 		case []any:
 			recent := make([]any, 0, len(transitions))
@@ -456,6 +458,35 @@ func compactWorldSimulationProjectAllState(result map[string]any) {
 			state["recent_transitions"] = recent
 		}
 	}
+	markProjectAllStateDisplayView(result, "world_simulation")
+}
+
+const projectedPlanningContextViewVersion = "projected-planning-context-view.v1"
+
+// A compact view is not the signed source object: nil/empty collections and
+// omitted transition deltas both affect its digest. Keep the source binding
+// explicit and make decoding the view as the canonical v2 type fail closed.
+func markProjectAllStateDisplayView(result map[string]any, profile string) {
+	state, ok := result["project_all_state"].(map[string]any)
+	if !ok || state == nil {
+		return
+	}
+	if state["version"] != projectedPlanningContextViewVersion {
+		state["source_version"] = state["version"]
+		state["source_context_digest"] = state["context_digest"]
+	}
+	delete(state, "context_digest")
+	state["version"] = projectedPlanningContextViewVersion
+	state["view_profile"] = profile
+	result["project_all_state_policy"] = "本对象是完整 projected 前态的展示投影；source_context_digest 绑定完整源对象，不是当前 JSON 的摘要。历史 recent_transitions 只保留回执，ready planning 另省略已消费的累计状态。以保留的 state_root、当前累计事实、predecessor_contract 和 open_obligations 为依据；不得从省略字段推断空状态或补造事实。Planner 必须把 predecessor_contract 的 outgoing_consequence_id/text 逐字写入 arc_transition_contract.incoming_consequence_id/text，并用本章某个 causal_beats[].cause 逐字填写 consumed_by_cause。其他 shadow 台账只供细节，冲突时以本投影保留的源事实为准。"
+}
+
+func cloneProjectAllStateViewMap(state map[string]any) map[string]any {
+	copy := make(map[string]any, len(state))
+	for key, value := range state {
+		copy[key] = value
+	}
+	return copy
 }
 
 func applyPlanningContextProfile(result map[string]any) {
@@ -557,6 +588,8 @@ func compactReadyPlanningProjectAllState(result map[string]any) {
 			result["project_all_state"] = copy
 		}
 	case map[string]any:
+		state = cloneProjectAllStateViewMap(state)
+		result["project_all_state"] = state
 		delete(state, "cumulative_state")
 		switch transitions := state["recent_transitions"].(type) {
 		case []any:
@@ -588,6 +621,7 @@ func compactReadyPlanningProjectAllState(result map[string]any) {
 			state["recent_transitions"] = recent
 		}
 	}
+	markProjectAllStateDisplayView(result, "ready_planning")
 }
 
 func compactReadyPlanningFutureOutline(result, working map[string]any) {

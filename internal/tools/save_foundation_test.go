@@ -13,7 +13,7 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func TestSaveFoundationAllowsRebasedChapterZeroOutlineReplacement(t *testing.T) {
+func TestSaveFoundationRejectsBareRebaseMarkerForOutlineReplacement(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
 	if err := s.Init(); err != nil {
@@ -47,8 +47,8 @@ func TestSaveFoundationAllowsRebasedChapterZeroOutlineReplacement(t *testing.T) 
 			}},
 		}},
 	})
-	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err != nil {
-		t.Fatalf("rebased chapter-zero outline replacement rejected: %v", err)
+	if _, err := NewSaveFoundationTool(s).Execute(context.Background(), args); err == nil {
+		t.Fatal("a bare generation marker granted outline replacement authority")
 	}
 }
 

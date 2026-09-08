@@ -247,21 +247,25 @@ func pipelineSealedConvergenceSeededCompactFinalizeRecovery(
 	if !pipelineSealedConvergenceSameBinaryProbe(failover, latestProbe) {
 		return fmt.Errorf("sealed convergence seeded compact executable path/hash/version drift before dispatch")
 	}
+	usageCtx, usageScope, err := newPipelineSealedConvergenceUsage(cfg, st, intent)
+	if err != nil {
+		return err
+	}
 	recovery.PromptSHA256 = pipelineBytesSHA([]byte(prompt))
 	recovery.PromptRunes = utf8.RuneCountInString(prompt)
 	recovery.ModelDispatches = 1
 	recovery.DispatchedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := saveUpdatedPipelineSealedConvergenceReplanIntent(st.Dir(), intent, eligibility); err != nil {
-		return fmt.Errorf("sealed convergence persist seeded compact model dispatch 1/1: %w", err)
+		return usageScope.Finish(fmt.Errorf("sealed convergence persist seeded compact model dispatch 1/1: %w", err))
 	}
 
 	allowlisted := newPipelineSealedConvergenceMutablePlanDetailsTool(
 		tools.NewPlanDetailsTool(st), chapter, recovery.AllowedMutableKeys,
 	)
-	if err := agents.RunSealedConvergencePlannerSeededCompactFinalize(
-		context.Background(), cfg, promptBundle, st.Dir(), chapter, prompt,
+	if err := usageScope.Finish(agents.RunSealedConvergencePlannerSeededCompactFinalize(
+		usageCtx, cfg, promptBundle, st.Dir(), chapter, prompt,
 		failover.BinaryPath, allowlisted,
-	); err != nil {
+	)); err != nil {
 		return fmt.Errorf("sealed convergence seeded compact finalize dispatch 1/1 failed: %w", err)
 	}
 	cp, err := tools.CurrentChapterPlanCausalCheckpoint(store.NewStore(st.Dir()), chapter)
@@ -818,7 +822,27 @@ func newPipelineSealedConvergenceMutablePlanDetailsTool(inner agentcore.Tool, ch
 	return &pipelineSealedConvergenceMutablePlanDetailsTool{inner: inner, chapter: chapter, allowed: allowed}
 }
 
-func (t *pipelineSealedConvergenceMutablePlanDetailsTool) Name() string { return "plan_details" }
+func (t *pipelineSealedConvergenceMutablePlanDetailsTool) Name() string  { return "plan_details" }
+func (t *pipelineSealedConvergenceMutablePlanDetailsTool) Label() string { return "补充章节推演" }
+func (t *pipelineSealedConvergenceMutablePlanDetailsTool) ReadOnly(json.RawMessage) bool {
+	return false
+}
+func (t *pipelineSealedConvergenceMutablePlanDetailsTool) ConcurrencySafe(json.RawMessage) bool {
+	return false
+}
+func (t *pipelineSealedConvergenceMutablePlanDetailsTool) WithPlanGroundingReviewer(reviewer tools.PlanGroundingReviewer) (agentcore.Tool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.calls != 0 {
+		return nil, fmt.Errorf("cannot rebind grounding after restricted plan_details execution")
+	}
+	details, ok := t.inner.(*tools.PlanDetailsTool)
+	if !ok {
+		return nil, fmt.Errorf("restricted plan_details grounding requires the original formal tool")
+	}
+	details.WithGroundingReviewer(reviewer)
+	return t, nil
+}
 func (t *pipelineSealedConvergenceMutablePlanDetailsTool) Description() string {
 	return "只补Host允许的mutable causal_simulation字段并以finalize=true收口；禁止覆盖任何seed字段。"
 }

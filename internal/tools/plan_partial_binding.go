@@ -28,6 +28,9 @@ func ValidateStagedChapterPlanSourceBinding(
 		return fmt.Errorf("staged chapter plan world simulation identity drift")
 	}
 	if !planStructureBoundToSources(st, chapter, partial, simulation) {
+		if _, err := recoverIndependentPlanSourceStamp(st, chapter, partial, simulation, false); err != nil {
+			return err
+		}
 		return fmt.Errorf("staged chapter plan is not bound to the current world simulation/rewrite source")
 	}
 	return nil

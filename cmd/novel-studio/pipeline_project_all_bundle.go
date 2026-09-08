@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -73,6 +74,9 @@ func buildPipelineProjectedChapterBundle(
 	// consistent) instead of failing the projected-bundle check on a mis-typed
 	// hash the model was never a reliable source of.
 	if strings.TrimSpace(plan.CausalSimulation.WorldSimulationID) != strings.TrimSpace(simulation.SimulationID) {
+		if domain.HasPlanGroundingPolicy(simulation) {
+			return domain.ProjectedChapterBundle{}, registry, fmt.Errorf("grounded plan world_simulation_id differs from its reviewed simulation; refusing to rewrite the exact plan")
+		}
 		stale := strings.TrimSpace(plan.CausalSimulation.WorldSimulationID)
 		plan.CausalSimulation.WorldSimulationID = simulation.SimulationID
 		if stale != "" {
@@ -91,6 +95,9 @@ func buildPipelineProjectedChapterBundle(
 	// than fail the bundle on a reworded copy.
 	if chosen := strings.TrimSpace(simulation.ProtagonistProjection.ChosenDecision); chosen != "" &&
 		strings.TrimSpace(plan.CausalSimulation.ProtagonistDecision) != chosen {
+		if domain.HasPlanGroundingPolicy(simulation) {
+			return domain.ProjectedChapterBundle{}, registry, fmt.Errorf("grounded plan protagonist_decision differs from its reviewed simulation; refusing to rewrite the exact plan")
+		}
 		plan.CausalSimulation.ProtagonistDecision = simulation.ProtagonistProjection.ChosenDecision
 	}
 	if domain.IsArcPlanningGenerationV2(generation) {
@@ -131,7 +138,22 @@ func buildPipelineProjectedChapterBundle(
 	if err != nil {
 		return domain.ProjectedChapterBundle{}, registry, fmt.Errorf("project-all sign next obligation registry: %w", err)
 	}
-	delta := pipelineProjectAllDelta(chapter, simulation, plan, consumed, carried, created)
+	delta, err := pipelineProjectAllDelta(chapter, simulation, plan, consumed, carried, created)
+	if err != nil {
+		return domain.ProjectedChapterBundle{}, registry, err
+	}
+	var physicalBefore *domain.WorldPhysicalStateV2
+	if simulation.PhysicalState != nil {
+		sources := domain.ProjectedChapterBundle{CharacterAgentEvidence: artifacts.CharacterAgentEvidence, CharacterActivationEvidence: artifacts.CharacterActivationEvidence}
+		stimulus := sources.CharacterOpeningStimulus()
+		if stimulus == nil || stimulus.PhysicalState == nil {
+			return domain.ProjectedChapterBundle{}, registry, fmt.Errorf("physical simulation bundle requires its arbitrated predecessor state")
+		}
+		physicalBefore = stimulus.PhysicalState
+		if err := domain.ValidateWorldPhysicalStateV2(*physicalBefore); err != nil {
+			return domain.ProjectedChapterBundle{}, registry, err
+		}
+	}
 	if err := validatePipelineProjectAllRevealBudget(plan); err != nil {
 		return domain.ProjectedChapterBundle{}, registry, err
 	}
@@ -140,32 +162,33 @@ func buildPipelineProjectedChapterBundle(
 		return domain.ProjectedChapterBundle{}, registry, err
 	}
 	bundle := domain.ProjectedChapterBundle{
-		Version:                  domain.ProjectedChapterBundleV2Version,
-		GenerationID:             generation.GenerationID,
-		Chapter:                  chapter,
-		Authority:                domain.ProjectedAuthorityV2,
-		State:                    domain.ProjectedStateV2,
-		ProjectionLevel:          domain.FormalProjectionLevelV2,
-		PreviousBundleDigest:     previousBundleDigest,
-		ProjectedPreStateRoot:    preStateRoot,
-		ChapterWorldSimulation:   simulation,
-		CharacterAgentEvidence:   artifacts.CharacterAgentEvidence,
-		ChapterPlan:              plan,
-		FormalWorldSimulation:    pipelineFormalWorldSimulationV2(simulation),
-		POVPlan:                  pipelinePOVPlanV2(simulation, plan),
-		HardRenderContract:       pipelineHardRenderContractV2(plan, simulation, delta),
-		SourceBindings:           pipelineSourceBindingsV2(outline, plan, artifacts.RAGFactReceipt, artifacts.CraftRecallReceipt),
-		RAGFactReceipt:           artifacts.RAGFactReceipt,
-		RAGFactReceiptDigest:     factDigest,
-		CraftRecallReceipt:       artifacts.CraftRecallReceipt,
-		CraftRecallReceiptDigest: craftDigest,
-		PlanningContextDigest:    artifacts.PlanningContextDigest,
-		ObligationsConsumed:      consumed,
-		ObligationsCreated:       created,
-		ObligationsCarried:       carried,
-		ProjectedDelta:           delta,
-		ProjectedPostStateRoot:   postStateRoot,
-		RenderContext:            append(json.RawMessage(nil), artifacts.RenderContext...),
+		Version:                     domain.ProjectedChapterBundleV2Version,
+		GenerationID:                generation.GenerationID,
+		Chapter:                     chapter,
+		Authority:                   domain.ProjectedAuthorityV2,
+		State:                       domain.ProjectedStateV2,
+		ProjectionLevel:             domain.FormalProjectionLevelV2,
+		PreviousBundleDigest:        previousBundleDigest,
+		ProjectedPreStateRoot:       preStateRoot,
+		ChapterWorldSimulation:      simulation,
+		CharacterAgentEvidence:      artifacts.CharacterAgentEvidence,
+		CharacterActivationEvidence: artifacts.CharacterActivationEvidence,
+		ChapterPlan:                 plan,
+		FormalWorldSimulation:       pipelineFormalWorldSimulationV2(simulation, physicalBefore),
+		POVPlan:                     pipelinePOVPlanV2(simulation, plan),
+		HardRenderContract:          pipelineHardRenderContractV2(plan, simulation, delta),
+		SourceBindings:              pipelineSourceBindingsV2(outline, plan, artifacts.RAGFactReceipt, artifacts.CraftRecallReceipt),
+		RAGFactReceipt:              artifacts.RAGFactReceipt,
+		RAGFactReceiptDigest:        factDigest,
+		CraftRecallReceipt:          artifacts.CraftRecallReceipt,
+		CraftRecallReceiptDigest:    craftDigest,
+		PlanningContextDigest:       artifacts.PlanningContextDigest,
+		ObligationsConsumed:         consumed,
+		ObligationsCreated:          created,
+		ObligationsCarried:          carried,
+		ProjectedDelta:              delta,
+		ProjectedPostStateRoot:      postStateRoot,
+		RenderContext:               append(json.RawMessage(nil), artifacts.RenderContext...),
 	}
 	bundle.RenderContext, err = augmentPipelineProjectAllRenderContext(bundle.RenderContext, bundle)
 	if err != nil {
@@ -198,24 +221,37 @@ func pipelineProjectAllSourcesContainExact(sources []string, token string) bool 
 	return false
 }
 
-func pipelineFormalWorldSimulationV2(sim domain.ChapterWorldSimulation) domain.FormalWorldSimulationV2 {
+func pipelineFormalWorldSimulationV2(sim domain.ChapterWorldSimulation, physicalBefore ...*domain.WorldPhysicalStateV2) domain.FormalWorldSimulationV2 {
 	formal := domain.FormalWorldSimulationV2{
 		SimulationID:     sim.SimulationID,
 		AvailableChoices: compactProjectAllStrings(sim.ProtagonistProjection.AvailableOptions),
 		ChosenDecision:   fallbackProjectAllText(sim.ProtagonistProjection.ChosenDecision, firstProjectAllOption(sim.ProtagonistProjection.AvailableOptions)),
 		TimeAdvance:      strings.TrimSpace(sim.TimeWindow),
 	}
-	for i, decision := range sim.CharacterDecisions {
+	for _, decision := range sim.CharacterDecisions {
 		name := strings.TrimSpace(decision.Character)
 		if name == "" {
 			continue
 		}
+		initialLocation := decision.Location
+		if sim.PhysicalState != nil {
+			initialLocation = ""
+			if len(physicalBefore) > 0 && physicalBefore[0] != nil && decision.PostState != nil {
+				for _, actor := range physicalBefore[0].Actors {
+					if actor.AgentID == decision.PostState.AgentID {
+						initialLocation = actor.Location
+						break
+					}
+				}
+			}
+		}
+		locationID := pipelineProjectAllStableID("initial", sim.Chapter, name, "location")
 		formal.InitialConditions = append(formal.InitialConditions,
 			domain.SimulationStateFactV2{
-				ID:      pipelineProjectAllStableID("initial", sim.Chapter, name, "location"),
+				ID:      locationID,
 				Subject: name,
 				Field:   "location",
-				Value:   fallbackProjectAllText(decision.Location, "location_unknown"),
+				Value:   fallbackProjectAllText(initialLocation, "location_unknown"),
 			},
 			domain.SimulationStateFactV2{
 				ID:      pipelineProjectAllStableID("initial", sim.Chapter, name, "goal"),
@@ -228,21 +264,25 @@ func pipelineFormalWorldSimulationV2(sim domain.ChapterWorldSimulation) domain.F
 		if text := strings.TrimSpace(decision.KnowledgeBoundary); text != "" {
 			known = append(known, text)
 		}
+		var unknown []string
+		if name == strings.TrimSpace(sim.ProtagonistProjection.Protagonist) {
+			unknown = compactProjectAllStrings(sim.ProtagonistProjection.HiddenPressures)
+		}
 		formal.Actors = append(formal.Actors, domain.SimulationActorV2{
 			CharacterID:      name,
 			Motivation:       fallbackProjectAllText(decision.CurrentGoal, decision.DecisionReason),
 			KnownFacts:       known,
-			UnknownFacts:     compactProjectAllStrings(sim.ProtagonistProjection.HiddenPressures),
+			UnknownFacts:     unknown,
 			OffscreenState:   fallbackProjectAllText(decision.StateAfter, decision.CompletionState),
 			AvailableActions: fallbackProjectAllStrings(decision.AvailableOptions, fallbackProjectAllText(decision.Decision, decision.Action)),
 		})
-		causes := []string{formal.InitialConditions[max(0, len(formal.InitialConditions)-2)].ID}
+		causes := []string{locationID}
 		downstream := strings.TrimSpace(decision.StateAfter)
 		if len(decision.ButterflyEffects) > 0 {
 			downstream = strings.TrimSpace(decision.ButterflyEffects[0].Effect)
 		}
 		formal.CausalSteps = append(formal.CausalSteps, domain.SimulationCausalStepV2{
-			ID:               pipelineProjectAllStableID("causal", sim.Chapter, name, fmt.Sprint(i)),
+			ID:               pipelineProjectAllStableID("causal", sim.Chapter, name, "decision"),
 			CauseIDs:         causes,
 			ActorID:          name,
 			Decision:         fallbackProjectAllText(decision.Decision, decision.Action),
@@ -255,18 +295,25 @@ func pipelineFormalWorldSimulationV2(sim domain.ChapterWorldSimulation) domain.F
 			Field:   "state",
 			Value:   fallbackProjectAllText(decision.StateAfter, decision.CompletionState),
 		})
-		if location := strings.TrimSpace(decision.Location); location != "" {
+		if location := strings.TrimSpace(initialLocation); location != "" {
+			formal.LocationFlow = appendUniqueProjectAllString(formal.LocationFlow, location)
+		}
+		if sim.PhysicalState != nil {
+			location := strings.TrimSpace(pipelineProjectAllPostLocation(sim, decision))
+			formal.TerminalConditions = append(formal.TerminalConditions, domain.SimulationStateFactV2{
+				ID: pipelineProjectAllStableID("terminal", sim.Chapter, name, "location"), Subject: name, Field: "location", Value: location,
+			})
 			formal.LocationFlow = appendUniqueProjectAllString(formal.LocationFlow, location)
 		}
 	}
 	if len(formal.AvailableChoices) < 2 {
-		for _, decision := range sim.CharacterDecisions {
+		if decision, ok := projectAllDecisionForCharacter(sim, sim.ProtagonistProjection.Protagonist); ok {
 			for _, option := range decision.AvailableOptions {
 				formal.AvailableChoices = appendUniqueProjectAllString(formal.AvailableChoices, option)
 			}
 		}
 	}
-	if len(formal.AvailableChoices) < 2 {
+	if len(formal.AvailableChoices) < 2 && sim.Version < 2 {
 		formal.AvailableChoices = appendUniqueProjectAllString(formal.AvailableChoices, "保持前态并暂不扩大行动")
 	}
 	for _, choice := range formal.AvailableChoices {
@@ -293,16 +340,25 @@ func pipelinePOVPlanV2(sim domain.ChapterWorldSimulation, plan domain.ChapterPla
 		Unknowns:          compactProjectAllStrings(append(sim.ProtagonistProjection.HiddenPressures, plan.CausalSimulation.InformationGaps...)),
 		TimeAdvance:       strings.TrimSpace(sim.TimeWindow),
 	}
+	initialByCharacter := make(map[string]domain.CharacterSimulationState)
 	for _, initial := range plan.CausalSimulation.InitialState {
+		initialByCharacter[strings.TrimSpace(initial.Character)] = initial
+	}
+	for _, decision := range sim.CharacterDecisions {
+		name := strings.TrimSpace(decision.Character)
+		if name == "" {
+			continue
+		}
+		initial := initialByCharacter[name]
 		out.Motivations = append(out.Motivations, domain.POVCharacterMotivationV2{
-			CharacterID: strings.TrimSpace(initial.Character),
-			Goal:        fallbackProjectAllText(initial.CurrentGoal, initial.ActionTendency),
-			Pressure:    fallbackProjectAllText(initial.Pressure, initial.PrivateBoundary),
-			Choice:      fallbackProjectAllText(initial.LikelyAction, plan.CausalSimulation.ProtagonistDecision),
+			CharacterID: name,
+			Goal:        fallbackProjectAllText(decision.CurrentGoal, initial.CurrentGoal),
+			Pressure:    fallbackProjectAllText(decision.Pressure, initial.Pressure),
+			Choice:      fallbackProjectAllText(decision.Decision, decision.Action),
 		})
 	}
 	for _, decision := range sim.CharacterDecisions {
-		if decision.Character == protagonist && len(sim.CharacterDecisions) > 1 {
+		if strings.TrimSpace(decision.Character) == protagonist && len(sim.CharacterDecisions) > 1 {
 			continue
 		}
 		out.OffscreenStates = append(out.OffscreenStates, domain.POVOffscreenStateV2{
@@ -346,8 +402,7 @@ func pipelinePOVPlanV2(sim domain.ChapterWorldSimulation, plan domain.ChapterPla
 			Choice:      plan.CausalSimulation.ProtagonistDecision,
 		}}
 	}
-	if len(out.OffscreenStates) == 0 && len(sim.CharacterDecisions) > 0 {
-		decision := sim.CharacterDecisions[0]
+	if decision, ok := projectAllDecisionForCharacter(sim, protagonist); len(out.OffscreenStates) == 0 && ok {
 		out.OffscreenStates = []domain.POVOffscreenStateV2{{
 			CharacterID:  decision.Character,
 			State:        fallbackProjectAllText(decision.StateAfter, decision.CompletionState),
@@ -553,8 +608,17 @@ func pipelineProjectAllDelta(
 	sim domain.ChapterWorldSimulation,
 	plan domain.ChapterPlan,
 	consumed, carried, created []string,
-) domain.ProjectedDelta {
+) (domain.ProjectedDelta, error) {
 	delta := domain.ProjectedDelta{Version: domain.ProjectedDeltaV2Version}
+	physical, err := pipelineProjectAllPhysicalState(sim)
+	if err != nil {
+		return delta, err
+	}
+	if physical != nil {
+		if err := appendPipelineProjectAllPhysicalDelta(&delta, chapter, sim, *physical); err != nil {
+			return delta, err
+		}
+	}
 	for i, outcome := range plan.CausalSimulation.OutcomeShift {
 		delta.Timeline = append(delta.Timeline, pipelineProjectAllMutation(
 			"timeline", chapter, fmt.Sprint(i), "chapter", "outcome", "advance", outcome, plan.Goal,
@@ -564,6 +628,14 @@ func pipelineProjectAllDelta(
 		delta.Timeline = append(delta.Timeline, pipelineProjectAllMutation(
 			"timeline", chapter, "contract", "chapter", "outcome", "advance", plan.Hook, plan.Goal,
 		))
+	}
+	if sim.StoryTime != nil {
+		clock := pipelineProjectAllMutation(
+			"timeline", chapter, "world-clock", "world", "story_day", "advance",
+			strconv.FormatFloat(sim.StoryTime.EndDay, 'g', -1, 64), "world arbitration",
+		)
+		clock.Before = strconv.FormatFloat(sim.StoryTime.StartDay, 'g', -1, 64)
+		delta.Timeline = append(delta.Timeline, clock)
 	}
 	for _, decision := range sim.CharacterDecisions {
 		// hold_baseline is an authority/control record proving that an
@@ -575,17 +647,17 @@ func pipelineProjectAllDelta(
 			continue
 		}
 		name := strings.TrimSpace(decision.Character)
-		if state := strings.TrimSpace(decision.StateAfter); state != "" {
+		if state := strings.TrimSpace(decision.StateAfter); physical == nil && state != "" {
 			delta.CharacterState = append(delta.CharacterState, pipelineProjectAllMutation(
 				"character", chapter, name, name, "state", "update", state, decision.Decision,
 			))
 		}
-		if location := strings.TrimSpace(decision.Location); location != "" {
+		if location := strings.TrimSpace(pipelineProjectAllPostLocation(sim, decision)); location != "" {
 			delta.Locations = append(delta.Locations, pipelineProjectAllMutation(
 				"location", chapter, name, name, "location", "set", location, decision.Action,
 			))
 		}
-		if knowledge := strings.TrimSpace(decision.KnowledgeBoundary); knowledge != "" {
+		if knowledge := strings.TrimSpace(decision.KnowledgeBoundary); physical == nil && knowledge != "" {
 			delta.Knowledge = append(delta.Knowledge, pipelineProjectAllMutation(
 				"knowledge", chapter, name, name, "knowledge_boundary", "set", knowledge, decision.DecisionReason,
 			))
@@ -604,6 +676,11 @@ func pipelineProjectAllDelta(
 		delta.Relationships = append(delta.Relationships, mutation)
 	}
 	for _, resource := range plan.CausalSimulation.StructuralResources {
+		if physical != nil {
+			// Narrative resource pressure is still part of the plan, but is
+			// not an arbitrated physical balance or an accepted resource delta.
+			continue
+		}
 		if strings.TrimSpace(resource.Resource) == "" {
 			continue
 		}
@@ -640,7 +717,7 @@ func pipelineProjectAllDelta(
 			"obligation", chapter, id, id, "state", "carry", "open", "not due in this chapter",
 		))
 	}
-	return domain.NormalizeProjectedDeltaV2(delta)
+	return domain.NormalizeProjectedDeltaV2(delta), nil
 }
 
 func pipelineProjectAllAuthorityNoOp(decision domain.CharacterWorldDecision) bool {
@@ -712,7 +789,18 @@ func pipelineProjectAllCreateObligations(
 	registry domain.ObligationRegistryV2,
 ) ([]string, domain.ObligationRegistryV2, error) {
 	created := []string{}
-	add := func(kind domain.ObligationKindV2, contract string, consumer int, hard bool) error {
+	createdIDs := make(map[string]bool)
+	existingByID := make(map[string]domain.ObligationV2, len(registry.Obligations))
+	for _, existing := range registry.Obligations {
+		existingByID[existing.ID] = existing
+	}
+	markCreated := func(id string) {
+		if !createdIDs[id] {
+			createdIDs[id] = true
+			created = append(created, id)
+		}
+	}
+	add := func(kind domain.ObligationKindV2, contract string, consumer int, hard bool, sourceDigest string) error {
 		contract = strings.TrimSpace(contract)
 		if contract == "" || consumer <= plan.Chapter {
 			return nil
@@ -730,29 +818,37 @@ func pipelineProjectAllCreateObligations(
 		if err != nil {
 			return err
 		}
-		for _, existing := range registry.Obligations {
-			if existing.ID == id {
-				// Exact replay after a registry-before-bundle crash must rebuild
-				// the same bundle, including its created-obligation list.
-				if existing.Origin.GenerationID == generation.GenerationID &&
-					existing.Origin.Chapter == plan.Chapter {
-					created = append(created, id)
-				}
-				return nil
-			}
-		}
 		hardness := domain.ObligationSoftV2
 		if hard {
 			hardness = domain.ObligationHardV2
 		}
-		registry.Obligations = append(registry.Obligations, domain.ObligationV2{
+		if existing, ok := existingByID[id]; ok {
+			// Exact replay after a registry-before-bundle crash must rebuild
+			// the same bundle, including each created obligation exactly once.
+			if existing.Origin.GenerationID == generation.GenerationID &&
+				existing.Origin.Chapter == plan.Chapter {
+				if existing.DueWindow.FromChapter != consumer || existing.DueWindow.ToChapter != consumer ||
+					existing.DueWindow.TerminalResolution || existing.Hardness != hardness ||
+					len(existing.ConsumerChapters) != 1 || existing.ConsumerChapters[0] != consumer ||
+					(sourceDigest != "" && existing.Origin.SourceDigest != sourceDigest) {
+					return fmt.Errorf("project-all chapter %d obligation %s has conflicting source, consumer or hardness; refusing to discard a distinct obligation", plan.Chapter, id)
+				}
+				markCreated(id)
+			}
+			return nil
+		}
+		originDigest, evidenceDigest := pipelineProjectAllDigest(contract), pipelineProjectAllDigest(plan.Hook)
+		if sourceDigest != "" {
+			originDigest, evidenceDigest = sourceDigest, sourceDigest
+		}
+		obligation := domain.ObligationV2{
 			ID:       id,
 			Kind:     kind,
 			Contract: contract,
 			Origin: domain.ObligationOriginV2{
 				GenerationID: generation.GenerationID,
 				Chapter:      plan.Chapter,
-				SourceDigest: pipelineProjectAllDigest(contract),
+				SourceDigest: originDigest,
 			},
 			DueWindow: domain.ObligationDueWindowV2{
 				FromChapter: consumer,
@@ -763,17 +859,20 @@ func pipelineProjectAllCreateObligations(
 			ConsumerChapters: []int{consumer},
 			Evidence: []domain.ObligationEvidenceV2{{
 				Chapter:      plan.Chapter,
-				SourceDigest: pipelineProjectAllDigest(plan.Hook),
+				SourceDigest: evidenceDigest,
 				Detail:       contract,
 			}},
-		})
-		created = append(created, id)
+		}
+		registry.Obligations = append(registry.Obligations, obligation)
+		existingByID[id] = obligation
+		markCreated(id)
 		return nil
 	}
 	for _, decision := range sim.CharacterDecisions {
 		for _, effect := range decision.ButterflyEffects {
 			if effect.ArrivalChapter > plan.Chapter {
-				if err := add(domain.ObligationCharacterV2, effect.Effect, effect.ArrivalChapter, effect.Visibility != "hidden"); err != nil {
+				contract, sourceDigest := pipelineProjectAllCharacterObligationSource(sim, decision, effect)
+				if err := add(domain.ObligationCharacterV2, contract, effect.ArrivalChapter, effect.Visibility != "hidden", sourceDigest); err != nil {
 					return nil, registry, err
 				}
 			}
@@ -781,14 +880,14 @@ func pipelineProjectAllCreateObligations(
 	}
 	for _, chain := range plan.CausalSimulation.EvidenceChains {
 		if chain.ChapterToResolve > plan.Chapter {
-			if err := add(domain.ObligationRevealV2, chain.Event+" → "+chain.Evidence, chain.ChapterToResolve, true); err != nil {
+			if err := add(domain.ObligationRevealV2, chain.Event+" → "+chain.Evidence, chain.ChapterToResolve, true, ""); err != nil {
 				return nil, registry, err
 			}
 		}
 	}
 	for _, step := range plan.CausalSimulation.ReaderRewardPlan.RewardLadder {
 		if step.Chapter > plan.Chapter {
-			if err := add(domain.ObligationResourceV2, step.Reward+"；代价："+step.Cost, step.Chapter, true); err != nil {
+			if err := add(domain.ObligationResourceV2, step.Reward+"；代价："+step.Cost, step.Chapter, true, ""); err != nil {
 				return nil, registry, err
 			}
 		}
@@ -887,12 +986,29 @@ func projectAllLiteraryKnowledgeBoundary(plan domain.ChapterPlan) string {
 }
 
 func firstProjectAllLocation(sim domain.ChapterWorldSimulation) string {
-	for _, decision := range sim.CharacterDecisions {
-		if strings.TrimSpace(decision.Location) != "" {
-			return decision.Location
-		}
+	if decision, ok := projectAllDecisionForCharacter(sim, sim.ProtagonistProjection.Protagonist); ok {
+		return strings.TrimSpace(pipelineProjectAllPostLocation(sim, decision))
 	}
-	return "本章正式计划限定的连续空间"
+	return "" // Missing/ambiguous POV identity must not borrow another actor's location.
+}
+
+func projectAllDecisionForCharacter(sim domain.ChapterWorldSimulation, character string) (domain.CharacterWorldDecision, bool) {
+	character = strings.TrimSpace(character)
+	var matched domain.CharacterWorldDecision
+	found := false
+	if character == "" {
+		return matched, false
+	}
+	for _, decision := range sim.CharacterDecisions {
+		if strings.TrimSpace(decision.Character) != character {
+			continue
+		}
+		if found {
+			return domain.CharacterWorldDecision{}, false
+		}
+		matched, found = decision, true
+	}
+	return matched, found
 }
 
 func pipelineProjectAllRelationshipChanges(plan domain.ChapterPlan) []string {

@@ -152,6 +152,13 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err != nil {
 		return fmt.Errorf("outline-all parse compass estimated_scale: %w", err)
 	}
+	target, wordContractDerived, err := preparePipelineOutlineAllShortWordContract(live, compass, target)
+	if err != nil {
+		return err
+	}
+	if wordContractDerived {
+		fmt.Fprintln(os.Stderr, "[pipeline:outline-all] 已按固定章数和单章字数范围冻结短篇全书字数合同")
+	}
 	if generationID, created, err := ensurePipelineOutlineAllGeneration(
 		live,
 		zeroSimulationGenerationID(time.Now().UTC().Format(time.RFC3339Nano)),
@@ -242,6 +249,11 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		}
 	} else if existingCandidateReceipt.SourceSnapshotRoot != sourceRoot {
 		return fmt.Errorf("outline-all recovered candidate does not bind the current live baseline")
+	}
+	if restored, err := recoverPipelineOutlineAllLegacyStructurePhase(live, candidate, existingCandidateReceipt, protectedRoot, stableProgressRoot); err != nil {
+		return err
+	} else if restored {
+		fmt.Fprintln(os.Stderr, "[pipeline:outline-all] 已恢复旧 plan_structure 宿主误改的章零阶段，沿用已验证的首条操作回执")
 	}
 	candidateProtected, err := pipelineOutlineAllProtectedCanonRoot(candidateDir)
 	if err != nil {

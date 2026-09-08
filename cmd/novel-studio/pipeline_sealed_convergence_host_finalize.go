@@ -223,6 +223,15 @@ func pipelineSealedConvergenceTryHostFinalize(
 		return false, fmt.Errorf("sealed convergence persist Host finalize invocation 1/1: %w", err)
 	}
 	if _, err := tools.NewPlanDetailsTool(st).Execute(context.Background(), args); err != nil {
+		if errors.Is(err, tools.ErrPlanGroundingReviewRequired) {
+			// The one Host dispatch has durably staged the partial but consumed
+			// no access receipt. Re-enter only the existing journal-recovery
+			// branch (ToolDispatches == 1); it cannot dispatch this tool again.
+			// That branch validates the pre-consume proof and returns control to
+			// the remaining explicitly authorized Planner lane, never a hidden
+			// judge call inside this Host-only operation.
+			return pipelineSealedConvergenceTryHostFinalize(promptBundle, style, st, chapter, intent, eligibility)
+		}
 		return false, fmt.Errorf("sealed convergence Host-only plan_details finalize failed; no model retry permitted: %w", err)
 	}
 	cp, err = tools.CurrentChapterPlanCausalCheckpoint(store.NewStore(st.Dir()), chapter)

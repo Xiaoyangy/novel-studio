@@ -57,7 +57,7 @@ func CurrentChapterPlanCausalCheckpoint(st *store.Store, chapter int) (*domain.C
 		return nil, fmt.Errorf("读取第 %d 章正式 plan 以核对 causal binding 失败: %w: %w",
 			chapter, errs.ErrStoreRead, err)
 	}
-	requiresSimulation := chapterWorldSimulationRequired(st) ||
+	requiresSimulation := chapterWorldSimulationRequired(st, chapter) ||
 		(formalPlan != nil && strings.TrimSpace(formalPlan.CausalSimulation.WorldSimulationID) != "")
 	if !requiresSimulation {
 		// Legacy projects may retain an optional, pre-checkpoint simulation
@@ -74,6 +74,11 @@ func CurrentChapterPlanCausalCheckpoint(st *store.Store, chapter int) (*domain.C
 			"第 %d 章 chapter_world_simulation checkpoint(seq=%d) 晚于当前正式 plan checkpoint(seq=%d)；必须基于该 simulation 重新 finalize POV plan 后才能写入正文: %w",
 			chapter, simulation.Seq, plan.Seq, errs.ErrToolPrecondition,
 		)
+	}
+	if formalPlan != nil {
+		if err := validateCurrentPlanGrounding(st, *formalPlan); err != nil {
+			return nil, fmt.Errorf("第 %d 章计划裁决忠实性证明无效: %w", chapter, err)
+		}
 	}
 	return plan, nil
 }

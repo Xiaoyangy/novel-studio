@@ -136,7 +136,7 @@ var (
 	volumeScaleRangeRE  = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:卷|volumes?)`)
 	chapterScaleRangeRE = regexp.MustCompile(`(?i)(\d+)\s*[-–—~～至到]\s*(\d+)\s*(?:章|chapters?)`)
 	wordScaleRangeRE    = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(万)?\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*(万)?\s*(?:中文字|汉字|字|words?)`)
-	storyTimeRangeRE    = regexp.MustCompile(`(?i)(?:\d+(?:\.\d+)?\s*[-–—~～至到]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:年|years?|日|天|days?)`)
+	storyTimeRangeRE    = regexp.MustCompile(`(?i)(?:[0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+)(?:\s*[-–—~～至到]\s*(?:[0-9]+(?:\.[0-9]+)?|[零〇一二三四五六七八九十两]+))?\s*(?:年|years?|日|天|days?|小时|hours?|hrs?|分钟|minutes?|mins?|秒钟?|seconds?|secs?)`)
 )
 
 var (
@@ -420,10 +420,13 @@ func ResolveBookScaleTarget(value string, currentVolumes, currentChapters int) (
 	if currentChapters > target.TargetChapters {
 		target.TargetChapters = currentChapters
 	}
-	if target.TargetChapters < target.TargetVolumes*OutlineAllMinArcChapters {
+	// Each volume needs a nonempty model-planned arc. The legacy 8–16 chapter
+	// repair partition is not a scale requirement: it would reject otherwise
+	// valid short books before their one- or three-chapter arc can be planned.
+	if target.TargetChapters/OutlineAllMinPlanArcChapters < target.TargetVolumes {
 		return BookScaleTarget{}, fmt.Errorf(
 			"estimated scale target %d chapters cannot allocate at least one %d-chapter arc to %d volumes",
-			target.TargetChapters, OutlineAllMinArcChapters, target.TargetVolumes,
+			target.TargetChapters, OutlineAllMinPlanArcChapters, target.TargetVolumes,
 		)
 	}
 	minWords, maxWords, hasWordRange, err := parseBookWordScaleRange(value)

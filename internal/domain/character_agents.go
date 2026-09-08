@@ -3,22 +3,28 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 )
 
 const (
-	CharacterAgentRegistryVersion         = "character-agent-registry.v1"
-	CharacterAgentActivationVersion       = "character-agent-activation.v1"
-	WorldStimulusPacketVersion            = "world-stimulus-packet.v1"
-	CharacterObservationVersion           = "character-observation-packet.v1"
-	CharacterDecisionProposalVersion      = "character-decision-proposal.v1"
-	WorldArbitrationReceiptVersion        = "world-arbitration-receipt.v1"
-	CharacterAgentMemoryVersion           = "character-agent-memory.v1"
-	CharacterAgentEvidenceVersion         = "character-agent-evidence.v1"
-	CharacterAgentSuccessorPlanVersion    = "character-agent-successor-plan.v1"
-	CharacterAgentDecisionProtocolVersion = "character-agent-protocol.v1"
+	CharacterAgentRegistryVersion           = "character-agent-registry.v1"
+	CharacterAgentActivationVersion         = "character-agent-activation.v1"
+	WorldStimulusPacketVersion              = "world-stimulus-packet.v1"
+	CharacterObservationVersion             = "character-observation-packet.v1"
+	CharacterDecisionProposalVersion        = "character-decision-proposal.v1"
+	WorldArbitrationReceiptVersion          = "world-arbitration-receipt.v1"
+	CharacterAgentMemoryVersion             = "character-agent-memory.v1"
+	CharacterAgentEvidenceVersion           = "character-agent-evidence.v1"
+	CharacterHardConflictEvidenceVersion    = "character-hard-conflict-evidence.v1"
+	CharacterAgentSuccessorPlanVersion      = "character-agent-successor-plan.v1"
+	CharacterAgentDecisionProtocolVersion   = "character-agent-protocol.v1"
+	CharacterAgentDecisionProtocolV2Version = "character-agent-protocol.v2"
+	WorldStimulusPacketV2Version            = "world-stimulus-packet.v2"
+	CharacterObservationV2Version           = "character-observation-packet.v2"
+	WorldArbitrationReceiptV2Version        = "world-arbitration-receipt.v2"
 
 	CharacterAgentActive   = "active"
 	CharacterAgentSleeping = "sleeping"
@@ -56,6 +62,7 @@ type CharacterAgentSuccessorPlan struct {
 	ArcLastChapter        int            `json:"arc_last_chapter"`
 	BookLastChapter       int            `json:"book_last_chapter"`
 	ArbitrationDigest     string         `json:"arbitration_digest"`
+	ReadinessDigest       string         `json:"readiness_digest,omitempty"`
 	AcceptedCanonRoot     string         `json:"accepted_canon_root"`
 	EndingDirection       string         `json:"ending_direction"`
 	NonNegotiables        []string       `json:"non_negotiables"`
@@ -72,6 +79,11 @@ func ComputeCharacterAgentSuccessorPlanDigest(plan CharacterAgentSuccessorPlan) 
 }
 
 func FinalizeCharacterAgentSuccessorPlan(plan CharacterAgentSuccessorPlan) (CharacterAgentSuccessorPlan, error) {
+	if plan.ReadinessDigest != "" {
+		if err := validatePlanningV2Digest("successor readiness source", plan.ReadinessDigest); err != nil {
+			return plan, err
+		}
+	}
 	if plan.Version == "" {
 		plan.Version = CharacterAgentSuccessorPlanVersion
 	}
@@ -406,21 +418,24 @@ type WorldOperationalFaction struct {
 }
 
 type WorldStimulusPacket struct {
-	Version              string                     `json:"version"`
-	GenerationID         string                     `json:"generation_id"`
-	Chapter              int                        `json:"chapter"`
-	TimeWindow           string                     `json:"time_window"`
-	PublicFacts          []CharacterAgentFact       `json:"public_facts,omitempty"`
-	CurrentEvents        []CharacterAgentFact       `json:"current_events,omitempty"`
-	OperationalWorld     *WorldOperationalState     `json:"operational_world,omitempty"`
-	Mechanisms           []CodexMechanism           `json:"mechanisms,omitempty"`
-	CounterfactualTests  []CodexCounterfactualProbe `json:"counterfactual_tests,omitempty"`
-	WorldCoherenceDigest string                     `json:"world_coherence_digest,omitempty"`
-	HardContracts        []string                   `json:"hard_contracts,omitempty"`
-	SoftGuidance         []string                   `json:"soft_guidance,omitempty"`
-	Sources              []string                   `json:"sources,omitempty"`
-	GeneratedAt          string                     `json:"generated_at,omitempty"`
-	Digest               string                     `json:"digest"`
+	SelfEvaluationContext *CharacterSelfEvaluationContextV1 `json:"self_evaluation_context,omitempty"`
+	Version               string                            `json:"version"`
+	GenerationID          string                            `json:"generation_id"`
+	Chapter               int                               `json:"chapter"`
+	TimeWindow            string                            `json:"time_window"`
+	StoryClock            *StoryClockContext                `json:"story_clock,omitempty"`
+	PhysicalState         *WorldPhysicalStateV2             `json:"physical_state,omitempty"`
+	PublicFacts           []CharacterAgentFact              `json:"public_facts,omitempty"`
+	CurrentEvents         []CharacterAgentFact              `json:"current_events,omitempty"`
+	OperationalWorld      *WorldOperationalState            `json:"operational_world,omitempty"`
+	Mechanisms            []CodexMechanism                  `json:"mechanisms,omitempty"`
+	CounterfactualTests   []CodexCounterfactualProbe        `json:"counterfactual_tests,omitempty"`
+	WorldCoherenceDigest  string                            `json:"world_coherence_digest,omitempty"`
+	HardContracts         []string                          `json:"hard_contracts,omitempty"`
+	SoftGuidance          []string                          `json:"soft_guidance,omitempty"`
+	Sources               []string                          `json:"sources,omitempty"`
+	GeneratedAt           string                            `json:"generated_at,omitempty"`
+	Digest                string                            `json:"digest"`
 }
 
 func ComputeWorldStimulusPacketDigest(p WorldStimulusPacket) (string, error) {
@@ -429,15 +444,55 @@ func ComputeWorldStimulusPacketDigest(p WorldStimulusPacket) (string, error) {
 }
 
 func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, error) {
+	if err := validateWorkArtifactStimulusV1(p); err != nil {
+		return p, err
+	}
 	if p.Version == "" {
 		p.Version = WorldStimulusPacketVersion
 	}
-	if p.Version != WorldStimulusPacketVersion || p.Chapter <= 0 || strings.TrimSpace(p.GenerationID) == "" {
+	if (p.Version != WorldStimulusPacketVersion && p.Version != WorldStimulusPacketV2Version) || p.Chapter <= 0 || strings.TrimSpace(p.GenerationID) == "" {
 		return p, fmt.Errorf("world stimulus identity is incomplete")
+	}
+	if p.Version == WorldStimulusPacketV2Version {
+		if p.PhysicalState == nil {
+			return p, fmt.Errorf("v2 world stimulus requires physical_state")
+		}
+		state, err := FinalizeWorldPhysicalStateV2(*p.PhysicalState)
+		if err != nil {
+			return p, err
+		}
+		if HasCharacterSelfExperiencePolicyV2(p.Sources) {
+			state, err = PrepareCharacterSelfExperienceStateV2(state)
+			if err != nil {
+				return p, err
+			}
+		}
+		p.PhysicalState = &state
+		knownMechanisms := map[string]bool{}
+		for _, mechanism := range p.Mechanisms {
+			knownMechanisms[mechanism.ID] = true
+		}
+		for _, resource := range state.Resources {
+			for _, ref := range resource.AccessRequiresAny {
+				if ref == "" || !knownMechanisms[ref] {
+					return p, fmt.Errorf("resource access requires an unknown world mechanism %q", ref)
+				}
+			}
+		}
+	} else if p.PhysicalState != nil {
+		return p, fmt.Errorf("physical_state requires v2 world stimulus")
+	}
+	if p.StoryClock != nil {
+		if err := ValidateStoryClockContext(*p.StoryClock); err != nil {
+			return p, fmt.Errorf("world stimulus: %w", err)
+		}
 	}
 	p.HardContracts = normalizeV2Strings(p.HardContracts)
 	p.SoftGuidance = normalizeV2Strings(p.SoftGuidance)
 	p.Sources = normalizeV2Strings(p.Sources)
+	if err := validateSelfChronologyStimulusV1(p); err != nil {
+		return p, err
+	}
 	digest, err := ComputeWorldStimulusPacketDigest(p)
 	if err != nil {
 		return p, err
@@ -447,31 +502,37 @@ func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, er
 }
 
 type CharacterObservationPacket struct {
-	Version          string                     `json:"version"`
-	GenerationID     string                     `json:"generation_id"`
-	Chapter          int                        `json:"chapter"`
-	Round            int                        `json:"round"`
-	AgentID          string                     `json:"agent_id"`
-	Character        string                     `json:"character"`
-	Tier             string                     `json:"tier"`
-	TimeWindow       string                     `json:"time_window"`
-	Location         string                     `json:"location,omitempty"`
-	CurrentGoal      string                     `json:"current_goal"`
-	Pressure         string                     `json:"pressure"`
-	Resources        []string                   `json:"resources,omitempty"`
-	Relationships    []string                   `json:"relationships,omitempty"`
-	Commitments      []string                   `json:"commitments,omitempty"`
-	KnownFacts       []CharacterAgentFact       `json:"known_facts,omitempty"`
-	PerceivedEvents  []CharacterAgentFact       `json:"perceived_events,omitempty"`
-	PublicRules      []CharacterAgentFact       `json:"public_rules,omitempty"`
-	PublicMechanisms []CodexMechanism           `json:"public_mechanisms,omitempty"`
-	Memory           []CharacterAgentMemoryFact `json:"memory,omitempty"`
-	ConflictFeedback []string                   `json:"conflict_feedback,omitempty"`
-	StimulusDigest   string                     `json:"stimulus_digest"`
-	MemoryRoot       string                     `json:"memory_root,omitempty"`
-	Sources          []string                   `json:"sources,omitempty"`
-	GeneratedAt      string                     `json:"generated_at,omitempty"`
-	Digest           string                     `json:"digest"`
+	ArtifactViews           []CharacterArtifactViewV1           `json:"artifact_views,omitempty"`
+	OperationalObservations []CharacterOperationalObservationV1 `json:"operational_observations,omitempty"`
+	CycleContext            *CharacterObservationCycleContext   `json:"cycle_context,omitempty"`
+	Version                 string                              `json:"version"`
+	GenerationID            string                              `json:"generation_id"`
+	Chapter                 int                                 `json:"chapter"`
+	Round                   int                                 `json:"round"`
+	AgentID                 string                              `json:"agent_id"`
+	Character               string                              `json:"character"`
+	Tier                    string                              `json:"tier"`
+	TimeWindow              string                              `json:"time_window"`
+	Location                string                              `json:"location,omitempty"`
+	CurrentGoal             string                              `json:"current_goal"`
+	Pressure                string                              `json:"pressure"`
+	Resources               []string                            `json:"resources,omitempty"`
+	ResourceViews           []CharacterResourceViewV2           `json:"resource_views,omitempty"`
+	SelfExperiences         []CharacterSelfExperienceV2         `json:"self_experiences,omitempty"`
+	TaskProgress            []CharacterTaskProgressV2           `json:"task_progress,omitempty"`
+	Relationships           []string                            `json:"relationships,omitempty"`
+	Commitments             []string                            `json:"commitments,omitempty"`
+	KnownFacts              []CharacterAgentFact                `json:"known_facts,omitempty"`
+	PerceivedEvents         []CharacterAgentFact                `json:"perceived_events,omitempty"`
+	PublicRules             []CharacterAgentFact                `json:"public_rules,omitempty"`
+	PublicMechanisms        []CodexMechanism                    `json:"public_mechanisms,omitempty"`
+	Memory                  []CharacterAgentMemoryFact          `json:"memory,omitempty"`
+	ConflictFeedback        []string                            `json:"conflict_feedback,omitempty"`
+	StimulusDigest          string                              `json:"stimulus_digest"`
+	MemoryRoot              string                              `json:"memory_root,omitempty"`
+	Sources                 []string                            `json:"sources,omitempty"`
+	GeneratedAt             string                              `json:"generated_at,omitempty"`
+	Digest                  string                              `json:"digest"`
 }
 
 func (p CharacterObservationPacket) AllowedFactIDs() map[string]struct{} {
@@ -486,6 +547,35 @@ func (p CharacterObservationPacket) AllowedFactIDs() map[string]struct{} {
 	for _, fact := range p.Memory {
 		if fact.ID != "" {
 			out[fact.ID] = struct{}{}
+		}
+	}
+	if p.Version == CharacterObservationV2Version {
+		if HasCharacterWorkArtifactPolicyV1(p.Sources) {
+			for _, view := range p.ArtifactViews {
+				for _, claim := range view.Claims {
+					out[claim.ID] = struct{}{}
+				}
+				for _, signature := range view.Signatures {
+					out[signature.SignatureDigest] = struct{}{}
+				}
+			}
+		}
+		if HasCharacterOperationalAvailabilityPolicyV1(p.Sources) {
+			for _, observation := range p.OperationalObservations {
+				out[observation.ID] = struct{}{}
+			}
+		}
+		if HasCharacterSelfExperiencePolicyV2(p.Sources) {
+			for _, experience := range p.SelfExperiences {
+				out[experience.ID] = struct{}{}
+			}
+		}
+		for _, view := range p.ResourceViews {
+			for _, ref := range append(append([]string(nil), view.EvidenceRefs...), view.Perception.EvidenceRefs...) {
+				if ref != "" {
+					out[ref] = struct{}{}
+				}
+			}
 		}
 	}
 	return out
@@ -507,11 +597,51 @@ func ComputeCharacterObservationDigest(p CharacterObservationPacket) (string, er
 }
 
 func FinalizeCharacterObservationPacket(p CharacterObservationPacket) (CharacterObservationPacket, error) {
+	if err := validateWorkArtifactObservationV1(p); err != nil {
+		return p, err
+	}
+	if err := validateCharacterOperationalObservationPacketV1(p); err != nil {
+		return p, err
+	}
+	if err := validateCharacterObservationCycleContext(p); err != nil {
+		return p, err
+	}
 	if p.Version == "" {
 		p.Version = CharacterObservationVersion
 	}
-	if p.Version != CharacterObservationVersion || p.GenerationID == "" || p.Chapter <= 0 || p.Round <= 0 || p.AgentID == "" || p.Character == "" {
+	if (p.Version != CharacterObservationVersion && p.Version != CharacterObservationV2Version) || p.GenerationID == "" || p.Chapter <= 0 || p.Round <= 0 || p.AgentID == "" || p.Character == "" {
 		return p, fmt.Errorf("character observation identity is incomplete")
+	}
+	if p.Version == CharacterObservationV2Version {
+		if strings.TrimSpace(p.Location) == "" {
+			return p, fmt.Errorf("v2 character observation requires actual current location")
+		}
+		if err := ValidateCharacterResourceViewsV2(p.ResourceViews, p.Chapter); err != nil {
+			return p, err
+		}
+		if err := validateCharacterObservationSourceRefsV2(p); err != nil {
+			return p, err
+		}
+		if err := validateCharacterSelfObservationV2(p); err != nil {
+			return p, err
+		}
+	} else {
+		if len(p.ResourceViews) > 0 {
+			return p, fmt.Errorf("resource_views require v2 character observation")
+		}
+		if HasCharacterSelfChronologyPolicyV1(p.Sources) {
+			return p, fmt.Errorf("self chronology requires v2 character observation")
+		}
+		for _, fact := range p.SelfExperiences {
+			if fact.Evaluation != nil {
+				return p, fmt.Errorf("self evaluation cannot be embedded in a legacy observation")
+			}
+		}
+		for _, task := range p.TaskProgress {
+			if task.LatestAttemptStatus != "" {
+				return p, fmt.Errorf("attempt status cannot be embedded in a legacy observation")
+			}
+		}
 	}
 	if p.Round > 1 && len(p.ConflictFeedback) == 0 {
 		return p, fmt.Errorf("revision observation must contain conflict feedback")
@@ -535,32 +665,42 @@ func FinalizeCharacterObservationPacket(p CharacterObservationPacket) (Character
 }
 
 type CharacterDecisionProposal struct {
-	Version              string   `json:"version"`
-	GenerationID         string   `json:"generation_id"`
-	Chapter              int      `json:"chapter"`
-	Round                int      `json:"round"`
-	AgentID              string   `json:"agent_id"`
-	Character            string   `json:"character"`
-	ObservationDigest    string   `json:"observation_digest"`
-	Time                 string   `json:"time,omitempty"`
-	Location             string   `json:"location"`
-	CurrentGoal          string   `json:"current_goal"`
-	Pressure             string   `json:"pressure"`
-	Resources            []string `json:"resources,omitempty"`
-	AvailableOptions     []string `json:"available_options"`
-	RejectedOptions      []string `json:"rejected_options,omitempty"`
-	Decision             string   `json:"decision"`
-	DecisionReason       string   `json:"decision_reason"`
-	IntendedAction       string   `json:"intended_action"`
-	ActionDuration       string   `json:"action_duration"`
-	KnowledgeRefs        []string `json:"knowledge_refs"`
-	MechanismRefs        []string `json:"mechanism_refs,omitempty"`
-	ResourceClaims       []string `json:"resource_claims,omitempty"`
-	Constraints          []string `json:"constraints,omitempty"`
-	Contingencies        []string `json:"contingencies,omitempty"`
-	ExpectedConsequences []string `json:"expected_consequences,omitempty"`
-	SubmittedAt          string   `json:"submitted_at,omitempty"`
-	Digest               string   `json:"digest"`
+	ArtifactAccess       []CharacterArtifactAccessIntentV1          `json:"artifact_access,omitempty"`
+	ArtifactReads        []CharacterArtifactReadVersionV1           `json:"artifact_reads,omitempty"`
+	ArtifactSigns        []CharacterArtifactSignIntentV1            `json:"artifact_signs,omitempty"`
+	Version              string                                     `json:"version"`
+	SelfTasks            []CharacterSelfTaskV2                      `json:"self_tasks,omitempty"`
+	WorkContinuations    []CharacterWorkContinuationAuthorizationV1 `json:"work_continuations,omitempty"`
+	GenerationID         string                                     `json:"generation_id"`
+	Chapter              int                                        `json:"chapter"`
+	Round                int                                        `json:"round"`
+	AgentID              string                                     `json:"agent_id"`
+	Character            string                                     `json:"character"`
+	ObservationDigest    string                                     `json:"observation_digest"`
+	Time                 string                                     `json:"time,omitempty"`
+	Location             string                                     `json:"location"`
+	CurrentGoal          string                                     `json:"current_goal"`
+	Pressure             string                                     `json:"pressure"`
+	Resources            []string                                   `json:"resources,omitempty"`
+	AvailableOptions     []string                                   `json:"available_options"`
+	RejectedOptions      []string                                   `json:"rejected_options,omitempty"`
+	Decision             string                                     `json:"decision"`
+	DecisionReason       string                                     `json:"decision_reason"`
+	IntendedAction       string                                     `json:"intended_action"`
+	ActionDuration       string                                     `json:"action_duration"`
+	KnowledgeRefs        []string                                   `json:"knowledge_refs"`
+	MechanismRefs        []string                                   `json:"mechanism_refs,omitempty"`
+	ResourceClaims       []string                                   `json:"resource_claims,omitempty"`
+	ResourceEstimates    []ResourceEstimateV2                       `json:"resource_estimates,omitempty"`
+	ResourceMeasurements []ResourceMeasurementV2                    `json:"resource_measurements,omitempty"`
+	ResourceReports      []ResourceReportV2                         `json:"resource_reports,omitempty"`
+	Communications       []CharacterCommunicationV2                 `json:"communications,omitempty"`
+	ResourceReads        []ResourceReadRequestV2                    `json:"resource_reads,omitempty"`
+	Constraints          []string                                   `json:"constraints,omitempty"`
+	Contingencies        []string                                   `json:"contingencies,omitempty"`
+	ExpectedConsequences []string                                   `json:"expected_consequences,omitempty"`
+	SubmittedAt          string                                     `json:"submitted_at,omitempty"`
+	Digest               string                                     `json:"digest"`
 }
 
 func ComputeCharacterDecisionProposalDigest(p CharacterDecisionProposal) (string, error) {
@@ -574,6 +714,21 @@ func FinalizeCharacterDecisionProposal(p CharacterDecisionProposal, observation 
 	}
 	if p.Version != CharacterDecisionProposalVersion || p.GenerationID != observation.GenerationID || p.Chapter != observation.Chapter || p.Round != observation.Round || p.AgentID != observation.AgentID || p.Character != observation.Character || p.ObservationDigest != observation.Digest {
 		return p, fmt.Errorf("character proposal is not bound to its observation")
+	}
+	if err := ValidateCharacterArtifactIntentV1(p, observation); err != nil {
+		return p, err
+	}
+	if err := ValidateCharacterResourceIntentV2(p, observation); err != nil {
+		return p, err
+	}
+	if err := ValidateCharacterKnowledgeIntentV2(p, observation); err != nil {
+		return p, err
+	}
+	if err := ValidateCharacterSelfTaskIntentV2(p, observation); err != nil {
+		return p, err
+	}
+	if err := ValidateCharacterWorkContinuationIntentV1(p, observation); err != nil {
+		return p, err
 	}
 	if strings.TrimSpace(p.Location) == "" || strings.TrimSpace(p.CurrentGoal) == "" || strings.TrimSpace(p.Pressure) == "" || len(p.AvailableOptions) < 2 || strings.TrimSpace(p.Decision) == "" || strings.TrimSpace(p.DecisionReason) == "" || strings.TrimSpace(p.IntendedAction) == "" || strings.TrimSpace(p.ActionDuration) == "" || len(p.KnowledgeRefs) == 0 {
 		return p, fmt.Errorf("character proposal is incomplete")
@@ -616,20 +771,24 @@ type WorldArbitrationConflict struct {
 }
 
 type CharacterDecisionResolution struct {
-	AgentID          string                    `json:"agent_id"`
-	Character        string                    `json:"character"`
-	ProposalDigest   string                    `json:"proposal_digest"`
-	Decision         string                    `json:"decision"`
-	IntendedAction   string                    `json:"intended_action"`
-	ActionOrder      int                       `json:"action_order"`
-	Outcome          string                    `json:"outcome"` // success / partial / blocked
-	CompletionState  string                    `json:"completion_state"`
-	ImmediateResult  string                    `json:"immediate_result"`
-	StateAfter       string                    `json:"state_after"`
-	MechanismRefs    []string                  `json:"mechanism_refs,omitempty"`
-	VisibleToPOV     bool                      `json:"visible_to_pov,omitempty"`
-	ButterflyEffects []DecisionButterflyEffect `json:"butterfly_effects"`
-	ConflictIDs      []string                  `json:"conflict_ids,omitempty"`
+	ArtifactReadResults []CharacterArtifactReadResultV1      `json:"artifact_read_results,omitempty"`
+	ArtifactSignatures  []CharacterArtifactSignatureResultV1 `json:"artifact_signatures,omitempty"`
+	SelfExecutions      []CharacterSelfExecutionV2           `json:"self_executions,omitempty"`
+	AgentID             string                               `json:"agent_id"`
+	Character           string                               `json:"character"`
+	ProposalDigest      string                               `json:"proposal_digest"`
+	Decision            string                               `json:"decision"`
+	IntendedAction      string                               `json:"intended_action"`
+	ActionOrder         int                                  `json:"action_order"`
+	Outcome             string                               `json:"outcome"` // success / partial / blocked
+	CompletionState     string                               `json:"completion_state"`
+	ImmediateResult     string                               `json:"immediate_result"`
+	StateAfter          string                               `json:"state_after"`
+	PostState           *CharacterPhysicalStateV2            `json:"post_state,omitempty"`
+	MechanismRefs       []string                             `json:"mechanism_refs,omitempty"`
+	VisibleToPOV        bool                                 `json:"visible_to_pov,omitempty"`
+	ButterflyEffects    []DecisionButterflyEffect            `json:"butterfly_effects"`
+	ConflictIDs         []string                             `json:"conflict_ids,omitempty"`
 }
 
 type WorldArbitrationReceipt struct {
@@ -637,10 +796,14 @@ type WorldArbitrationReceipt struct {
 	GenerationID          string                        `json:"generation_id"`
 	Chapter               int                           `json:"chapter"`
 	Round                 int                           `json:"round"`
+	StoryTime             *StoryTimeChapterSchedule     `json:"story_time,omitempty"`
 	StimulusDigest        string                        `json:"stimulus_digest"`
 	ActivationDigest      string                        `json:"activation_digest"`
 	ProposalDigests       []string                      `json:"proposal_digests"`
 	Resolutions           []CharacterDecisionResolution `json:"resolutions"`
+	ResourceSettlements   []ResourceSettlementV2        `json:"resource_settlements,omitempty"`
+	ResourceDeliveries    []ResourceDeliveryV2          `json:"resource_deliveries,omitempty"`
+	PassiveReceptions     []CharacterPassiveReceptionV2 `json:"passive_receptions,omitempty"`
 	Conflicts             []WorldArbitrationConflict    `json:"conflicts,omitempty"`
 	HardContractStatus    string                        `json:"hard_contract_status"` // feasible / infeasible
 	HardContractConflicts []string                      `json:"hard_contract_conflicts,omitempty"`
@@ -655,17 +818,96 @@ func ComputeWorldArbitrationReceiptDigest(r WorldArbitrationReceipt) (string, er
 	return characterAgentDigest(r)
 }
 
+// This feedback copies only the bound proposal's identity and mismatched
+// intent fields, never the rejected candidate or either side's reasoning.
+func characterArbitrationIntentRewriteError(proposal CharacterDecisionProposal, resolution CharacterDecisionResolution) error {
+	const maxExpectedJSONBytes = 1536
+	var fields []string
+	add := func(field, expected string) {
+		encoded, _ := json.Marshal(expected)
+		if len(encoded) <= maxExpectedJSONBytes {
+			fields = append(fields, fmt.Sprintf("%s must exactly match original proposal.%s; expected_json=%s", field, field, encoded))
+			return
+		}
+		fields = append(fields, fmt.Sprintf("%s must exactly match original proposal.%s; original value omitted (utf8_bytes=%d, sha256:%x); copy that complete proposal field, not a shortened value", field, field, len(expected), sha256.Sum256([]byte(expected))))
+	}
+	if resolution.Decision != proposal.Decision {
+		add("decision", proposal.Decision)
+	}
+	if resolution.IntendedAction != proposal.IntendedAction {
+		add("intended_action", proposal.IntendedAction)
+	}
+	agentID := proposal.AgentID
+	if len(agentID) > 128 {
+		agentID = fmt.Sprintf("<agent utf8_bytes=%d sha256:%x>", len(agentID), sha256.Sum256([]byte(agentID)))
+	}
+	encodedCharacter, _ := json.Marshal(proposal.Character)
+	characterLabel := string(encodedCharacter)
+	if len(encodedCharacter) > 256 {
+		characterLabel = fmt.Sprintf("<name utf8_bytes=%d sha256:%x>", len(proposal.Character), sha256.Sum256([]byte(proposal.Character)))
+	}
+	return fmt.Errorf("arbiter rewrote intent for %s: character=%s; %s", agentID, characterLabel, strings.Join(fields, "; "))
+}
+
 func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldStimulusPacket, activation CharacterAgentActivation, proposals []CharacterDecisionProposal, maxRevisionRounds int) (WorldArbitrationReceipt, error) {
+	if HasCharacterWorkArtifactPolicyV1(stimulus.Sources) {
+		return r, fmt.Errorf("work artifacts require the verified v3 arbitration round entry")
+	}
+	return finalizeWorldArbitrationReceiptWithPriorSources(r, stimulus, activation, proposals, maxRevisionRounds, nil)
+}
+
+// priorSources is private Host-verified authority, not a model-provided round
+// override. The legacy public entry point always passes nil and keeps its exact
+// same-cycle round rule and serialization.
+func finalizeWorldArbitrationReceiptWithPriorSources(r WorldArbitrationReceipt, stimulus WorldStimulusPacket, activation CharacterAgentActivation, proposals []CharacterDecisionProposal, maxRevisionRounds int, priorSources map[string]string) (WorldArbitrationReceipt, error) {
 	if r.Version == "" {
 		r.Version = WorldArbitrationReceiptVersion
 	}
-	if r.Version != WorldArbitrationReceiptVersion || r.GenerationID != stimulus.GenerationID || r.Chapter != stimulus.Chapter || r.StimulusDigest != stimulus.Digest || r.ActivationDigest != activation.Digest || r.Round <= 0 || r.Round > maxRevisionRounds+1 {
+	if (r.Version != WorldArbitrationReceiptVersion && r.Version != WorldArbitrationReceiptV2Version) || r.GenerationID != stimulus.GenerationID || r.Chapter != stimulus.Chapter || r.StimulusDigest != stimulus.Digest || r.ActivationDigest != activation.Digest || r.Round <= 0 || r.Round > maxRevisionRounds+1 {
 		return r, fmt.Errorf("world arbitration identity is incomplete")
+	}
+	if (r.Version == WorldArbitrationReceiptV2Version) != (stimulus.Version == WorldStimulusPacketV2Version) {
+		return r, fmt.Errorf("world arbitration/stimulus protocol versions do not match")
+	}
+	if len(r.PassiveReceptions) > 0 {
+		sleeping := map[string]bool{}
+		for _, entry := range activation.Entries {
+			sleeping[entry.AgentID] = entry.State == CharacterAgentSleeping
+		}
+		for _, reception := range r.PassiveReceptions {
+			if !sleeping[reception.ToAgentID] {
+				return r, fmt.Errorf("passive reception recipient is not in this cycle's registered sleeping baseline")
+			}
+		}
+	}
+	if r.Version == WorldArbitrationReceiptVersion {
+		if len(r.ResourceSettlements)+len(r.ResourceDeliveries)+len(r.PassiveReceptions) > 0 {
+			return r, fmt.Errorf("resource_settlements require v2 arbitration")
+		}
+		for _, resolution := range r.Resolutions {
+			if resolution.PostState != nil || len(resolution.SelfExecutions) > 0 {
+				return r, fmt.Errorf("post_state requires v2 arbitration")
+			}
+		}
+	}
+	if err := ValidateStoryTimeForClock(r.Chapter, r.StoryTime, stimulus.StoryClock); err != nil {
+		return r, fmt.Errorf("world arbitration: %w", err)
+	}
+	if stimulus.StoryClock != nil {
+		// Accept harmless input rounding, but persist the exact host coordinate
+		// so tolerance never accumulates into drift across chapters.
+		if r.Digest != "" && r.StoryTime.StartDay != stimulus.StoryClock.CurrentDay {
+			return r, fmt.Errorf("world arbitration: stored story_time start_day differs from host current_day")
+		}
+		storyTime := *r.StoryTime
+		storyTime.StartDay = stimulus.StoryClock.CurrentDay
+		r.StoryTime = &storyTime
 	}
 	byAgent := make(map[string]CharacterDecisionProposal, len(proposals))
 	wantedDigests := make([]string, 0, len(proposals))
 	for _, proposal := range proposals {
-		if proposal.Round <= 0 || proposal.Round > r.Round {
+		priorAllowed := priorSources != nil && proposal.Digest != "" && priorSources[proposal.AgentID] == proposal.Digest
+		if proposal.Round <= 0 || (proposal.Round > r.Round && !priorAllowed) {
 			return r, fmt.Errorf("proposal %s belongs to future/invalid round %d, arbitration round %d", proposal.AgentID, proposal.Round, r.Round)
 		}
 		byAgent[proposal.AgentID] = proposal
@@ -692,7 +934,7 @@ func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldSt
 			return r, fmt.Errorf("resolution for %s is not bound to a proposal", resolution.AgentID)
 		}
 		if resolution.Decision != proposal.Decision || resolution.IntendedAction != proposal.IntendedAction {
-			return r, fmt.Errorf("arbiter rewrote intent for %s", resolution.AgentID)
+			return r, characterArbitrationIntentRewriteError(proposal, *resolution)
 		}
 		for _, ref := range resolution.MechanismRefs {
 			if _, ok := knownMechanisms[ref]; !ok {
@@ -780,7 +1022,7 @@ func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldSt
 		return r, fmt.Errorf("non-final arbitration must identify an unresolved conflict")
 	}
 	if !r.Finalized && r.Round > maxRevisionRounds && r.HardContractStatus != "infeasible" {
-		return r, fmt.Errorf("world arbitration exhausted revision rounds")
+		return r, fmt.Errorf("world arbitration exhausted revision rounds (round=%d, max_revision_rounds=%d): 裁决闭合不要求所有角色意图成功或人物达成共识。若能依据原意图、实际时空和资源给出确定后果，可裁 partial/blocked，并仅将已经裁定后果的冲突标为 resolved；不能再请求角色修订、改变其意图、伪造会合/交付/读取，或只翻转 finalized/resolved 而不提供完整真实后态。若角色实际移动或执行了任务，整体不能标 blocked，应保留真实执行并把未发生的子任务分别标为 blocked/not_started、不给执行时间。真正没有任何执行时才可整体 blocked；硬合同是否不可实现仍按事实判断", r.Round, maxRevisionRounds)
 	}
 	projection := r.ProtagonistProjection
 	var protagonistProposal *CharacterDecisionProposal
@@ -791,8 +1033,42 @@ func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldSt
 			break
 		}
 	}
-	if protagonistProposal == nil || projection.ChosenDecision != protagonistProposal.Decision || len(projection.AvailableOptions) < 2 || strings.TrimSpace(projection.DecisionReason) == "" || len(projection.PlanConstraints) == 0 || len(projection.CausalChain) == 0 {
+	// A cycle arbitrates only active actors; the chapter host builds its POV
+	// projection from real choices across the complete cycle chain. Never
+	// invent a sleeping POV proposal to satisfy the one-shot contract.
+	omittedCycleProjection := HasCharacterActivationCycleContract(stimulus) && emptyCharacterCycleProjection(projection)
+	if !omittedCycleProjection && (protagonistProposal == nil || projection.ChosenDecision != protagonistProposal.Decision || len(projection.AvailableOptions) < 2 || strings.TrimSpace(projection.DecisionReason) == "" || len(projection.PlanConstraints) == 0 || len(projection.CausalChain) == 0) {
 		return r, fmt.Errorf("world arbitration protagonist projection is not bound to the protagonist proposal")
+	}
+	if r.Version == WorldArbitrationReceiptV2Version {
+		if HasCharacterSelfChronologyPolicyV1(stimulus.Sources) {
+			for i := range r.Resolutions {
+				var err error
+				r.Resolutions[i].SelfExecutions, err = canonicalSelfExecutionsV1(r.Resolutions[i].SelfExecutions)
+				if err != nil {
+					return r, err
+				}
+			}
+		}
+		physical, err := applyArbitrationPhysicalStateWithArtifactSourcesV1(r, stimulus, proposals, priorSources)
+		if err != nil {
+			return r, err
+		}
+		for i := range r.Resolutions {
+			for _, actor := range physical.Actors {
+				if actor.AgentID == r.Resolutions[i].AgentID {
+					copy := actor
+					r.Resolutions[i].PostState = &copy
+					break
+				}
+			}
+		}
+		if HasCharacterResourceObservationTimePolicyV1(stimulus.Sources) {
+			r.ResourceSettlements = canonicalResourceObservationSettlementsV1(r.ResourceSettlements)
+		}
+		for i := range r.ResourceSettlements {
+			r.ResourceSettlements[i].EvidenceRefs = normalizeV2Strings(r.ResourceSettlements[i].EvidenceRefs)
+		}
 	}
 	digest, err := ComputeWorldArbitrationReceiptDigest(r)
 	if err != nil {
@@ -802,7 +1078,15 @@ func FinalizeWorldArbitrationReceipt(r WorldArbitrationReceipt, stimulus WorldSt
 	return r, nil
 }
 
-func (r WorldArbitrationReceipt) CharacterDecisions(proposals []CharacterDecisionProposal) ([]CharacterWorldDecision, error) {
+func (r WorldArbitrationReceipt) CharacterDecisions(proposals []CharacterDecisionProposal, physical ...WorldPhysicalStateV2) ([]CharacterWorldDecision, error) {
+	if r.Version == WorldArbitrationReceiptV2Version {
+		if len(physical) != 1 {
+			return nil, fmt.Errorf("v2 character decisions require the complete applied physical state")
+		}
+		if err := ValidateWorldPhysicalStateV2(physical[0]); err != nil {
+			return nil, err
+		}
+	}
 	byDigest := make(map[string]CharacterDecisionProposal, len(proposals))
 	for _, proposal := range proposals {
 		byDigest[proposal.Digest] = proposal
@@ -813,13 +1097,37 @@ func (r WorldArbitrationReceipt) CharacterDecisions(proposals []CharacterDecisio
 		if !ok {
 			return nil, fmt.Errorf("missing proposal %s", resolution.ProposalDigest)
 		}
+		location := proposal.Location
+		resources := append([]string(nil), proposal.Resources...)
+		var postState *CharacterPhysicalStateV2
+		if r.Version == WorldArbitrationReceiptV2Version {
+			if resolution.PostState == nil {
+				return nil, fmt.Errorf("v2 character decision lacks post_state")
+			}
+			views, err := BuildCharacterResourceViewsV2(physical[0], resolution.AgentID)
+			if err != nil {
+				return nil, err
+			}
+			resources = FormatCharacterResourceViewsV2(views)
+			for _, actor := range physical[0].Actors {
+				if actor.AgentID == resolution.AgentID {
+					if !samePhysicalValueV2(actor, *resolution.PostState) {
+						return nil, fmt.Errorf("v2 physical actor differs from arbitration post_state")
+					}
+					copy := actor
+					postState = &copy
+					break
+				}
+			}
+			location = resolution.PostState.Location
+		}
 		out = append(out, CharacterWorldDecision{
 			Character:         proposal.Character,
 			Time:              proposal.Time,
-			Location:          proposal.Location,
+			Location:          location,
 			CurrentGoal:       proposal.CurrentGoal,
 			Pressure:          proposal.Pressure,
-			Resources:         append([]string(nil), proposal.Resources...),
+			Resources:         resources,
 			KnowledgeBoundary: strings.Join(proposal.KnowledgeRefs, ","),
 			MechanismRefs:     normalizeV2Strings(append(append([]string(nil), proposal.MechanismRefs...), resolution.MechanismRefs...)),
 			AvailableOptions:  append([]string(nil), proposal.AvailableOptions...),
@@ -830,6 +1138,7 @@ func (r WorldArbitrationReceipt) CharacterDecisions(proposals []CharacterDecisio
 			CompletionState:   resolution.CompletionState,
 			ImmediateResult:   resolution.ImmediateResult,
 			StateAfter:        resolution.StateAfter,
+			PostState:         postState,
 			VisibleToPOV:      resolution.VisibleToPOV,
 			ButterflyEffects:  append([]DecisionButterflyEffect(nil), resolution.ButterflyEffects...),
 		})
@@ -908,17 +1217,27 @@ func FinalizeCharacterAgentMemory(m CharacterAgentMemory) (CharacterAgentMemory,
 }
 
 type CharacterAgentUsage struct {
-	GenerationID string  `json:"generation_id"`
-	Role         string  `json:"role"` // character / world_arbiter
-	AgentID      string  `json:"agent_id"`
-	Character    string  `json:"character"`
-	Chapter      int     `json:"chapter"`
-	Round        int     `json:"round"`
-	Input        int     `json:"input"`
-	Output       int     `json:"output"`
-	CacheRead    int     `json:"cache_read,omitempty"`
-	CacheWrite   int     `json:"cache_write,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	UsageID       string   `json:"usage_id,omitempty"`
+	GenerationID  string   `json:"generation_id"`
+	Role          string   `json:"role"` // character / world_arbiter
+	AgentID       string   `json:"agent_id"`
+	Character     string   `json:"character"`
+	Chapter       int      `json:"chapter"`
+	Cycle         int      `json:"cycle,omitempty"` // zero preserves historical single-round usage
+	Round         int      `json:"round"`
+	Input         int      `json:"input"`
+	Output        int      `json:"output"`
+	CacheRead     int      `json:"cache_read,omitempty"`
+	CacheWrite    int      `json:"cache_write,omitempty"`
+	CostUSD       float64  `json:"cost_usd,omitempty"`
+	CostSource    string   `json:"cost_source,omitempty"` // reported / estimated / unknown
+	Model         string   `json:"model,omitempty"`
+	Provider      string   `json:"provider,omitempty"`
+	Models        []string `json:"models,omitempty"` // provider/model identities when a run uses more than one
+	Status        string   `json:"status,omitempty"` // success / failed / canceled
+	ErrorCategory string   `json:"error_category,omitempty"`
+	Attempts      int      `json:"attempts,omitempty"`
+	UnpricedCalls int      `json:"unpriced_calls,omitempty"`
 }
 
 // CharacterAgentEvidenceBundle is the sealed, server-only proof for a
@@ -948,10 +1267,38 @@ func ComputeCharacterAgentEvidenceRoot(e CharacterAgentEvidenceBundle) (string, 
 }
 
 func FinalizeCharacterAgentEvidenceBundle(e CharacterAgentEvidenceBundle) (CharacterAgentEvidenceBundle, error) {
-	if e.Version == "" {
-		e.Version = CharacterAgentEvidenceVersion
+	return finalizeCharacterEvidenceBundle(e, false)
+}
+
+// A hard-conflict proof is auditable but cannot be used as a completed world
+// simulation. The distinct version prevents an open result entering a sealed
+// legacy bundle through the ordinary evidence validator.
+func FinalizeCharacterHardConflictEvidenceBundle(e CharacterAgentEvidenceBundle) (CharacterAgentEvidenceBundle, error) {
+	return finalizeCharacterEvidenceBundle(e, true)
+}
+
+func finalizeCharacterEvidenceBundle(e CharacterAgentEvidenceBundle, hardConflictOnly bool) (CharacterAgentEvidenceBundle, error) {
+	// Validation/finalization may sort and normalize nested slices. A value
+	// parameter does not detach those slices from an immutable bundle shared by
+	// concurrent store handles. Clone the serializable proof before touching it;
+	// the JSON representation (and historical digest semantics) stays unchanged.
+	raw, cloneErr := json.Marshal(e)
+	if cloneErr != nil {
+		return e, fmt.Errorf("clone character-agent evidence: %w", cloneErr)
 	}
-	if e.Version != CharacterAgentEvidenceVersion || e.GenerationID == "" || e.Chapter <= 0 || strings.TrimSpace(e.ProtocolDigest) == "" {
+	var owned CharacterAgentEvidenceBundle
+	if cloneErr := json.Unmarshal(raw, &owned); cloneErr != nil {
+		return e, fmt.Errorf("clone character-agent evidence: %w", cloneErr)
+	}
+	e = owned
+	expectedVersion := CharacterAgentEvidenceVersion
+	if hardConflictOnly {
+		expectedVersion = CharacterHardConflictEvidenceVersion
+	}
+	if e.Version == "" {
+		e.Version = expectedVersion
+	}
+	if e.Version != expectedVersion || e.GenerationID == "" || e.Chapter <= 0 || strings.TrimSpace(e.ProtocolDigest) == "" {
 		return e, fmt.Errorf("character-agent evidence identity is incomplete")
 	}
 
@@ -986,6 +1333,19 @@ func FinalizeCharacterAgentEvidenceBundle(e CharacterAgentEvidenceBundle) (Chara
 		observation, finalizeErr := FinalizeCharacterObservationPacket(e.Observations[i])
 		if finalizeErr != nil || observation.Digest != storedDigest || observation.GenerationID != e.GenerationID || observation.Chapter != e.Chapter || observation.StimulusDigest != stimulus.Digest {
 			return e, fmt.Errorf("character-agent evidence observation[%d]: identity/digest mismatch: %w", i, finalizeErr)
+		}
+		if (stimulus.Version == WorldStimulusPacketV2Version) != (observation.Version == CharacterObservationV2Version) {
+			return e, fmt.Errorf("character-agent evidence mixes observation/stimulus protocol versions")
+		}
+		if stimulus.Version == WorldStimulusPacketV2Version {
+			if err := validateCharacterResourceViewsAgainstStimulusV2(stimulus, observation); err != nil {
+				return e, err
+			}
+			for _, actor := range stimulus.PhysicalState.Actors {
+				if actor.AgentID == observation.AgentID && (actor.Character != observation.Character || actor.Location != observation.Location) {
+					return e, fmt.Errorf("v2 observation origin differs from actual physical actor")
+				}
+			}
 		}
 		key := observationKey{agentID: observation.AgentID, round: observation.Round}
 		if _, duplicate := observations[key]; duplicate {
@@ -1075,8 +1435,14 @@ func FinalizeCharacterAgentEvidenceBundle(e CharacterAgentEvidenceBundle) (Chara
 		if i < len(e.Arbitrations)-1 && finalized.Finalized {
 			return e, fmt.Errorf("character-agent evidence finalized before its last arbitration")
 		}
-		if i == len(e.Arbitrations)-1 && !finalized.Finalized {
-			return e, fmt.Errorf("character-agent evidence final arbitration is not closed")
+		if i == len(e.Arbitrations)-1 {
+			if hardConflictOnly {
+				if finalized.Finalized || finalized.HardContractStatus != "infeasible" {
+					return e, fmt.Errorf("hard-conflict evidence requires an uncommitted hard-infeasible final receipt")
+				}
+			} else if !finalized.Finalized {
+				return e, fmt.Errorf("character-agent evidence final arbitration is not closed")
+			}
 		}
 		e.Arbitrations[i] = finalized
 	}
@@ -1086,8 +1452,14 @@ func FinalizeCharacterAgentEvidenceBundle(e CharacterAgentEvidenceBundle) (Chara
 		return e, fmt.Errorf("character-agent evidence memory root set is incomplete")
 	}
 	for i, usage := range e.Usage {
-		if usage.AgentID == "" || usage.GenerationID != e.GenerationID || usage.Chapter != e.Chapter || usage.Round <= 0 || usage.Round > e.Arbitrations[len(e.Arbitrations)-1].Round || usage.Input < 0 || usage.Output < 0 || usage.CostUSD < 0 {
+		if usage.AgentID == "" || usage.GenerationID != e.GenerationID || usage.Chapter != e.Chapter || usage.Round <= 0 || usage.Round > e.Arbitrations[len(e.Arbitrations)-1].Round || usage.Input < 0 || usage.Output < 0 || usage.CostUSD < 0 || usage.Attempts < 0 || usage.UnpricedCalls < 0 {
 			return e, fmt.Errorf("character-agent evidence usage[%d] is invalid", i)
+		}
+		if usage.CostSource != "" && usage.CostSource != "reported" && usage.CostSource != "estimated" && usage.CostSource != "unknown" {
+			return e, fmt.Errorf("character-agent evidence usage[%d] has invalid cost source", i)
+		}
+		if usage.Status != "" && usage.Status != "success" && usage.Status != "failed" && usage.Status != "canceled" {
+			return e, fmt.Errorf("character-agent evidence usage[%d] has invalid status", i)
 		}
 		if usage.Role != "character" && usage.Role != "world_arbiter" {
 			return e, fmt.Errorf("character-agent evidence usage[%d] has invalid role %q", i, usage.Role)
@@ -1128,4 +1500,15 @@ func characterAgentDigest(value any) (string, error) {
 		return "", err
 	}
 	return "sha256:" + sum, nil
+}
+
+func ValidateCharacterHardConflictEvidenceBundle(e CharacterAgentEvidenceBundle) error {
+	finalized, err := FinalizeCharacterHardConflictEvidenceBundle(e)
+	if err != nil {
+		return err
+	}
+	if e.EvidenceRoot == "" || finalized.EvidenceRoot != e.EvidenceRoot {
+		return fmt.Errorf("character hard-conflict evidence root mismatch")
+	}
+	return nil
 }

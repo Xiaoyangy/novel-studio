@@ -21,7 +21,10 @@ var characterAgentDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 // CharacterAgentStore owns durable identities/canonical memories and the
 // generation-scoped evidence produced by autonomous character decisions.
-type CharacterAgentStore struct{ io *IO }
+type CharacterAgentStore struct {
+	io    *IO
+	cycle *characterActivationProofScope
+}
 
 func NewCharacterAgentStore(io *IO) *CharacterAgentStore { return &CharacterAgentStore{io: io} }
 
@@ -111,18 +114,7 @@ func (s *CharacterAgentStore) SaveRegistrySnapshot(generationID string, chapter 
 		return err
 	}
 	path := characterAgentRegistrySnapshotPath(generationID, chapter)
-	return s.io.WithWriteLock(func() error {
-		if raw, readErr := s.io.ReadFileUnlocked(path); readErr == nil {
-			var existing domain.CharacterAgentRegistry
-			if json.Unmarshal(raw, &existing) != nil || existing.RegistryRoot != finalized.RegistryRoot {
-				return fmt.Errorf("immutable character-agent registry snapshot already exists")
-			}
-			return nil
-		} else if !os.IsNotExist(readErr) {
-			return readErr
-		}
-		return s.io.WriteJSONUnlocked(path, finalized)
-	})
+	return s.writeProof(path, &finalized)
 }
 
 func (s *CharacterAgentStore) LoadRegistrySnapshot(generationID string, chapter int) (*domain.CharacterAgentRegistry, error) {
@@ -130,7 +122,7 @@ func (s *CharacterAgentStore) LoadRegistrySnapshot(generationID string, chapter 
 		return nil, err
 	}
 	var registry domain.CharacterAgentRegistry
-	if err := s.io.ReadJSON(characterAgentRegistrySnapshotPath(generationID, chapter), &registry); err != nil {
+	if err := s.readProof(characterAgentRegistrySnapshotPath(generationID, chapter), &registry); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
@@ -154,7 +146,7 @@ func (s *CharacterAgentStore) SaveSuccessorPlan(plan domain.CharacterAgentSucces
 	if err != nil {
 		return err
 	}
-	if err := s.writeImmutable(characterAgentSuccessorPlanPath(finalized.ParentGenerationID, finalized.Digest), finalized.Digest, &finalized); err != nil {
+	if err := s.writeImmutable(characterAgentSuccessorPlanPath(finalized.ParentGenerationID, finalized.Digest), &finalized); err != nil {
 		return err
 	}
 	if !activate {
@@ -275,8 +267,11 @@ func (s *CharacterAgentStore) SaveStimulus(packet domain.WorldStimulusPacket) er
 	if err != nil {
 		return err
 	}
+	if err := s.validateCycleStimulus(finalized); err != nil {
+		return err
+	}
 	path := filepath.Join(characterAgentChapterDir(packet.GenerationID, packet.Chapter), "stimulus.json")
-	return s.writeImmutable(path, finalized.Digest, &finalized)
+	return s.writeProof(path, &finalized)
 }
 
 func (s *CharacterAgentStore) LoadStimulus(generationID string, chapter int) (*domain.WorldStimulusPacket, error) {
@@ -285,15 +280,21 @@ func (s *CharacterAgentStore) LoadStimulus(generationID string, chapter int) (*d
 	}
 	var packet domain.WorldStimulusPacket
 	path := filepath.Join(characterAgentChapterDir(generationID, chapter), "stimulus.json")
-	if err := s.io.ReadJSON(path, &packet); err != nil {
+	if err := s.readProof(path, &packet); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	finalized, err := domain.FinalizeWorldStimulusPacket(packet)
-	if err != nil || finalized.Digest != packet.Digest {
+	if err != nil {
 		return nil, fmt.Errorf("invalid world stimulus: %w", err)
+	}
+	if finalized.Digest != packet.Digest || packet.GenerationID != generationID || packet.Chapter != chapter {
+		return nil, fmt.Errorf("world stimulus identity/digest mismatch for %s chapter %d", generationID, chapter)
+	}
+	if err := s.validateCycleStimulus(packet); err != nil {
+		return nil, err
 	}
 	return &packet, nil
 }
@@ -306,8 +307,11 @@ func (s *CharacterAgentStore) SaveActivation(activation domain.CharacterAgentAct
 	if err != nil {
 		return err
 	}
+	if err := s.validateCycleActivation(finalized); err != nil {
+		return err
+	}
 	path := filepath.Join(characterAgentChapterDir(activation.GenerationID, activation.Chapter), "activation.json")
-	return s.writeImmutable(path, finalized.Digest, &finalized)
+	return s.writeProof(path, &finalized)
 }
 
 func (s *CharacterAgentStore) LoadActivation(generationID string, chapter int) (*domain.CharacterAgentActivation, error) {
@@ -316,15 +320,21 @@ func (s *CharacterAgentStore) LoadActivation(generationID string, chapter int) (
 	}
 	var activation domain.CharacterAgentActivation
 	path := filepath.Join(characterAgentChapterDir(generationID, chapter), "activation.json")
-	if err := s.io.ReadJSON(path, &activation); err != nil {
+	if err := s.readProof(path, &activation); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	finalized, err := domain.FinalizeCharacterAgentActivation(activation)
-	if err != nil || finalized.Digest != activation.Digest {
+	if err != nil {
 		return nil, fmt.Errorf("invalid character activation: %w", err)
+	}
+	if finalized.Digest != activation.Digest || activation.GenerationID != generationID || activation.Chapter != chapter {
+		return nil, fmt.Errorf("character activation identity/digest mismatch for %s chapter %d", generationID, chapter)
+	}
+	if err := s.validateCycleActivation(activation); err != nil {
+		return nil, err
 	}
 	return &activation, nil
 }
@@ -340,7 +350,10 @@ func (s *CharacterAgentStore) SaveObservation(packet domain.CharacterObservation
 	if err != nil {
 		return err
 	}
-	return s.writeImmutable(characterAgentObservationPath(packet.GenerationID, packet.Chapter, packet.Round, packet.AgentID), finalized.Digest, &finalized)
+	if err := s.validateCycleObservation(finalized); err != nil {
+		return err
+	}
+	return s.writeProof(characterAgentObservationPath(packet.GenerationID, packet.Chapter, packet.Round, packet.AgentID), &finalized)
 }
 
 func (s *CharacterAgentStore) LoadObservation(generationID string, chapter, round int, agentID string) (*domain.CharacterObservationPacket, error) {
@@ -351,15 +364,21 @@ func (s *CharacterAgentStore) LoadObservation(generationID string, chapter, roun
 		return nil, err
 	}
 	var packet domain.CharacterObservationPacket
-	if err := s.io.ReadJSON(characterAgentObservationPath(generationID, chapter, round, agentID), &packet); err != nil {
+	if err := s.readProof(characterAgentObservationPath(generationID, chapter, round, agentID), &packet); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	finalized, err := domain.FinalizeCharacterObservationPacket(packet)
-	if err != nil || finalized.Digest != packet.Digest {
+	if err != nil {
 		return nil, fmt.Errorf("invalid character observation: %w", err)
+	}
+	if finalized.Digest != packet.Digest || packet.GenerationID != generationID || packet.Chapter != chapter || packet.Round != round || packet.AgentID != agentID {
+		return nil, fmt.Errorf("character observation identity/digest mismatch for %s chapter %d round %d agent %s", generationID, chapter, round, agentID)
+	}
+	if err := s.validateCycleObservation(packet); err != nil {
+		return nil, err
 	}
 	return &packet, nil
 }
@@ -375,7 +394,16 @@ func (s *CharacterAgentStore) SaveProposal(proposal domain.CharacterDecisionProp
 	if err != nil {
 		return err
 	}
-	return s.writeImmutable(characterAgentProposalPath(proposal.GenerationID, proposal.Chapter, proposal.Round, proposal.AgentID), finalized.Digest, &finalized)
+	if s.cycle != nil {
+		stored, err := s.LoadObservation(proposal.GenerationID, proposal.Chapter, proposal.Round, proposal.AgentID)
+		if err != nil {
+			return err
+		}
+		if stored == nil || stored.Digest != observation.Digest {
+			return fmt.Errorf("cycle proposal lacks its persisted observation")
+		}
+	}
+	return s.writeProof(characterAgentProposalPath(proposal.GenerationID, proposal.Chapter, proposal.Round, proposal.AgentID), &finalized)
 }
 
 func (s *CharacterAgentStore) LoadProposal(generationID string, chapter, round int, agentID string) (*domain.CharacterDecisionProposal, error) {
@@ -384,7 +412,7 @@ func (s *CharacterAgentStore) LoadProposal(generationID string, chapter, round i
 		return nil, err
 	}
 	var proposal domain.CharacterDecisionProposal
-	if err := s.io.ReadJSON(characterAgentProposalPath(generationID, chapter, round, agentID), &proposal); err != nil {
+	if err := s.readProof(characterAgentProposalPath(generationID, chapter, round, agentID), &proposal); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
@@ -441,7 +469,10 @@ func (s *CharacterAgentStore) SaveArbitration(receipt domain.WorldArbitrationRec
 	if err != nil {
 		return err
 	}
-	return s.writeImmutable(characterAgentArbitrationPath(receipt.GenerationID, receipt.Chapter, receipt.Round), finalized.Digest, &finalized)
+	if err := s.validateCycleArbitrationInputs(finalized, stimulus, activation, proposals); err != nil {
+		return err
+	}
+	return s.writeProof(characterAgentArbitrationPath(receipt.GenerationID, receipt.Chapter, receipt.Round), &finalized)
 }
 
 func (s *CharacterAgentStore) LoadArbitration(generationID string, chapter, round int) (*domain.WorldArbitrationReceipt, error) {
@@ -449,11 +480,14 @@ func (s *CharacterAgentStore) LoadArbitration(generationID string, chapter, roun
 		return nil, err
 	}
 	var receipt domain.WorldArbitrationReceipt
-	if err := s.io.ReadJSON(characterAgentArbitrationPath(generationID, chapter, round), &receipt); err != nil {
+	if err := s.readProof(characterAgentArbitrationPath(generationID, chapter, round), &receipt); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if receipt.GenerationID != generationID || receipt.Chapter != chapter || receipt.Round != round {
+		return nil, fmt.Errorf("world arbitration identity mismatch for %s chapter %d round %d", generationID, chapter, round)
 	}
 	stimulus, err := s.LoadStimulus(generationID, chapter)
 	if err != nil || stimulus == nil {
@@ -582,15 +616,22 @@ func (s *Store) EnsureCharacterAgentCanon(baseChapter int) error {
 		seeds[key] = item
 	}
 	for _, character := range characters {
-		add(seed{name: character.Name, aliases: character.Aliases, tier: character.Tier, role: character.Role})
+		var facts []string
+		if character.InitialState != nil {
+			facts = append(facts, character.InitialState.KnownFacts...)
+		}
+		add(seed{name: character.Name, aliases: character.Aliases, tier: character.Tier, role: character.Role, facts: facts})
 	}
 	for _, dossier := range dossiers {
-		facts := []string{dossier.KnowledgeBoundary}
-		add(seed{name: dossier.Character, aliases: dossier.Aliases, tier: dossier.Tier, role: dossier.Role, facts: facts})
+		// KnowledgeBoundary is an author-facing restriction and may name the
+		// very secret this character must not know. It is not positive memory.
+		add(seed{name: dossier.Character, aliases: dossier.Aliases, tier: dossier.Tier, role: dossier.Role, facts: dossier.KnownFactsAtStoryStart})
 	}
 	if continuity != nil {
 		for _, entry := range continuity.Entries {
-			add(seed{name: entry.Name, aliases: entry.Aliases, tier: entry.Tier, facts: entry.CurrentFacts, chapter: entry.LastSeenChapter})
+			facts := append([]string(nil), entry.CurrentFacts...)
+			facts = append(facts, entry.Dynamics.KnowledgeLedger.KnownFacts...)
+			add(seed{name: entry.Name, aliases: entry.Aliases, tier: entry.Tier, facts: facts, chapter: entry.LastSeenChapter})
 		}
 	}
 	keys := make([]string, 0, len(seeds))
@@ -722,6 +763,9 @@ func normalizeCharacterAgentIdentitySet(values []string, canonical string) []str
 // arbitration result; projected memory files and abandoned generations are
 // never copied into canon.
 func (s *Store) PromoteAcceptedCharacterAgentMemory(bundle domain.ProjectedChapterBundle, outcome domain.ActualOutcomeReceiptV2) error {
+	if bundle.CharacterActivationEvidence != nil {
+		return fmt.Errorf("multi-cycle accepted memory must use the prepared immutable publication workflow")
+	}
 	if bundle.ChapterWorldSimulation.Version < 2 {
 		return nil
 	}
@@ -752,6 +796,7 @@ func (s *Store) PromoteAcceptedCharacterAgentMemory(bundle domain.ProjectedChapt
 	registryChanged := false
 	if registry == nil {
 		clone := evidence.Registry
+		clone.Entries = cloneCharacterAgentRecords(evidence.Registry.Entries)
 		clone.RegistryRoot = ""
 		for i := range clone.Entries {
 			if clone.Entries[i].Status != domain.CharacterAgentRetired {
@@ -801,9 +846,20 @@ func (s *Store) PromoteAcceptedCharacterAgentMemory(bundle domain.ProjectedChapt
 			}
 		}
 		if !alreadyPresent {
+			memoryText := strings.TrimSpace("决定：" + proposal.Decision + "；行动：" + proposal.IntendedAction + "；实际结果：" + resolution.ImmediateResult + "；后态：" + resolution.StateAfter)
+			if finalArbitration.Version == domain.WorldArbitrationReceiptV2Version {
+				if bundle.ChapterWorldSimulation.PhysicalState == nil {
+					return fmt.Errorf("accepted v2 character memory lacks physical state")
+				}
+				var memoryErr error
+				memoryText, memoryErr = domain.CharacterPrivateOutcomeV2(proposal, resolution, *bundle.ChapterWorldSimulation.PhysicalState, finalArbitration)
+				if memoryErr != nil {
+					return memoryErr
+				}
+			}
 			memory.Facts = append(memory.Facts, domain.CharacterAgentMemoryFact{
 				ID: factID, Chapter: bundle.Chapter, Kind: "accepted_decision_outcome",
-				Text:         strings.TrimSpace("决定：" + proposal.Decision + "；行动：" + proposal.IntendedAction + "；实际结果：" + resolution.ImmediateResult + "；后态：" + resolution.StateAfter),
+				Text:         memoryText,
 				SourceDigest: outcome.ReceiptDigest, KnowledgeRefs: append([]string(nil), proposal.KnowledgeRefs...), Accepted: true,
 			})
 			memory.LastAcceptedChapter = max(memory.LastAcceptedChapter, bundle.Chapter)
@@ -836,13 +892,53 @@ func (s *Store) PromoteReviewedCharacterAgentMemory(chapter int, acceptedAt stri
 	if err != nil || simulation == nil || simulation.Version < 2 || simulation.CharacterAgentProtocol == nil {
 		return err
 	}
-	activation, err := s.CharacterAgents.LoadActivation(simulation.GenerationID, chapter)
-	if err != nil || activation == nil || activation.Digest != simulation.CharacterAgentProtocol.ActivationDigest {
-		return fmt.Errorf("load accepted character activation: %w", err)
-	}
-	snapshot, err := s.CharacterAgents.LoadRegistrySnapshot(simulation.GenerationID, chapter)
-	if err != nil || snapshot == nil {
-		return fmt.Errorf("load accepted character registry snapshot: %w", err)
+	type memoryTarget struct{ AgentID, Character string }
+	var targets []memoryTarget
+	var snapshot *domain.CharacterAgentRegistry
+	if simulation.CharacterActivation != nil {
+		if !s.World.HasAcceptedChapterReview(chapter) {
+			return fmt.Errorf("activation memory promotion requires an accepted body review")
+		}
+		evidence, err := s.LoadCharacterActivationChapterEvidence(simulation.GenerationID, chapter)
+		if err != nil {
+			return err
+		}
+		if evidence == nil {
+			return fmt.Errorf("reviewed activation chapter lacks complete evidence")
+		}
+		if err := domain.ValidateCharacterActivationSimulation(*simulation, *evidence); err != nil {
+			return err
+		}
+		snapshot = &evidence.Inputs[0].Registry
+		ids := map[string]bool{}
+		for _, cycle := range evidence.Cycles {
+			last := cycle.Evidence.Arbitrations[len(cycle.Evidence.Arbitrations)-1]
+			for _, resolution := range last.Resolutions {
+				ids[resolution.AgentID] = true
+			}
+			for _, reception := range last.PassiveReceptions {
+				ids[reception.ToAgentID] = true
+			}
+		}
+		for _, entry := range snapshot.Entries {
+			if ids[entry.AgentID] {
+				targets = append(targets, memoryTarget{entry.AgentID, entry.Character})
+			}
+		}
+	} else {
+		activation, err := s.CharacterAgents.LoadActivation(simulation.GenerationID, chapter)
+		if err != nil || activation == nil || activation.Digest != simulation.CharacterAgentProtocol.ActivationDigest {
+			return fmt.Errorf("load accepted character activation: %w", err)
+		}
+		snapshot, err = s.CharacterAgents.LoadRegistrySnapshot(simulation.GenerationID, chapter)
+		if err != nil || snapshot == nil {
+			return fmt.Errorf("load accepted character registry snapshot: %w", err)
+		}
+		for _, entry := range activation.Entries {
+			if entry.State == domain.CharacterAgentActive {
+				targets = append(targets, memoryTarget{entry.AgentID, entry.Character})
+			}
+		}
 	}
 	registry, err := s.CharacterAgents.LoadRegistry()
 	if err != nil {
@@ -850,6 +946,7 @@ func (s *Store) PromoteReviewedCharacterAgentMemory(chapter int, acceptedAt stri
 	}
 	if registry == nil {
 		clone := *snapshot
+		clone.Entries = cloneCharacterAgentRecords(snapshot.Entries)
 		clone.RegistryRoot = ""
 		registry = &clone
 	}
@@ -876,10 +973,7 @@ func (s *Store) PromoteReviewedCharacterAgentMemory(chapter int, acceptedAt stri
 	sourceSum := sha256.Sum256(append(append([]byte(nil), sourceRaw...), []byte(simulation.SimulationID)...))
 	sourceDigest := "sha256:" + hex.EncodeToString(sourceSum[:])
 	registryChanged := false
-	for _, active := range activation.Entries {
-		if active.State != domain.CharacterAgentActive {
-			continue
-		}
+	for _, active := range targets {
 		memory, loadErr := s.CharacterAgents.LoadCanonicalMemory(active.AgentID)
 		if loadErr != nil {
 			return loadErr
@@ -932,17 +1026,42 @@ func (s *Store) PromoteReviewedCharacterAgentMemory(chapter int, acceptedAt stri
 	return nil
 }
 
-func (s *CharacterAgentStore) writeImmutable(path, digest string, value any) error {
+func (s *CharacterAgentStore) writeImmutable(path string, value any) error {
+	incoming, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
 	return s.io.WithWriteLock(func() error {
-		if raw, err := s.io.ReadFileUnlocked(path); err == nil {
-			var existing map[string]any
-			if json.Unmarshal(raw, &existing) != nil || fmt.Sprint(existing["digest"]) != digest {
+		verifyExisting := func() error {
+			info, err := os.Lstat(s.io.path(path))
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("immutable character-agent artifact is not a regular file at %s", path)
+			}
+			raw, err := s.io.ReadFileUnlocked(path)
+			if err != nil {
+				return err
+			}
+			// A matching stored digest is only a claim; compare the actual payload
+			// so retries cannot silently accept damaged evidence with an old hash.
+			if !sameJSON(raw, incoming) {
 				return fmt.Errorf("immutable character-agent artifact already exists at %s", path)
 			}
 			return nil
-		} else if !os.IsNotExist(err) {
+		}
+		if err := verifyExisting(); !os.IsNotExist(err) {
 			return err
 		}
-		return s.io.WriteJSONUnlocked(path, value)
+		// IO locks are instance-local. Publish with no-replace semantics so two
+		// Store instances/processes can never overwrite each other's decisions.
+		if err := s.io.writeFileNoReplaceUnlocked(path, incoming); err != nil {
+			if os.IsExist(err) {
+				return verifyExisting()
+			}
+			return err
+		}
+		return nil
 	})
 }

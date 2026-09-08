@@ -250,11 +250,17 @@ func mergeConfig(base, overlay Config) Config {
 		if overlay.CharacterAgents.Activation != "" {
 			base.CharacterAgents.Activation = overlay.CharacterAgents.Activation
 		}
+		if overlay.CharacterAgents.ExecutionPolicy != "" {
+			base.CharacterAgents.ExecutionPolicy = overlay.CharacterAgents.ExecutionPolicy
+		}
 		if overlay.CharacterAgents.MaxConcurrency > 0 {
 			base.CharacterAgents.MaxConcurrency = overlay.CharacterAgents.MaxConcurrency
 		}
 		if overlay.CharacterAgents.MaxRevisionRounds > 0 {
 			base.CharacterAgents.MaxRevisionRounds = overlay.CharacterAgents.MaxRevisionRounds
+		}
+		if overlay.CharacterAgents.MaxActivationCycles != 0 {
+			base.CharacterAgents.MaxActivationCycles = overlay.CharacterAgents.MaxActivationCycles
 		}
 	}
 

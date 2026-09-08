@@ -21,7 +21,8 @@ import (
 
 // PlanChapterTool 保存章节构思，Agent 自主决定规划粒度。
 type PlanChapterTool struct {
-	store *store.Store
+	store     *store.Store
+	grounding PlanGroundingReviewer
 }
 
 func NewPlanChapterTool(store *store.Store) *PlanChapterTool {
@@ -62,7 +63,7 @@ func (t *PlanChapterTool) Schema() map[string]any {
 	)
 }
 
-func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *PlanChapterTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var executionTarget struct {
 		Chapter int `json:"chapter"`
 	}
@@ -79,7 +80,7 @@ func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 	// 的字段合并进 partial 后按同一口径 finalize。这样即使 planner 在单发/两阶段之间
 	// 混用（弱模型在压缩后常"忘了"自己在走两阶段），也能用已累积的字段收口，
 	// 而不是要求单发一次性给全导致"缺字段"+超大请求。
-	if merged, handled, err := t.tryFinalizeFromPartial(args); handled {
+	if merged, handled, err := t.tryFinalizeFromPartial(ctx, args); handled {
 		return merged, err
 	}
 	plan, err := decodeChapterPlanArgs(args)
@@ -97,7 +98,7 @@ func (t *PlanChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 	if err != nil || skipped != nil {
 		return skipped, err
 	}
-	return finalizeChapterPlan(t.store, plan, isRewritePlan)
+	return finalizeChapterPlan(t.store, plan, isRewritePlan, planGroundingExecution{ctx, t.grounding})
 }
 
 // inProgressChapterOf 从进度推断当前正在推演的章号（in_progress 优先，回退下一待写章）。
@@ -118,7 +119,7 @@ func inProgressChapterOf(s *store.Store) int {
 // tryFinalizeFromPartial 若目标章已有两阶段 partial，则把本次 plan_chapter 的字段并入
 // partial 后 finalize，实现单发/两阶段互通。返回 (结果, 是否已处理, err)。
 // 无 partial 时返回 handled=false，走普通单发路径。
-func (t *PlanChapterTool) tryFinalizeFromPartial(args json.RawMessage) (json.RawMessage, bool, error) {
+func (t *PlanChapterTool) tryFinalizeFromPartial(ctx context.Context, args json.RawMessage) (json.RawMessage, bool, error) {
 	var callMap map[string]any
 	if err := unmarshalToolArgs(args, &callMap); err != nil {
 		return nil, false, nil
@@ -166,7 +167,7 @@ func (t *PlanChapterTool) tryFinalizeFromPartial(args json.RawMessage) (json.Raw
 	if err != nil || skipped != nil {
 		return skipped, true, err
 	}
-	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan)
+	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan, planGroundingExecution{ctx, t.grounding})
 	if err != nil {
 		return nil, true, err
 	}
@@ -208,8 +209,10 @@ func ensureChapterPlannable(s *store.Store, chapter int) (skipped json.RawMessag
 
 // finalizeChapterPlan 完整校验并落盘章节计划：写 plan 文件、置章节 in_progress、
 // 记 checkpoint、透出事件编织冲突。plan_chapter 单发与 plan_details finalize 共用。
-func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan bool) (json.RawMessage, error) {
-	applyOutlineAnchorsToPlan(s, &plan, isRewritePlan)
+func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan bool, grounding ...planGroundingExecution) (json.RawMessage, error) {
+	if err := applyOutlineAnchorsToPlan(s, &plan, isRewritePlan); err != nil {
+		return nil, err
+	}
 	if id := craftReceiptIDFromSources(plan.CausalSimulation.ContextSources); id != "" {
 		if receipt, err := s.RAG.LoadCraftRecallReceipt(id); err != nil {
 			return nil, fmt.Errorf("load project-all craft receipt: %w", err)
@@ -268,6 +271,9 @@ func finalizeChapterPlan(s *store.Store, plan domain.ChapterPlan, isRewritePlan 
 			plan.Chapter, strings.Join(hardIssues, "\n- "), errs.ErrToolPrecondition)
 	}
 
+	if err := reviewChapterPlanGrounding(s, &plan, grounding...); err != nil {
+		return nil, err
+	}
 	if err := consumePlanningContextAccessReceipt(
 		s,
 		plan.Chapter,
@@ -487,13 +493,13 @@ func sanitizeProjectDiagnosticListForPlan(s *store.Store, items []string) []stri
 	return sanitized
 }
 
-func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan, rewrite bool) {
+func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan, rewrite bool) error {
 	if s == nil || plan == nil || plan.Chapter <= 0 {
-		return
+		return nil
 	}
 	entry, err := s.Outline.GetChapterOutline(plan.Chapter)
 	if err != nil || entry == nil {
-		return
+		return nil
 	}
 	if title := strings.TrimSpace(entry.Title); title != "" {
 		plan.Title = title
@@ -502,7 +508,24 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan, rewrite
 	// brief and finalized world simulation. Preserve its corrected goal/hook;
 	// only the stable chapter title may come from an older outline entry.
 	if rewrite {
-		return
+		return nil
+	}
+	if simulation, err := independentSimulationForOutlineAnchors(s, plan.Chapter); err != nil {
+		return err
+	} else if simulation != nil {
+		if plan.CausalSimulation.WorldSimulationID != simulation.SimulationID ||
+			plan.CausalSimulation.ProtagonistDecision != simulation.ProtagonistProjection.ChosenDecision {
+			return fmt.Errorf("independent character plan must bind the current final arbitration before replacing soft outline events: world_simulation_id=%q, protagonist_decision=%q: %w", simulation.SimulationID, simulation.ProtagonistProjection.ChosenDecision, errs.ErrToolPrecondition)
+		}
+		plan.Goal = "落实本轮世界模拟后的主角选择：" + simulation.ProtagonistProjection.ChosenDecision
+		plan.Contract.RequiredBeats = withoutInjectedSoftOutlineBeat(plan.Contract.RequiredBeats, entry.CoreEvent)
+		// Genuine accepted/host-bound obligations still apply, even when a
+		// model's proposed concrete scene sequence can no longer happen.
+		applyProjectAllOutlineObligations(plan, entry.Scenes)
+		if len(compactStrings(plan.Contract.RequiredBeats)) == 0 {
+			return fmt.Errorf("旧软大纲自动条目已失效；请用 plan_structure 提交最终裁决支持的 required_beats 和章末 hook，已有 causal_simulation 细节保留: %w", errs.ErrToolPrecondition)
+		}
+		return nil
 	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		plan.Goal = "完整兑现本章大纲核心事件：" + event
@@ -515,6 +538,7 @@ func applyOutlineAnchorsToPlan(s *store.Store, plan *domain.ChapterPlan, rewrite
 		plan.Hook = hook
 	}
 	applyProjectAllOutlineObligations(plan, entry.Scenes)
+	return nil
 }
 
 func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string) {
@@ -523,10 +547,20 @@ func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string
 	}
 	var hard []string
 	var simulationOnly []string
+	var hardV2 []string
+	var simulationOnlyV2 []string
 	var predecessorState []string
 	for _, scene := range scenes {
 		scene = strings.TrimSpace(scene)
 		switch {
+		case strings.HasPrefix(scene, "[project-all v2-hard-obligation:"):
+			if outcome, ok := projectAllV2ObligationProse(scene, true); ok {
+				hardV2 = appendUniqueString(hardV2, outcome)
+			}
+		case strings.HasPrefix(scene, "[project-all v2-simulation-obligation:"):
+			if outcome, ok := projectAllV2ObligationProse(scene, false); ok {
+				simulationOnlyV2 = appendUniqueString(simulationOnlyV2, outcome)
+			}
 		case strings.HasPrefix(scene, "[project-all hard-obligation:"):
 			hard = appendUniqueString(hard, scene)
 		case strings.HasPrefix(scene, "[project-all simulation-obligation:"):
@@ -534,6 +568,13 @@ func applyProjectAllOutlineObligations(plan *domain.ChapterPlan, scenes []string
 		case strings.HasPrefix(scene, "[project-all predecessor-state:"):
 			predecessorState = appendUniqueString(predecessorState, scene)
 		}
+	}
+	if len(hardV2) > 0 {
+		plan.Contract.RequiredBeats = appendUniqueString(plan.Contract.RequiredBeats, strings.Join(hardV2, "；"))
+	}
+	if len(simulationOnlyV2) > 0 {
+		plan.Contract.ContinuityChecks = appendUniqueString(plan.Contract.ContinuityChecks,
+			"跨章场外义务（只推进世界状态，不得越过 POV 知识边界）："+strings.Join(simulationOnlyV2, "；"))
 	}
 	if len(hard) > 0 {
 		// One composite beat preserves the global 2-4 result-level beat budget
@@ -1125,7 +1166,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 	if missingCharacters := missingInitialStateCoverage(protagonistOnly, sim.InitialState); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.initial_state", missingCharacters))
 	}
-	if missingCharacters := missingEmotionalLogicCoverage(protagonistOnly, sim.EmotionalLogic); len(missingCharacters) > 0 {
+	if missingCharacters := planEmotionalLogicMissingCharacters(s, sim.EmotionalLogic); len(missingCharacters) > 0 {
 		missing = append(missing, formatMissingCharacterCoverage("causal_simulation.emotional_logic", missingCharacters))
 	}
 	if protagonist != "" && !voiceLogicContainsCharacter(sim.VoiceLogic, protagonist) {

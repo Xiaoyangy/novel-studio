@@ -23,6 +23,10 @@ const (
 	pipelineProjectAllAttemptPath  = "meta/planning/v2/project_all_attempt.json"
 )
 
+// The stage always constructs and locks its real generation before this
+// expensive boundary. Tests replace only the planner, never source guards.
+var pipelineProjectedChapterPlanner = agents.RunProjectedChapterPlanning
+
 type pipelineProjectAllAttempt struct {
 	Version        string `json:"version"`
 	Nonce          string `json:"nonce"`
@@ -106,7 +110,7 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 	if err := requireNoPendingSealedSteer(st, "project-all"); err != nil {
 		return err
 	}
-	identity, err := buildPipelineProjectAllIdentity(cfg, promptBundle, st, progress)
+	identity, err := buildPipelineProjectAllIdentityForPreflight(cfg, promptBundle, st, progress, flags.Restart)
 	if err != nil {
 		return err
 	}
@@ -245,6 +249,11 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 	if err := reconcilePipelineProjectAllWorkspace(shadow, projected, identity.Generation); err != nil {
 		return err
 	}
+	accounting, err := newPipelineProjectAllAccounting(context.Background(), cfg, st, shadow, identity.Generation.GenerationID)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, accounting.close()) }()
 
 	for chapter := first; chapter <= last; chapter++ {
 		bundles, err := projected.LoadProjectedChapterBundles(identity.Generation.GenerationID)
@@ -291,8 +300,8 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 			chapter,
 			last,
 		)
-		artifacts, err := agents.RunProjectedChapterPlanning(
-			context.Background(),
+		artifacts, err := pipelineProjectedChapterPlanner(
+			accounting.ctx,
 			cfg,
 			promptBundle,
 			workspace,
@@ -300,16 +309,19 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 			planningContext.ContextDigest,
 			identity.Generation.CharacterAgentProtocol,
 			agents.ProjectedArcBoundary{
-				Volume:           identity.Arc.Volume,
-				Arc:              identity.Arc.Arc,
-				Title:            identity.Arc.Title,
-				Goal:             identity.Arc.Goal,
-				BaseCanonChapter: identity.Generation.BaseCanonChapter,
-				BaseCanonRoot:    identity.Generation.BaseCanonRoot,
-				FirstChapter:     identity.Arc.FirstChapter,
-				LastChapter:      identity.Arc.LastChapter,
-				BookLastChapter:  identity.Arc.BookLastChapter,
+				Volume:                       identity.Arc.Volume,
+				Arc:                          identity.Arc.Arc,
+				Title:                        identity.Arc.Title,
+				Goal:                         identity.Arc.Goal,
+				BaseCanonChapter:             identity.Generation.BaseCanonChapter,
+				BaseCanonRoot:                identity.Generation.BaseCanonRoot,
+				FirstChapter:                 identity.Arc.FirstChapter,
+				LastChapter:                  identity.Arc.LastChapter,
+				BookLastChapter:              identity.Arc.BookLastChapter,
+				CharacterActivationPolicy:    identity.Generation.CharacterActivationPolicy,
+				MaxCharacterActivationCycles: identity.Generation.MaxCharacterActivationCycles,
 			},
+			accounting.hooks(),
 		)
 		if err != nil {
 			return fmt.Errorf("project-all 第 %d 章失败: %w", chapter, err)
@@ -400,6 +412,20 @@ func buildPipelineProjectAllIdentity(
 	st *store.Store,
 	progress *domain.Progress,
 ) (pipelineProjectAllIdentity, error) {
+	return buildPipelineProjectAllIdentityForPreflight(cfg, promptBundle, st, progress, false)
+}
+
+// A restart's initial identity is only a read-only bounds/source preflight.
+// It must not pin the new selection back to the old attempt. The real attempt
+// is rotated only after the execution lock, then the strict wrapper above is
+// called again before any generation or shadow workspace is published.
+func buildPipelineProjectAllIdentityForPreflight(
+	cfg bootstrap.Config,
+	promptBundle assets.Bundle,
+	st *store.Store,
+	progress *domain.Progress,
+	restarting bool,
+) (pipelineProjectAllIdentity, error) {
 	var identity pipelineProjectAllIdentity
 	if st == nil || progress == nil {
 		return identity, fmt.Errorf("project-all identity requires store and progress")
@@ -417,6 +443,11 @@ func buildPipelineProjectAllIdentity(
 		return identity, fmt.Errorf("project-all 当前 preplan 已要求正史 rebase；请先重跑 preplan")
 	}
 	baseChapter := progress.LatestCompleted()
+	if baseChapter > 0 {
+		if err := validatePipelineCharacterMemoryBeforeSource(st, progress); err != nil {
+			return identity, fmt.Errorf("project-all accepted character memory source: %w", err)
+		}
+	}
 	if identity.Preplan.BaseCanonChapter != baseChapter {
 		return identity, fmt.Errorf(
 			"project-all preplan base=%d 与当前正史 base=%d 不一致",
@@ -477,6 +508,18 @@ func buildPipelineProjectAllIdentity(
 			BaseOutlineRoot string `json:"base_outline_root"`
 			SuccessorDigest string `json:"successor_digest"`
 		}{"character-agent-successor-outline.v1", stableOutlineRoot, candidate.Digest})
+	}
+	resumeAttempt, err := loadPipelineProjectAllAttemptNonce(cfg.OutputDir)
+	if err != nil {
+		return identity, err
+	}
+	if successorPlan != nil {
+		resumeAttempt = strings.TrimSpace(resumeAttempt + "|" + successorPlan.Digest)
+	}
+	if !restarting {
+		if err := pinPipelineActivationForExistingAttempt(&cfg, st, baseChapter, first, last, resumeAttempt); err != nil {
+			return identity, err
+		}
 	}
 	foundationSnapshotRoot, err := pipelineProjectAllFoundationSnapshotRoot(cfg.OutputDir)
 	if err != nil {
@@ -616,7 +659,7 @@ func buildPipelineProjectAllIdentity(
 		ProjectionScope:        domain.PlanningProjectionScopeArcV2,
 		ScopeID:                scopeID,
 		BookHorizonChapter:     bookLast,
-		CharacterAgentProtocol: domain.CharacterAgentDecisionProtocolVersion,
+		CharacterAgentProtocol: cfg.CharacterAgentsProtocolVersion(),
 		Status:                 domain.PlanningGenerationBuildingV2,
 		BaseCanonChapter:       baseChapter,
 		BaseCanonRoot:          baseCanonRoot,
@@ -634,6 +677,13 @@ func buildPipelineProjectAllIdentity(
 	}
 	if !cfg.CharacterAgentsEnabled() {
 		generation.CharacterAgentProtocol = "legacy"
+	}
+	if generation.CharacterAgentProtocol == domain.CharacterAgentDecisionProtocolV2Version {
+		generation.PlanGroundingPolicy = domain.PlanGroundingPolicyV1
+		if cfg.CharacterActivationLimit() > 1 {
+			generation.CharacterActivationPolicy = cfg.CharacterActivationPolicy()
+			generation.MaxCharacterActivationCycles = cfg.CharacterActivationLimit()
+		}
 	}
 	generation.GenerationDigest, err = domain.ComputePlanningGenerationV2Digest(generation)
 	if err != nil {
@@ -972,6 +1022,8 @@ func validatePipelineProjectAllGenerationIdentity(
 		got.ScopeID != want.ScopeID ||
 		got.BookHorizonChapter != want.BookHorizonChapter ||
 		got.CharacterAgentProtocol != want.CharacterAgentProtocol ||
+		got.CharacterActivationPolicy != want.CharacterActivationPolicy ||
+		got.MaxCharacterActivationCycles != want.MaxCharacterActivationCycles ||
 		got.BaseCanonChapter != want.BaseCanonChapter ||
 		got.BaseCanonRoot != want.BaseCanonRoot ||
 		got.BaseStateRoot != want.BaseStateRoot ||

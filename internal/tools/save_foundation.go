@@ -94,7 +94,7 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		// 模型无从修复。放行到 Execute 由 normalizeFoundationContent 给出
 		// 可执行的修复提示（压缩篇幅重发），错误信息可控。
 		schema.Property("content", map[string]any{
-			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围，其中 x-y章 必须是全书总章数范围（严禁把“每弧/每卷 8-16 章”这类单元预算写成全书章数范围；如需注明可写“每弧8-16章”，但全书总章数必须另有独立的 x-y章 范围）；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，每个弧必须覆盖 8-16 章；8-16 章短篇应使用一卷一弧，不得拆成多个不足 8 章的短弧。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。world_codex v2 必须包含 mechanisms（visibility、触发、前置、输入、代价、结果、失败模式、可观测性、时间、section_refs）与 counterfactual_tests；每条机制都要被探针引用。book_world v2 的每个 faction 必须带有限 resources 和 clock（{segments, progress, consequence, pace}），多个势力至少有一条 relation；route.from/to 必须命中 place id/name，主要路线必须有 travel_days>0 和 risk；place.factions 与 relation.target 必须命中势力 id/name/aliases。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。",
+			"description": "内容（必填）。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。update_compass 的 estimated_scale 若供 outline-all 消费，必须同时包含 x-y卷与x-y章的显式数字范围，其中 x-y章 必须是全书总章数范围（严禁把“每弧/每卷 8-16 章”这类单元预算写成全书章数范围；如需注明可写“每弧8-16章”，但全书总章数必须另有独立的 x-y章 范围）；固定单卷12章也写成1-1卷、12-12章。layered_outline 若供 outline-all 消费，各弧章位必须非空、连续且不重叠，跨度以作者篇幅预算和实际因果承载量为准，不规定统一的每弧章数下限。expand_arc 时传章节数组。characters 每项可带 psych 定量心理画像（big_five 五维 0-1 / attachment 依恋 / values 价值观 / moral_foundations / cognitive_biases / abilities / dna 显隐突三组事实）。world_rules 每条可带 visibility（formal 显规则 / informal 潜规则 / secret 隐秘规则）与 source（朝廷/江湖/家族/门派）。world_rules 的 character_view 是独立的角色可见规则字符串。world_codex 新建自动启用 character_view_version=1；formal/informal mechanisms 必须另带 character_view 对象 {name,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}，name/trigger/timing 为字符串，其余为字符串数组。角色视图仅写普遍适用的程序、条件、资源规律，不含本案秘密、未来揭示或硬合同结局；secret 留在作者态供 Arbiter。unknown field 会拒绝保存，专属设备/证据流程信息写入 sections[].content/rules。world_codex v2 必须包含 mechanisms（visibility、触发、前置、输入、代价、结果、失败模式、可观测性、时间、section_refs）与 counterfactual_tests；每条机制都要被探针引用。book_world v2 的每个 faction 必须带有限 resources 和 clock（{segments, progress, consequence, pace}），多个势力至少有一条 relation；route.from/to 必须命中 place id/name，主要路线必须有 travel_days>0 和 risk；place.factions 与 relation.target 必须命中势力 id/name/aliases。book_world 顶层形状严格固定：protagonist_position 是字符串；vision_pillars 是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 是对象 {economic:{base,controlled_by,tension}, cultural:{base,controlled_by,tension}, political:{base,controlled_by,tension}, historical:{base,controlled_by,tension}}；两个 pillars 均不得传数组。" + foundationShapeHint("characters"),
 		}),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（expand_arc / revise_arc / outline-all append_volume / volume_codex 时必传）")),
@@ -260,6 +260,11 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("characters", &chars); err != nil {
 			return nil, err
 		}
+		for i, character := range chars {
+			if err := domain.ValidateCharacterInitialState(character); err != nil {
+				return nil, fmt.Errorf("characters[%d]: %v: %w%s", i, err, errs.ErrToolArgs, foundationShapeHint("characters"))
+			}
+		}
 		if err := t.store.Characters.Save(chars); err != nil {
 			return nil, fmt.Errorf("save characters: %w: %w", errs.ErrStoreWrite, err)
 		}
@@ -360,9 +365,23 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 			return nil, fmt.Errorf("save plan_structure flattened outline: %w: %w", errs.ErrStoreWrite, err)
 		}
 		total := domain.TotalChapters(volumes)
-		_ = t.store.Progress.UpdatePhase(domain.PhaseOutline)
-		_ = t.store.Progress.SetTotalChapters(total)
-		_ = t.store.Progress.SetLayered(true)
+		outlineAll, err := outlineAllExecutionModeActive(t.store)
+		if err != nil {
+			return nil, err
+		}
+		// A receipt-authorized skeleton may only update total_chapters. The
+		// chapter-zero phase, layered flag and all other progress are frozen.
+		if !outlineAll {
+			if err := t.store.Progress.UpdatePhase(domain.PhaseOutline); err != nil {
+				return nil, err
+			}
+			if err := t.store.Progress.SetLayered(true); err != nil {
+				return nil, err
+			}
+		}
+		if err := t.store.Progress.SetTotalChapters(total); err != nil {
+			return nil, fmt.Errorf("save plan_structure total chapters: %w: %w", errs.ErrStoreWrite, err)
+		}
 		result["volumes"] = domain.RealVolumeCount(volumes)
 		result["reserved_chapters"] = total
 
@@ -731,13 +750,37 @@ func FoundationRefreshArtifactsDigest(dir, kind string) (string, error) {
 // 先做一次确定性修复（尾逗号、字符串内裸控制字符——LLM 长 JSON 的高频失误）
 // 再试；仍失败才把行列位置和修复提示回给 LLM，让重试能直接定位而不是盲猜。
 func decodeFoundationJSON(typeName, content string, out any) error {
-	err := json.Unmarshal([]byte(content), out)
+	decode := func(raw []byte) error {
+		if typeName != "world_codex" {
+			return json.Unmarshal(raw, out)
+		}
+		// Only new author submissions are strict. Store/history readers keep
+		// their existing compatibility behavior, including old generations.
+		if !json.Valid(raw) {
+			return json.Unmarshal(raw, out) // Preserve syntax offsets and EOF checks.
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		return decoder.Decode(out)
+	}
+	unknownFieldError := func(err error) error {
+		if typeName != "world_codex" || err == nil || !strings.HasPrefix(err.Error(), "json: unknown field ") {
+			return nil
+		}
+		return fmt.Errorf("parse world_codex JSON: %v。此字段不在世界法典 schema 中，本次提交未保存、未合并草稿。不要删除领域信息来凑 schema：请将不支持的设备、证据流程等完整写入对应 sections[].content/rules，并将可执行条件放入 mechanisms 的已定义字段；只修正本次提交，已暂存的合法部分不必重发: %w%s", err, errs.ErrToolArgs, foundationShapeHint("world_codex"))
+	}
+	err := decode([]byte(content))
 	if err == nil {
 		return nil
 	}
+	if unknown := unknownFieldError(err); unknown != nil {
+		return unknown
+	}
 	if repaired, changed := repairLooseJSON(content); changed {
-		if json.Unmarshal([]byte(repaired), out) == nil {
+		if repairErr := decode([]byte(repaired)); repairErr == nil {
 			return nil
+		} else if unknown := unknownFieldError(repairErr); unknown != nil {
+			return unknown
 		}
 	}
 	// 反射式形状归一化：LLM 高频把对象写成数组、标量写成数组、单元素结构裸写成对象
@@ -745,8 +788,10 @@ func decodeFoundationJSON(typeName, content string, out any) error {
 	// 让模型重发、省一次 codex/LLM 往返。仅当 out 是指针时可取目标类型。
 	if rv := reflect.ValueOf(out); rv.Kind() == reflect.Pointer && !rv.IsNil() {
 		if coerced, changed := coerceJSONShape(json.RawMessage(content), rv.Elem().Type()); changed {
-			if json.Unmarshal(coerced, out) == nil {
+			if coerceErr := decode(coerced); coerceErr == nil {
 				return nil
+			} else if unknown := unknownFieldError(coerceErr); unknown != nil {
+				return unknown
 			}
 		}
 	}
@@ -909,6 +954,15 @@ func normalizeCodexListField(raw json.RawMessage, idKey string) (json.RawMessage
 // foundationShapeHint 给结构复杂、模型高频猜错的类型返回一份紧凑结构模板，
 // 附在解析/校验错误后，让模型一次重试就能对齐，而不是每轮收敛一个字段。
 func foundationShapeHint(typeName string) string {
+	if typeName == "characters" {
+		return "\ncharacters 每项的 initial_state 是独立开局态对象 {time?,location,current_goal,current_action?,pressure,known_facts,resources,relationships,commitments,resource_balances?}：location/current_goal/pressure必须非空，known_facts至少一条、不空白重复。旧resources字符串只留作者态，v2只用显式resource_balances生成角色资源视图。\n" +
+			"resource_balances每条完整形状 {resource_id,name,perceived_name?,perceived_label?,unit,perceived_unit?,actual_amount,access,perception,evidence_refs,readable_facts?,access_requires_any?}。resource_id=res_加16—64位小写hex，不编码秘密/数量。同ID全世界只有一个资源，name/unit/actual_amount/readable_facts/access_requires_any必须一致；可多角色shared引用，不克隆余额。name/unit是世界作者态，perceived_name/perceived_unit独立写角色已知的安全名称/量纲，不从世界字段回退；新本人经历协议只展示perceived_label静态安全短标签（如检修灯、常规手工具），不得包含当前地点、进行中动作、余额或进度，缺失时仅显示泛称，不从旧动态perceived_name猜取。未知单位为空。actual_amount为有限非负number或null；定性权限/材料用null、空unit，不强迫量化。access=exclusive/shared/none。\n" +
+			"perception={kind:unaware/unknown/last_observed/estimated/reported,amount?,estimate_min?,estimate_max?,as_of_chapter,evidence_refs}，初态as_of_chapter=0；unaware/unknown无数值，观测/报告用amount，估计用范围；任何数值感知须有角色已知perceived_unit及独立来源，不自动复制actual_amount。\n" +
+			"readable_facts=[{id,text}]仅为该资源/文书形成时实际写下的原始内容，不根据当前余额、作者动机或未来StateAfter补旧文书。封袋外清单与袋内原件用不同resource_id，各自facts独立，读取不递归容器。access_requires_any是既有WorldCodex机制id数组；受限原件初始access=none，实际执行解封/许可机制或从已获权者正常交接后才可读。角色获得名称/承诺不等于获得持有权或内容。未知来源和数量保持null/空；新建重要角色的目标、压力、位置不得取自未来arc/core_event。"
+	}
+	if typeName == "world_rules" {
+		return "\nworld_rules 每条为 {category,rule,boundary,visibility,character_view?}；character_view 是独立字符串，只写普遍适用的程序、条件和资源规律，不含本案秘密、未来揭示或硬合同结局；secret 不投放给角色。"
+	}
 	if typeName != "world_codex" {
 		return ""
 	}
@@ -917,17 +971,18 @@ func foundationShapeHint(typeName string) string {
 		keys = append(keys, sec.Key)
 	}
 	return "\nworld_codex 结构模板（字段名必须完全一致）：" +
-		fmt.Sprintf(`{"schema_version":%d,`, domain.CurrentWorldCodexSchemaVersion) +
+		fmt.Sprintf(`{"schema_version":%d,"character_view_version":1,`, domain.CurrentWorldCodexSchemaVersion) +
 		`"ability_tiers":[{"order":1,"name":"…","magnitude":"…","limits":"…","promotion":"…","cost":"…"}],` +
 		`"skill_domains":[{"name":"…","description":"…","tier_binding":"…","constraints":["…"]}],` +
 		`"races":[{"name":"…","description":"…","constraints":["…"]}],` +
 		`"weapon_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…"}],` +
 		`"equipment_categories":[同 weapon_categories 结构],` +
 		`"sections":[{"key":"…","content":"…","rules":["…"]} 或 {"key":"…","not_applicable":true,"reason":"…"}],` +
-		`"mechanisms":[{"id":"…","name":"…","visibility":"formal","section_refs":["mechanism_structure"],"actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…"}],` +
+		`"mechanisms":[{"id":"…","name":"…","visibility":"formal","section_refs":["mechanism_structure"],"actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…","character_view":{"name":"…","actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…"}}],` +
 		`"counterfactual_tests":[{"id":"…","given":["…"],"action":"…","expected_outcome":"…","forbidden_outcome":"…","mechanism_refs":["…"]}],` +
 		`"immutability_policy":"…"}` +
-		"；sections 是数组且必须覆盖全部 16 个 key：" + strings.Join(keys, ", ")
+		"；sections 是数组且必须覆盖全部 16 个 key：" + strings.Join(keys, ", ") +
+		"。新建法典自动启用 character_view_version=1；formal/informal 必须提供完整 character_view，只含普遍适用程序、条件、资源规律，不含本案秘密、未来揭示或硬合同结局；secret 不提供公开视图。设备/证据流程等专属领域信息存入 sections[].content/rules，未知字段不会静默保存。"
 }
 
 // repairLooseJSON 对 LLM 产出 JSON 的两类高频语法失误做确定性修复：
@@ -1086,6 +1141,14 @@ func (t *SaveFoundationTool) chapterZeroFoundationRefreshAuthorized() bool {
 	if !t.allowChapterZeroFoundationRefresh {
 		return false
 	}
+	progress, err := t.store.Progress.Load()
+	if err != nil {
+		return false
+	}
+	if progress != nil && strings.TrimSpace(progress.GenerationID) != "" &&
+		(!t.oneShotFoundationRefresh || !t.recordFoundationRefreshEpoch || t.allowedFoundationType != "layered_outline") {
+		return false
+	}
 	if err := RequireChapterZeroFoundationRefreshState(t.store); err != nil {
 		return false
 	}
@@ -1111,10 +1174,17 @@ func RequireChapterZeroFoundationRefreshState(st *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("load chapter-zero refresh progress: %w", err)
 	}
-	if p == nil || (p.Phase != domain.PhaseWriting && p.Phase != domain.PhasePremise && p.Phase != domain.PhaseOutline) ||
+	rebased := false
+	if p != nil && (strings.TrimSpace(p.GenerationID) != "" || strings.TrimSpace(p.GenerationMode) != "") {
+		if err := st.ValidateRebasedChapterZeroFoundationRefresh(); err != nil {
+			return fmt.Errorf("foundation refresh rebase evidence is invalid: %w: %w", err, errs.ErrToolPrecondition)
+		}
+		rebased = true
+	}
+	if p == nil || (p.Phase != domain.PhaseWriting && p.Phase != domain.PhasePremise && p.Phase != domain.PhaseOutline && !(rebased && p.Phase == domain.PhaseInit)) ||
 		p.LatestCompleted() != 0 || len(p.CompletedChapters) != 0 || p.TotalWordCount != 0 || len(p.ChapterWordCounts) != 0 ||
-		len(p.PendingRewrites) != 0 || strings.TrimSpace(p.RewriteReason) != "" || strings.TrimSpace(p.GenerationID) != "" ||
-		strings.TrimSpace(p.GenerationMode) != "" || p.CurrentChapter < 0 || p.CurrentChapter > 1 || p.InProgressChapter < 0 ||
+		len(p.PendingRewrites) != 0 || strings.TrimSpace(p.RewriteReason) != "" || (!rebased && (strings.TrimSpace(p.GenerationID) != "" || strings.TrimSpace(p.GenerationMode) != "")) ||
+		p.CurrentChapter < 0 || p.CurrentChapter > 1 || p.InProgressChapter < 0 ||
 		p.InProgressChapter > 1 || len(p.CompletedScenes) != 0 || p.ReopenedFromComplete || len(p.StrandHistory) != 0 ||
 		len(p.HookHistory) != 0 || (p.Flow != "" && p.Flow != domain.FlowWriting) {
 		return fmt.Errorf("foundation refresh requires chapter-zero progress with no canon, generation, rewrite, or history evidence: %w", errs.ErrToolPrecondition)
@@ -1150,34 +1220,18 @@ func RequireChapterZeroFoundationRefreshState(st *store.Store) error {
 
 func (t *SaveFoundationTool) chapterZeroRebaseOutlineReplacementAuthorized() bool {
 	p, err := t.store.Progress.Load()
-	if err != nil || p == nil || p.Phase != domain.PhaseWriting || p.LatestCompleted() != 0 || p.TotalWordCount != 0 || strings.TrimSpace(p.GenerationID) == "" {
+	if err != nil || p == nil || strings.TrimSpace(p.GenerationID) == "" || !t.oneShotFoundationRefresh || !t.recordFoundationRefreshEpoch ||
+		(t.allowedFoundationType != "outline" && t.allowedFoundationType != "layered_outline") {
 		return false
 	}
-	markerRaw, err := os.ReadFile(filepath.Join(t.store.Dir(), "meta", "all_chapter_rebase.json"))
-	if err != nil {
+	if err := RequireChapterZeroFoundationRefreshState(t.store); err != nil {
 		return false
 	}
-	var marker struct {
-		NewGenerationID string `json:"new_generation_id"`
-	}
-	if json.Unmarshal(markerRaw, &marker) != nil || strings.TrimSpace(marker.NewGenerationID) != strings.TrimSpace(p.GenerationID) {
+	lock, err := t.store.Runtime.InspectPipelineExecution()
+	if err != nil || lock == nil || lock.Mode != domain.PipelineExecutionFoundation || lock.TargetChapter != 1 {
 		return false
 	}
-	if _, err := os.Stat(filepath.Join(t.store.Dir(), "meta", "first_chapter_generation_readiness.json")); err == nil || !os.IsNotExist(err) {
-		return false
-	}
-	for _, rel := range []string{"chapters", "drafts"} {
-		entries, err := os.ReadDir(filepath.Join(t.store.Dir(), rel))
-		if err != nil && !os.IsNotExist(err) {
-			return false
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
-				return false
-			}
-		}
-	}
-	return true
+	return requireCurrentPipelineExecutionProcess(lock, "save_foundation verified chapter-zero rebase refresh") == nil
 }
 
 // worldCodexDraftRel 初建期的增量草稿缓冲。LLM 稳定输出不了一次成型的完整
@@ -1199,12 +1253,12 @@ func (t *SaveFoundationTool) loadWorldCodexDraft() *domain.WorldCodex {
 	return &draft
 }
 
-func (t *SaveFoundationTool) saveWorldCodexDraft(codex *domain.WorldCodex) {
+func (t *SaveFoundationTool) saveWorldCodexDraft(codex *domain.WorldCodex) error {
 	data, err := json.MarshalIndent(codex, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(filepath.Join(t.store.Dir(), worldCodexDraftRel), data, 0o644)
+	return os.WriteFile(filepath.Join(t.store.Dir(), worldCodexDraftRel), data, 0o644)
 }
 
 func (t *SaveFoundationTool) dropWorldCodexDraft() {
@@ -1217,6 +1271,9 @@ func mergeWorldCodex(base, in *domain.WorldCodex) *domain.WorldCodex {
 	out := *base
 	if in.SchemaVersion > 0 {
 		out.SchemaVersion = in.SchemaVersion
+	}
+	if in.CharacterViewVersion != 0 {
+		out.CharacterViewVersion = in.CharacterViewVersion
 	}
 	if len(in.AbilityTiers) > 0 {
 		out.AbilityTiers = in.AbilityTiers
@@ -1271,7 +1328,10 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 		codex.SchemaVersion = domain.CurrentWorldCodexSchemaVersion
 	}
 	// 初建期增量合并：已有草稿时先并入本次提交（见 worldCodexDraftRel 注释）。
-	existingCodex, _ := t.store.LoadWorldCodex()
+	existingCodex, loadErr := t.store.LoadWorldCodex()
+	if loadErr != nil {
+		return fmt.Errorf("load world_codex: %w: %w", errs.ErrStoreRead, loadErr)
+	}
 	if existingCodex != nil && strings.TrimSpace(changeReason) == "" && strings.TrimSpace(changeEvidence) == "" {
 		// 法典已定稿且本次不是修订：直接短路，防止重派的 architect 反复重交
 		// 不完整 payload 空烧回合（修订必须显式带 change_reason+change_evidence）。
@@ -1280,8 +1340,15 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 	}
 	if existingCodex == nil {
 		if draft := t.loadWorldCodexDraft(); draft != nil {
-			codex = mergeWorldCodex(draft, codex)
+			*codex = *mergeWorldCodex(draft, codex)
 		}
+		if codex.CharacterViewVersion == 0 {
+			codex.CharacterViewVersion = domain.CurrentWorldCharacterViewVersion
+		}
+	} else if codex.CharacterViewVersion == 0 {
+		// Preserve historical v0 as-is, and do not accidentally downgrade an
+		// already explicit v1 foundation when a revision omits this field.
+		codex.CharacterViewVersion = existingCodex.CharacterViewVersion
 	}
 	var missing []string
 	require := func(ok bool, field string) {
@@ -1304,6 +1371,35 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 	require(strings.TrimSpace(codex.ImmutabilityPolicy) != "", "immutability_policy")
 	require(len(codex.Mechanisms) > 0, "mechanisms（触发/前置/代价/结果/失败/可见性/时间）")
 	require(len(codex.CounterfactualTests) > 0, "counterfactual_tests（每条机制至少被一个探针覆盖）")
+	if codex.CharacterViewVersion == domain.CurrentWorldCharacterViewVersion {
+		for i, mechanism := range codex.Mechanisms {
+			if domain.CodexMechanismVisibility(mechanism) == "secret" {
+				continue
+			}
+			prefix := fmt.Sprintf("mechanisms[%d].character_view", i)
+			view := mechanism.CharacterView
+			if view == nil {
+				require(false, prefix+"（独立公开视图，不能复制作者秘密/未来结果）")
+				continue
+			}
+			require(strings.TrimSpace(view.Name) != "", prefix+".name")
+			require(strings.TrimSpace(view.Trigger) != "", prefix+".trigger")
+			require(strings.TrimSpace(view.Timing) != "", prefix+".timing")
+			for _, field := range []struct {
+				name   string
+				values []string
+			}{
+				{"actor_scope", view.ActorScope}, {"preconditions", view.Preconditions}, {"inputs", view.Inputs},
+				{"costs", view.Costs}, {"effects", view.Effects}, {"failure_modes", view.FailureModes}, {"observability", view.Observability},
+			} {
+				complete := len(field.values) > 0
+				for _, value := range field.values {
+					complete = complete && strings.TrimSpace(value) != ""
+				}
+				require(complete, prefix+"."+field.name)
+			}
+		}
+	}
 
 	// 覆盖清单：每个世界维度要么有内容，要么显式 not_applicable + 理由。
 	sectionByKey := map[string]domain.CodexSection{}
@@ -1325,7 +1421,9 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 	if len(missing) > 0 {
 		if existingCodex == nil {
 			// 初建期：把已收到的部分暂存草稿，后续调用只需补缺失字段。
-			t.saveWorldCodexDraft(codex)
+			if err := t.saveWorldCodexDraft(codex); err != nil {
+				return fmt.Errorf("save world_codex draft: %w: %w", errs.ErrStoreWrite, err)
+			}
 			return fmt.Errorf("world_codex 已合并暂存为草稿，仍缺：%s。下次调用 save_foundation(type=world_codex) 只需补发缺失字段（已收到的部分不必重发，会自动合并）: %w%s",
 				strings.Join(missing, ", "), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
 		}
@@ -1431,6 +1529,7 @@ func diffWorldCodexFields(old *domain.WorldCodex, next *domain.WorldCodex) []str
 		return string(data)
 	}
 	add("ability_tiers", marshal(old.AbilityTiers) != marshal(next.AbilityTiers))
+	add("character_view_version", old.CharacterViewVersion != next.CharacterViewVersion)
 	add("skill_domains", marshal(old.SkillDomains) != marshal(next.SkillDomains))
 	add("races", marshal(old.Races) != marshal(next.Races))
 	add("weapon_categories", marshal(old.WeaponCategories) != marshal(next.WeaponCategories))

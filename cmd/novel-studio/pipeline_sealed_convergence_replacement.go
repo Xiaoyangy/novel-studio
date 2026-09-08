@@ -359,21 +359,25 @@ func pipelineSealedConvergenceDispatchZeroSideEffectReplacement(
 		chapter,
 		string(planningContextRaw),
 	)
+	usageCtx, usageScope, err := newPipelineSealedConvergenceUsage(cfg, st, intent)
+	if err != nil {
+		return err
+	}
 	replacement.AccessReceiptDigest = receipt.ReceiptDigest
 	replacement.PromptSHA256 = pipelineBytesSHA([]byte(steer))
 	replacement.Dispatches = 1
 	replacement.DispatchedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := saveUpdatedPipelineSealedConvergenceReplanIntent(st.Dir(), intent, eligibility); err != nil {
-		return fmt.Errorf("sealed convergence persist replacement dispatch 1/1: %w", err)
+		return usageScope.Finish(fmt.Errorf("sealed convergence persist replacement dispatch 1/1: %w", err))
 	}
-	if err := agents.RunSealedConvergencePlannerContinuationReplacement(
-		context.Background(),
+	if err := usageScope.Finish(agents.RunSealedConvergencePlannerContinuationReplacement(
+		usageCtx,
 		cfg,
 		promptBundle,
 		st.Dir(),
 		chapter,
 		steer,
-	); err != nil {
+	)); err != nil {
 		return fmt.Errorf("sealed convergence replacement dispatch 1/1 failed: %w", err)
 	}
 	cp, err := tools.CurrentChapterPlanCausalCheckpoint(store.NewStore(st.Dir()), chapter)
@@ -505,16 +509,20 @@ func pipelineSealedConvergenceDispatchBinaryFailover(
 	if err != nil || !pipelineSealedConvergenceSameBinaryProbe(failover, latestProbe) {
 		return fmt.Errorf("sealed convergence binary failover executable changed before dispatch: %w", err)
 	}
+	usageCtx, usageScope, err := newPipelineSealedConvergenceUsage(cfg, st, intent)
+	if err != nil {
+		return err
+	}
 	failover.AccessReceiptDigest = receipt.ReceiptDigest
 	failover.PromptSHA256 = pipelineBytesSHA([]byte(steer))
 	failover.Dispatches = 1
 	failover.DispatchedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := saveUpdatedPipelineSealedConvergenceReplanIntent(st.Dir(), intent, eligibility); err != nil {
-		return fmt.Errorf("sealed convergence persist binary failover dispatch 1/1: %w", err)
+		return usageScope.Finish(fmt.Errorf("sealed convergence persist binary failover dispatch 1/1: %w", err))
 	}
-	if err := agents.RunSealedConvergencePlannerContinuationBinaryFailover(
-		context.Background(), cfg, promptBundle, st.Dir(), chapter, steer, failover.BinaryPath,
-	); err != nil {
+	if err := usageScope.Finish(agents.RunSealedConvergencePlannerContinuationBinaryFailover(
+		usageCtx, cfg, promptBundle, st.Dir(), chapter, steer, failover.BinaryPath,
+	)); err != nil {
 		return fmt.Errorf("sealed convergence binary failover dispatch 1/1 failed: %w", err)
 	}
 	cp, err := tools.CurrentChapterPlanCausalCheckpoint(store.NewStore(st.Dir()), chapter)

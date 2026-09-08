@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -152,9 +153,18 @@ func canonicalIndentedJSON(v any) ([]byte, error) {
 }
 
 func sameJSON(left, right []byte) bool {
+	decode := func(raw []byte, target *any) bool {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(target); err != nil {
+			return false
+		}
+		var trailing any
+		return decoder.Decode(&trailing) == io.EOF
+	}
 	var lv any
 	var rv any
-	if json.Unmarshal(left, &lv) != nil || json.Unmarshal(right, &rv) != nil {
+	if !decode(left, &lv) || !decode(right, &rv) {
 		return bytes.Equal(left, right)
 	}
 	lraw, lerr := json.Marshal(lv)
@@ -407,7 +417,13 @@ func (s *ProjectedStoreV2) contentAddressedJSONExistsUnlocked(rel string, value 
 }
 
 func (s *ProjectedStoreV2) writeFileNoReplaceUnlocked(rel string, data []byte) error {
-	final := s.io.path(rel)
+	return s.io.writeFileNoReplaceUnlocked(rel, data)
+}
+
+// writeFileNoReplaceUnlocked publishes a synced complete artifact without
+// replacing an existing path, including across independent Store instances.
+func (io *IO) writeFileNoReplaceUnlocked(rel string, data []byte) error {
+	final := io.path(rel)
 	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
 		return err
 	}
@@ -475,6 +491,7 @@ func rejectUnexpectedBuildingFiles(root string) error {
 		projectedGenerationManifestFile: {},
 		projectedSourceSnapshotFile:     {},
 		projectedObligationRegistryFile: {},
+		projectedChronologySourceFile:   {},
 	}
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -851,6 +868,11 @@ func (s *ProjectedStoreV2) LoadProjectedChapterBundles(generationID string) ([]d
 			if err := domain.ValidateProjectedChapterBundleChain(*generation, bundles, *registry); err != nil {
 				return nil, err
 			}
+			if len(bundles) > 0 {
+				if err := s.validateProjectedChronologySourceUnlocked(base, *generation, bundles[0], false); err != nil {
+					return nil, err
+				}
+			}
 			return bundles, nil
 		}
 		return s.loadBundlesAtUnlocked(base)
@@ -976,6 +998,9 @@ func (s *ProjectedStoreV2) saveProjectedChapterBundleUnlocked(
 	if bundle.Chapter < generation.FirstProjectedChapter || bundle.Chapter > generation.LastProjectedChapter {
 		return nil, fmt.Errorf("bundle chapter %d is outside generation range %d..%d",
 			bundle.Chapter, generation.FirstProjectedChapter, generation.LastProjectedChapter)
+	}
+	if err := s.validateProjectedChronologySourceUnlocked(base, *generation, bundle, true); err != nil {
+		return nil, err
 	}
 	registry, err := s.loadRegistryAtUnlocked(base)
 	if err != nil {
@@ -1158,6 +1183,30 @@ func (s *ProjectedStoreV2) ProjectChapterAndAdvance(
 
 	var result domain.ProjectionCursorV2
 	err = s.withProjectedWriteLock(func() error {
+		generation, err := s.loadGenerationAtUnlocked(projectedBuildingGenerationPath(intent.GenerationID))
+		if err != nil {
+			return err
+		}
+		if generation == nil {
+			generation, err = s.loadGenerationAtUnlocked(projectedSealedGenerationPath(intent.GenerationID))
+			if err != nil {
+				return err
+			}
+		}
+		if generation == nil {
+			return fmt.Errorf("generation %s does not exist", intent.GenerationID)
+		}
+		// Reject protocol mixtures before writing even a recoverable intent.
+		if err := domain.ValidateGenerationCharacterProtocolV2(*generation, intent.Bundle); err != nil {
+			return err
+		}
+		sourceBase := projectedBuildingGenerationPath(generation.GenerationID)
+		if generation.Status == domain.PlanningGenerationSealedV2 {
+			sourceBase = projectedSealedGenerationPath(generation.GenerationID)
+		}
+		if err := s.validateProjectedChronologySourceUnlocked(sourceBase, *generation, intent.Bundle, true); err != nil {
+			return err
+		}
 		completed, err := s.findCompletedProjectedChapterIntentUnlocked(intent)
 		if err != nil {
 			return err
@@ -1403,6 +1452,13 @@ func (s *ProjectedStoreV2) applyProjectedChapterIntentUnlocked(
 	}
 	if before == nil {
 		return nil, fmt.Errorf("building generation %s does not exist", intent.GenerationID)
+	}
+	// Older pending intents must not mutate the registry before this check.
+	if err := domain.ValidateGenerationCharacterProtocolV2(*before, intent.Bundle); err != nil {
+		return nil, err
+	}
+	if err := s.validateProjectedChronologySourceUnlocked(base, *before, intent.Bundle, true); err != nil {
+		return nil, err
 	}
 	nextRegistryRoot := intent.NextRegistry.RegistryRoot
 	if before.GenerationDigest != intent.ExpectedGenerationDigest &&
@@ -1897,6 +1953,9 @@ func (s *ProjectedStoreV2) SealGenerationExpected(
 		if err := domain.ValidatePlanningSourceSnapshotAgainstGenerationV2(*source, completeBuilding); err != nil {
 			return err
 		}
+		if err := s.validateProjectedChronologySourceUnlocked(buildingBase, completeBuilding, bundles[0], true); err != nil {
+			return err
+		}
 
 		sealedAt := s.now().UTC().Format(time.RFC3339Nano)
 		sealed := completeBuilding
@@ -1958,6 +2017,9 @@ func (s *ProjectedStoreV2) SealGenerationExpected(
 			return err
 		}
 		if err := s.io.WriteJSONUnlocked(filepath.Join(tmpRel, projectedSourceSnapshotFile), *source); err != nil {
+			return err
+		}
+		if err := s.copyChronologySourceUnlocked(buildingBase, tmpRel); err != nil {
 			return err
 		}
 		if err := s.io.WriteJSONUnlocked(filepath.Join(tmpRel, projectedObligationRegistryFile), *registry); err != nil {
@@ -2112,6 +2174,11 @@ func (s *ProjectedStoreV2) validateSealedGenerationUnlocked(
 	}
 	if err := domain.ValidateProjectedChapterBundleChain(*generation, bundles, *registry); err != nil {
 		return nil, err
+	}
+	if len(bundles) > 0 {
+		if err := s.validateProjectedChronologySourceUnlocked(base, *generation, bundles[0], false); err != nil {
+			return nil, err
+		}
 	}
 	var manifest domain.ProjectedChainManifestV2
 	if err := s.readJSONUnlocked(filepath.Join(base, projectedChainManifestFile), &manifest); err != nil {

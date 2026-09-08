@@ -76,6 +76,9 @@ func zeroInitDynamics(project zeroInitProject) zeroInitCharacterDynamicsDoc {
 }
 
 func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.CharacterSimulationState {
+	if c.InitialState != nil {
+		return zeroExplicitInitialCharacterState(c)
+	}
 	role := zeroFirstNonEmpty(c.Role, "关键角色")
 	arc := zeroOpeningArcBaseline(c)
 	actionBias := zeroOpeningActionBias(c)
@@ -138,12 +141,12 @@ func zeroInitCharacterState(project zeroInitProject, c domain.Character) domain.
 		"关系/资源损失迫使其修正判断",
 	}
 	unknownFacts := []string{"第一章世界规则的完整代价", "其他角色的真实意图", "章末钩子背后的答案"}
-	pressure := fmt.Sprintf("第一章核心事件“%s”会检验其性格、资源和关系边界。", zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title))
-	resources := []string{"角色卡既有经验", "第一章可见事实", "可复核的关系/资源台账"}
-	evidenceSeen := []string{"premise", "characters", "current_chapter_outline", "world_rules/book_world"}
+	pressure := "自身职责、已知关系与现有资源构成当前压力；尚未发生的事件不是已感知事实。"
+	resources := []string{"角色卡既有经验"}
+	evidenceSeen := []string{"characters"}
 	likelyAction := "先按最低证据标准试探局面，再用可见行动换取新信息或资源。"
 	competenceStage := "开局阶段：只能使用角色卡里的经验和现场证据，不能预装最终答案。"
-	triggerEvent := fmt.Sprintf("第一章核心事件触发：%s。", zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title))
+	triggerEvent := pressure
 	actionPressure := "必须在章内做出一个能改变状态的选择。"
 	pressureTest := "第一章用规则、关系或资源短缺测试其行动倾向。"
 	growthSignal := "承认一个新信息，并为下一章留下主动目标。"
@@ -328,6 +331,9 @@ func zeroOpeningCharacterFact(c domain.Character) string {
 }
 
 func zeroCurrentGoal(project zeroInitProject, c domain.Character, role string) string {
+	if c.InitialState != nil {
+		return c.InitialState.CurrentGoal
+	}
 	name := zeroFirstNonEmpty(c.Name, role, "该角色")
 	if !zeroFirstChapterCharacterActive(project, c) {
 		if mention := project.FirstMentions[strings.TrimSpace(c.Name)]; mention > 1 {
@@ -335,9 +341,8 @@ func zeroCurrentGoal(project zeroInitProject, c domain.Character, role string) s
 		}
 		return fmt.Sprintf("%s在首次正式入场前维持自己的%s生活线，不得为了人物覆盖提前进入第一章现场。", name, role)
 	}
-	event := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title, "第一章核心事件")
 	baseline := zeroFirstNonEmpty(zeroOpeningCharacterDescription(c), strings.Join(c.Traits, "、"), role)
-	return fmt.Sprintf("%s以%s的身份和“%s”的当下基线进入“%s”，做出一个可验证且会留下后果的选择。", name, role, baseline, event)
+	return fmt.Sprintf("%s以%s的身份维持自身处境，已知当下基线：%s。", name, role, baseline)
 }
 
 func zeroSkillLimitWorldMechanism() string {
@@ -349,9 +354,13 @@ func zeroRelationshipEffectLine() string {
 }
 
 func zeroInitVoiceLogic(project zeroInitProject, c domain.Character) domain.CharacterVoiceLogic {
+	personalitySource := zeroFirstNonEmpty(strings.Join(c.Traits, "、"), zeroOpeningCharacterDescription(c), c.Role)
+	if c.InitialState != nil {
+		personalitySource = zeroFirstNonEmpty(strings.Join(c.Traits, "、"), "声口特征未明确；只从真实话语与可见反应归纳。")
+	}
 	return domain.CharacterVoiceLogic{
 		Character:          c.Name,
-		PersonalitySource:  zeroFirstNonEmpty(strings.Join(c.Traits, "、"), zeroOpeningCharacterDescription(c), c.Role),
+		PersonalitySource:  personalitySource,
 		SpeechPrinciple:    zeroSpeechPrinciple(project, c),
 		SceneObjective:     zeroSceneObjective(project, c),
 		HiddenSubtext:      zeroHiddenSubtext(project, c),
@@ -373,6 +382,9 @@ func zeroInitVoiceLogic(project zeroInitProject, c domain.Character) domain.Char
 }
 
 func zeroSceneObjective(project zeroInitProject, c domain.Character) string {
+	if c.InitialState != nil {
+		return fmt.Sprintf("%s的开局目标是%s，位置为%s；是否交谈、核验或暂缓由其实际选择决定，完成后才记录本章结果。", c.Name, c.InitialState.CurrentGoal, c.InitialState.Location)
+	}
 	event := zeroFirstNonEmpty(project.FirstChapter.CoreEvent, project.FirstChapter.Title, "第一章事件")
 	if !zeroFirstChapterCharacterActive(project, c) {
 		if mention := project.FirstMentions[strings.TrimSpace(c.Name)]; mention > 1 {
@@ -385,6 +397,9 @@ func zeroSceneObjective(project zeroInitProject, c domain.Character) string {
 }
 
 func zeroSpeechPrinciple(project zeroInitProject, c domain.Character) string {
+	if c.InitialState != nil {
+		return "说话只服务本人明确的当前目标和实际知情；声口从已声明特征及真实话语建立，不复制作者Description或未来Arc。"
+	}
 	if !zeroFirstChapterCharacterActive(project, c) {
 		return fmt.Sprintf("%s首次入场前只保留由%s与当下性格推出的个人声口；不预写与主角的熟稔、暧昧、默契或共同秘密。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前身份"))
 	}
@@ -392,6 +407,9 @@ func zeroSpeechPrinciple(project zeroInitProject, c domain.Character) string {
 }
 
 func zeroHiddenSubtext(project zeroInitProject, c domain.Character) string {
+	if c.InitialState != nil {
+		return fmt.Sprintf("%s当前明确的压力是%s。若实际选择不直说某项内容，再据本人已知事实及现场行动解释；不预定隐瞒动机、未来转折或他人秘密。", c.Name, c.InitialState.Pressure)
+	}
 	if !zeroFirstChapterCharacterActive(project, c) {
 		return fmt.Sprintf("%s在离屏阶段先守住%s的现实利益、关系与日程；未正式入场前不对第一章现场作出反应。", zeroFirstNonEmpty(c.Name, "该角色"), zeroFirstNonEmpty(c.Role, "当前角色"))
 	}
@@ -400,6 +418,10 @@ func zeroHiddenSubtext(project zeroInitProject, c domain.Character) string {
 }
 
 func zeroRelationshipStance(project zeroInitProject, c domain.Character) string {
+	if c.InitialState != nil {
+		return fmt.Sprintf("%s仅以作者初态确认的关系为基线：%s；同处、通信、信任或承诺变化均须由实际行动成立。", c.Name,
+			zeroFirstNonEmpty(strings.Join(c.InitialState.Relationships, "；"), "未明确具体关系"))
+	}
 	if !zeroFirstChapterCharacterActive(project, c) {
 		return fmt.Sprintf("%s未进入第一章时不预建亲密默契；与主角的关系只保留角色卡已写明的基线，首次联系/见面后再按证据更新。", zeroFirstNonEmpty(c.Name, "该角色"))
 	}
@@ -412,6 +434,9 @@ func zeroRelationshipStance(project zeroInitProject, c domain.Character) string 
 }
 
 func zeroDictionAndRhythm(project zeroInitProject, c domain.Character) string {
+	if c.InitialState != nil {
+		return "措辞与节奏由实际交流、明确特征和当前压力决定；未给定声口时不从作者秘密或未来角色弧线推导。"
+	}
 	if !zeroFirstChapterCharacterActive(project, c) {
 		return fmt.Sprintf("离屏阶段不预写对白；首次入场时从%s的职业词、生活词和性格节奏建立声口，不能沿用主角或其他角色模板。", zeroFirstNonEmpty(c.Role, "当前身份"))
 	}
@@ -419,6 +444,9 @@ func zeroDictionAndRhythm(project zeroInitProject, c domain.Character) string {
 }
 
 func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.CharacterSimulationState) []domain.DialogueSceneBlueprint {
+	if primary := zeroProtagonist(project.Characters); primary.InitialState != nil {
+		return zeroExplicitOpeningDialogue(project, primary)
+	}
 	protagonist := zeroFirstNonEmpty(zeroProtagonist(project.Characters).Name, "主角")
 	counterpart := zeroFirstNonEmpty(zeroFirstActiveNonProtagonistName(project), zeroAssetOpeningPressureName(project), "第一位施压者")
 	for _, state := range states {
@@ -536,7 +564,102 @@ func zeroDialogueSceneBlueprints(project zeroInitProject, states []domain.Charac
 	}}
 }
 
+func zeroExplicitOpeningPlace(project zeroInitProject, character domain.Character) string {
+	if character.InitialState == nil {
+		return ""
+	}
+	location := strings.TrimSpace(character.InitialState.Location)
+	if project.BookWorld != nil {
+		for _, place := range project.BookWorld.Places {
+			if strings.EqualFold(location, strings.TrimSpace(place.ID)) || strings.EqualFold(location, strings.TrimSpace(place.Name)) {
+				return zeroFirstNonEmpty(place.Name, place.ID)
+			}
+		}
+	}
+	return location
+}
+
+func zeroStorycraftScene(project zeroInitProject) string {
+	if primary := zeroProtagonist(project.Characters); primary.InitialState != nil {
+		return zeroExplicitOpeningPlace(project, primary)
+	}
+	return zeroFirstSceneForProject(project)
+}
+
+// This is a conditional preparation aid, not a dialogue that has already
+// happened. Only explicitly co-located characters are offered as candidates;
+// a future chapter cast cannot teleport an offscreen actor into the opening.
+func zeroExplicitOpeningDialogue(project zeroInitProject, primary domain.Character) []domain.DialogueSceneBlueprint {
+	place := zeroExplicitOpeningPlace(project, primary)
+	participants := []domain.Character{primary}
+	for _, character := range project.Characters {
+		if character.Name != "" && character.Name != primary.Name && character.InitialState != nil &&
+			place != "" && zeroExplicitOpeningPlace(project, character) == place {
+			participants = append(participants, character)
+		}
+	}
+	names := make([]string, 0, len(participants))
+	tactics := make([]domain.DialogueObjectiveTactic, 0, len(participants))
+	turns := make([]domain.DialogueTurnDesign, 0, len(participants))
+	for _, character := range participants {
+		names = append(names, character.Name)
+		tactics = append(tactics, domain.DialogueObjectiveTactic{
+			Character: character.Name, ImmediateObjective: character.InitialState.CurrentGoal,
+			Tactic:        "若本人选择交流，依据实际目标决定询问、说明、拒绝或协商；此处不指定其决定。",
+			CounterTactic: "只有对方实际回应才形成应对；未发生交流时不制造反应。",
+			EmotionalLeak: "只取本视角实际看见的动作和听见的话，不由秘密或角色标签预定恐惧、羞耻或掩饰。",
+			TurnResult:    "本次交流若发生，结果以最终提案和裁决为准，暂不宣判成功、转嫁或让步。",
+		})
+		turns = append(turns, domain.DialogueTurnDesign{
+			Speaker: character.Name, SurfaceLineFunction: "仅在本人实际选择开口时按本岗目标安排话语；这些候选条目不是发言顺序。",
+			HiddenSubtext:  "若有未明说内容，必须有其真实知情及当时选择支持；允许直接交流而无隐藏动机。",
+			NewInformation: "只传递本人实际知道且选择传出的信息，听者实际收到才更新认知。",
+			ActionBeat:     "以交流当时的真实位置、物件和可见动作承接，不预写递交、退让或误操作。",
+			NextPressure:   "若交流改变信息、资源或责任，则据实际变化继续；也允许维持原状态。",
+		})
+	}
+	contact := "主角开局地点没有其他已确认同处的对谈候选；异地角色到达或通信成立前不编造双人对白。"
+	if len(participants) > 1 {
+		contact = "作者确认开局同处的候选人员为" + strings.Join(names, "、") + "；同处不等于已经交谈，也不指定谁先开口。"
+	}
+	return []domain.DialogueSceneBlueprint{{
+		SceneID: "opening-dialogue-engine", DialogueMode: "pressure_negotiation",
+		ModeReason:           "仅在角色实际选择协商时采用此模式；正式Planner须依据最终裁决改写为具体可执行蓝图，不能直接复制本条件模板。",
+		ScenePressure:        primary.InitialState.Pressure,
+		EmotionalTemperature: "情绪以作者明确初态和实际可见反应为依据，允许冷静、直接或沉默，不强制升温。",
+		RelationshipFrame:    contact, Medium: "尚未发生交流；若同处者选择当面交流则为face_to_face，异地交流须先落实媒介与送达。", POVRole: "participant",
+		AudiencePresence: domain.DialogueAudiencePresence{Present: "旁听者尚未确认，不能由章节名单自动加入。", PerformanceFor: "仅在实际有观众时说明其作用。", AudienceEffect: "观众反应须实际发生，否则不形成压力。"},
+		InfoAsymmetry: domain.DialogueInfoAsymmetry{
+			POVKnows: "仅包含主角initial_state.known_facts及后来实际收到的内容。", POVLacks: "未感知或未收到的信息仍未知，不强制主角误读。",
+			OtherHolds:     "对方掌握的信息以其自身初态和实际经历为准，不预设掌握另一半真相或存在隐瞒动机。",
+			ReaderPosition: "reader_level；单一贴近视角不得提前向读者公开未感知秘密。", AsymmetryPlay: "只有实际披露和核验才改变信息差，不强制新增谜团。",
+		},
+		ValueShift:        domain.DialogueValueShift{Value: "本次实际交流涉及的目标、信息或责任", OpeningCharge: "开局基线来自各人初态，不默认主角被动。", TurnTrigger: "最终提案及裁决确认的具体交流或行动才触发变化。", ClosingCharge: "据实际结果判定改善、恶化或不变，不预定小胜或新债。"},
+		PowerTrajectory:   domain.DialoguePowerTrajectory{OpeningHolder: "依据实际岗位与可用资源，不预定某人占上风。", FlipBeat: "只有实际行动改变筹码才记录转移，不规定第二轮翻转。", ClosingHolder: "正式Planner根据裁决写明最终控制范围，也可没有变化。"},
+		AddressShift:      "称谓来自既有关系；变化须有具体动作与交流支持。",
+		OpeningStrategy:   "由真实场景决定dialogue_first/action_first/object_first/silence_first，不要求先有对白。",
+		FirstSpokenMoment: "谁先开口及何时开口均待角色实际选择；开局动作不自动成为对白。",
+		LocationAnchor:    place + "；这是主角作者初态的位置，后续场景只能随真实移动与裁决改变。",
+		POVState:          "保留主角当前已知与未知范围，身体和情绪反应须有事实支持，不预填错误判断。",
+		InnerQuestion:     "若当前知识存在与目标有关的缺口，再以本视角表达具体问题。", MemoryBridge: "只补理解当前行为所需的已知经历，不引用未来Arc或章纲结果。",
+		IdentityGrounding:           "以实际到场者的可见岗位、物件或有来源介绍识别身份；秘密身份不能作为外观。",
+		DialogueObjective:           "正式Planner根据角色实际交流意图给出本场具体目标，不能用模板代替已裁决的选择。",
+		InterlocutorAgenda:          contact + "各人当前目标见候选策略，但是否采取策略仍由其决定。",
+		ProtagonistResponseStrategy: "由主角实际知情与最终提案决定核验、协商、拒绝或保持沉默，不预定失误。",
+		ObjectiveTactics:            tactics, TurnProgression: turns,
+		DirectnessPolicy: "允许直接说明可公开事实；潜台词仅在真实关系和选择支持时使用。", SubtextSource: "仅来自已明确的个人目标与当前实际行为，不能由未来Arc或秘密类别自动推出。",
+		EscalationPattern: "若冲突实际升级，再按裁决确定推进；不强制试探次数或让步。", BeatDensity: "动作拍随真实交流和场景密度安排，不要求每句话伴随动作。",
+		SilencePolicy: "本人可以选择沉默，是否沉默及其效果待真实行动确认。", InfoReleasePolicy: "只释放已实际说出或出示且被接收的内容。",
+		ExpositionBudget: "背景只服务当下可见行为，不用旁白替未发生的对话解释秘密。", SubtextAndPowerShift: "权力与关系变化必须对应实际交换，不预置输赢和误解。",
+		ExitBeat: "按实际场景结果结束；不预设承诺、交易或关系升级。",
+		DoNotUse: []string{"把候选同处人员当作已交谈", "搬移离屏角色以凑对白", "强制错误信念、隐瞒动机或误操作", "把本条件性辅助稿当正式可执行计划"},
+	}}
+}
+
 func zeroInitResourceLedger(project zeroInitProject) domain.ResourceLedger {
+	if ledger, explicit := zeroExplicitInitialResourceLedger(project); explicit {
+		return ledger
+	}
 	protagonist := zeroProtagonist(project.Characters)
 	return domain.ResourceLedger{
 		Version: 1,
@@ -669,6 +792,9 @@ func zeroInitCrowdPolicy(project zeroInitProject) map[string]any {
 
 func zeroInitStorycraftPlan(project zeroInitProject, dynamics zeroInitCharacterDynamicsDoc) zeroPrewriteStorycraftPlan {
 	usagePolicy := "所有新正文都必须先把本计划转入 plan_chapter.causal_simulation：人物先有 Want/Lie/Need/Truth 和合理犯错，行动先有身体/情绪/关系/创伤/偏差/意义驱动，关系先有亲密阶段与边界，人物先有可识别外观，对话先按角色、场景、压力、情绪和关系选择 dialogue_mode、opening_strategy 与 objective_tactics，读者先有小胜与新债，离屏线先有证据回收路径，章末先有具体后果契约；正式写作可根据当轮网络检索和最新台账更新字段，但不能省略同类字段。"
+	if zeroProtagonist(project.Characters).InitialState != nil {
+		usagePolicy = "这是基于作者明确开局态的条件性写作辅助，不是已发生的角色决定。不得为了填字段发明错误信念、必犯错误、未确认的同场对白或可见外貌。正式Planner仍须在角色提交与世界裁决之后给出本章具体、可执行且证据完整的计划；辅助条件不能原样冒充最终选择、实际因果或正文事实，也不能用于跳过正式计划门禁。"
+	}
 	return zeroPrewriteStorycraftPlan{
 		Version:            2,
 		Scope:              "reusable_prewrite_storycraft",
@@ -703,6 +829,18 @@ func zeroCharacterArcTests(project zeroInitProject, states []domain.CharacterSim
 			continue
 		}
 		state := stateByName[c.Name]
+		if c.InitialState != nil {
+			out = append(out, domain.CharacterArcTest{
+				Character: c.Name, Want: c.InitialState.CurrentGoal, PressureTest: c.InitialState.Pressure,
+				CoreLie:          "作者开局态未声明错误信念；若实际判断与可靠新证据矛盾，再记录具体偏差，不预定认知错误。",
+				Need:             "若当前目标或承诺在行动中受到检验，再依实际选择说明需要调整之处。",
+				Truth:            "本章结论须由实际证据与结果支持，不以角色必须犯错作为成长前提。",
+				FirstMistake:     "开局未声明已发生的失误；只有实际误判或操作失误发生时才记录，允许角色判断正确。",
+				CorrectionSignal: "角色实际收到与原判断不符的新证据时才可能修正；没有发生错误就不编造纠错。",
+				ChapterEvidence:  "正式Planner需根据最终角色提案和裁决给出本章具体选择、可见后果与验证依据，不能把本条件性辅助稿当成已发生事件。",
+			})
+			continue
+		}
 		coreLie := zeroFirstNonEmpty(state.ArcAxis.CoreLie, firstString(state.Misbeliefs), "以为旧经验足以解释第一章新压力。")
 		out = append(out, domain.CharacterArcTest{
 			Character:        c.Name,
@@ -769,7 +907,7 @@ func zeroReaderRewardPlan(project zeroInitProject) domain.ReaderRewardPlan {
 
 func zeroEvidenceReturnChains(project zeroInitProject, states []domain.CharacterSimulationState) []domain.EvidenceReturnChain {
 	protagonist := zeroProtagonist(project.Characters).Name
-	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景")
 	var out []domain.EvidenceReturnChain
 	seen := map[string]bool{}
 	add := func(name, event, timing string, resolve int) {
@@ -892,7 +1030,7 @@ func zeroDormantCharacterPolicy(project zeroInitProject, states []domain.Charact
 }
 
 func zeroRealitySupportPlan(project zeroInitProject) []domain.RealitySupportPlan {
-	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景")
 	return []domain.RealitySupportPlan{
 		{
 			Domain:             "场景环境与现实执行",
@@ -933,11 +1071,16 @@ func zeroEmotionalLogic(project zeroInitProject, states []domain.CharacterSimula
 		state := stateByName[c.Name]
 		pressure := zeroFirstNonEmpty(state.Pressure, project.FirstChapter.CoreEvent, "正文开始前的世界/关系压力")
 		emotion := zeroCharacterEmotionProfile(project, c)
+		baselineMood := zeroFirstNonEmpty(firstString(c.Traits), "紧绷")
+		if c.InitialState != nil {
+			pressure = c.InitialState.Pressure
+			baselineMood = "作者开局态未确认具体心境，待实际反应支持。"
+		}
 		out = append(out, domain.CharacterEmotionalLogic{
 			Character:               c.Name,
 			PhysiologicalState:      emotion.PhysiologicalState,
 			ImmediateState:          emotion.ImmediateState,
-			BaselineMood:            zeroFirstNonEmpty(firstString(c.Traits), "紧绷"),
+			BaselineMood:            baselineMood,
 			PrimaryEmotion:          emotion.Primary,
 			CompositeEmotion:        emotion.Composite,
 			EmotionalTrigger:        pressure,
@@ -1009,6 +1152,25 @@ type zeroEmotionProfile struct {
 }
 
 func zeroCharacterEmotionProfile(project zeroInitProject, c domain.Character) zeroEmotionProfile {
+	if c.InitialState != nil {
+		return zeroEmotionProfile{
+			PhysiologicalState: "身体状态仅取作者初态或实际可见证据，未注明的不预设。",
+			ImmediateState:     c.InitialState.Location + "；" + c.InitialState.Pressure,
+			Primary:            "具体情绪尚未由当前反应确定", Composite: "若有复合情绪，需由本章实际反应支持，不按角色身份预填。",
+			GoalAppraisal: c.InitialState.CurrentGoal, BoundaryThreat: "仅当实际事件威胁已声明目标、资源或承诺时确认。",
+			Regulation: "角色如何调节压力由实际选择决定，允许冷静直说或保持原状。",
+			Defense:    "尚未确认防御机制，不预设掩饰、合理化或否认。", Bias: "尚未确认认知偏差；若出现判断错误再按实际证据说明。",
+			ApproachAvoidance: "趋近或回避须由最终提案确定，不预定逃避失控或被看穿。",
+			ShortLongTerm:     "只比较当前目标与已声明承诺，不从未来Arc补长期冲突。",
+			SelfRelationship:  "只有既有关系和实际选择支持时才产生自我与关系冲突。",
+			HiddenReason:      "未明说的理由只有实际行为及本人明确知情支持时才能成立，不从未来Arc推导。",
+			MeaningNeed:       "角色所赋意义依作者已知基线和真实选择确定，未声明的不补写。",
+			Metacognition:     "自我觉察程度由实际判断和反应体现，不要求高自控或必然失控。",
+			Action:            "正式Planner根据最终提案与裁决明确情绪是否以及如何影响本章具体行动。",
+			EventRole:         "事件贡献取决于实际行动，也允许该角色保持原选择。",
+			Evidence:          []string{"本POV实际感知的反应与动作；尚未发生者只能作为待观察项"},
+		}
+	}
 	name := zeroFirstNonEmpty(c.Name, "角色")
 	role := zeroFirstNonEmpty(c.Role, "当前身份")
 	traits := zeroFirstNonEmpty(strings.Join(c.Traits, "、"), zeroOpeningCharacterDescription(c), "既有性格")
@@ -1067,7 +1229,17 @@ func zeroRelationshipEmotionArcs(project zeroInitProject, states []domain.Charac
 		intimacyStage := zeroIntimacyStage(relType)
 		romancePotential := zeroRomancePotential(relType)
 		nextBeat := "下一次推进必须改变信任、亏欠、亲密、嫉妒、保护欲或权力位置之一。"
-		if !firstChapterActive && !zeroEstablishedRelationshipType(relType) {
+		if protagonist.InitialState != nil && c.InitialState != nil {
+			relType = "以作者明确开局关系为准"
+			currentBond = "只保留各自initial_state.relationships中已明确的关系，不从未来Arc推断亲密或敌意。"
+			emotionalWant = "若本次实际互动产生关系诉求，再按最终提案说明，不预填向对方索取的情感位置。"
+			fear = "未声明具体关系恐惧，不预设被抛弃、被背叛或被看穿。"
+			trustDebt = "信任与责任从已声明关系和承诺开始，不默认低信任或必然新增债务。"
+			conflictTrigger = "具体互动尚未由裁决确认，不将未来章节事件写成已触发关系冲突。"
+			intimacyStage = "只确认已有关系，不推导未声明的亲密阶段。"
+			romancePotential = "不从未来Arc或性别推断恋爱方向；仅按作者既有关系和实际选择建模。"
+			nextBeat = "若真实互动改变关系，再记录具体变化；未变化时保持原状态。"
+		} else if !firstChapterActive && !zeroEstablishedRelationshipType(relType) {
 			relType = "未建立/待首次互动"
 			currentBond = "尚未相识、联系或共同经历；零章不预设互信、亏欠、默契、暧昧或敌意。"
 			emotionalWant = "首次互动前不预写向对方索取的情感位置；只保留各自生活线的现实目标。"
@@ -1246,6 +1418,23 @@ func zeroVisualDesign(project zeroInitProject, states []domain.CharacterSimulati
 		if c.Name == "" {
 			continue
 		}
+		if c.InitialState != nil {
+			out = append(out, domain.CharacterVisualDesign{
+				Character:       c.Name,
+				Silhouette:      "体型轮廓尚未由角色可见证据确认，不能按反派、职业或性格标签补骨相。",
+				FaceAndHair:     "只采用当前POV确实观察到或由明确公开外观资料支持的面部与发型。",
+				ClothingStyle:   "穿着尚未在显式开局态中确认；正式计划须按现场可见且有来源的服装细节设计，不能把Description中的领用、经手或秘密事实当衣着锚点。",
+				ColorPalette:    "颜色由实际衣物、物件与现场照明确定，不按身份善恶固定色板。",
+				BodyLanguage:    "仅使用角色实际执行且在POV范围内可见的动作，不把作者知道的隐瞒经过转成外显身体语言。",
+				SignatureObject: "物件须实际在场并可见；有使用权限不等于已经携带，不能由秘密记录推定标志物。",
+				FirstImpression: "首次印象限于本视角实际感知的特征，不提前呈现幕后身份或责任结论。",
+				StatusWear:      "汗雨、磨损、整洁与疲惫均须有当前场景事实支持，不作缺省断言。",
+				ChangeRule:      "只根据实际环境与角色行动改变外观，不要求每次出现都制造变化。",
+				SceneUse:        "正式Planner必须选择本场真实可见且有功能的具体视觉信息；此辅助约束不是可直接渲染的外貌事实。",
+				DoNotUse:        []string{"扫描Description单字推导衣着", "以秘密案件事实当作可见外貌", "根据角色善恶或职业发明体型", "把未确认外观写成已确认锚点"},
+			})
+			continue
+		}
 		statusWear := "只加入由当前场景、职业动作和资源状态支持的整洁、褶皱、汗雨或磨损变化；不得默认贫穷、失业、破损或疲惫。"
 		changeRule := "外观随资源、权力、工作强度、亲密关系和生活阶段改变；不能每次出场都像静态设定图。"
 		out = append(out, domain.CharacterVisualDesign{
@@ -1370,9 +1559,12 @@ func zeroVisualEvidenceClauses(c domain.Character, markers ...string) string {
 }
 
 func zeroGroundedWorldBackgroundPlan(project zeroInitProject) zeroWorldBackgroundPlan {
-	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景")
 	region := zeroFirstNonEmpty(zeroKnownCityName(project), "开局区域")
 	primary := zeroProtagonist(project.Characters)
+	if primary.InitialState != nil {
+		scene = zeroExplicitOpeningPlace(project, primary)
+	}
 	protagonist := zeroFirstNonEmpty(primary.Name, "主角")
 	counterpart := ""
 	for _, name := range zeroCurrentCounterparts(project, primary) {
@@ -1547,7 +1739,10 @@ func zeroInitChapterPlan(project zeroInitProject, dynamics zeroInitCharacterDyna
 	}
 	emotionTarget := "难堪、不服、试探和做成第一件事后的短暂松气；小胜必须带着下一步责任。"
 	hookGoal := "让读者想知道这次结果能否复制、谁会加入或阻拦、下一步要由谁承担成本。"
-	sceneAnchors := []string{zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"), "由本章事件产生的可复核证据", "参与者选择与关系变化"}
+	sceneAnchors := []string{zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景"), "由本章事件产生的可复核证据", "参与者选择与关系变化"}
+	if primary := zeroProtagonist(project.Characters); primary.InitialState != nil {
+		sceneAnchors[0] = zeroExplicitOpeningPlace(project, primary)
+	}
 	chapterFunction := "整本书入口：证明主角行动、当前阻力、可见结果与关系推进能形成长期连载发动机。"
 	return domain.ChapterPlan{
 		Chapter:    1,
@@ -1755,7 +1950,7 @@ func zeroReaderEntertainmentPlan(project zeroInitProject) domain.ReaderEntertain
 }
 
 func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan {
-	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景")
 	return []domain.GroundingDetailPlan{
 		{
 			Detail:        "付款、物料、位置、安装和顾客等待先像真实经营现场，再承担剧情压力。",
@@ -1774,19 +1969,39 @@ func zeroGroundingDetails(project zeroInitProject) []domain.GroundingDetailPlan 
 }
 
 func zeroOffscreenStage(project zeroInitProject, states []domain.CharacterSimulationState) []domain.CharacterStageRecord {
-	scene := zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景")
+	scene := zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景")
 	var records []domain.CharacterStageRecord
 	for _, state := range states {
 		if strings.TrimSpace(state.Character) == "" {
 			continue
 		}
 		firstChapterActive := false
+		var explicitCharacter *domain.Character
 		firstMention := project.FirstMentions[strings.TrimSpace(state.Character)]
 		for _, c := range project.Characters {
 			if zeroCharacterNameIs(c, state.Character) {
 				firstChapterActive = zeroFirstChapterCharacterActive(project, c)
+				if c.InitialState != nil {
+					explicitCharacter = &c
+				}
 				break
 			}
+		}
+		if explicitCharacter != nil {
+			i := explicitCharacter.InitialState
+			records = append(records, domain.CharacterStageRecord{
+				Chapter: 1, Character: state.Character, Time: zeroFirstNonEmpty(i.Time, "作者未明确开局时刻"), Location: zeroExplicitOpeningPlace(project, *explicitCharacter),
+				Status: "作者明确的开局状态，后续行动尚未裁决", Environment: "环境仅由作者开局地点及已知现场事实支持，不复制未来全章事件。",
+				CurrentAction: zeroFirstNonEmpty(i.CurrentAction, "作者未明确正在执行的动作，不预定后续行动"), Pressure: i.Pressure,
+				Decision: "尚未作出本章独立决定，等待角色实际提案及世界裁决。", MistakeOrMisbelief: "尚未确认误判或错误信念，不强制犯错。",
+				KnowledgeBoundary: "只使用本人明确已知或实际收到的事实，不共享主角现场信息。", VisibleInChapter: firstChapterActive,
+				Evidence: "characters.json:initial_state", Transport: "当前留在作者开局地点；移动须有实际选择和合法路线。", TravelTime: "只核算真实发生的移动，未移动不产生行程。",
+				MeetingConstraint: "同场或通信必须由实际到达和消息送达成立，章节名单不能证明已到场。", PersonalityDelta: "未发生新的性格或关系变化。",
+				DeathState: "生死与伤情仅依作者已知事实，不由角色标签推定。", ProtagonistNotice: "只有主角实际观察或收到信息后才更新其知情。",
+				TimelineConsistency: "这是开局基线；后续行程、工时和行动严格按世界裁决推进。", NextPotential: "后续目标与状态按真实刺激和选择更新，可能保持原状。",
+				Tags: []string{"zero_init", "authored_initial_state", state.Character},
+			})
+			continue
 		}
 		location := scene
 		status := "角色状态待第一章正文确认"
@@ -1878,7 +2093,7 @@ func zeroReviewRefinement() domain.ReviewRefinementLoop {
 
 func zeroEnvironmentState(project zeroInitProject) []domain.EnvironmentSignal {
 	return []domain.EnvironmentSignal{{
-		Place:              zeroFirstNonEmpty(zeroFirstSceneForProject(project), "第一章主场景"),
+		Place:              zeroFirstNonEmpty(zeroStorycraftScene(project), "第一章主场景"),
 		VisibleState:       "价格、票据、物料、位置、排队、交接、人员动作或消息记录中至少一项可见且会变化。",
 		InformationCarried: "承载当前目标的用途、执行条件、责任边界、参与者顾虑与资源缺口。",
 		PressureApplied:    "迫使角色在有限时间和资源下作出一次可执行选择，并明确谁承担成本。",

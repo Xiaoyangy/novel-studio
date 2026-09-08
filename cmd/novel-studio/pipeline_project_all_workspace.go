@@ -19,15 +19,16 @@ const pipelineProjectAllPlanningContextPath = "meta/project_all_state.json"
 const pipelineProjectAllWorkspaceManifestPath = "meta/project_all_workspace_manifest.json"
 
 type pipelineProjectAllWorkspaceManifest struct {
-	Version                string `json:"version"`
-	GenerationID           string `json:"generation_id"`
-	SourceOutput           string `json:"source_output"`
-	BaseChapter            int    `json:"base_chapter"`
-	Workspace              string `json:"workspace"`
-	InitializedAt          string `json:"initialized_at"`
-	IsolatedWrites         bool   `json:"isolated_writes"`
-	FoundationSnapshotRoot string `json:"foundation_snapshot_root"`
-	RAGSnapshotRoot        string `json:"rag_snapshot_root"`
+	Version                         string `json:"version"`
+	GenerationID                    string `json:"generation_id"`
+	SourceOutput                    string `json:"source_output"`
+	BaseChapter                     int    `json:"base_chapter"`
+	Workspace                       string `json:"workspace"`
+	InitializedAt                   string `json:"initialized_at"`
+	IsolatedWrites                  bool   `json:"isolated_writes"`
+	FoundationSnapshotRoot          string `json:"foundation_snapshot_root"`
+	RAGSnapshotRoot                 string `json:"rag_snapshot_root"`
+	AcceptedCharacterBaselineDigest string `json:"accepted_character_baseline_digest,omitempty"`
 }
 
 func pipelineProjectAllWorkspacePath(outputDir, generationID string) string {
@@ -154,6 +155,16 @@ func savePipelineProjectAllWorkspaceManifest(
 		FoundationSnapshotRoot: foundationSnapshotRoot,
 		RAGSnapshotRoot:        ragSnapshotRoot,
 	}
+	baseline, err := pipelineProjectAllAcceptedCharacterBaseline(liveOutputDir, generationID, baseChapter)
+	if err != nil {
+		return fmt.Errorf("freeze accepted character baseline: %w", err)
+	}
+	if baseline != nil {
+		if _, err := writePipelinePlanningJSON(filepath.Join(workspace, store.ProjectAllAcceptedCharacterBaselinePath), baseline); err != nil {
+			return err
+		}
+		manifest.AcceptedCharacterBaselineDigest = baseline.Digest
+	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
@@ -194,6 +205,13 @@ func validatePipelineProjectAllWorkspaceManifest(
 		manifest.FoundationSnapshotRoot != foundationSnapshotRoot ||
 		manifest.RAGSnapshotRoot != ragSnapshotRoot {
 		return fmt.Errorf("workspace manifest does not match generation/source/base")
+	}
+	baseline, err := pipelineProjectAllAcceptedCharacterBaseline(liveOutputDir, generationID, baseChapter)
+	if err != nil {
+		return err
+	}
+	if err := validatePipelineProjectAllAcceptedBaseline(workspace, manifest, baseline); err != nil {
+		return err
 	}
 	return nil
 }
@@ -243,142 +261,8 @@ func pipelineProjectAllRAGSnapshotRoot(outputDir string) (string, error) {
 // never folded back into this root; later promotion uses the root persisted in
 // PlanningSourceSnapshotV2 rather than rehashing live-growing ledgers.
 func pipelineProjectAllFoundationSnapshotRoot(outputDir string) (string, error) {
-	artifacts := make(map[string]string)
-	add := func(rel string) error {
-		rel = filepath.ToSlash(filepath.Clean(rel))
-		digest, err := pipelineOptionalFileSHA(outputDir, rel)
-		if err != nil {
-			return err
-		}
-		if digest != "" {
-			artifacts[rel] = digest
-		}
-		return nil
-	}
-	for _, rel := range []string{
-		"premise.md",
-		"characters.json",
-		"book_world.json",
-		"world_codex.json",
-		"world_rules.json",
-		"relationship_state.initial.json",
-		"relationship_state.json",
-		"foreshadow_ledger.initial.json",
-		"foreshadow_ledger.json",
-		"timeline.json",
-		"meta/compass.json",
-		"meta/run.json",
-		"meta/world_foundation.json",
-		"meta/world_coherence_report.json",
-		"meta/initial_character_dynamics.json",
-		"meta/initial_resource_ledger.json",
-		"meta/simulation_restart_policy.json",
-		"meta/simulation_profile.json",
-		"meta/crowd_role_policy.json",
-		"meta/prewrite_storycraft_plan.json",
-		"meta/prewrite_storycraft_plan.md",
-		"references/prewrite_storycraft_plan.md",
-		"meta/world_background_plan.json",
-		"meta/world_background_plan.md",
-		"references/world_background_plan.md",
-		"meta/zero_chapter_context_manifest.json",
-		"meta/resource_ledger.json",
-		"meta/cast_ledger.json",
-		"meta/state_changes.json",
-		"meta/chapter_progress.json",
-		"meta/project_progress.json",
-		"meta/character_continuity.json",
-		"meta/character_agents/registry.json",
-		"meta/evolution_report.json",
-		"meta/world_events.jsonl",
-		"meta/world_tick.json",
-		"meta/offscreen_agenda.json",
-		"meta/story_time_contract.json",
-		"meta/story_calendar.json",
-		"meta/simulation_tiers.json",
-		"meta/event_weave.json",
-		"meta/moral_ceiling.json",
-		"meta/physics_axioms.json",
-		"meta/pacing_contract.json",
-		"meta/social_mood.json",
-		"meta/info_graph.json",
-		"meta/ritual_calendar.json",
-		"meta/crowd_life.json",
-		"meta/ecological_map.json",
-		"meta/cosmology.json",
-		"meta/cultural_footnotes.json",
-		"meta/user_rules.json",
-		"meta/style_rules.json",
-		"meta/writing_assets.json",
-		"meta/web_reference_brief.json",
-		"meta/web_reference_brief.md",
-		"references/web_reference_brief.md",
-	} {
-		if err := add(rel); err != nil {
-			return "", err
-		}
-	}
-	for _, sourceRoot := range []struct {
-		path       string
-		extensions map[string]bool
-	}{
-		{path: "meta/characters", extensions: map[string]bool{".json": true}},
-		{path: "meta/character_agents/memory", extensions: map[string]bool{".json": true}},
-		{path: "meta/volume_codex", extensions: map[string]bool{".json": true}},
-		{path: "meta/snapshots", extensions: map[string]bool{".json": true}},
-		{path: "meta/character_stage", extensions: map[string]bool{".json": true}},
-		{path: "meta/side_character_journeys", extensions: map[string]bool{".json": true}},
-		{path: "meta/chapter_world_deltas", extensions: map[string]bool{".json": true}},
-		{path: "reviews", extensions: map[string]bool{
-			".json": true, ".jsonl": true, ".md": true,
-		}},
-	} {
-		base := filepath.Join(outputDir, filepath.FromSlash(sourceRoot.path))
-		if _, err := os.Stat(base); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return "", err
-		}
-		if err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			rel, err := filepath.Rel(outputDir, path)
-			if err != nil {
-				return err
-			}
-			rel = filepath.ToSlash(rel)
-			if entry.IsDir() {
-				if rel == "reviews/drafts" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("project-all foundation snapshot refuses symlink %s", rel)
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("project-all foundation snapshot refuses non-regular file %s", rel)
-			}
-			if !sourceRoot.extensions[strings.ToLower(filepath.Ext(entry.Name()))] {
-				return nil
-			}
-			return add(rel)
-		}); err != nil {
-			return "", err
-		}
-	}
-	return pipelineProjectAllDigest(struct {
-		Version   string            `json:"version"`
-		Artifacts map[string]string `json:"artifacts"`
-	}{
-		Version:   "project-all-foundation-snapshot.v1",
-		Artifacts: artifacts,
-	}), nil
+	_, root, err := store.CaptureProjectAllFoundationSnapshot(outputDir)
+	return root, err
 }
 
 // sanitizePipelineProjectAllWorkspace removes every inference artifact that
@@ -480,7 +364,7 @@ func projectAllWorkspaceExcluded(rel string, isDir bool) bool {
 	}
 	if !isDir {
 		switch rel {
-		case "meta/pipeline.json", "meta/usage.json", "meta/diag-export.md":
+		case "meta/pipeline.json", "meta/usage.json", "meta/diag-export.md", pipelineProjectedPhysicalStatePath:
 			return true
 		}
 	}
@@ -669,12 +553,25 @@ func applyPipelineProjectAllObligationsToOutline(
 			tag = "project-all hard-obligation"
 			mode = "本章正式 POV 计划必须兑现"
 		}
+		contract, proseView, err := pipelineProjectAllObligationProseContract(st, registry, obligation)
+		if err != nil {
+			return nil, err
+		}
+		if proseView {
+			// Keep the immutable ID in the host outline, not in story facts.
+			tag = "project-all v2-simulation-obligation"
+			if obligation.Hardness == domain.ObligationHardV2 {
+				tag = "project-all v2-hard-obligation"
+			}
+			additions = append(additions, fmt.Sprintf("[%s:%s] %s", tag, obligation.ID, contract))
+			continue
+		}
 		additions = append(additions, fmt.Sprintf(
 			"[%s:%s] %s：%s",
 			tag,
 			obligation.ID,
 			mode,
-			strings.TrimSpace(obligation.Contract),
+			contract,
 		))
 	}
 	if predecessor != nil && predecessor.Chapter == chapter-1 &&
@@ -702,6 +599,11 @@ func applyPipelineProjectAllObligationsToOutline(
 				}
 				if len(additions) > 0 {
 					if err := st.Outline.SaveLayeredOutline(volumes); err != nil {
+						return nil, err
+					}
+					// novel_context and both plan tools read the flat outline.
+					// Keep that actual consumer view synchronized with the audit tree.
+					if err := st.Outline.SaveOutline(domain.FlattenOutline(volumes)); err != nil {
 						return nil, err
 					}
 				}
@@ -743,6 +645,23 @@ func advancePipelineProjectAllWorkspace(
 	if st == nil || simulation == nil || plan == nil {
 		return fmt.Errorf("advance project-all workspace requires store, simulation and plan")
 	}
+	physical, err := pipelineProjectAllPhysicalState(*simulation)
+	if err != nil {
+		return err
+	}
+	var physicalReceipt pipelineProjectedPhysicalStateReceipt
+	if physical != nil {
+		if len(projectedDeltas) != 1 {
+			return fmt.Errorf("advance physical project-all state requires its exact projected delta")
+		}
+		if err := domain.ValidateProjectedPhysicalStateV2(*simulation, projectedDeltas[0]); err != nil {
+			return fmt.Errorf("advance project-all physical delta: %w", err)
+		}
+		physicalReceipt, err = pipelineProjectedPhysicalReceipt(generationID, chapter, *simulation, *physical)
+		if err != nil {
+			return err
+		}
+	}
 	characters := make([]string, 0, len(simulation.CharacterDecisions))
 	keyEvents := append([]string(nil), plan.Contract.RequiredBeats...)
 	if len(keyEvents) == 0 {
@@ -777,23 +696,32 @@ func advancePipelineProjectAllWorkspace(
 			field string
 			value string
 		}{
-			{field: "location", value: decision.Location},
+			{field: "location", value: pipelineProjectAllPostLocation(*simulation, decision)},
 			{field: "knowledge", value: decision.KnowledgeBoundary},
 			{field: "decision", value: decision.Decision},
 			{field: "status", value: decision.StateAfter},
 			{field: "completion_state", value: decision.CompletionState},
 			{field: "decision_rationale", value: decision.DecisionReason},
 		} {
+			if physical != nil && (fact.field == "knowledge" || fact.field == "status") {
+				// These legacy author summaries are not proof that this actor
+				// perceived the physical world or learned a hidden balance.
+				continue
+			}
 			value := strings.TrimSpace(fact.value)
 			if value == "" {
 				continue
+			}
+			reason := strings.TrimSpace(decision.ImmediateResult)
+			if physical != nil {
+				reason = "world arbitration:" + physicalReceipt.ArbitrationDigest
 			}
 			stateChanges = append(stateChanges, domain.StateChange{
 				Chapter:   chapter,
 				Entity:    name,
 				Field:     fact.field,
 				NewValue:  value,
-				Reason:    strings.TrimSpace(decision.ImmediateResult),
+				Reason:    reason,
 				FactKey:   name + ":" + fact.field,
 				ValidFrom: chapter,
 			})
@@ -809,7 +737,7 @@ func advancePipelineProjectAllWorkspace(
 			worldEvents = append(worldEvents, domain.WorldEvent{
 				TickID:              fmt.Sprintf("projected:%s:%06d", generationID, chapter),
 				Chapter:             chapter,
-				Location:            decision.Location,
+				Location:            pipelineProjectAllPostLocation(*simulation, decision),
 				Actors:              append([]string{name}, effect.Targets...),
 				Summary:             effect.Effect,
 				Consequence:         effect.ProtagonistImpact,
@@ -840,7 +768,7 @@ func advancePipelineProjectAllWorkspace(
 			return err
 		}
 	}
-	if len(plan.CausalSimulation.OffscreenStage) > 0 {
+	if physical == nil && len(plan.CausalSimulation.OffscreenStage) > 0 {
 		if err := st.SaveCharacterStageRecords(chapter, plan.CausalSimulation.OffscreenStage); err != nil {
 			return err
 		}
@@ -892,6 +820,11 @@ func advancePipelineProjectAllWorkspace(
 	); err != nil {
 		return err
 	}
+	if physical != nil {
+		if err := savePipelineProjectedPhysicalState(st, physicalReceipt); err != nil {
+			return err
+		}
+	}
 	volume, arc, _ := st.Outline.LocateChapter(chapter)
 	if err := st.WorldSim.SaveTick(domain.WorldTick{
 		TickID:         fmt.Sprintf("projected:%s:%06d", generationID, chapter),
@@ -918,6 +851,12 @@ func applyPipelineProjectAllResourceDelta(
 	}
 	pending := make([]domain.ResourceClaim, 0, len(delta.Resources))
 	for _, mutation := range delta.Resources {
+		if mutation.Field == domain.WorldResourceActualAmountV2Field {
+			// The legacy claims ledger has no numeric balance or perception
+			// fields. The typed physical receipt owns these global quantities;
+			// converting them into pending prose pressure would lose authority.
+			continue
+		}
 		name := strings.TrimSpace(mutation.Object)
 		if name == "" {
 			name = strings.TrimSpace(mutation.Field)
@@ -932,6 +871,9 @@ func applyPipelineProjectAllResourceDelta(
 			Evidence:     mutation.Cause,
 			Participants: compactProjectAllStrings([]string{mutation.Subject, mutation.Object}),
 		})
+	}
+	if len(pending) == 0 {
+		return nil
 	}
 	return st.ResourceLedger.MergeClaims(chapter, nil, pending)
 }
@@ -992,18 +934,22 @@ func savePipelineProjectAllWorldDelta(
 		if decision.CompletionState == "completed" || decision.CompletionState == "instant" {
 			currentAction = ""
 		}
+		status, knowledge, worldImpact, nextPotential := decision.StateAfter, decision.KnowledgeBoundary, decision.ImmediateResult, decision.ImmediateResult
+		if simulation.PhysicalState != nil {
+			status, knowledge, worldImpact, nextPotential = "", "", "", ""
+		}
 		delta.CharacterDeltas = append(delta.CharacterDeltas, domain.CharacterChapterDelta{
 			Character:         decision.Character,
-			Location:          decision.Location,
-			Status:            decision.StateAfter,
+			Location:          pipelineProjectAllPostLocation(*simulation, decision),
+			Status:            status,
 			VisibleInChapter:  decision.VisibleToPOV,
 			CurrentAction:     currentAction,
 			Decision:          decision.Decision,
 			DecisionReason:    decision.DecisionReason,
-			KnowledgeBoundary: decision.KnowledgeBoundary,
+			KnowledgeBoundary: knowledge,
 			ButterflyEffects:  projectAllButterflyEffectTexts(decision.ButterflyEffects),
-			WorldImpact:       decision.ImmediateResult,
-			NextPotential:     decision.ImmediateResult,
+			WorldImpact:       worldImpact,
+			NextPotential:     nextPotential,
 			TimelineConsistency: fallbackProjectAllText(
 				decision.Time,
 				simulation.TimeWindow,
@@ -1012,8 +958,15 @@ func savePipelineProjectAllWorldDelta(
 	}
 	appendWorld := func(kind string, mutations []domain.StateMutationV2) {
 		for _, mutation := range mutations {
+			mutationKind := kind
+			switch mutation.Field {
+			case domain.WorldPhysicalStateV2Field:
+				mutationKind = "physical_state"
+			case domain.WorldResourceActualAmountV2Field:
+				mutationKind = "resource_actual"
+			}
 			delta.WorldDeltas = append(delta.WorldDeltas, domain.WorldChapterDelta{
-				Kind:     kind,
+				Kind:     mutationKind,
 				Entity:   fallbackProjectAllText(mutation.Object, mutation.Subject),
 				Change:   mutation.After,
 				Evidence: mutation.Cause,
@@ -1048,7 +1001,16 @@ func pipelineProjectAllWorldMutationVisibleToProtagonist(
 	mutation domain.StateMutationV2,
 	simulation *domain.ChapterWorldSimulation,
 ) bool {
-	if strings.TrimSpace(kind) == "obligation" || simulation == nil {
+	if simulation == nil {
+		return false
+	}
+	switch strings.TrimSpace(kind) {
+	case "obligation", "physical_state", "resource_actual":
+		// Kind survives the compact chapter-world-delta representation used
+		// during resume; its numeric text must never become a visibility test.
+		return false
+	}
+	if mutation.Field == domain.WorldPhysicalStateV2Field || mutation.Field == domain.WorldResourceActualAmountV2Field {
 		return false
 	}
 	protagonist := strings.TrimSpace(simulation.ProtagonistProjection.Protagonist)

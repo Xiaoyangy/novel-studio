@@ -44,7 +44,7 @@ func TestConfigResolveReasoningEffort(t *testing.T) {
 func TestCharacterAgentDefaultsAndConcurrencyLimit(t *testing.T) {
 	cfg := Config{Provider: "local", ModelName: "model", Providers: map[string]ProviderConfig{"local": {Type: "openai", APIKey: "test"}}}
 	cfg.FillDefaults()
-	if !cfg.CharacterAgentsEnabled() || cfg.CharacterAgents.Protocol != "v1" || cfg.CharacterAgents.Scope != "active_core" || cfg.CharacterAgents.Activation != "event_driven" || cfg.CharacterAgents.MaxConcurrency != 4 || cfg.CharacterAgents.MaxRevisionRounds != 1 {
+	if !cfg.CharacterAgentsEnabled() || cfg.CharacterAgents.Protocol != "v2" || cfg.CharacterAgents.Scope != "active_core" || cfg.CharacterAgents.Activation != "event_driven" || cfg.CharacterAgents.MaxConcurrency != 4 || cfg.CharacterAgents.MaxRevisionRounds != 1 {
 		t.Fatalf("unexpected character-agent defaults: %+v", cfg.CharacterAgents)
 	}
 	cfg.CharacterAgents.MaxConcurrency = 5

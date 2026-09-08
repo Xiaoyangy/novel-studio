@@ -1325,6 +1325,17 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		if outcomeErr != nil {
 			return outcomeErr
 		}
+		// The immutable outcome retains its pre-publication canon root. The
+		// render receipt covers the actual fully published character memory.
+		publishedProgress, err := st.Progress.Load()
+		if err != nil {
+			return err
+		}
+		actualCanonRoot, err = pipelineCanonRoot(cfg.OutputDir, publishedProgress)
+		if err != nil {
+			return fmt.Errorf("render 计算角色记忆发布后 canon root: %w", err)
+		}
+		rendered.ActualCanonRoot = actualCanonRoot
 		outcomeReceiptDigest = outcome.ReceiptDigest
 		renderedAt = outcome.AcceptedAt
 		if chapterRenderTransactionEnabled {
@@ -2713,6 +2724,22 @@ func pipelinePlanningDependencies(outputDir string) ([]domain.PlanningDependency
 }
 
 func pipelineCanonRoot(outputDir string, progress *domain.Progress) (string, error) {
+	return pipelineCanonRootWithCharacterMemoryOverrides(outputDir, progress, nil)
+}
+
+// Overrides are the exact before/after file digests of a receipt-bound memory
+// publication. They permit dry-run roots and recovery of a partially applied
+// publication without excluding character memory from canon or trusting a
+// changed live file as its own pre-state proof. This function never writes.
+func pipelineCanonRootWithCharacterMemoryOverrides(outputDir string, progress *domain.Progress, overrides map[string]string) (string, error) {
+	if progress == nil {
+		return "", fmt.Errorf("canonical planning snapshot requires progress")
+	}
+	for rel, digest := range overrides {
+		if err := validatePipelineCharacterMemoryCanonOverride(rel, digest); err != nil {
+			return "", err
+		}
+	}
 	type canonArtifact struct {
 		Path   string `json:"path"`
 		SHA256 string `json:"sha256"`
@@ -2735,7 +2762,9 @@ func pipelineCanonRoot(outputDir string, progress *domain.Progress) (string, err
 		}
 		var digest string
 		var err error
-		if required {
+		if override, ok := overrides[rel]; ok {
+			digest = override
+		} else if required {
 			digest, err = pipelineRequiredFileSHA(outputDir, rel)
 		} else {
 			digest, err = pipelineOptionalFileSHA(outputDir, rel)
@@ -2817,6 +2846,13 @@ func pipelineCanonRoot(outputDir string, progress *domain.Progress) (string, err
 				return nil
 			}
 		}); err != nil {
+			return "", err
+		}
+	}
+	// A publication can introduce a first canonical registry or memory file;
+	// walking the current tree alone would omit these future exact artifacts.
+	for rel := range overrides {
+		if err := add(rel, false); err != nil {
 			return "", err
 		}
 	}

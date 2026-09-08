@@ -672,18 +672,36 @@ func TestProjectAllStateIsInjectedOnlyForExactLockedChapter(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	var injected domain.ProjectedPlanningContextV2
+	var injected struct {
+		domain.ProjectedPlanningContextV2
+		SourceVersion       string `json:"source_version"`
+		SourceContextDigest string `json:"source_context_digest"`
+	}
 	if err := json.Unmarshal(result["project_all_state"], &injected); err != nil {
 		t.Fatalf("decode injected project_all_state: %v body=%s", err, result["project_all_state"])
 	}
-	if injected.ContextDigest != planningContext.ContextDigest ||
+	if injected.Version != "projected-planning-context-view.v1" ||
+		injected.SourceVersion != domain.ProjectedPlanningContextV2Version ||
+		injected.SourceContextDigest != planningContext.ContextDigest || injected.ContextDigest != "" ||
 		injected.StateRoot != planningContext.StateRoot ||
 		injected.NextChapter != 1 {
 		t.Fatalf("novel_context injected a different projected state: got=%+v want=%+v", injected, planningContext)
 	}
+	exact, token, err := tools.LoadProjectAllStateForExecution(st, 1)
+	if err != nil || exact == nil || !reflect.DeepEqual(*exact, planningContext) {
+		t.Fatalf("execution reader did not preserve the complete original authority: %+v, %v", exact, err)
+	}
+	var injectedToken string
+	if err := json.Unmarshal(result["project_all_state_source_token"], &injectedToken); err != nil || injectedToken != token {
+		t.Fatalf("summary view is not bound to the exact execution source: %q vs %q, %v", injectedToken, token, err)
+	}
+	if err := domain.ValidateProjectedPlanningContextV2(injected.ProjectedPlanningContextV2); err == nil {
+		t.Fatal("model-facing summary was accepted as an exact authority")
+	}
 	var policy string
 	if err := json.Unmarshal(result["project_all_state_policy"], &policy); err != nil ||
-		!strings.Contains(policy, "唯一 projected 前态") {
+		!strings.Contains(policy, "展示投影") || !strings.Contains(policy, "source_context_digest") ||
+		!strings.Contains(policy, "不得从省略字段推断空状态") {
 		t.Fatalf("project-all precedence policy missing: policy=%q err=%v", policy, err)
 	}
 	if _, err := tool.Execute(
@@ -766,7 +784,10 @@ func TestProjectAllAuthorityNoOpNeverEntersProjectedState(t *testing.T) {
 	if !pipelineProjectAllAuthorityNoOp(hold) || pipelineProjectAllAuthorityNoOp(active) {
 		t.Fatal("authority no-op classifier did not distinguish frozen and active decisions")
 	}
-	delta := pipelineProjectAllDelta(1, sim, plan, nil, nil, nil)
+	delta, err := pipelineProjectAllDelta(1, sim, plan, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mutations := range [][]domain.StateMutationV2{
 		delta.CharacterState,
 		delta.Locations,
@@ -2093,13 +2114,19 @@ func projectAllCmdTestInstallThreeChapterCLIProjection(
 func projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(
 	t *testing.T,
 	mutate func(chapter int, artifacts *agents.ProjectedChapterArtifacts),
+	protocols ...string,
 ) (cliOptions, *store.Store, pipelineProjectAllIdentity) {
 	t.Helper()
+	protocol := "legacy" // These fixtures intentionally exercise monolithic simulations.
+	if len(protocols) > 0 {
+		protocol = protocols[0]
+	}
 	runRoot := t.TempDir()
 	configPath := filepath.Join(runRoot, "config.json")
-	projectAllCmdTestWriteFile(t, configPath, `{
+	projectAllCmdTestWriteFile(t, configPath, fmt.Sprintf(`{
   "provider": "ollama",
   "model": "project-all-test-model",
+  "character_agents": {"protocol": %q, "max_activation_cycles": 1},
   "providers": {
     "ollama": {
       "type": "openai",
@@ -2107,7 +2134,7 @@ func projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(
     }
   }
 }
-`)
+`, protocol))
 	opts := cliOptions{ConfigPath: configPath, Dir: runRoot}
 	cfg, promptBundle, err := loadCfgBundle(opts)
 	if err != nil {
@@ -2129,16 +2156,18 @@ func projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(
 	if err := st.Outline.SaveOutline(outlines); err != nil {
 		t.Fatal(err)
 	}
+	arcs := []domain.ArcOutline{{Index: 1, Title: "验证弧", Goal: "取得可复核证据", Chapters: outlines}}
+	if protocol == "v2" {
+		// The physical fixture supplies a complete one-chapter first arc;
+		// later chapters belong to the next generation, never legacy filler
+		// inside an explicitly v2 generation.
+		arcs = []domain.ArcOutline{{Index: 1, Title: "验证弧", Goal: "取得可复核证据", Chapters: outlines[:1]}, {Index: 2, Title: "后果弧", Goal: "回应已经接受的结果", Chapters: outlines[1:]}}
+	}
 	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
 		Index: 1,
 		Title: "第一卷",
 		Theme: "先验证再承担",
-		Arcs: []domain.ArcOutline{{
-			Index:    1,
-			Title:    "验证弧",
-			Goal:     "取得可复核证据",
-			Chapters: outlines,
-		}},
+		Arcs:  arcs,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -2238,7 +2267,7 @@ func projectAllCmdTestInstallThreeChapterCLIProjectionWithMutator(
 	if err != nil {
 		t.Fatal(err)
 	}
-	for chapter := 1; chapter <= 3; chapter++ {
+	for chapter := identity.Generation.FirstProjectedChapter; chapter <= identity.Generation.LastProjectedChapter; chapter++ {
 		artifacts, outline := projectAllCmdTestArtifacts(t, identity.Generation.GenerationID, chapter)
 		if mutate != nil {
 			mutate(chapter, artifacts)
@@ -2662,6 +2691,42 @@ func projectAllCmdTestBindPlanningContext(
 		artifacts.RAGFactReceipt.SourceToken(),
 		domain.CraftRecallReceiptSourceTokenV2(*artifacts.CraftRecallReceipt),
 	)
+	if generation.PlanGroundingPolicy == domain.PlanGroundingPolicyV1 {
+		projectAllCmdTestGroundingReceipt(t, artifacts)
+	}
+}
+
+// Transaction fixtures use an explicit stub classifier. Actual classification
+// quality is separately exercised by the opt-in live regression, not inferred
+// from this synthetic passing receipt.
+func projectAllCmdTestGroundingReceipt(t *testing.T, artifacts *agents.ProjectedChapterArtifacts) {
+	t.Helper()
+	sim, evidence := artifacts.WorldSimulation, artifacts.CharacterAgentEvidence
+	if sim == nil || sim.CharacterAgentProtocol == nil || evidence == nil {
+		t.Fatal("grounding fixture requires real independent evidence")
+	}
+	if !domain.HasPlanGroundingPolicy(*sim) {
+		sim.Sources = append(sim.Sources, domain.PlanGroundingPolicyV1)
+	}
+	var arbitration domain.WorldArbitrationReceipt
+	for _, receipt := range evidence.Arbitrations {
+		if receipt.Digest == sim.CharacterAgentProtocol.ArbitrationDigest {
+			arbitration = receipt
+		}
+	}
+	observation, err := domain.GroundingPOVObservation(*sim, evidence.Observations, evidence.Proposals, arbitration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := domain.NewPlanGroundingInput(*artifacts.Plan, *sim, observation, arbitration, projectAllCmdTestDigest("stub-grounding-reviewer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := domain.FinalizePlanGroundingReceipt(input, domain.PlanGroundingVerdict{Pass: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts.Plan.GroundingReview = &receipt
 }
 
 func projectAllCmdTestNoMaterialCraftReceipt(

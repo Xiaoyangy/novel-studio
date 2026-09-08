@@ -588,6 +588,22 @@ func validatePipelineProjectAllLiveCanonForPromotion(
 			expectedCanonRoot,
 		)
 	}
+	if cursor != nil && strings.TrimSpace(cursor.LastOutcomeReceiptDigest) != "" {
+		generationID := generation.GenerationID
+		if cursor.LastAcceptedChapter == generation.BaseCanonChapter && generation.ParentGenerationID != "" {
+			generationID = generation.ParentGenerationID
+		}
+		outcome, err := projected.LoadActualOutcomeReceipt(generationID, cursor.LastAcceptedChapter, cursor.LastOutcomeReceiptDigest)
+		if err != nil {
+			return err
+		}
+		if err := validatePipelineAcceptedCharacterMemoryPublication(store.NewStore(outputDir), outcome, true); err != nil {
+			return fmt.Errorf("accepted canon character memory: %w", err)
+		}
+		if err := validatePipelineAcceptedStoryClock(store.NewStore(outputDir), outcome); err != nil {
+			return fmt.Errorf("accepted canon story clock: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -631,9 +647,15 @@ func pipelineProjectAllExpectedCanonRoot(
 		}
 		if outcome == nil ||
 			outcome.ReceiptDigest != carriedOutcomeDigest ||
-			outcome.Chapter != generation.BaseCanonChapter ||
-			outcome.ActualCanonRoot != generation.BaseCanonRoot {
+			outcome.Chapter != generation.BaseCanonChapter {
 			return "", fmt.Errorf("successor arc base cursor does not bind the predecessor's exact accepted canon root")
+		}
+		publishedRoot, err := pipelineOutcomePublishedCanonRoot(projected, outcome)
+		if err != nil {
+			return "", err
+		}
+		if publishedRoot != generation.BaseCanonRoot {
+			return "", fmt.Errorf("successor arc base cursor does not bind the predecessor's exact published canon root")
 		}
 		return generation.BaseCanonRoot, nil
 	}
@@ -654,7 +676,7 @@ func pipelineProjectAllExpectedCanonRoot(
 		strings.TrimSpace(outcome.ActualCanonRoot) == "" {
 		return "", fmt.Errorf("last accepted outcome does not bind an actual canon root")
 	}
-	return outcome.ActualCanonRoot, nil
+	return pipelineOutcomePublishedCanonRoot(projected, outcome)
 }
 
 func requirePreviousPipelineSealedRenderClosed(
@@ -1211,6 +1233,9 @@ func acceptPipelineSealedRenderOutcome(
 	if strings.TrimSpace(actualCanonRoot) == "" {
 		return nil, fmt.Errorf("sealed render outcome requires durable actual canon root")
 	}
+	if err := validatePipelineSealedStoryClockMatch(st, &binding.Bundle, commit, bodySHA, actualMatch); err != nil {
+		return nil, err
+	}
 	projectedDigest, err := domain.ComputeProjectedDeltaV2Digest(binding.Bundle.ProjectedDelta)
 	if err != nil {
 		return nil, err
@@ -1224,15 +1249,17 @@ func acceptPipelineSealedRenderOutcome(
 	}
 	if binding.Outcome != nil {
 		if binding.Outcome.ChapterBodySHA256 != bodySHA ||
-			binding.Outcome.CommitCheckpointSeq != commit.Seq ||
-			binding.Outcome.ActualCanonRoot != actualCanonRoot {
+			binding.Outcome.CommitCheckpointSeq != commit.Seq {
+			return nil, fmt.Errorf("sealed render recovery outcome 未绑定当前 exact body/commit")
+		}
+		if binding.Bundle.ChapterWorldSimulation.Version < 2 && binding.Outcome.ActualCanonRoot != actualCanonRoot {
 			return nil, fmt.Errorf("sealed render recovery outcome 未绑定当前 exact body/commit")
 		}
 		recoveredDigest, digestErr := domain.ComputeProjectedDeltaV2Digest(binding.Outcome.ActualDelta)
 		if digestErr != nil || recoveredDigest != actualDigest {
 			return nil, fmt.Errorf("sealed render recovery outcome actual delta 与当前独立证据不一致")
 		}
-		if err := st.PromoteAcceptedCharacterAgentMemory(binding.Bundle, *binding.Outcome); err != nil {
+		if err := applyPipelineAcceptedCharacterMemoryPublication(st, binding.Bundle, *binding.Outcome); err != nil {
 			return nil, fmt.Errorf("sealed render recovery promote character memory: %w", err)
 		}
 		return binding.Outcome, nil
@@ -1278,10 +1305,15 @@ func acceptPipelineSealedRenderOutcome(
 	if err != nil || cursor == nil {
 		return nil, fmt.Errorf("sealed render accept 读取 realization cursor: %w", err)
 	}
+	// Freeze exact before/after files before accepting the outcome, but do not
+	// make projected character memories canonical until acceptance is durable.
+	if err := preparePipelineAcceptedCharacterMemoryPublication(st, binding.Bundle, outcome); err != nil {
+		return nil, fmt.Errorf("sealed render prepare character memory publication: %w", err)
+	}
 	if _, err := st.ProjectedV2().AcceptOutcome(*cursor, outcome); err != nil {
 		return nil, fmt.Errorf("sealed render 发布 actual outcome/cursor: %w", err)
 	}
-	if err := st.PromoteAcceptedCharacterAgentMemory(binding.Bundle, outcome); err != nil {
+	if err := applyPipelineAcceptedCharacterMemoryPublication(st, binding.Bundle, outcome); err != nil {
 		return nil, fmt.Errorf("sealed render promote accepted character memory: %w", err)
 	}
 	return &outcome, nil

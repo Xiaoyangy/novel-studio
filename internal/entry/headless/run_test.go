@@ -2,17 +2,79 @@ package headless
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/entry/startup"
 	"github.com/chenhongyang/novel-studio/internal/host"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 )
+
+func TestPrepareUserRulesKeepsAuthorContractSeparateFromHostWorkflow(t *testing.T) {
+	const authorPrompt = "写一部3章完结的渡口悬疑小说。每章2000—2500字。\n脑暴结论：林澄只能依据亲眼所见调查油料账本，结局保住渡船。"
+	const hostWorkflow = "\nHost流程：先保存foundation，再按弧规划；旧流程提示每弧8—16章。"
+	opts := Options{Prompt: authorPrompt + hostWorkflow, UserRulesPrompt: authorPrompt}
+	plan, err := startup.PrepareQuick(startup.Request{Mode: startup.ModeQuick, UserPrompt: opts.Prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preparedRules []string
+	if err := prepareUserRules(opts, plan.RawPrompt, func(prompt string) error {
+		preparedRules = append(preparedRules, prompt)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(preparedRules) != 1 || preparedRules[0] != authorPrompt {
+		t.Fatalf("rules normalizer did not receive the exact author contract: %q", preparedRules)
+	}
+	if strings.Contains(preparedRules[0], "Host流程") || strings.Contains(preparedRules[0], "8—16") {
+		t.Fatal("host execution constraints contaminated permanent author preferences")
+	}
+	if !strings.Contains(plan.StartPrompt, hostWorkflow) {
+		t.Fatal("host workflow was lost from the execution prompt")
+	}
+}
+
+func TestPrepareUserRulesFallsBackToRawQuickStartPrompt(t *testing.T) {
+	const authorPrompt = "保留原有直接启动行为：写一部12章都市悬疑。"
+	for _, override := range []string{"", " \n\t "} {
+		calls := 0
+		err := prepareUserRules(Options{UserRulesPrompt: override}, authorPrompt, func(prompt string) error {
+			calls++
+			if prompt != authorPrompt {
+				t.Fatalf("empty override changed quick-start rules: %q", prompt)
+			}
+			return nil
+		})
+		if err != nil || calls != 1 {
+			t.Fatalf("calls=%d err=%v", calls, err)
+		}
+	}
+}
+
+func TestPrepareUserRulesPreserveTakesPriorityAndErrorsPropagate(t *testing.T) {
+	normalizationErr := errors.New("normalization failed")
+	called := false
+	prepare := func(string) error {
+		called = true
+		return normalizationErr
+	}
+	opts := Options{PreserveUserRules: true, UserRulesPrompt: "新的作者要求"}
+	if err := prepareUserRules(opts, "新的宿主流程", prepare); err != nil || called {
+		t.Fatalf("preserve mode invoked rules normalization: called=%v err=%v", called, err)
+	}
+	opts.PreserveUserRules = false
+	if err := prepareUserRules(opts, "新的宿主流程", prepare); !errors.Is(err, normalizationErr) || !called {
+		t.Fatalf("normalization failure did not stop startup: called=%v err=%v", called, err)
+	}
+}
 
 func TestSealedConvergenceDeterministicPreconditionStopsOnFirstFailure(t *testing.T) {
 	events := []host.Event{

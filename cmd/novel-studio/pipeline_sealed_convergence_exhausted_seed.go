@@ -460,20 +460,24 @@ func pipelineSealedConvergenceTryExhaustedSeedFinalize(
 	if err := pipelineSealedConvergenceRequireSessionAbsent(st.Dir(), journal.SessionIdentity); err != nil {
 		return false, err
 	}
+	usageCtx, usageScope, err := newPipelineSealedConvergenceUsage(cfg, st, intent)
+	if err != nil {
+		return false, err
+	}
 	journal.PromptSHA256 = pipelineBytesSHA([]byte(prompt))
 	journal.PromptRunes = utf8.RuneCountInString(prompt)
 	journal.ModelDispatches = 1
 	journal.DispatchedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := saveUpdatedPipelineSealedConvergenceReplanIntent(st.Dir(), intent, eligibility); err != nil {
-		return false, fmt.Errorf("sealed convergence persist exhausted compact model dispatch 1/1: %w", err)
+		return false, usageScope.Finish(fmt.Errorf("sealed convergence persist exhausted compact model dispatch 1/1: %w", err))
 	}
 	allowlisted := newPipelineSealedConvergenceMutablePlanDetailsTool(
 		tools.NewPlanDetailsTool(st), chapter, journal.AllowedMutableKeys,
 	)
-	if err := agents.RunSealedConvergencePlannerExhaustedCompactFinalize(
-		context.Background(), cfg, promptBundle, st.Dir(), chapter, prompt,
+	if err := usageScope.Finish(agents.RunSealedConvergencePlannerExhaustedCompactFinalize(
+		usageCtx, cfg, promptBundle, st.Dir(), chapter, prompt,
 		journal.BinaryPath, allowlisted,
-	); err != nil {
+	)); err != nil {
 		return false, fmt.Errorf("sealed convergence exhausted compact finalize dispatch 1/1 failed: %w", err)
 	}
 	cp, err = tools.CurrentChapterPlanCausalCheckpoint(store.NewStore(st.Dir()), chapter)

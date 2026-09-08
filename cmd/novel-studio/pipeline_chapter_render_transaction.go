@@ -154,9 +154,11 @@ func pipelineEnsureChapterRenderCommitted(
 	if committed := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseCommitted); committed != nil {
 		if committed.Evidence.CommitCheckpointSeq != verified.Commit.Seq ||
 			committed.Evidence.CommitDigest != verified.Commit.Digest ||
-			committed.Evidence.CommitDigest != verified.BodySHA256 ||
-			committed.Evidence.CandidateRoot != domain.PlanningV2DigestPrefix+verified.ActualCanonRoot {
+			committed.Evidence.CommitDigest != verified.BodySHA256 {
 			return domain.ChapterRenderBodyIdentity{}, fmt.Errorf("durable committed transaction no longer matches exact commit/canonical evidence")
+		}
+		if err := validatePipelineCommittedCanonWithMemoryPublication(artifactOutputDir, frozen, verified.BodySHA256, verified.Commit, committed.Evidence.CandidateRoot, verified.ActualCanonRoot); err != nil {
+			return domain.ChapterRenderBodyIdentity{}, fmt.Errorf("durable committed transaction canonical evidence: %w", err)
 		}
 		return identity, nil
 	}
@@ -1224,13 +1226,8 @@ func pipelineVerifyChapterRenderRecoveryArtifacts(
 		committed.Evidence.CommitDigest != snapshot.Commit.Digest {
 		return fmt.Errorf("recovery checkpoint evidence differs from durable candidate")
 	}
-	currentCanonRoot := domain.PlanningV2DigestPrefix + snapshot.ActualCanonRoot
-	if committed.Evidence.CandidateRoot != currentCanonRoot {
-		return fmt.Errorf(
-			"recovery canonical root drifted from committed transaction: committed=%s current=%s",
-			committed.Evidence.CandidateRoot,
-			currentCanonRoot,
-		)
+	if err := validatePipelineCommittedCanonWithMemoryPublication(outputDir, frozen, snapshot.BodySHA256, snapshot.Commit, committed.Evidence.CandidateRoot, snapshot.ActualCanonRoot); err != nil {
+		return fmt.Errorf("recovery canonical root drifted from committed transaction: %w", err)
 	}
 	formal := pipelineChapterRenderReceiptForPhase(receipts, domain.ChapterRenderPhaseFormalAccepted)
 	if formal != nil {

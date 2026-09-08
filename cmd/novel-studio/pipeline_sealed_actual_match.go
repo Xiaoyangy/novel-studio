@@ -18,12 +18,13 @@ import (
 // only after every mutation has independent evidence; equality is a result,
 // never an input assumption.
 type pipelineSealedActualDeltaMatch struct {
-	ActualDelta          domain.ProjectedDelta          `json:"actual_delta"`
-	ProjectionMatch      bool                           `json:"projection_match"`
-	Complete             bool                           `json:"complete"`
-	MismatchReasons      []string                       `json:"mismatch_reasons,omitempty"`
-	Evidence             []pipelineSealedActualEvidence `json:"evidence,omitempty"`
-	ObligationsSatisfied []string                       `json:"obligations_satisfied,omitempty"`
+	ActualDelta          domain.ProjectedDelta             `json:"actual_delta"`
+	ProjectionMatch      bool                              `json:"projection_match"`
+	Complete             bool                              `json:"complete"`
+	MismatchReasons      []string                          `json:"mismatch_reasons,omitempty"`
+	Evidence             []pipelineSealedActualEvidence    `json:"evidence,omitempty"`
+	ObligationsSatisfied []string                          `json:"obligations_satisfied,omitempty"`
+	StoryClockEvidence   *pipelineSealedStoryClockEvidence `json:"story_clock_evidence,omitempty"`
 }
 
 type pipelineSealedActualEvidence struct {
@@ -171,7 +172,7 @@ func matchPipelineSealedRenderActualDelta(
 		}
 	}
 
-	facts, err := collectPipelineSealedActualFacts(st, *candidate)
+	facts, err := collectPipelineSealedActualFacts(st, *candidate, bundle.ChapterWorldSimulation.StoryTime != nil)
 	if err != nil {
 		return result, err
 	}
@@ -277,6 +278,34 @@ func matchPipelineSealedActualFacts(
 
 	for _, category := range pipelineSealedProjectedCategories(projected) {
 		for _, mutation := range category.Mutations {
+			if pipelineSealedStoryClockMutation(category.Name, mutation) {
+				clock, err := derivePipelineSealedStoryClockEvidence(requirements.Bundle, chapterBody)
+				if err != nil || clock == nil {
+					reasons = append(reasons, fmt.Sprintf("timeline[%s] lacks independently proved actual story_clock: %v", mutation.StableID, err))
+					continue
+				}
+				if !pipelineStoryClockNumberEqual(mutation.Before, clock.StartDay) || !pipelineStoryClockNumberEqual(mutation.After, clock.EndDay) {
+					reasons = append(reasons, "world/story_day projection differs from adjudicated story_time")
+					continue
+				}
+				for i, fact := range facts {
+					if !pipelineSealedActualIdentityMatches(category.Name, mutation, fact) {
+						continue
+					}
+					matchedFacts[i] = true
+					if !pipelineStoryClockNumberEqual(fact.After, clock.EndDay) || (fact.Before != "" && !pipelineStoryClockNumberEqual(fact.Before, clock.StartDay)) {
+						reasons = append(reasons, "world/story_day commit metadata contradicts exact-body time evidence")
+					}
+				}
+				pipelineSealedAppendActualMutation(&result.ActualDelta, category.Name, mutation)
+				result.StoryClockEvidence = clock
+				evidence = append(evidence, pipelineSealedActualEvidence{
+					Category: category.Name, StableID: mutation.StableID,
+					Locator: fmt.Sprintf("body:story-clock#runes=%d:%d;sha256=%s", clock.StartRune, clock.EndRune, clock.BodySHA256),
+					Before:  mutation.Before, After: mutation.After,
+				})
+				continue
+			}
 			if category.Name == "obligation" {
 				switch mutation.Operation {
 				case "create", "carry":
@@ -731,7 +760,9 @@ func pipelineSealedProjectedCategories(delta domain.ProjectedDelta) []pipelineSe
 func collectPipelineSealedActualFacts(
 	st *store.Store,
 	candidate domain.ChapterWorldDelta,
+	storyClockEnabled ...bool,
 ) ([]pipelineSealedActualFact, error) {
+	withClock := len(storyClockEnabled) > 0 && storyClockEnabled[0]
 	facts := make([]pipelineSealedActualFact, 0)
 	add := func(fact pipelineSealedActualFact) {
 		fact.Category = strings.TrimSpace(fact.Category)
@@ -792,9 +823,16 @@ func collectPipelineSealedActualFacts(
 			// A committed chapter may retain several scene-granularity
 			// timeline events for one projected chapter-level outcome.
 			fact.Hard = false
+			if withClock && (strings.TrimSpace(world.Entity) == "world:story_day" || strings.TrimSpace(world.Entity) == "world/story_day") {
+				fact.Subject, fact.Field, fact.Hard = "world", "story_day", true
+				fact.Before, fact.After = splitPipelineSealedTransition(world.Change)
+			}
 		case "state":
 			fact.Subject, fact.Field = splitPipelineSealedStateEntity(world.Entity)
 			fact.Category = pipelineSealedCategoryForStateField(fact.Field)
+			if withClock && fact.Subject == "world" && fact.Field == "story_day" {
+				fact.Category = "timeline"
+			}
 			fact.Before, fact.After = splitPipelineSealedTransition(world.Change)
 		case "relationship":
 			fact.Category, fact.Field = "relationship", "relationship"
@@ -930,6 +968,9 @@ func pipelineSealedActualIdentityMatches(
 	mutation domain.StateMutationV2,
 	fact pipelineSealedActualFact,
 ) bool {
+	if pipelineSealedStoryClockMutation(category, mutation) {
+		return fact.Category == "timeline" && strings.TrimSpace(fact.Subject) == "world" && strings.TrimSpace(fact.Field) == "story_day" && strings.TrimSpace(fact.Object) == ""
+	}
 	if category != fact.Category ||
 		!pipelineSealedIdentityEqual(
 			pipelineSealedCanonicalField(category, mutation.Field),

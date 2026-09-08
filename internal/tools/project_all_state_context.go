@@ -13,6 +13,16 @@ import (
 
 const projectAllStateContextPath = "meta/project_all_state.json"
 
+// LoadProjectAllStateForExecution exposes the same read-only lease, process
+// and context-identity validation used by novel_context. Callers may perform
+// compatibility checks before a context tool emits any access receipts.
+func LoadProjectAllStateForExecution(st *store.Store, chapter int) (*domain.ProjectedPlanningContextV2, string, error) {
+	if st == nil || chapter <= 0 {
+		return nil, "", nil
+	}
+	return loadProjectAllStateWithLeaseReader(st, chapter, st.Runtime.InspectPipelineExecution)
+}
+
 func (t *ContextTool) addProjectAllStateContext(
 	result map[string]any,
 	chapter int,
@@ -40,7 +50,11 @@ func loadProjectAllStateForExecution(
 	if st == nil || chapter <= 0 {
 		return nil, "", nil
 	}
-	lock, err := st.Runtime.LoadPipelineExecution()
+	return loadProjectAllStateWithLeaseReader(st, chapter, st.Runtime.LoadPipelineExecution)
+}
+
+func loadProjectAllStateWithLeaseReader(st *store.Store, chapter int, loadLease func() (*domain.PipelineExecutionLock, error)) (*domain.ProjectedPlanningContextV2, string, error) {
+	lock, err := loadLease()
 	if err != nil {
 		return nil, "", err
 	}

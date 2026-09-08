@@ -49,6 +49,12 @@ func validWorldCodexContent() map[string]any {
 			"actor_scope": []string{"持有原始凭证者"}, "trigger": "持有人发起结算", "preconditions": []string{"凭证有效且权属已确认"},
 			"inputs": []string{"有效凭证", "信用额度"}, "costs": []string{"冻结等额信用额度"}, "effects": []string{"债务状态进入已结算"},
 			"failure_modes": []string{"凭证无效时驳回并留下审计记录"}, "observability": []string{"当事人收到回执，旁观者只能看到公开状态"}, "timing": "提交后一个工作日",
+			"character_view": map[string]any{
+				"name": "凭证结算程序", "actor_scope": []string{"持有效原始凭证者"}, "trigger": "提交结算申请",
+				"preconditions": []string{"出示权属明确的原始凭证"}, "inputs": []string{"原始凭证"}, "costs": []string{"占用核验时间"},
+				"effects": []string{"核验通过后更新结算状态"}, "failure_modes": []string{"凭证不全则退回"},
+				"observability": []string{"当事人可查看核验回执"}, "timing": "提交后一个工作日",
+			},
 		}},
 		"counterfactual_tests": []map[string]any{{
 			"id": "contract-without-proof", "given": []string{"申请人没有原始凭证"}, "action": "申请结算", "expected_outcome": "驳回并留下审计记录",

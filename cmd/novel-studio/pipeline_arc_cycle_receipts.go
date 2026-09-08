@@ -308,6 +308,9 @@ func savePipelineChapterAcceptance(
 	if !utf8.Valid(body) {
 		return nil, fmt.Errorf("chapter %d exact body is not valid UTF-8", chapter)
 	}
+	if err := validatePipelineAcceptedStoryClock(st, outcome); err != nil {
+		return nil, fmt.Errorf("chapter %d story clock acceptance: %w", chapter, err)
+	}
 	bodyRunes := utf8.RuneCount(body)
 	if err := domain.ValidateAcceptedChapterBodyRunes(chapter, bodyRunes, manifest.ChapterBodyRunes); err != nil {
 		return nil, err
@@ -492,6 +495,9 @@ func validatePipelineArcOutcomeChain(
 		}
 		if !outcome.ProjectionMatch || outcome.ActualPostStateRoot != outcome.ProjectedPostStateRoot {
 			return nil, fmt.Errorf("chapter %d actual outcome is not an exact projection match", acceptance.Chapter)
+		}
+		if err := validatePipelineAcceptedStoryClock(st, outcome); err != nil {
+			return nil, fmt.Errorf("chapter %d accepted story clock: %w", acceptance.Chapter, err)
 		}
 		if outcome.ActualPreStateRoot != expectedPreStateRoot {
 			return nil, fmt.Errorf(

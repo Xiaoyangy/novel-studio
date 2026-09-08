@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -921,6 +919,18 @@ func rewriteFactCoverageIntegrityGaps(expected []string, actual []domain.Chapter
 
 func chapterWorldSimulationGaps(s *store.Store, sim domain.ChapterWorldSimulation) []string {
 	var gaps []string
+	if independentChapterSimulation(sim) {
+		if sim.Version != 2 || sim.Chapter <= 0 || sim.SimulationID == "" || sim.GenerationID == "" || strings.TrimSpace(sim.TimeWindow) == "" {
+			return []string{"independent character simulation identity is incomplete"}
+		}
+		if err := validateStoredCharacterAgentProtocol(s, sim); err != nil {
+			return []string{"character-agent protocol invalid: " + err.Error()}
+		}
+		if err := validateIndependentPlanContextSources(s, sim.Chapter, &sim, nil, false); err != nil {
+			return []string{err.Error()}
+		}
+		return nil // Independent receipts do not use legacy cast/authority contracts.
+	}
 	sim.CharacterDecisions = canonicalizeCharacterWorldDecisions(s, sim.CharacterDecisions)
 	if sim.Version >= 2 {
 		if err := validateStoredCharacterAgentProtocol(s, sim); err != nil {
@@ -1740,15 +1750,20 @@ func firstRunes(text string, limit int) string {
 }
 
 func chapterWorldSimulationID(sim domain.ChapterWorldSimulation) string {
-	clone := sim
-	clone.SimulationID = ""
-	clone.GeneratedAt = ""
-	raw, _ := json.Marshal(clone)
-	sum := sha256.Sum256(raw)
-	return fmt.Sprintf("ch%03d-%s", sim.Chapter, hex.EncodeToString(sum[:6]))
+	return domain.ComputeChapterWorldSimulationID(sim)
 }
 
-func chapterWorldSimulationRequired(s *store.Store) bool {
+func independentChapterSimulation(sim domain.ChapterWorldSimulation) bool {
+	return sim.Version >= 2 || sim.CharacterAgentProtocol != nil || sim.PhysicalState != nil
+}
+
+func chapterWorldSimulationRequired(s *store.Store, chapter int) bool {
+	if s == nil || chapter <= 0 {
+		return false
+	}
+	if sim, err := s.LoadChapterWorldSimulation(chapter); err != nil || (sim != nil && independentChapterSimulation(*sim)) {
+		return true // An unreadable/invalid independent receipt is never optional.
+	}
 	cast, err := s.WorldSim.LoadSimulationCast()
 	return err == nil && len(cast.Assignments) > 0
 }
@@ -1756,8 +1771,14 @@ func chapterWorldSimulationRequired(s *store.Store) bool {
 // ChapterWorldSimulationStatus exposes the pre-plan boundary to the Host
 // router without leaking simulation implementation details into flow logic.
 func ChapterWorldSimulationStatus(s *store.Store, chapter int) (required, ready bool, gaps []string) {
-	if s == nil || chapter <= 0 || !chapterWorldSimulationRequired(s) {
+	if s == nil || chapter <= 0 || !chapterWorldSimulationRequired(s, chapter) {
 		return false, true, nil
+	}
+	if sim, err := s.LoadChapterWorldSimulation(chapter); err != nil {
+		return true, false, []string{err.Error()}
+	} else if sim != nil && independentChapterSimulation(*sim) {
+		gaps := chapterWorldSimulationGaps(s, *sim)
+		return true, len(gaps) == 0, gaps
 	}
 	if partial, err := s.LoadChapterWorldSimulationPartial(chapter); err != nil {
 		return true, false, []string{err.Error()}
@@ -1776,7 +1797,7 @@ func ChapterWorldSimulationStatus(s *store.Store, chapter int) (required, ready 
 }
 
 func ensureChapterWorldSimulationReadyForPlanning(s *store.Store, chapter int) (*domain.ChapterWorldSimulation, error) {
-	if !chapterWorldSimulationRequired(s) {
+	if !chapterWorldSimulationRequired(s, chapter) {
 		// A cast change can make a previously staged simulation optional. Planning
 		// is the write-side recovery point: discard that stale partial so the
 		// shared prose guard does not deadlock on an artifact no simulator will
@@ -1797,6 +1818,9 @@ func ensureChapterWorldSimulationReadyForPlanning(s *store.Store, chapter int) (
 	if sim == nil {
 		return nil, fmt.Errorf("第 %d 章必须先完成单世界全角色推演：调用 simulate_chapter_world 分批覆盖所有实名角色并 finalize，之后才能规划 POV 章节: %w", chapter, errs.ErrToolPrecondition)
 	}
+	if sim.Chapter != chapter {
+		return nil, fmt.Errorf("第 %d 章 simulation 实际绑定第 %d 章: %w", chapter, sim.Chapter, errs.ErrToolPrecondition)
+	}
 	if gaps := chapterWorldSimulationGaps(s, *sim); len(gaps) > 0 {
 		return nil, fmt.Errorf("第 %d 章全角色世界推演不完整：%s: %w", chapter, strings.Join(gaps, "；"), errs.ErrToolPrecondition)
 	}
@@ -1804,7 +1828,7 @@ func ensureChapterWorldSimulationReadyForPlanning(s *store.Store, chapter int) (
 }
 
 func validateChapterWorldSimulationReference(s *store.Store, plan domain.ChapterPlan) error {
-	if !chapterWorldSimulationRequired(s) {
+	if !chapterWorldSimulationRequired(s, plan.Chapter) {
 		return nil
 	}
 	sim, err := ensureChapterWorldSimulationReadyForPlanning(s, plan.Chapter)

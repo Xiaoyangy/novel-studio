@@ -263,6 +263,13 @@ func renderCharacterDossier(d domain.CharacterDossier) string {
 		}
 		fmt.Fprintf(&b, "；主角已知=%t\n", ev.KnownToProtagonist)
 	}
+	if len(d.KnownFactsAtStoryStart) > 0 {
+		b.WriteString("\n## 故事开始时已知事实\n\n")
+		b.WriteString("条目保留原文；事件发生时间与是否亲历仅以历史记录和来源为准。\n\n")
+		for _, fact := range d.KnownFactsAtStoryStart {
+			fmt.Fprintf(&b, "- %s\n", fact)
+		}
+	}
 	b.WriteString("\n## 资源\n\n")
 	for _, r := range d.Resources {
 		fmt.Fprintf(&b, "- `%s` %s：kind=%s；status=%s；risk=%s；evidence=%s\n", r.ID, r.Name, r.Kind, r.Status, r.Risk, r.Evidence)

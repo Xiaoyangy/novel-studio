@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -578,9 +579,16 @@ func (t *ContextTool) ProbeRAGRecall(ctx context.Context, chapter int) ([]domain
 }
 
 func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, chapter int, warn func(string, error)) {
-	if !chapterWorldSimulationRequired(t.store) {
+	if !chapterWorldSimulationRequired(t.store, chapter) {
 		return
 	}
+	currentFinal, finalErr := t.store.LoadChapterWorldSimulation(chapter)
+	if finalErr != nil {
+		warn("chapter_world_simulation", finalErr)
+		result["chapter_world_simulation"] = map[string]any{"status": "invalid", "gaps": []string{finalErr.Error()}, "next_step": "停止规划并保留现有工件；先恢复可验证的正式世界推演，不能把损坏工件当作可选来源。"}
+		return
+	}
+	independentFinal := currentFinal != nil && independentChapterSimulation(*currentFinal)
 	escalation := InspectRenderOnlyReplanEscalation(t.store, chapter)
 	result["simulation_characters"] = requiredDossierCharacterNames(t.store, chapter)
 	result["visible_characters"] = chapterOutlineCharacterNames(t.store, chapter)
@@ -594,7 +602,7 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 	}
 	if partial, err := t.store.LoadChapterWorldSimulationPartial(chapter); err != nil {
 		warn("chapter_world_simulation_partial", err)
-	} else if partial != nil {
+	} else if partial != nil && !independentFinal {
 		status := "partial"
 		policy := "复用已落盘的角色决定，只补 gaps 中的最小缺口，不重发已完成角色。"
 		gaps := chapterWorldSimulationGaps(t.store, *partial)
@@ -644,13 +652,18 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			gaps = reusableChapterWorldSimulationGaps(t.store, *sim)
 		}
 		if len(gaps) > 0 {
-			addAuthority()
+			nextStep := "当前正式模拟已因返工源或角色可见性变化失效；重新分批调用 simulate_chapter_world 并 finalize。"
+			if independentChapterSimulation(*sim) {
+				nextStep = "独立角色回执校验失败；停止并保留当前工件，恢复原始证据，不得退回单体 simulate_chapter_world。"
+			} else {
+				addAuthority()
+			}
 			result["chapter_world_simulation"] = map[string]any{
 				"status":             "invalid",
 				"simulation_id":      sim.SimulationID,
 				"characters_present": characterDecisionNames(sim.CharacterDecisions),
 				"gaps":               gaps,
-				"next_step":          "当前正式模拟已因返工源或角色可见性变化失效；重新分批调用 simulate_chapter_world 并 finalize。",
+				"next_step":          nextStep,
 			}
 			return
 		}
@@ -665,6 +678,17 @@ func (t *ContextTool) buildChapterWorldSimulationContext(result map[string]any, 
 			"rewrite_source":         sim.RewriteSource,
 			"rewrite_fact_coverage":  sim.RewriteFactCoverage,
 			"render_policy":          "character_decisions 仅用于全角色连续性与 commit 回填；正文只能渲染 protagonist_projection.observable_effects 和主角合法获得的信息，hidden/delayed 不得泄露。",
+		}
+		if sim.CharacterActivation != nil {
+			view, err := domain.CharacterActivationPlannerView(*sim)
+			if err != nil {
+				warn("chapter_activation_view", err)
+				result["chapter_world_simulation"] = map[string]any{"status": "invalid", "gaps": []string{err.Error()}}
+				return
+			}
+			for key, value := range view {
+				ready[key] = value
+			}
 		}
 		if renderOnlyRerender {
 			ready["source_version_policy"] = "显式 render-only 已校验世界推演和 POV plan；旧正文/brief hash 只表示版本差，不触发重推演。"
@@ -754,10 +778,15 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	var readySimulation *domain.ChapterWorldSimulation
 	simulationAuthorityNeeded := false
 	simulationFinalizationOnly := false
-	worldSimulationRequired := chapterWorldSimulationRequired(t.store)
+	worldSimulationRequired := chapterWorldSimulationRequired(t.store, chapter)
 	escalation := InspectRenderOnlyReplanEscalation(t.store, chapter)
 	if worldSimulationRequired {
-		if partialSim, partialErr := t.store.LoadChapterWorldSimulationPartial(chapter); partialErr == nil && partialSim != nil {
+		currentFinal, finalErr := t.store.LoadChapterWorldSimulation(chapter)
+		independentFinal := currentFinal != nil && independentChapterSimulation(*currentFinal)
+		if finalErr != nil {
+			simulationStage = map[string]any{"status": "invalid", "gaps": []string{finalErr.Error()}}
+			nextStep = "停止规划并恢复可验证的正式模拟；损坏来源不能当作可选模拟或用单体路径覆盖。"
+		} else if partialSim, partialErr := t.store.LoadChapterWorldSimulationPartial(chapter); partialErr == nil && partialSim != nil && !independentFinal {
 			status := "partial"
 			policy := "复用已落盘角色决定，只补 gaps 中的最小缺口。"
 			gaps := chapterWorldSimulationGaps(t.store, *partialSim)
@@ -796,6 +825,9 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 					"gaps":               gaps,
 				}
 				nextStep = "当前正式模拟未绑定返工源或未覆盖保留事实；重新分批调用 simulate_chapter_world 并 finalize，随后重新 plan_structure。"
+				if independentChapterSimulation(*final) {
+					nextStep = "独立角色回执校验失败；停止并恢复同源证据，不得退回单体 simulate_chapter_world。"
+				}
 				simulationAuthorityNeeded = true
 			} else {
 				readySimulation = final
@@ -825,12 +857,17 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 	} else if readySimulation != nil {
 		if planStructureBoundToSources(t.store, chapter, partial, readySimulation) {
 			structureStatus = "ready"
+		} else if _, err := recoverIndependentPlanSourceStamp(t.store, chapter, partial, readySimulation, false); errors.Is(err, ErrIndependentPlanNeedsReplan) {
+			structureStatus = "needs_replan"
+			nextStep = "旧 partial 缺少已消费真实裁决的证明；保留审计并停止当前partial收口，通过正式恢复流程基于真实裁决重规划，不得仅补宿主stamp后继续finalize。"
 		} else {
 			structureStatus = "stale"
 			nextStep = "当前 plan_structure 未绑定最新 world_simulation/rewrite_source；先重新调用 plan_structure，再用 plan_details 补缺并 finalize。"
 		}
 	}
 	switch structureStatus {
+	case "needs_replan":
+		stage["policy"] = "同源身份不等于规划语义有效；旧 partial 只保留审计，不得自动补 stamp 或沿用其中场景和章末结果。"
 	case "stale":
 		stage["policy"] = "当前骨架绑定的是旧 world_simulation/rewrite_source，必须先重新 plan_structure；新骨架提交后再用 plan_details 补缺，不检索、不写正文。"
 	case "waiting_for_simulation":
@@ -856,7 +893,7 @@ func (t *ContextTool) stagedPlanRepairContext(chapter, requestedChapter int, rew
 		"saved_core":              savedCore,
 		"fields_present":          fields,
 		"gap_summary":             planDetailsGapSummary(t.store, chapter, partial, merged),
-		"recommended_batches":     planDetailsRecommendedBatches(),
+		"recommended_batches":     planDetailsRecommendedBatchesForState(t.store, chapter, partial, merged),
 		"simulation_characters":   requiredDossierCharacterNames(t.store, chapter),
 		"visible_characters":      chapterOutlineCharacterNames(t.store, chapter),
 		"working_memory": map[string]any{

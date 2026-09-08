@@ -23,14 +23,15 @@ import (
 // isolated project-all workspace. Callers package them into a non-canonical v2
 // bundle; this runner never writes to the live novel output.
 type ProjectedChapterArtifacts struct {
-	WorldSimulation        *domain.ChapterWorldSimulation
-	CharacterAgentEvidence *domain.CharacterAgentEvidenceBundle
-	Plan                   *domain.ChapterPlan
-	PlanCheckpoint         *domain.Checkpoint
-	RAGFactReceipt         *domain.RAGFactReceipt
-	CraftRecallReceipt     *domain.CraftRecallReceipt
-	PlanningContextDigest  string
-	RenderContext          json.RawMessage
+	WorldSimulation             *domain.ChapterWorldSimulation
+	CharacterAgentEvidence      *domain.CharacterAgentEvidenceBundle
+	CharacterActivationEvidence *domain.CharacterActivationChapterEvidence
+	Plan                        *domain.ChapterPlan
+	PlanCheckpoint              *domain.Checkpoint
+	RAGFactReceipt              *domain.RAGFactReceipt
+	CraftRecallReceipt          *domain.CraftRecallReceipt
+	PlanningContextDigest       string
+	RenderContext               json.RawMessage
 }
 
 // ProjectedArcBoundary makes the host-selected arc transaction visible to the
@@ -38,15 +39,18 @@ type ProjectedChapterArtifacts struct {
 // orientation, but neither agent may formally plan a chapter outside this
 // boundary during the current generation.
 type ProjectedArcBoundary struct {
-	Volume           int
-	Arc              int
-	Title            string
-	Goal             string
-	BaseCanonChapter int
-	BaseCanonRoot    string
-	FirstChapter     int
-	LastChapter      int
-	BookLastChapter  int
+	Volume                       int
+	Arc                          int
+	Title                        string
+	Goal                         string
+	BaseCanonChapter             int
+	BaseCanonRoot                string
+	FirstChapter                 int
+	LastChapter                  int
+	BookLastChapter              int
+	CharacterActivationPolicy    string
+	MaxCharacterActivationCycles int
+	CharacterProtocolPinned      bool
 }
 
 // A simulator turn is intentionally bounded, but every successful tool call
@@ -545,7 +549,12 @@ func RunProjectedChapterPlanning(
 	planningContextDigest string,
 	characterAgentProtocol string,
 	arcBoundary ProjectedArcBoundary,
+	accounting ...ProjectedPlanningAccounting,
 ) (_ *ProjectedChapterArtifacts, returnErr error) {
+	if len(accounting) > 0 {
+		ctx = context.WithValue(ctx, projectedPlanningAccountingKey{}, accounting[0])
+		ctx = context.WithValue(ctx, projectedPlanningChapterKey{}, chapter)
+	}
 	contextToken, err := domain.ProjectedPlanningContextSourceTokenV2(planningContextDigest)
 	if err != nil {
 		return nil, fmt.Errorf("project-all planning context digest: %w", err)
@@ -558,13 +567,10 @@ func RunProjectedChapterPlanning(
 	}
 	cfg.OutputDir = isolatedOutputDir
 	cfg.DisableLiveRAG = true
-	if strings.TrimSpace(characterAgentProtocol) == domain.CharacterAgentDecisionProtocolVersion {
-		cfg.CharacterAgents.Protocol = "v1"
-	} else {
-		// Historical generations did not carry this field and therefore finish
-		// under their original monolithic simulation protocol.
-		cfg.CharacterAgents.Protocol = "legacy"
+	if err := bindProjectedCharacterProtocol(&cfg, characterAgentProtocol); err != nil {
+		return nil, err
 	}
+	arcBoundary.CharacterProtocolPinned = true
 	st := store.NewStore(isolatedOutputDir)
 	if err := st.Init(); err != nil {
 		return nil, fmt.Errorf("init project-all workspace: %w", err)
@@ -715,8 +721,13 @@ func RunProjectedChapterPlanning(
 				)
 			}
 			turnCeiling := projectAllWorldSimulationTurnCeiling(pass, startsFresh)
+			if err := projectedAccountingBefore(ctx); err != nil {
+				return nil, err
+			}
+			simulatorModel, simulatorOnMessage := projectedAccountingModel(ctx, model, "project_all_world_simulator", "")
 			simulator := agentcore.NewAgent(
-				agentcore.WithModel(model),
+				agentcore.WithModel(simulatorModel),
+				agentcore.WithOnMessage(simulatorOnMessage),
 				agentcore.WithSystemPrompt(worldSimulatorSystemPrompt+projectAllSimulationBoundary),
 				agentcore.WithTools(contextTool, simulationTool),
 				agentcore.WithMaxTurns(cappedMaxTurns(cfg.ResolveMaxTurns("writer", turnCeiling), turnCeiling)),
@@ -742,6 +753,9 @@ func RunProjectedChapterPlanning(
 				return nil, fmt.Errorf("project-all world simulation chapter %d pass %d: %w", chapter, pass, err)
 			}
 			simulator.WaitForIdle()
+			if err := projectedAccountingAfter(ctx); err != nil {
+				return nil, err
+			}
 			if err := projectAllWorldSimulationContextError(ctx, chapter, "after simulator session"); err != nil {
 				return nil, err
 			}
@@ -862,26 +876,12 @@ func RunProjectedChapterPlanning(
 		if len(planningContextRaw) == 0 {
 			return nil, fmt.Errorf("project-all planner host context chapter %d is empty", chapter)
 		}
-		planner := agentcore.NewAgent(
-			agentcore.WithModel(model),
-			agentcore.WithSystemPrompt(bundle.Prompts.Planner+projectAllPlannerBoundary),
-			agentcore.WithTools(
-				contextTool,
-				tools.NewCraftRecallTool(st),
-				tools.NewPlanStructureTool(st),
-				tools.NewPlanDetailsTool(st),
-			),
-			agentcore.WithMaxTurns(cappedMaxTurns(cfg.ResolveMaxTurns("writer", 36), 36)),
-			agentcore.WithToolsAreIdempotent(false),
-			agentcore.WithMaxToolErrors(0),
-			agentcore.WithMaxRetries(subagentMaxRetries),
-			agentcore.WithCacheLastMessage(promptCacheControl),
-			agentcore.WithPromptCacheKey(agentPromptCacheKey("project_all_planner", st.Dir(), fmt.Sprint(chapter))),
-			agentcore.WithStopGuard(reminder.NewPlannerStopGuard(st)),
-		)
+		if err := projectedAccountingBefore(ctx); err != nil {
+			return nil, err
+		}
+		plannerModel, plannerOnMessage := projectedAccountingModel(ctx, model, "project_all_planner", "")
 		thinking, _ := ResolveThinkingForModel(model, roleThinking(cfg, "writer"))
-		planner.SetThinkingLevel(thinking)
-		if err := planner.Prompt(ctx, fmt.Sprintf(
+		plannerPrompt := fmt.Sprintf(
 			"Host 已代你完成本章唯一一次 novel_context(chapter=%d, profile=planning) 调用并签发当前访问收据；不要再次调用 novel_context，也不要解释或结束，直接消费下列权威 JSON 并调用 plan_structure，然后用 plan_details 分批 finalize：\n<host_prefetched_novel_context>\n%s\n</host_prefetched_novel_context>\n\nProject-Arc 已完成 V%dA%d《%s》中第 %d 章的全角色世界推演。本弧范围第%d-%d章，整体目标：%s。只规划第 %d 章：必须消费当前 content-addressed craft receipt；有 hits 的每个 need 都要按 receipt pack 精确转化进 external_reference_plan，fact receipt 有 hits 时同理；no_material 只绑定来源，禁止伪造材料。用 plan_structure + plan_details 分批生成并 finalize 完整 POV plan。若 project_all_state 有 predecessor_contract，arc_transition_contract 的 incoming id/text 必须逐字复制，consumed_by_cause 必须逐字等于本章一个 causal_beats[].cause；弧首章 incoming 留空。每章都必须另写弧内唯一的 outgoing consequence id/text，禁止用 goal/hook 冒充。render_capacity 必须给出3-6个有主动阻力、转折、退出后果和具体行动证据的场景单元，总量自然支撑 user_rules.chapter_words，不得靠手续、复述或总结注水。%s不得读取或生成正文，不得转去其他章节。跨弧 payoff/reveal/reward 必须保留为 carried-forward，不能挤到本弧末章提前兑现；只有第%d章才是全书末章。",
 			chapter,
 			string(planningContextRaw),
@@ -895,10 +895,29 @@ func RunProjectedChapterPlanning(
 			chapter,
 			bookBudget,
 			arcBoundary.BookLastChapter,
-		)); err != nil {
+		)
+		plannerSystem := bundle.Prompts.Planner + projectAllPlannerBoundary
+		if simulation.CharacterActivation != nil {
+			plannerSystem += projectAllActivationPlannerBoundary
+		}
+		if err := runProjectAllPlannerLoop(ctx, chapter, plannerPrompt, agentcore.AgentContext{
+			SystemPrompt: plannerSystem,
+			Tools: []agentcore.Tool{
+				contextTool,
+				tools.NewCraftRecallTool(st),
+				tools.NewPlanStructureTool(st),
+				tools.NewPlanDetailsTool(st).WithGroundingReviewer(NewPlanGroundingReviewer(cfg, models, nil)),
+			},
+		}, agentcore.LoopConfig{
+			Model: plannerModel, OnMessage: plannerOnMessage,
+			MaxTurns:           cappedMaxTurns(cfg.ResolveMaxTurns("writer", 36), 36),
+			ToolsAreIdempotent: false, MaxToolErrors: 0, MaxRetries: subagentMaxRetries,
+			ThinkingLevel: thinking, CacheLastMessage: promptCacheControl,
+			PromptCacheKey: agentPromptCacheKey("project_all_planner", st.Dir(), fmt.Sprint(chapter)),
+			StopGuard:      reminder.NewPlannerStopGuard(st),
+		}); err != nil {
 			return nil, fmt.Errorf("project-all POV plan chapter %d: %w", chapter, err)
 		}
-		planner.WaitForIdle()
 		plan, planCP, err = loadCurrentProjectedPlan(st, chapter)
 		if err != nil {
 			return nil, err
@@ -957,19 +976,32 @@ func RunProjectedChapterPlanning(
 	if factReceipt == nil {
 		return nil, fmt.Errorf("project-all chapter %d did not persist an explicit RAG fact receipt", chapter)
 	}
-	characterAgentEvidence, err := loadCharacterAgentEvidence(st, *simulation)
+	var characterAgentEvidence *domain.CharacterAgentEvidenceBundle
+	var characterActivationEvidence *domain.CharacterActivationChapterEvidence
+	if simulation.CharacterActivation != nil {
+		characterActivationEvidence, err = st.LoadCharacterActivationChapterEvidence(simulation.GenerationID, chapter)
+		if err == nil && characterActivationEvidence == nil {
+			err = fmt.Errorf("whole-chapter activation evidence is missing")
+		}
+		if err == nil {
+			err = domain.ValidateCharacterActivationSimulation(*simulation, *characterActivationEvidence)
+		}
+	} else {
+		characterAgentEvidence, err = loadCharacterAgentEvidence(st, *simulation)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("project-all chapter %d load character-agent evidence: %w", chapter, err)
 	}
 	return &ProjectedChapterArtifacts{
-		WorldSimulation:        simulation,
-		CharacterAgentEvidence: characterAgentEvidence,
-		Plan:                   plan,
-		PlanCheckpoint:         planCP,
-		RAGFactReceipt:         factReceipt,
-		CraftRecallReceipt:     craftReceipt,
-		PlanningContextDigest:  strings.TrimSpace(planningContextDigest),
-		RenderContext:          renderContext,
+		WorldSimulation:             simulation,
+		CharacterAgentEvidence:      characterAgentEvidence,
+		CharacterActivationEvidence: characterActivationEvidence,
+		Plan:                        plan,
+		PlanCheckpoint:              planCP,
+		RAGFactReceipt:              factReceipt,
+		CraftRecallReceipt:          craftReceipt,
+		PlanningContextDigest:       strings.TrimSpace(planningContextDigest),
+		RenderContext:               renderContext,
 	}, nil
 }
 
@@ -1029,7 +1061,11 @@ func projectAllToolContractsDigest() string {
 // simulator/planner prompt and tool protocol to the generation identity
 // without exporting those inputs. Any model contract change creates a new
 // planning dependency root; bounded host recovery mechanics remain outside it.
-func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
+func ProjectAllPlanningProtocolDigest(plannerPrompt string, characterProtocol ...string) string {
+	protocol := domain.CharacterAgentDecisionProtocolVersion
+	if len(characterProtocol) > 0 {
+		protocol = characterProtocol[0]
+	}
 	toolContracts := projectAllToolContractsDigest()
 	if toolContracts == "" {
 		return ""
@@ -1039,23 +1075,27 @@ func ProjectAllPlanningProtocolDigest(plannerPrompt string) string {
 		return ""
 	}
 	digest, err := domain.DeterministicPlanningHash(struct {
-		Version            string `json:"version"`
-		WorldSimulator     string `json:"world_simulator"`
-		SimulationBoundary string `json:"simulation_boundary"`
-		Planner            string `json:"planner"`
-		PlannerBoundary    string `json:"planner_boundary"`
-		ToolContracts      string `json:"tool_contracts"`
-		AuthorityPolicy    string `json:"authority_policy"`
-		CharacterProtocol  string `json:"character_protocol"`
+		Version                  string `json:"version"`
+		WorldSimulator           string `json:"world_simulator"`
+		SimulationBoundary       string `json:"simulation_boundary"`
+		Planner                  string `json:"planner"`
+		PlannerBoundary          string `json:"planner_boundary"`
+		ToolContracts            string `json:"tool_contracts"`
+		AuthorityPolicy          string `json:"authority_policy"`
+		CharacterProtocol        string `json:"character_protocol"`
+		ProjectionCompilerPolicy string `json:"projection_compiler_policy"`
+		PlanGroundingProtocol    string `json:"plan_grounding_protocol"`
 	}{
-		Version:            "project-all-agent-protocol.v3",
-		WorldSimulator:     worldSimulatorSystemPrompt,
-		SimulationBoundary: projectAllSimulationBoundary,
-		Planner:            plannerPrompt,
-		PlannerBoundary:    projectAllPlannerBoundary,
-		ToolContracts:      toolContracts,
-		AuthorityPolicy:    authorityPolicy,
-		CharacterProtocol:  CharacterAgentProtocolDigest(),
+		Version:                  "project-all-agent-protocol.v3",
+		WorldSimulator:           worldSimulatorSystemPrompt,
+		SimulationBoundary:       projectAllSimulationBoundary,
+		Planner:                  plannerPrompt,
+		PlannerBoundary:          projectAllPlannerBoundary,
+		ToolContracts:            toolContracts,
+		AuthorityPolicy:          authorityPolicy,
+		CharacterProtocol:        CharacterAgentProtocolDigestForVersion(protocol),
+		ProjectionCompilerPolicy: "identity-bound-pov-projection.v1",
+		PlanGroundingProtocol:    planGroundingProtocolDigest(),
 	})
 	if err != nil {
 		return ""

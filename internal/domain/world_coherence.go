@@ -105,6 +105,7 @@ func AuditWorldCoherence(rules []WorldRule, codex *WorldCodex, world *BookWorld)
 	}
 
 	strictCodex := codex != nil && codex.SchemaVersion >= CurrentWorldCodexSchemaVersion
+	strictCharacterViews := codex != nil && codex.CharacterViewVersion == CurrentWorldCharacterViewVersion
 	strictWorld := world != nil && world.Version >= CurrentBookWorldSchemaVersion
 	strictOperational := strictCodex || strictWorld
 	operationalSeverity := func(strict bool) string {
@@ -128,6 +129,10 @@ func AuditWorldCoherence(rules []WorldRule, codex *WorldCodex, world *BookWorld)
 		}
 		if strings.TrimSpace(rule.Boundary) == "" {
 			add("world_rules.boundary.empty", operationalSeverity(strictOperational), subject+".boundary", "规则必须写明不可突破的边界")
+		}
+		if strictCharacterViews && WorldRuleVisibility(rule) != "secret" && strings.TrimSpace(rule.CharacterView) == "" {
+			add("world_rules.character_view.empty", WorldCoherenceSeverityError, subject+".character_view",
+				"角色视图 v1 的非 secret 规则必须提供独立公开文本；不能回退到含作者事实的 rule/boundary")
 		}
 		key := strings.TrimSpace(rule.Category) + "\x00" + strings.TrimSpace(rule.Rule)
 		if key != "\x00" {
@@ -275,6 +280,10 @@ func auditWorldCodex(
 	mechanismIDs map[string]struct{},
 	add func(string, string, string, string),
 ) {
+	if codex.CharacterViewVersion != 0 && codex.CharacterViewVersion != CurrentWorldCharacterViewVersion {
+		add("codex.character_view_version.unsupported", WorldCoherenceSeverityError, "world_codex.character_view_version",
+			fmt.Sprintf("不支持角色视图版本 %d；仅支持历史版本 0 和显式公开视图版本 %d", codex.CharacterViewVersion, CurrentWorldCharacterViewVersion))
+	}
 	severity := WorldCoherenceSeverityWarning
 	if strict {
 		severity = WorldCoherenceSeverityError
@@ -389,6 +398,9 @@ func auditWorldCodex(
 	}
 	for i, mechanism := range codex.Mechanisms {
 		subject := fmt.Sprintf("world_codex.mechanisms[%d]", i)
+		if codex.CharacterViewVersion == CurrentWorldCharacterViewVersion && CodexMechanismVisibility(mechanism) != "secret" {
+			auditCharacterMechanismView(mechanism.CharacterView, subject+".character_view", add)
+		}
 		id := strings.TrimSpace(mechanism.ID)
 		if id == "" {
 			add("codex.mechanism.id.empty", severity, subject+".id", "机制 ID 不能为空")
@@ -475,6 +487,31 @@ func auditWorldCodex(
 	for id := range mechanismIDs {
 		if _, covered := coveredMechanisms[id]; !covered {
 			add("codex.mechanism.untested", severity, "world_codex.mechanisms."+id, "没有反事实探针覆盖该机制")
+		}
+	}
+}
+
+func auditCharacterMechanismView(view *CharacterMechanismView, subject string, add func(string, string, string, string)) {
+	if view == nil {
+		add("codex.mechanism.character_view.missing", WorldCoherenceSeverityError, subject,
+			"角色视图 v1 的非 secret 机制必须提供独立公开操作视图；不得复制作者机制补缺")
+		return
+	}
+	for field, value := range map[string]string{
+		"name": view.Name, "trigger": view.Trigger, "timing": view.Timing,
+	} {
+		if strings.TrimSpace(value) == "" {
+			add("codex.mechanism.character_view."+field+".empty", WorldCoherenceSeverityError, subject+"."+field,
+				"角色公开机制字段不能为空")
+		}
+	}
+	for field, values := range map[string][]string{
+		"actor_scope": view.ActorScope, "preconditions": view.Preconditions, "inputs": view.Inputs,
+		"costs": view.Costs, "effects": view.Effects, "failure_modes": view.FailureModes, "observability": view.Observability,
+	} {
+		if len(nonEmptyWorldStrings(values)) == 0 {
+			add("codex.mechanism.character_view."+field+".empty", WorldCoherenceSeverityError, subject+"."+field,
+				"角色公开机制必须显式说明适用条件、输入、代价、结果、失败及可观测性")
 		}
 	}
 }

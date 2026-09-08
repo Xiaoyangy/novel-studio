@@ -1969,7 +1969,7 @@ func validateCommitCharacterStage(s *store.Store, chapter int, records []domain.
 		return fmt.Errorf("第 %d 章提交缺少 character_stage_records：必须沉淀主角和关键配角的场景、行动、位置、交通/见面限制和状态变化: %w", chapter, errs.ErrToolPrecondition)
 	}
 	protagonist := inferCommitProtagonist(s)
-	simulationRequired := chapterWorldSimulationRequired(s)
+	simulationRequired := chapterWorldSimulationRequired(s, chapter)
 	hasSideCharacter := false
 	var missing []string
 	for i, r := range records {

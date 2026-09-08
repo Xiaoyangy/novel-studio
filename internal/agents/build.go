@@ -379,7 +379,7 @@ func BuildCoordinatorWithOptions(
 		// An exact-target refresh is a mutation sidecar, not a general Architect
 		// session. Capability narrowing makes the prompt's one-read/one-save
 		// contract structural: no world tick, research, or craft mutation can run.
-		architectTools = []agentcore.Tool{contextTool, saveFoundation}
+		architectTools = []agentcore.Tool{tools.NewFoundationSourceContextTool(store, buildOpts.FoundationRefreshTarget), saveFoundation}
 	}
 	// 阶段拆分：推演（planner=writer）与正文渲染（drafter）各自独立上下文，
 	// 每阶段只拿本阶段所需上下文——planner 吃全量规划上下文产出完整计划落盘，
@@ -394,7 +394,7 @@ func BuildCoordinatorWithOptions(
 		// Host 已先派 world_simulator。POV planner 只保留 staged plan 工具，
 		// 避免重复携带 simulate_chapter_world 与单发 plan_chapter 的大 schema。
 		tools.NewPlanStructureTool(store),
-		tools.NewPlanDetailsTool(store),
+		tools.NewPlanDetailsTool(store).WithGroundingReviewer(NewPlanGroundingReviewer(cfg, models, recordUsage)),
 	}
 	// Dedicated world-simulation repair agent. The model repeatedly ignored a
 	// textual "do not call plan_details" instruction, so this role receives a

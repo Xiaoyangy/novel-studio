@@ -21,7 +21,8 @@ type ChapterPlan struct {
 	// AdvanceEvents 本章计划推进的事件 id（Task 078 事件编织层；可选）。
 	// 与 meta/event_weave.json 编织表冲突时 plan 返回 weave_conflicts 警告，
 	// Writer 须在 Notes 里说明改排理由。
-	AdvanceEvents []string `json:"advance_events,omitempty"`
+	AdvanceEvents   []string              `json:"advance_events,omitempty"`
+	GroundingReview *PlanGroundingReceipt `json:"grounding_review,omitempty"`
 }
 
 // ChapterDraftPartIndex 记录分片草稿的可恢复状态。

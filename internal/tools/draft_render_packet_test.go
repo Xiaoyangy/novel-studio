@@ -1504,12 +1504,13 @@ func TestCompactReadyPlanningProjectAllStateKeepsLastTwoReceiptOnlyTransitions(t
 				t.Fatalf("ready-planning transport retained cumulative state: %s", after)
 			}
 			for key, want := range map[string]any{
-				"version":         domain.ProjectedPlanningContextV2Version,
-				"generation_id":   "generation-1",
-				"next_chapter":    float64(5),
-				"through_chapter": float64(4),
-				"state_root":      "state-root-4",
-				"context_digest":  "context-digest-4",
+				"version":               projectedPlanningContextViewVersion,
+				"source_version":        domain.ProjectedPlanningContextV2Version,
+				"generation_id":         "generation-1",
+				"next_chapter":          float64(5),
+				"through_chapter":       float64(4),
+				"state_root":            "state-root-4",
+				"source_context_digest": "context-digest-4",
 			} {
 				if got := compact[key]; !reflect.DeepEqual(got, want) {
 					t.Fatalf("ready-planning transport changed %s: got=%#v want=%#v", key, got, want)
@@ -1706,7 +1707,7 @@ func TestWorldSimulationProfileKeepsCharacterStateAndDropsWritingMaterial(t *tes
 		t.Fatalf("world simulation lost the folded direct pre-state: %+v", projected)
 	}
 	recent := projected["recent_transitions"].([]any)
-	if len(recent) != 3 || recent[2].(map[string]any)["chapter"] != 3 || projected["context_digest"] != "keep-digest" {
+	if len(recent) != 3 || recent[2].(map[string]any)["chapter"] != 3 || projected["source_context_digest"] != "keep-digest" {
 		t.Fatalf("world simulation project-all transition receipts are incomplete: %+v", projected)
 	}
 	for _, raw := range recent {

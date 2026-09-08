@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -93,13 +94,20 @@ func (t *PlanStructureTool) Execute(_ context.Context, args json.RawMessage) (js
 			return nil, fmt.Errorf("plan_structure 缺少核心字段 %s: %w", field, errs.ErrToolArgs)
 		}
 	}
-	applyOutlineAnchorsToStructure(t.store, chapter, structure, isRewritePlan)
+	if err := applyOutlineAnchorsToStructure(t.store, chapter, structure, isRewritePlan); err != nil {
+		return nil, err
+	}
 	if err := applyRewriteAnchorsToStructure(t.store, chapter, structure); err != nil {
 		return nil, err
 	}
 	bindPlanStructureToSources(t.store, chapter, structure, worldSimulation)
 	delete(structure, "causal_simulation") // 细节只走 plan_details，避免两处口径漂移
 	existingPartial, _ := t.store.Drafts.LoadChapterPlanPartial(chapter)
+	if existingPartial != nil {
+		if _, err := recoverIndependentPlanSourceStamp(t.store, chapter, existingPartial, worldSimulation, true); err != nil {
+			return nil, err
+		}
+	}
 	preferredReceiptID := ""
 	if existingPartial != nil {
 		preferredReceiptID, _ = existingPartial[planCraftReceiptKey].(string)
@@ -201,13 +209,13 @@ func planStructureBoundToSources(s *store.Store, chapter int, partial map[string
 	return true
 }
 
-func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[string]any, rewrite bool) {
+func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[string]any, rewrite bool) error {
 	if s == nil || chapter <= 0 || structure == nil {
-		return
+		return nil
 	}
 	entry, err := s.Outline.GetChapterOutline(chapter)
 	if err != nil || entry == nil {
-		return
+		return nil
 	}
 	if title := strings.TrimSpace(entry.Title); title != "" {
 		structure["title"] = title
@@ -219,7 +227,15 @@ func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[s
 	// source-bound goal/hook with stale outline prose. New chapters still use
 	// the outline as their scope authority.
 	if rewrite {
-		return
+		return nil
+	}
+	if simulation, err := independentSimulationForOutlineAnchors(s, chapter); err != nil {
+		return err
+	} else if simulation != nil {
+		// The frozen outline is soft guidance for this protocol. The actual
+		// adjudicated choices determine scenes, result-level beats and hooks.
+		structure["required_beats"] = withoutInjectedSoftOutlineBeat(stringSliceFromAny(structure["required_beats"]), entry.CoreEvent)
+		return nil
 	}
 	if event := strings.TrimSpace(entry.CoreEvent); event != "" {
 		// 大纲核心事件决定本章“要完成什么”。The formal contract is what
@@ -238,6 +254,7 @@ func applyOutlineAnchorsToStructure(s *store.Store, chapter int, structure map[s
 		// 追加一条元指令让 Drafter 重复对账。
 		structure["hook"] = hook
 	}
+	return nil
 }
 
 func stringSliceFromAny(value any) []string {
@@ -259,7 +276,8 @@ func stringSliceFromAny(value any) []string {
 
 // PlanDetailsTool 两阶段规划第 2 步：分批合并 causal_simulation，finalize 时收口。
 type PlanDetailsTool struct {
-	store *store.Store
+	store     *store.Store
+	grounding PlanGroundingReviewer
 }
 
 func NewPlanDetailsTool(store *store.Store) *PlanDetailsTool {
@@ -299,7 +317,7 @@ func (t *PlanDetailsTool) inProgressChapter() int {
 	return inProgressChapterOf(t.store)
 }
 
-func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (t *PlanDetailsTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		Chapter          int            `json:"chapter"`
 		CausalSimulation map[string]any `json:"causal_simulation"`
@@ -326,6 +344,9 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	}
 	worldSimulation, err := ensureChapterWorldSimulationReadyForPlanning(t.store, a.Chapter)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := recoverIndependentPlanSourceStamp(t.store, a.Chapter, partial, worldSimulation, true); err != nil {
 		return nil, err
 	}
 	if !planStructureBoundToSources(t.store, a.Chapter, partial, worldSimulation) {
@@ -387,8 +408,14 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 	}
 
 	if !a.Finalize {
-		if result, finalized, err := t.autoFinalizePartialIfComplete(a.Chapter, partial, merged); finalized || err != nil {
-			return result, err
+		groundingReviewNeeded := false
+		if result, finalized, err := t.autoFinalizePartialIfComplete(ctx, a.Chapter, partial, merged); finalized || err != nil {
+			if t.grounding.Review != nil || !errors.Is(err, ErrPlanGroundingReviewRequired) {
+				return result, err
+			}
+			// A Host-only seed remains a durable staged seed. It cannot acquire
+			// a model call just because all structural fields are now complete.
+			groundingReviewNeeded = true
 		}
 		response := map[string]any{
 			"staged":              "details",
@@ -396,7 +423,10 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 			"fields_present":      sortedKeys(merged),
 			"gap_summary":         planDetailsGapSummary(t.store, a.Chapter, partial, merged),
 			"next_step":           "继续 plan_details 提交剩余字段；每次只补一个 recommended_batches 分组；全部就绪后最后一批再传 finalize=true；若字段已齐，本工具会自动收口为正式 plan",
-			"recommended_batches": planDetailsRecommendedBatches(),
+			"recommended_batches": planDetailsRecommendedBatchesForState(t.store, a.Chapter, partial, merged),
+		}
+		if groundingReviewNeeded {
+			response["gap_summary"] = append(planDetailsGapSummary(t.store, a.Chapter, partial, merged), "plan_grounding_review: 需要显式 Planner 模型修复入口执行裁决忠实性检查；Host-only 不调用模型")
 		}
 		if len(normalizations) > 0 {
 			response["scope_normalizations"] = normalizations
@@ -410,7 +440,7 @@ func (t *PlanDetailsTool) Execute(_ context.Context, args json.RawMessage) (json
 		return json.Marshal(response)
 	}
 
-	return t.finalizePartial(a.Chapter, partial, merged)
+	return t.finalizePartial(ctx, a.Chapter, partial, merged)
 }
 
 func normalizePartialVisibleCharacterScope(s *store.Store, chapter int, merged map[string]any) []string {
@@ -534,6 +564,18 @@ func applyPlanDetailsSourceAnchors(
 ) error {
 	if st == nil || chapter <= 0 || merged == nil {
 		return nil
+	}
+	if err := validateIndependentPlanCausalBindings(merged, simulation); err != nil {
+		return err
+	}
+	if simulation != nil && independentChapterSimulation(*simulation) {
+		sources := stringSliceFromAny(merged["context_sources"])
+		if sources == nil {
+			sources = []string{}
+		}
+		if err := validateIndependentPlanContextSources(st, chapter, simulation, sources, false); err != nil {
+			return err
+		}
 	}
 	contextSources := stringSliceFromAny(merged["context_sources"])
 	withoutStaleCraftReceipt := contextSources[:0]
@@ -1435,7 +1477,7 @@ func mergeArrayObjectsByCharacter(existing, incoming any) ([]any, bool) {
 	return out, true
 }
 
-func (t *PlanDetailsTool) autoFinalizePartialIfComplete(chapter int, partial, merged map[string]any) (json.RawMessage, bool, error) {
+func (t *PlanDetailsTool) autoFinalizePartialIfComplete(ctx context.Context, chapter int, partial, merged map[string]any) (json.RawMessage, bool, error) {
 	plan, err := chapterPlanFromPartial(chapter, partial, merged)
 	if err != nil {
 		return nil, false, nil
@@ -1450,14 +1492,14 @@ func (t *PlanDetailsTool) autoFinalizePartialIfComplete(chapter int, partial, me
 	if hardIssues, _ := checkChapterPlanConsistency(t.store, plan); len(hardIssues) > 0 {
 		return nil, false, nil
 	}
-	result, err := t.finalizePartial(chapter, partial, merged)
+	result, err := t.finalizePartial(ctx, chapter, partial, merged)
 	if err != nil {
 		return nil, true, err
 	}
 	return result, true, nil
 }
 
-func (t *PlanDetailsTool) finalizePartial(chapter int, partial, merged map[string]any) (json.RawMessage, error) {
+func (t *PlanDetailsTool) finalizePartial(ctx context.Context, chapter int, partial, merged map[string]any) (json.RawMessage, error) {
 	plan, err := chapterPlanFromPartial(chapter, partial, merged)
 	if err != nil {
 		return nil, fmt.Errorf("invalid merged plan: %w: %w", errs.ErrToolArgs, err)
@@ -1467,7 +1509,7 @@ func (t *PlanDetailsTool) finalizePartial(chapter int, partial, merged map[strin
 	if err != nil || skipped != nil {
 		return skipped, err
 	}
-	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan)
+	result, err := finalizeChapterPlan(t.store, plan, isRewritePlan, planGroundingExecution{ctx, t.grounding})
 	if err != nil {
 		return nil, planDetailsFinalizeRepairError(chapter, merged, err)
 	}
@@ -1484,7 +1526,7 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 		"saved_fields", strings.Join(sortedKeys(merged), ", "),
 		"cause", cause,
 	)
-	return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%v。已保存字段：%s。修复协议：不要一次性重发所有字段，也不要立刻 finalize=true；下一轮只补 recommended_batches 中最靠前且未完成的一组，保留已保存字段，最后一组补完后再传 finalize=true。recommended_batches=%s: %w",
+	return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%w。已保存字段：%s。修复协议：不要一次性重发所有字段，也不要立刻 finalize=true；下一轮只补 recommended_batches 中最靠前且未完成的一组，保留已保存字段，最后一组补完后再传 finalize=true。recommended_batches=%s: %w",
 		chapter,
 		cause,
 		strings.Join(sortedKeys(merged), ", "),
@@ -1504,7 +1546,7 @@ func planDetailsRecommendedBatches() []string {
 
 func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[string]any) []string {
 	var gaps []string
-	if chapterWorldSimulationRequired(s) {
+	if chapterWorldSimulationRequired(s, chapter) {
 		for _, field := range []string{"world_simulation_id", "protagonist_decision"} {
 			if _, ok := merged[field]; !ok {
 				gaps = append(gaps, "missing "+field)
@@ -1548,6 +1590,9 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 		protagonistOnly := compactStrings([]string{protagonist})
 		if missing := missingInitialStateCoverage(protagonistOnly, plan.CausalSimulation.InitialState); len(missing) > 0 {
 			gaps = append(gaps, formatMissingCharacterCoverage("initial_state", missing))
+		}
+		if missing := planEmotionalLogicMissingCharacters(s, plan.CausalSimulation.EmotionalLogic); len(missing) > 0 {
+			gaps = append(gaps, formatMissingCharacterCoverage("emotional_logic", missing))
 		}
 		for _, state := range plan.CausalSimulation.InitialState {
 			if strings.TrimSpace(state.Character) != "" && strings.TrimSpace(state.ActionTendency) == "" {

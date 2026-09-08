@@ -8,6 +8,7 @@
 
 ## 硬约束
 
+- **硬合同必须来自作者**：`non_negotiables` 只记录作者明确声明不可协商的要求，并保留原始依据；没有就保持为空，不设条数下限，也不凑数。模型选定的动作、线索顺序、章位落实方案和破局手段属于可重算的软情节，不能自行升级成硬合同。
 - **保存必须通过工具调用**：premise / outline / characters / world_rules / world_codex / book_world 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
 - **一次 run 完成全部必需项**：依次 `save_foundation` 保存 premise → characters → world_rules → world_codex → book_world → outline。每次落盘后读返回的 `remaining`，非空就继续下一项；`world_codex` 与 `book_world` 不在 remaining 中也必须主动保存，直到 `foundation_ready=true` 再结束。
 - **工具成功即结束**：`foundation_ready=true` 后直接结束本轮，不要再输出规划内容的文字总结。
@@ -74,19 +75,24 @@
 
 ### 3. 生成 Characters
 
-基于 premise 生成角色档案（JSON 格式），每个角色字段类型**严格如下**，不得改写为 object：
+基于 premise 生成角色档案（JSON 格式），每个角色字段类型**严格如下**，不得把字符串或数组字段改写为 object：
 - `name`: string
 - `aliases`: string[]（无则省略）
 - `role`: string
 - `description`: string（整体描述）
 - `arc`: **string**（整段角色弧线描述，不是 `{start/middle/end}` 对象；用"前期…后期…"表述）
 - `traits`: **string[]**（特质字符串数组，如 `["冷静","多疑"]`，不是 object）
+- `tier`: string（`core` / `important` / `secondary` / `decorative`；缺省视为重要角色）
+- `initial_state`: object（新建主角、core/important 及默认重要角色必填），字段 `{time?,location,current_goal,current_action?,pressure,known_facts,resources,relationships,commitments,resource_balances?}`。`time/location/current_goal/current_action/pressure` 为字符串；原有其他字段为字符串数组。`location/current_goal/pressure` 必须非空，`known_facts` 至少一条明确已知事实且不得重复。
+- 独立角色 v2 的可见资源使用 `resource_balances` 对象数组，旧 `resources` 字符串仅保留作者态。每条 `{resource_id,name,perceived_name,unit,perceived_unit,actual_amount,access,perception,evidence_refs}`：ID为`res_`加16—64位小写十六进制稳定标识，不编码秘密/数量；同ID各角色引用的name/unit/actual_amount必须一致，世界只结算一次。`actual_amount`为世界真值number或null；纯权限/材料用null且unit为空，不强迫量化。`perceived_name/perceived_unit`独立写角色真正知道的名称/量纲，不从作者态name或world unit自动补；未知名称用“未识别资源”。access=exclusive/shared/none，独占不能克隆，共享不重复余额。
+- perception={kind,amount?,estimate_min?,estimate_max?,as_of_chapter,evidence_refs}，kind=unaware/unknown/last_observed/estimated/reported；初态as_of_chapter=0。未知/未感知不填数值，观测/未核实报告填amount，估计给有来源上下界；有数值时必须有已知perceived_unit。真值与角色读数/估计可以不同，不用未来StateAfter补初态，不凭空测出精确余量。
 
 要求：
 
 - 角色功能必须清晰，避免冗余
 - 主要角色弧线要在单卷内完成
 - 角色关系变化要直接服务主冲突和结局兑现
+- `initial_state` 只写开局已经成立的个人位置、目标、行动、压力、已知事实、资源与关系承诺；每个人分别填写，位置须对应随后 `book_world.places` 的实际地点。不得复制未来 `arc`、整章 `core_event`、他人秘密或结局来填初态，也不把所有角色自动放进主角第一场景。没有依据的可选信息留空，后续选择与状态由角色 Agent 和世界裁决产生。
 
 调用 save_foundation(type="characters", scale="short", content=<JSON数组>)
 
@@ -96,18 +102,25 @@
 - category
 - rule
 - boundary
+- visibility（formal / informal / secret）
+- character_view（供角色接收的独立规则字符串；secret 规则不投放）
 
 要求：
 
 - 只保留必要规则，避免为短篇过度设计世界
 - 规则必须直接服务当前冲突
 - 写作禁区和世界规则边界要互相一致
+- `rule` / `boundary` 保存完整作者态；`character_view` 仅包含普遍适用的程序、条件、资源规律与可观察边界。不要向公开视图写入本案秘密、幕后角色身份、未来揭示、预定选择或硬合同结局；秘密事实保留在 secret 作者态。缺少显式视图时不向角色投放，formal / informal 标签本身不授予角色完整作者知识。
 
 调用 save_foundation(type="world_rules", scale="short", content=<JSON数组>)
 
 ### 5. 生成 World Codex
 
 短篇不做百科式世界观，但仍要让唯一主冲突经得起反推。生成 `schema_version: 2` 的完整世界法典：保留能力/技能/族群/武器/装备与 16 个 sections；只为会直接推动本篇选择的因果建立 `mechanisms`，每项写 `{id,name,visibility,section_refs,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}`，visibility 只能是 formal / informal / secret，secret 不得泄露给未知情角色；用 `counterfactual_tests` 逐条覆盖机制，写清不利初态、行动、应得结果和绝不能出现的便利捷径。能力级别要有 cost，适用 section 要有可执行 rules，所有门类要有 constraints。用 refs 连接已有内容，不重复改写规则。
+
+顶层同时写 `character_view_version: 1`，新建时宿主会固定启用。formal / informal 机制必须另有 `character_view` 对象：`{name,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}`，其中 `name/trigger/timing` 为字符串，其余为字符串数组。此视图只写角色可获知的一般机制，不带本案私密实例和未来结果；角色只读显式视图，完整作者源给 Arbiter，secret 机制不投放。不得把完整作者机制复制过去充数。
+
+未知字段会拒绝本次保存。设备细节、证据流程等信息写入对应 `sections[].content/rules`，可执行条件写入 `mechanisms` 的已有字段；不要另造顶层 `equipment` / `evidence_contract` 或引用未保存对象。修正 schema 时保留原设定信息。
 
 调用 save_foundation(type="world_codex", scale="short", content=<JSON对象>)
 

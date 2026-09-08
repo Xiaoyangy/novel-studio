@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/errs"
 	"github.com/chenhongyang/novel-studio/internal/models"
 	"github.com/chenhongyang/novel-studio/internal/utils"
@@ -189,21 +190,63 @@ type Config struct {
 	RAG RAGConfig `json:"rag,omitzero"`
 
 	// CharacterAgents controls the independent per-character decision protocol.
-	// New configurations default to v1; a sealed legacy planning generation is
+	// New configurations default to v2; a sealed legacy planning generation is
 	// still pinned by its own generation identity until its arc boundary.
 	CharacterAgents CharacterAgentsConfig `json:"character_agents,omitzero"`
 }
 
 type CharacterAgentsConfig struct {
-	Protocol          string `json:"protocol,omitempty"`   // v1 / legacy
-	Scope             string `json:"scope,omitempty"`      // active_core
-	Activation        string `json:"activation,omitempty"` // event_driven
-	MaxConcurrency    int    `json:"max_concurrency,omitempty"`
-	MaxRevisionRounds int    `json:"max_revision_rounds,omitempty"`
+	Protocol            string `json:"protocol,omitempty"`         // v2 / v1 / legacy
+	Scope               string `json:"scope,omitempty"`            // active_core
+	Activation          string `json:"activation,omitempty"`       // event_driven
+	ExecutionPolicy     string `json:"execution_policy,omitempty"` // v1 / v2 / v3 / v4; frozen per generation
+	MaxConcurrency      int    `json:"max_concurrency,omitempty"`
+	MaxRevisionRounds   int    `json:"max_revision_rounds,omitempty"`
+	MaxActivationCycles int    `json:"max_activation_cycles,omitempty"`
+}
+
+func (c Config) CharacterActivationLimit() int {
+	if c.CharacterAgentsProtocolVersion() != domain.CharacterAgentDecisionProtocolV2Version || c.CharacterAgents.MaxActivationCycles <= 1 {
+		return 1
+	}
+	return c.CharacterAgents.MaxActivationCycles
+}
+
+// Execution defaults never reinterpret an existing generation. The project-all
+// boundary pins its persisted policy before computing the planning identity.
+func (c Config) CharacterActivationPolicy() string {
+	if c.CharacterActivationLimit() <= 1 {
+		return ""
+	}
+	switch c.CharacterAgents.ExecutionPolicy {
+	case "", "v1":
+		return domain.CharacterActivationCyclePolicy
+	case "v2":
+		return domain.CharacterActivationCyclePolicyV2
+	case "v3":
+		return domain.CharacterActivationCyclePolicyV3
+	default:
+		return "" // ValidateBase rejects unknown values; never silently select v1.
+	}
 }
 
 func (c Config) CharacterAgentsEnabled() bool {
 	return c.CharacterAgents.Protocol != "legacy"
+}
+
+// Explicit v1 configurations retain their original protocol. Only an unset
+// configuration or v2 selects physical post-state accounting for new work.
+func (c Config) CharacterAgentsProtocolVersion() string {
+	switch c.CharacterAgents.Protocol {
+	case "v1":
+		return domain.CharacterAgentDecisionProtocolVersion
+	case "legacy":
+		return "legacy"
+	case "", "v2":
+		return domain.CharacterAgentDecisionProtocolV2Version
+	default:
+		return ""
+	}
 }
 
 type RAGConfig struct {
@@ -365,9 +408,9 @@ func (c *Config) ValidateBase() error {
 
 	// 校验预算政策
 	switch c.CharacterAgents.Protocol {
-	case "", "v1", "legacy":
+	case "", "v2", "v1", "legacy":
 	default:
-		return fmt.Errorf("character_agents.protocol must be v1 or legacy: %w", errs.ErrConfig)
+		return fmt.Errorf("character_agents.protocol must be v2, v1 or legacy: %w", errs.ErrConfig)
 	}
 	if c.CharacterAgents.Scope != "" && c.CharacterAgents.Scope != "active_core" {
 		return fmt.Errorf("character_agents.scope must be active_core: %w", errs.ErrConfig)
@@ -375,11 +418,20 @@ func (c *Config) ValidateBase() error {
 	if c.CharacterAgents.Activation != "" && c.CharacterAgents.Activation != "event_driven" {
 		return fmt.Errorf("character_agents.activation must be event_driven: %w", errs.ErrConfig)
 	}
+	if c.CharacterAgents.ExecutionPolicy != "" && c.CharacterAgents.ExecutionPolicy != "v1" && c.CharacterAgents.ExecutionPolicy != "v2" && c.CharacterAgents.ExecutionPolicy != "v3" {
+		return fmt.Errorf("character_agents.execution_policy must be v1, v2 or v3: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.ExecutionPolicy == "v3" && (c.CharacterAgentsProtocolVersion() != domain.CharacterAgentDecisionProtocolV2Version || c.CharacterAgents.MaxActivationCycles == 1) {
+		return fmt.Errorf("character_agents.execution_policy %s requires character protocol v2 and multiple activation cycles: %w", c.CharacterAgents.ExecutionPolicy, errs.ErrConfig)
+	}
 	if c.CharacterAgents.MaxConcurrency < 0 || c.CharacterAgents.MaxConcurrency > 4 {
 		return fmt.Errorf("character_agents.max_concurrency must be in 1..4 when set: %w", errs.ErrConfig)
 	}
 	if c.CharacterAgents.MaxRevisionRounds < 0 || c.CharacterAgents.MaxRevisionRounds > 1 {
 		return fmt.Errorf("character_agents.max_revision_rounds must be 0 or 1: %w", errs.ErrConfig)
+	}
+	if c.CharacterAgents.MaxActivationCycles < 0 || c.CharacterAgents.MaxActivationCycles > 64 {
+		return fmt.Errorf("character_agents.max_activation_cycles must be in 1..64 when set: %w", errs.ErrConfig)
 	}
 
 	// 校验预算政策
@@ -464,7 +516,7 @@ func (c *Config) FillDefaults() {
 		c.Style = "default"
 	}
 	if c.CharacterAgents.Protocol == "" {
-		c.CharacterAgents.Protocol = "v1"
+		c.CharacterAgents.Protocol = "v2"
 	}
 	if c.CharacterAgents.Scope == "" {
 		c.CharacterAgents.Scope = "active_core"
@@ -472,11 +524,20 @@ func (c *Config) FillDefaults() {
 	if c.CharacterAgents.Activation == "" {
 		c.CharacterAgents.Activation = "event_driven"
 	}
+	if c.CharacterAgents.ExecutionPolicy == "" {
+		c.CharacterAgents.ExecutionPolicy = "v1"
+	}
 	if c.CharacterAgents.MaxConcurrency <= 0 {
 		c.CharacterAgents.MaxConcurrency = 4
 	}
 	if c.CharacterAgents.MaxRevisionRounds == 0 && c.CharacterAgents.Protocol != "legacy" {
 		c.CharacterAgents.MaxRevisionRounds = 1
+	}
+	if c.CharacterAgents.MaxActivationCycles == 0 {
+		c.CharacterAgents.MaxActivationCycles = 1
+		if c.CharacterAgentsProtocolVersion() == domain.CharacterAgentDecisionProtocolV2Version {
+			c.CharacterAgents.MaxActivationCycles = 8
+		}
 	}
 	if c.Budget.Enabled() && c.Budget.WarnRatio == 0 {
 		c.Budget.WarnRatio = 0.8

@@ -109,6 +109,67 @@ func TestResolveBookScaleTargetUsesFrozenMidpointAndWordBudget(t *testing.T) {
 	}
 }
 
+func TestResolveBookScaleTargetUsesModelPlanFloorForShortBooks(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		scale    string
+		volumes  int
+		chapters int
+	}{
+		{"three-chapter short book", "1-1卷，3-3章，总字数6000-9000字", 1, 3},
+		{"single chapter", "1-1卷，1-1章，总字数2000-3000字", 1, 1},
+		{"one chapter per volume", "3-3卷，3-3章", 3, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, existing := range []bool{false, true} {
+				currentVolumes, currentChapters := 0, 0
+				if existing {
+					currentVolumes, currentChapters = tc.volumes, tc.chapters
+				}
+				target, err := ResolveBookScaleTarget(tc.scale, currentVolumes, currentChapters)
+				if err != nil {
+					t.Fatalf("existing=%v: valid short book rejected: %v", existing, err)
+				}
+				if target.TargetVolumes != tc.volumes || target.TargetChapters != tc.chapters {
+					t.Fatalf("short book was expanded beyond its declared contract: %+v", target)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveBookScaleTargetStillRejectsImpossibleVolumeAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		scale           string
+		currentVolumes  int
+		currentChapters int
+	}{
+		{"4-4卷，3-3章", 0, 0},
+		{"1-4卷，3-3章", 4, 3},
+	} {
+		_, err := ResolveBookScaleTarget(tc.scale, tc.currentVolumes, tc.currentChapters)
+		if err == nil || !strings.Contains(err.Error(), "cannot allocate") {
+			t.Fatalf("scale=%q accepted chapters fewer than volume reservations: %v", tc.scale, err)
+		}
+	}
+}
+
+func TestResolveBookScaleTargetRetainsLongBookReservationsAndCeiling(t *testing.T) {
+	const scale = "8-10卷，360-480章，总字数1000000-1300000字"
+	target, err := ResolveBookScaleTarget(scale, 10, 450)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.TargetVolumes != 10 || target.TargetChapters != 450 || target.TargetWords != 1150000 {
+		t.Fatalf("existing long-book reservation changed: %+v", target)
+	}
+	for _, reservation := range [][2]int{{11, 450}, {10, 481}} {
+		if _, err := ResolveBookScaleTarget(scale, reservation[0], reservation[1]); err == nil {
+			t.Fatalf("accepted reservation beyond hard scale maximum: %v", reservation)
+		}
+	}
+}
+
 func TestResolveBookScaleTargetCapturesSingleDayStoryTimeHint(t *testing.T) {
 	target, err := ResolveBookScaleTarget("1-1卷，12-12章，总字数28000-30000字；主线时间跨度10日", 1, 12)
 	if err != nil {
