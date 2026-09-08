@@ -427,6 +427,7 @@ data/runs/<书名>/
 | [生产与运维参考](README-TECHNICAL.md) | 执行锁、receipt、恢复、rebase、outline repair、命令和完整输出结构 |
 | [系统架构](docs/architecture.md) | Host、Agent、Tools、Store 与上下文拓扑 |
 | [Project-All 按弧架构](docs/project-all-architecture.md) | 当前弧推演、seal、逐章验收和下一弧解锁 |
+| [角色执行策略 V3](docs/character-activation-v3.md) | 配置、初始化与生产入口、旧代次兼容和真实验收边界 |
 | [设计阶段工作流](docs/design-stage-workflow.md) | Architect、outline-all 与 zero-init |
 | [上下文管理](docs/context-management.md) | 阶段化压缩、恢复包和上下文 receipt |
 | [数据生命周期](docs/data-lifecycle-and-progression.md) | 章节、角色、世界与推进台账 |

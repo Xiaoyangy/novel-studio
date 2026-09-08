@@ -404,6 +404,7 @@ Current limits:
 | [Production and operations](README-TECHNICAL.md) | Execution locks, receipts, recovery, rebase, outline repair, commands, and the full output tree |
 | [System architecture](docs/architecture.md) | Host, Agent, Tools, Store, and context topology |
 | [Project-All arc architecture](docs/project-all-architecture.md) | Current-arc projection, sealing, chapter acceptance, and next-arc unlock |
+| [Character execution policy V3](docs/character-activation-v3.md) | Configuration, initialization and production entry points, frozen-generation compatibility, and validation status (Chinese) |
 | [Design-stage workflow](docs/design-stage-workflow.md) | Architect, outline-all, and zero-init |
 | [Context management](docs/context-management.md) | Stage compaction, restore packs, and context receipts |
 | [Data lifecycle](docs/data-lifecycle-and-progression.md) | Chapters, characters, world state, and progression ledgers |
