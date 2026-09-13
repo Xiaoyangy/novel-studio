@@ -211,9 +211,15 @@ func (s *Store) loadVerifiedReadinessAuditAt(root, generation string, chapter, i
 	if current == nil {
 		return nil, fmt.Errorf("verified readiness audit has no source session")
 	}
-	prefix, err := s.rebuildVerifiedCharacterActivationPrefix(root, current.Session(), index, index-1)
-	if err != nil {
-		return nil, err
+	session := current.Session()
+	prefix := *current
+	// The current cursor was fully source-verified above. When it is already
+	// this exact assessing boundary, replaying the same prefix adds no proof.
+	if len(session.CycleDigests) != index || len(session.ReadinessDigests) != index-1 {
+		prefix, err = s.rebuildVerifiedCharacterActivationPrefix(root, session, index, index-1)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s.loadVerifiedReadinessAudit(root, prefix)
 }
@@ -237,9 +243,13 @@ func (s *Store) saveVerifiedCharacterReadinessReviewAudit(root string, audit dom
 	index := len(audit.Input.Trace.Cycles)
 	// A retry after application still checks the original assessing boundary,
 	// not the later mutable cursor or a newly fabricated review input.
-	boundary, err := s.rebuildVerifiedCharacterActivationPrefix(root, prefix.Session(), index, index-1)
-	if err != nil {
-		return err
+	session := prefix.Session()
+	boundary := *prefix
+	if len(session.CycleDigests) != index || len(session.ReadinessDigests) != index-1 {
+		boundary, err = s.rebuildVerifiedCharacterActivationPrefix(root, session, index, index-1)
+		if err != nil {
+			return err
+		}
 	}
 	if err := s.validateVerifiedReadinessAudit(root, boundary, audit); err != nil {
 		return err

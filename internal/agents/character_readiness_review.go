@@ -144,7 +144,7 @@ func runCharacterChapterReadiness(ctx context.Context, cfg bootstrap.Config, st 
 	if contextValue == nil {
 		return empty, fmt.Errorf("readiness execution lacks its frozen chapter context")
 	}
-	cycles := make([]domain.CharacterActivationCycle, 0, len(session.CycleDigests))
+	var cycles []domain.CharacterActivationCycle
 	var verifiedSteps []domain.VerifiedCharacterActivationStep
 	if domain.HasCharacterSelfChronologyPolicyV1(cycle.Evidence.Stimulus.Sources) {
 		prefix, err := st.LoadVerifiedCharacterActivationPrefix(session.GenerationID, session.Chapter)
@@ -156,19 +156,20 @@ func runCharacterChapterReadiness(ctx context.Context, cfg bootstrap.Config, st 
 		}
 		verifiedSteps = prefix.Steps()
 	}
-	for i := range session.CycleDigests {
-		if len(verifiedSteps) > 0 {
-			cycles = append(cycles, verifiedSteps[i].Cycle())
-			continue
+	if len(verifiedSteps) == 0 {
+		// Verified inputs below consume the steps directly. Materializing their
+		// full cycles here would deep-copy the entire history and discard it.
+		cycles = make([]domain.CharacterActivationCycle, 0, len(session.CycleDigests))
+		for i := range session.CycleDigests {
+			stored, err := st.LoadCharacterActivationCycle(session.GenerationID, session.Chapter, i+1)
+			if err != nil {
+				return empty, err
+			}
+			if stored == nil {
+				return empty, fmt.Errorf("readiness execution lost an earlier source cycle")
+			}
+			cycles = append(cycles, *stored)
 		}
-		stored, err := st.LoadCharacterActivationCycle(session.GenerationID, session.Chapter, i+1)
-		if err != nil {
-			return empty, err
-		}
-		if stored == nil {
-			return empty, fmt.Errorf("readiness execution lost an earlier source cycle")
-		}
-		cycles = append(cycles, *stored)
 	}
 	snapshot, err := models.SnapshotForRole("writer")
 	if err != nil {
