@@ -202,6 +202,14 @@ func runCharacterChapterReadiness(ctx context.Context, cfg bootstrap.Config, st 
 		}
 		return cached.Receipt, nil
 	}
+	return runCharacterReadinessInput(ctx, cfg, st, snapshot, thinking, protocol, inputDigest, input, grouped, nil)
+}
+
+// Both historical and transactional adapters use the same prompt, schema,
+// exact model input and usage lifecycle. Only the host persistence boundary differs.
+func runCharacterReadinessInput(ctx context.Context, cfg bootstrap.Config, st *store.Store, snapshot bootstrap.ModelSnapshot, thinking agentcore.ThinkingLevel, protocol, inputDigest string, input domain.CharacterReadinessReviewInput, grouped bool, commit *characterReadinessCommit) (domain.CharacterChapterReadiness, error) {
+	var empty domain.CharacterChapterReadiness
+	generation, chapter, cycleIndex := input.Context.GenerationID, input.Context.Chapter, len(input.Trace.Cycles)
 	raw, err := json.Marshal(input)
 	if err != nil {
 		return empty, err
@@ -214,19 +222,30 @@ func runCharacterChapterReadiness(ctx context.Context, cfg bootstrap.Config, st 
 			return empty, err
 		}
 		tool, prompt = groupTool, characterGroupedReadinessPrompt
+		if commit != nil {
+			groupTool.persist = commit.Save
+		}
 		raw, err = json.Marshal(groupTool.codec.ModelView())
 		if err != nil {
 			return empty, err
 		}
 	}
-	ctx, usageRecord, err := prepareCharacterAccounting(ctx, domain.CharacterAgentUsage{GenerationID: session.GenerationID, Chapter: session.Chapter, Cycle: cycle.Index, Round: 1, AgentID: "chapter_readiness", Character: "Chapter readiness", Role: "chapter_readiness"})
+	ctx, usageRecord, err := prepareCharacterAccounting(ctx, domain.CharacterAgentUsage{GenerationID: generation, Chapter: chapter, Cycle: cycleIndex, Round: 1, AgentID: "chapter_readiness", Character: "Chapter readiness", Role: "chapter_readiness"})
 	if err != nil {
 		return empty, err
 	}
 	usage, runErr := runCharacterAgentTerminalLoop(withCharacterToolDiagnosticScope(ctx, usageRecord), snapshot.Model, prompt, "判定以下完整章内实际证据：\n<chapter_readiness_input>\n"+string(raw)+"\n</chapter_readiness_input>\n只调用submit_chapter_readiness。", tool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("writer", 4), 6), thinking, nil, agentPromptCacheKey("chapter_readiness", st.Dir(), inputDigest, protocol), st)
-	audit, loadErr := st.LoadCharacterReadinessReviewAudit(session.GenerationID, session.Chapter, cycle.Index)
+	var audit *domain.CharacterReadinessReviewAudit
+	var loadErr error
+	if commit == nil {
+		audit, loadErr = st.LoadCharacterReadinessReviewAudit(generation, chapter, cycleIndex)
+	} else {
+		// Save already authenticated and committed this exact structured result.
+		// Do not replay all historical sources merely to retrieve our own result.
+		audit, _ = commit.Result()
+	}
 	if loadErr == nil && audit != nil {
-		reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: session.GenerationID, Chapter: session.Chapter, Cycle: cycle.Index, Kind: PlanningReadinessCommitted, ArtifactDigest: audit.Receipt.Digest})
+		reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: generation, Chapter: chapter, Cycle: cycleIndex, Kind: PlanningReadinessCommitted, ArtifactDigest: audit.Receipt.Digest})
 	}
 	if runErr == nil && loadErr == nil && audit == nil {
 		loadErr = fmt.Errorf("readiness model returned without a structured persisted verdict")

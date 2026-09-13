@@ -22,6 +22,7 @@ type submitGroupedCharacterReadinessTool struct {
 	input   domain.CharacterReadinessReviewInput
 	codec   *domain.CharacterReadinessModelCodecV1
 	binding domain.CharacterReadinessModelBindingV1
+	persist func(domain.CharacterReadinessReviewAudit) error
 }
 
 func newSubmitGroupedCharacterReadinessTool(st *store.Store, input domain.CharacterReadinessReviewInput) (*submitGroupedCharacterReadinessTool, error) {
@@ -29,7 +30,7 @@ func newSubmitGroupedCharacterReadinessTool(st *store.Store, input domain.Charac
 	if err != nil {
 		return nil, err
 	}
-	return &submitGroupedCharacterReadinessTool{st, input, codec, codec.Binding()}, nil
+	return &submitGroupedCharacterReadinessTool{store: st, input: input, codec: codec, binding: codec.Binding()}, nil
 }
 
 func (*submitGroupedCharacterReadinessTool) Name() string { return "submit_chapter_readiness" }
@@ -50,7 +51,11 @@ func (t *submitGroupedCharacterReadinessTool) Execute(_ context.Context, raw jso
 		return nil, err
 	}
 	binding := t.binding
-	if err := t.store.SaveCharacterReadinessReviewAudit(domain.CharacterReadinessReviewAudit{Input: t.input, Receipt: receipt, ModelView: &binding}); err != nil {
+	persist := t.persist
+	if persist == nil {
+		persist = t.store.SaveCharacterReadinessReviewAudit
+	}
+	if err := persist(domain.CharacterReadinessReviewAudit{Input: t.input, Receipt: receipt, ModelView: &binding}); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"submitted": true, "chapter": receipt.Chapter, "cycle_digest": receipt.CycleDigest, "readiness_digest": receipt.Digest, "decision": receipt.Decision})

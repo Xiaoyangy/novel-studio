@@ -15,7 +15,10 @@ type ChapterActivationDriver struct {
 	VerifyExecutionSources bool
 	ExecuteCycle           func(context.Context, domain.CharacterActivationSession) (domain.CharacterActivationCycle, error)
 	AssessCycle            func(context.Context, domain.CharacterActivationSession, domain.CharacterActivationCycle) (domain.CharacterChapterReadiness, error)
-	BeforeDispatch         func(context.Context, string) error
+	// Verified production adapters may authenticate inputs and commit the
+	// assessment themselves. The returned cursor must be the exact transition.
+	AssessPendingCycle func(context.Context, domain.CharacterActivationSession) (domain.CharacterChapterReadiness, *domain.CharacterActivationSession, error)
+	BeforeDispatch     func(context.Context, string) error
 }
 
 type ChapterActivationLimitError struct{ Chapter, Cycles int }
@@ -25,11 +28,11 @@ func (e *ChapterActivationLimitError) Error() string {
 }
 
 // RunChapterActivationLoop is resumable at both expensive boundaries: a paid
-// world cycle and its readiness assessment. It is deliberately not wired to
-// the production planner until the world-cycle adapters and bundle aggregation
-// are complete. The old one-round protocol must not silently pretend to loop.
+// world cycle and its readiness assessment. The old one-round protocol must
+// not silently pretend to loop.
 func RunChapterActivationLoop(ctx context.Context, st *store.Store, baseline domain.CharacterActivationSession, driver ChapterActivationDriver) (*domain.CharacterActivationSession, error) {
-	if st == nil || driver.ExecuteCycle == nil || driver.AssessCycle == nil {
+	if st == nil || driver.ExecuteCycle == nil || (driver.AssessCycle == nil && driver.AssessPendingCycle == nil) ||
+		(driver.AssessPendingCycle != nil && (!driver.VerifyExecutionSources || driver.AssessCycle != nil)) {
 		return nil, fmt.Errorf("chapter activation driver is incomplete")
 	}
 	if err := domain.ValidateCharacterActivationSession(baseline); err != nil {
@@ -94,6 +97,27 @@ func RunChapterActivationLoop(ctx context.Context, st *store.Store, baseline dom
 				}
 				reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: cycle.GenerationID, Chapter: cycle.Chapter, Cycle: cycle.Index, Kind: PlanningCycleCommitted, ArtifactDigest: cycle.Digest})
 			case "assessing":
+				if driver.AssessPendingCycle != nil {
+					// The transactional adapter recovers an existing paid audit
+					// before checking admission for a new model request.
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					readiness, applied, err := driver.AssessPendingCycle(ctx, *current)
+					if err != nil {
+						return err
+					}
+					expected, err := domain.ApplyCharacterChapterReadiness(*current, readiness)
+					if err != nil {
+						return err
+					}
+					if applied == nil || domain.ValidateCharacterActivationSession(*applied) != nil || applied.Digest != expected.Digest {
+						return fmt.Errorf("readiness transaction returned a different session transition")
+					}
+					current = applied
+					reportDurablePlanningProgress(ctx, DurablePlanningProgress{GenerationID: current.GenerationID, Chapter: current.Chapter, Cycle: len(current.CycleDigests), Kind: PlanningReadinessCommitted, ArtifactDigest: readiness.Digest})
+					continue
+				}
 				var cycle *domain.CharacterActivationCycle
 				var err error
 				if driver.VerifyExecutionSources {

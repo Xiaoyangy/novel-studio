@@ -119,6 +119,12 @@ func runCharacterActivationChapter(ctx context.Context, cfg bootstrap.Config, st
 			return runCharacterChapterReadiness(ctx, cfg, st, models, session, cycle)
 		},
 	}
+	if driver.VerifyExecutionSources {
+		driver.AssessCycle = nil
+		driver.AssessPendingCycle = func(ctx context.Context, session domain.CharacterActivationSession) (domain.CharacterChapterReadiness, *domain.CharacterActivationSession, error) {
+			return runVerifiedCharacterChapterReadiness(ctx, cfg, st, models, session, driver.BeforeDispatch)
+		}
+	}
 	session, err := RunChapterActivationLoop(ctx, st, baseline, driver)
 	if err != nil {
 		return nil, err
