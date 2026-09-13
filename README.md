@@ -101,6 +101,8 @@ novel-studio --check
 
 ### 3. 创建一本书
 
+> **版本提示：**下方 `--init-only` 示例适用于当前 `main` 源码。v0.3.0 Release 不支持该选项，请将它替换为 `--stages architect,outline-all,zero-init`（其余参数保留）。重新下载同一版 Release 不会获得尚未发布的功能。
+
 只准备世界、人物、全书导航和初始状态，使用 `--init-only`。完成后命令会退出，不进入整弧角色推演，也不会生成正文：
 
 ```bash
@@ -350,7 +352,7 @@ docker compose run --rm --service-ports novel-studio service start --host 0.0.0.
 |---|---|
 | `novel-studio doctor [--dir <RUN>]` | 不调用模型，检查环境并给出修复建议 |
 | `novel-studio --check` | 验证 provider、model 和 fallback 连通性 |
-| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | 仅初始化世界、人物、全书导航和初始状态，完成后退出 |
+| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | 当前 main：仅初始化后退出；v0.3.0 将 `--init-only` 换为 `--stages architect,outline-all,zero-init` |
 | `novel-studio --pipeline --new-novel --prompt "..."` | 创建书目并启动完整流程 |
 | `novel-studio --pipeline --dir <RUN>` | 从可信证据恢复下一步 |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,rehearse-arc,project-all,seal` | 在新规划边界完成整弧条件预演与接下来至多 3 章的细推封存，不写正文 |
@@ -404,7 +406,7 @@ data/runs/<书名>/
 | `novel-studio: command not found` | 执行安装脚本最后打印的 `export PATH=...`，或直接使用安装后的绝对路径 |
 | 不确定本机缺什么 | 先运行 `novel-studio doctor`；它不会调用模型 |
 | Provider 配置通过但模型不可用 | 运行 `novel-studio --check`，核对 provider key、model、base URL、额度和角色 fallback |
-| Release 没有 README 中的新能力 | README 描述当前 `main`；升级 Release，或使用 `./scripts/run-local.sh` 运行源码 |
+| Release 没有 README 中的新能力 | 先用 `--version` 核对版本；README 描述当前 `main`，未发布的功能需用 `./scripts/run-local.sh` 运行源码。v0.3.0 不支持 `--init-only`，改用 `--stages architect,outline-all,zero-init` |
 | Pipeline 中断或看似卡住 | 再次执行完全相同的 pipeline 命令；用 `service open` 或 `--diag` 查看 checkpoint，禁止手改回执 |
 | RAG 没有命中或 Qdrant 不一致 | 依次执行 `--build-rag`、`--rag-ready`，需要全盘核对时先运行只读 `rag audit` |
 | Dashboard 打不开 | 运行 `novel-studio service status`；需要前台日志时使用 `service start` |

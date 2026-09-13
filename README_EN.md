@@ -101,6 +101,8 @@ Global configuration lives at `~/.novel-studio/config.json`; `./.novel-studio/co
 
 ### 3. Start a book
 
+> **Version note:** the `--init-only` examples below require the current `main` source. Release v0.3.0 does not support this flag; replace it with `--stages architect,outline-all,zero-init` and keep the other arguments. Reinstalling the same Release does not add unreleased features.
+
 To prepare the world, characters, book outline, and opening state only, add `--init-only`. The command exits after initialization; it does not simulate the arc or generate prose:
 
 ```bash
@@ -331,7 +333,7 @@ Then open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). When using the Compo
 |---|---|
 | `novel-studio doctor [--dir <RUN>]` | Check the environment without calling a model |
 | `novel-studio --check` | Verify provider, model, and fallback connectivity |
-| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | Initialize the world, characters, book outline, and opening state, then exit |
+| `novel-studio --pipeline --new-novel --init-only --prompt "..."` | Current main: initialize, then exit; on v0.3.0 replace `--init-only` with `--stages architect,outline-all,zero-init` |
 | `novel-studio --pipeline --new-novel --prompt "..."` | Create a book and start the full workflow |
 | `novel-studio --pipeline --dir <RUN>` | Resume from trusted evidence |
 | `novel-studio --pipeline --dir <RUN> --stages preplan,rehearse-arc,project-all,seal` | At a new planning boundary, rehearse the whole arc and detail/seal the next at most three chapters without writing prose |
@@ -381,7 +383,7 @@ Durable artifactsâ€”not chat history, a model's claims, or one progress numberâ€
 | `novel-studio: command not found` | Run the `export PATH=...` line printed by the installer, or invoke the installed absolute path |
 | You do not know what the machine is missing | Run `novel-studio doctor` first; it does not call a model |
 | Configuration validates but the model is unavailable | Run `novel-studio --check`; verify provider key, model, base URL, quota, and role fallbacks |
-| The Release lacks a README feature | This README describes current `main`; upgrade the Release or run source through `./scripts/run-local.sh` |
+| The Release lacks a README feature | Check `--version` first. This README describes current `main`; use `./scripts/run-local.sh` for unreleased features. On v0.3.0 replace the unsupported `--init-only` with `--stages architect,outline-all,zero-init` |
 | A pipeline was interrupted or appears stuck | Repeat the exact pipeline command; inspect checkpoints through `service open` or `--diag`; do not edit receipts |
 | RAG has no hits or Qdrant differs | Run `--build-rag`, then `--rag-ready`; use the read-only `rag audit` before full maintenance |
 | The Dashboard does not open | Run `novel-studio service status`; use `service start` when foreground logs are needed |

@@ -108,7 +108,7 @@ func (p *Provider) Stream(ctx context.Context, req *litellm.Request) (litellm.St
 		return nil, err
 	}
 	stampWarnings(warnings, p.Name())
-	return prependWarnings(newStream(resp, req, p.spec), warnings), nil
+	return prependWarnings(newStream(ctx, resp, req, p.spec), warnings), nil
 }
 
 func (p *Provider) ListModels(ctx context.Context) ([]litellm.ModelInfo, error) {

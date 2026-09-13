@@ -262,11 +262,24 @@ func convertBlocks(blocks []litellm.Block, spec Spec) (any, []map[string]any, ma
 
 func putReasoningBlock(out map[string]any, block litellm.ReasoningBlock, spec Spec) error {
 	fields := spec.Response.ReasoningFields
-	if len(fields) == 0 {
+	field := ""
+	if len(fields) > 0 {
+		field = fields[0]
+	}
+	textField := spec.Request.ReasoningHistoryField
+	if textField == "" {
+		textField = field
+	}
+	if detailsField := spec.Request.ReasoningHistoryDetailsField; detailsField != "" {
+		return putStructuredReasoningHistory(out, block, textField, detailsField)
+	}
+	if field == "" && textField == "" {
 		return fmt.Errorf("ReasoningBlock history is not supported by this compat provider")
 	}
-	field := fields[0]
 	if len(block.Extra) > 0 {
+		if field == "" {
+			return fmt.Errorf("ReasoningBlock extra has no configured history field")
+		}
 		var decoded any
 		if err := json.Unmarshal(block.Extra, &decoded); err != nil {
 			return fmt.Errorf("ReasoningBlock extra must be valid JSON: %w", err)
@@ -275,11 +288,56 @@ func putReasoningBlock(out map[string]any, block litellm.ReasoningBlock, spec Sp
 		return nil
 	}
 	if block.Text != "" {
-		out[field] = block.Text
+		out[textField] = block.Text
 		return nil
 	}
 	if block.Signature != "" || len(block.Redacted) > 0 {
 		return fmt.Errorf("ReasoningBlock has provider state that this compat provider cannot encode")
+	}
+	return nil
+}
+
+func putStructuredReasoningHistory(out map[string]any, block litellm.ReasoningBlock, textField, detailsField string) error {
+	if textField == detailsField {
+		return fmt.Errorf("reasoning text and details history fields must differ")
+	}
+	if block.Signature != "" || len(block.Redacted) > 0 {
+		return fmt.Errorf("ReasoningBlock has provider state that this compat provider cannot encode")
+	}
+	mirroredText := false
+	if len(block.Extra) > 0 {
+		var details []json.RawMessage
+		if err := json.Unmarshal(block.Extra, &details); err != nil || details == nil {
+			return fmt.Errorf("ReasoningBlock extra must be a JSON array for %s", detailsField)
+		}
+		var projection []any
+		if json.Unmarshal(block.Extra, &projection) == nil {
+			// Response decoding derives Text from the same details array. Keep
+			// that complete array, without resending its identical text twice.
+			mirroredText = block.Text != "" && block.Text == reasoningDetailsText(projection)
+		}
+		// Keep the opaque provider array, including unknown fields and numeric
+		// spellings. Never decode a JSON-looking Text or Extra string as an array.
+		if existing, ok := out[detailsField].(json.RawMessage); ok {
+			var previous []json.RawMessage
+			if err := json.Unmarshal(existing, &previous); err != nil {
+				return fmt.Errorf("invalid accumulated reasoning details: %w", err)
+			}
+			joined, err := json.Marshal(append(previous, details...))
+			if err != nil {
+				return err
+			}
+			out[detailsField] = json.RawMessage(joined)
+		} else {
+			out[detailsField] = append(json.RawMessage(nil), block.Extra...)
+		}
+	}
+	if block.Text != "" && !mirroredText {
+		if textField == "" {
+			return fmt.Errorf("ReasoningBlock text has no configured history field")
+		}
+		previous, _ := out[textField].(string)
+		out[textField] = previous + block.Text
 	}
 	return nil
 }

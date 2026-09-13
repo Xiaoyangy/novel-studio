@@ -26,6 +26,9 @@ jobs:
           package-manager-cache: false
       - name: Go tests
         run: go test ./...
+      - name: Vendored provider tests
+        working-directory: third_party/litellm
+        run: go test -race -count=1 ./...
       - name: Dashboard tests
         run: python -m unittest discover -s services/dashboard -p 'test_*.py'
       - name: Dashboard client tests

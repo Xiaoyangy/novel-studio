@@ -62,6 +62,14 @@ type RequestSpec struct {
 	MaxStopSequences                       int
 	EmitEmptyAssistantContentWithToolCalls bool
 
+	// ReasoningHistoryField overrides the field for plain reasoning Text.
+	// When empty, the first Response.ReasoningFields entry remains the default.
+	ReasoningHistoryField string
+	// ReasoningHistoryDetailsField opts into separate structured history: Extra
+	// must be a JSON array, retained as raw JSON; Text uses ReasoningHistoryField.
+	// An empty value preserves the historical compat Extra-first encoding.
+	ReasoningHistoryDetailsField string
+
 	SupportsJSONSchema bool
 	JSONSchemaToPrompt bool
 
@@ -96,6 +104,13 @@ type StreamSpec struct {
 	ContentCumulative          bool
 	ContentCumulativeCondition string
 	DoneSentinel               string
+	// CumulativeForModel optionally narrows the cumulative flags above using
+	// the requested model. Nil preserves the existing provider-wide policy.
+	CumulativeForModel func(model string) bool
+	// AllowEOFWithFinish permits transport EOF only after all seen choices
+	// finish normally and all tool arguments are complete. It is not a blanket
+	// optional-sentinel switch; other providers still require DoneSentinel.
+	AllowEOFWithFinish bool
 
 	OmitStreamOptions bool
 }

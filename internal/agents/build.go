@@ -794,7 +794,7 @@ func BuildCoordinatorWithOptions(
 	agent := agentcore.NewAgent(
 		agentcore.WithModel(coordinatorModel),
 		agentcore.WithSystemPrompt(bundle.Prompts.Coordinator),
-		agentcore.WithTools(subagentTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
+		agentcore.WithTools(singleSubagentTool{Tool: subagentTool}, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
 		agentcore.WithMaxTurns(coordinatorMaxTurns),
 		agentcore.WithOnMessage(coordinatorOnMessage),
 		agentcore.WithToolsAreIdempotent(false),
@@ -1067,22 +1067,93 @@ func singleSubagentModeGate() agentcore.ToolGate {
 		if req.Call.Name != "subagent" {
 			return nil, nil
 		}
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(req.Call.Args, &raw); err != nil {
-			return nil, nil
-		}
-		for _, forbidden := range []string{"tasks", "chain", "team_name"} {
-			if _, exists := raw[forbidden]; exists {
-				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 只允许 subagent 的单任务 agent+task 模式；并行/链式/team 会破坏单世界状态的单写者顺序"}, nil
-			}
-		}
-		if value, exists := raw["background"]; exists {
-			var background bool
-			if json.Unmarshal(value, &background) == nil && background {
-				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 禁止后台 subagent 写共享故事状态；请使用同步 agent+task"}, nil
-			}
+		if _, err := normalizeSingleSubagentArgs(req.Call.Args); err != nil {
+			return &agentcore.GateDecision{Allowed: false, Reason: err.Error()}, nil
 		}
 		return nil, nil
+	}
+}
+
+// Keep empty unused mode fields out of the real dispatcher, whose typed params
+// otherwise reject {} or "". GateRequest is a value, so a gate cannot rewrite
+// the executed arguments. This wrapper also protects direct tool execution.
+type singleSubagentTool struct{ *subagent.Tool }
+
+func (t singleSubagentTool) Schema() map[string]any {
+	original := t.Tool.Schema()
+	schema := make(map[string]any, len(original))
+	for key, value := range original {
+		schema[key] = value
+	}
+	properties := make(map[string]any)
+	for key, value := range original["properties"].(map[string]any) {
+		properties[key] = value
+	}
+	for _, key := range []string{"tasks", "chain", "team_name"} {
+		// No simple "type": agentcore otherwise coerces the nonempty string
+		// "[]" into an empty array before our gate can reject it.
+		properties[key] = map[string]any{
+			"description": "单写者入口未使用的模式字段：应省略；兼容真正空的 []、{}、空字符串或 null，禁止任何非空值",
+			"enum":        []any{[]any{}, map[string]any{}, "", nil},
+		}
+	}
+	schema["properties"] = properties
+	return schema
+}
+
+func (t singleSubagentTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	normalized, err := normalizeSingleSubagentArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	return t.Tool.Execute(ctx, normalized)
+}
+
+func normalizeSingleSubagentArgs(args json.RawMessage) (json.RawMessage, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil || raw == nil {
+		return nil, fmt.Errorf("subagent 参数必须是合法 JSON 对象")
+	}
+	changed := false
+	for key, value := range raw {
+		// encoding/json also accepts case-insensitive struct field names. Check
+		// every spelling, including conflicting aliases, before dispatch.
+		switch {
+		case strings.EqualFold(key, "tasks"), strings.EqualFold(key, "chain"), strings.EqualFold(key, "team_name"):
+			if !emptySingleSubagentModeValue(value) {
+				return nil, fmt.Errorf("novel-studio 只允许 subagent 的单任务 agent+task 模式；并行/链式/team 会破坏单世界状态的单写者顺序")
+			}
+			delete(raw, key)
+			changed = true
+		case strings.EqualFold(key, "background"):
+			var background bool
+			if json.Unmarshal(value, &background) != nil || background {
+				return nil, fmt.Errorf("novel-studio 禁止后台 subagent 写共享故事状态；请使用同步 agent+task")
+			}
+		}
+	}
+	if !changed {
+		return args, nil
+	}
+	return json.Marshal(raw)
+}
+
+func emptySingleSubagentModeValue(raw json.RawMessage) bool {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	switch value := value.(type) {
+	case nil:
+		return true
+	case string:
+		return value == ""
+	case []any:
+		return len(value) == 0
+	case map[string]any:
+		return len(value) == 0
+	default:
+		return false
 	}
 }
 

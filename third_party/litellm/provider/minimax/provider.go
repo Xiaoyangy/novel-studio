@@ -2,6 +2,7 @@ package minimax
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/voocel/litellm"
@@ -19,6 +20,7 @@ var allowedProviderOptions = map[string]struct{}{
 }
 
 func New(cfg Config) (*compat.Provider, error) {
+	domestic := domesticEndpoint(cfg.BaseURL)
 	return compat.New(cfg, compat.Spec{
 		Name: "minimax",
 		Endpoint: compat.EndpointSpec{
@@ -26,10 +28,12 @@ func New(cfg Config) (*compat.Provider, error) {
 		},
 		Auth: compat.AuthSpec{APIKeyRequired: true},
 		Request: compat.RequestSpec{
-			MaxTokensField:         "max_completion_tokens",
-			Thinking:               mapThinking,
-			ProviderOptions:        mapProviderOptions,
-			AllowedProviderOptions: allowedProviderOptions,
+			ReasoningHistoryField:        "reasoning_content",
+			ReasoningHistoryDetailsField: "reasoning_details",
+			MaxTokensField:               "max_completion_tokens",
+			Thinking:                     mapThinking,
+			ProviderOptions:              mapProviderOptions,
+			AllowedProviderOptions:       allowedProviderOptions,
 		},
 		Response: compat.ResponseSpec{
 			ModelFromResponse:         true,
@@ -41,6 +45,8 @@ func New(cfg Config) (*compat.Provider, error) {
 			ReasoningCumulative:        true,
 			ContentCumulative:          true,
 			ContentCumulativeCondition: "thinking_enabled",
+			CumulativeForModel:         func(model string) bool { return !(domestic && modernMSeries(model)) },
+			AllowEOFWithFinish:         true,
 		},
 		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
 			caps.Thinking.Efforts = nil
@@ -56,6 +62,28 @@ func New(cfg Config) (*compat.Provider, error) {
 			return caps
 		},
 	})
+}
+
+// Domestic M2/M3 deployments return deltas (issue #5). The international
+// documentation still demonstrates cumulative chunks; preserve that contract
+// and the legacy text-01 behavior instead of guessing from repeated prefixes.
+func domesticEndpoint(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "api.minimax.cn" || host == "api.minimaxi.com"
+}
+
+func modernMSeries(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, family := range []string{"minimax-m2", "minimax-m3"} {
+		if model == family || strings.HasPrefix(model, family+".") || strings.HasPrefix(model, family+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 func Factory(cfg Config) (litellm.Provider, error) {
