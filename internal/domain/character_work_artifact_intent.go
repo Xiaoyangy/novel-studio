@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -147,7 +149,7 @@ func ValidateCharacterArtifactIntentV1(p CharacterDecisionProposal, o CharacterO
 		seen[key] = true
 	}
 	seen = map[string]bool{}
-	for _, sign := range p.ArtifactSigns {
+	for signIndex, sign := range p.ArtifactSigns {
 		if !artifactIntentTaskV1(p, sign.TaskID, sign.ResourceID) {
 			return fmt.Errorf("artifact signature must name its explicit owner work task and resource")
 		}
@@ -160,14 +162,43 @@ func ValidateCharacterArtifactIntentV1(p CharacterDecisionProposal, o CharacterO
 		for _, claim := range view.Claims {
 			knownClaims[claim.ClaimID] = true
 		}
-		for _, id := range sign.ClaimIDs {
+		for claimIndex, id := range sign.ClaimIDs {
 			if !knownClaims[id] {
-				return fmt.Errorf("cannot sign an unread artifact claim")
+				return artifactSigningClaimReferenceErrorV1(signIndex, claimIndex, id, knownClaims)
 			}
 		}
 		seen[key] = true
 	}
 	return nil
+}
+
+// A failed proposal is not an executed reading or signing event. Describe the
+// reference mismatch without exposing claim text or another version's knowledge.
+func artifactSigningClaimReferenceErrorV1(signIndex, claimIndex int, requested string, known map[string]bool) error {
+	ids := make([]string, 0, len(known))
+	for id := range known {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	omitted := 0
+	if len(ids) > 8 {
+		omitted = len(ids) - 8
+		ids = ids[:8]
+	}
+	for i := range ids {
+		ids[i] = artifactSigningDiagnosticIDV1(ids[i])
+	}
+	return fmt.Errorf("artifact_signs[%d].claim_ids[%d]: artifact claim reference mismatch (cannot sign an unread artifact claim); submitted claim_id %s is not in this version's known declaration IDs [%s] (omitted=%d). Use artifact_views.claims.claim_id, not a derived fact ID. This proposal was rejected before execution; no signing action occurred. Correct references using current observations; only genuinely unknown content requires actual knowledge acquisition", signIndex, claimIndex, artifactSigningDiagnosticIDV1(requested), strings.Join(ids, ", "), omitted)
+}
+
+func artifactSigningDiagnosticIDV1(id string) string {
+	if len(id) <= 128 {
+		quoted, _ := json.Marshal(id)
+		if len(quoted) <= 160 {
+			return string(quoted)
+		}
+	}
+	return fmt.Sprintf("<omitted utf8_bytes=%d>", len(id))
 }
 
 func validateWorkArtifactObservationV1(o CharacterObservationPacket) error {
