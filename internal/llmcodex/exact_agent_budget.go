@@ -3,6 +3,7 @@ package llmcodex
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/voocel/agentcore"
@@ -29,11 +30,42 @@ type codexExactHistoryEntry struct {
 }
 
 // These values are estimates/operating limits, never provider-reported usage.
-// The SDK heuristic is already used by the context packer. We apply a 25%
-// margin, preserve independent output/CLI room, and cap absolute input size.
+// Exact packets use a script-local heuristic, not a model tokenizer: a single
+// extra CJK rune must not reprice every ASCII JSON field in the whole packet.
+// We retain the 25% margin, independent output/CLI room and absolute size caps.
 type codexExactBudgetEstimate struct {
 	inputTokens, guardedTokens, inputLimit int
 	outputReserve, bytes, runes            int
+}
+
+// estimateCodexExactTextTokens keeps the prior rates for ordinary ASCII runs
+// and common three-byte Han/Japanese/Korean runes without a whole-text language
+// switch. Integer half-token units preserve the 1.5 CJK rate until final ceil.
+// Uncommon Unicode and non-whitespace controls use one token per UTF-8 byte;
+// this is deliberately conservative, including supplementary Han and emoji.
+// This estimate is not provider usage. The SDK/global context estimator and
+// the independent old-history allowance remain untouched.
+func estimateCodexExactTextTokens(text string) int {
+	asciiBytes, halfTokens := 0, 0
+	flushASCII := func() {
+		halfTokens += 2 * ((asciiBytes + 3) / 4)
+		asciiBytes = 0
+	}
+	for _, r := range text {
+		if r >= 0x20 && r <= 0x7e || r == '\n' || r == '\r' || r == '\t' {
+			asciiBytes++
+			continue
+		}
+		flushASCII()
+		width := utf8.RuneLen(r)
+		if width == 3 && unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+			halfTokens += 3
+		} else {
+			halfTokens += 2 * width
+		}
+	}
+	flushASCII()
+	return max((halfTokens+1)/2, 1)
 }
 
 func (budget codexExactAgentBudget) check(prompt string) (codexExactBudgetEstimate, error) {
@@ -57,10 +89,10 @@ func (budget codexExactAgentBudget) check(prompt string) (codexExactBudgetEstima
 	}
 	// Include the actual --output-schema content, which is not part of the
 	// serialized user prompt. Tool parameter schemas already occur in prompt.
-	estimate.inputTokens = corecontext.EstimateTokens(agentcore.UserMsg(prompt)) + corecontext.EstimateTokens(agentcore.UserMsg(string(budget.responseSchema)))
+	estimate.inputTokens = estimateCodexExactTextTokens(prompt) + estimateCodexExactTextTokens(string(budget.responseSchema))
 	estimate.guardedTokens = estimate.inputTokens + (estimate.inputTokens+3)/4
 	if estimate.guardedTokens > estimate.inputLimit {
-		return estimate, fmt.Errorf("exact agent packet exceeds configured operating budget: estimated_input_tokens=%d guarded_estimated_input_tokens=%d input_budget_tokens=%d configured_context_tokens=%d reserved_output_tokens=%d cli_overhead_reserve_tokens=%d input_runes=%d input_bytes=%d; estimates are not provider usage, no input truncated or provider call", estimate.inputTokens, estimate.guardedTokens, estimate.inputLimit, budget.contextWindow, estimate.outputReserve, codexExactCLIOverheadReserve, estimate.runes, estimate.bytes)
+		return estimate, fmt.Errorf("exact agent packet exceeds configured operating budget: estimated_input_tokens=%d guarded_estimated_input_tokens=%d input_budget_tokens=%d configured_context_tokens=%d reserved_output_tokens=%d cli_overhead_reserve_tokens=%d input_runes=%d input_bytes=%d estimator=script-local.v1; estimates are not provider usage, no input truncated or provider call", estimate.inputTokens, estimate.guardedTokens, estimate.inputLimit, budget.contextWindow, estimate.outputReserve, codexExactCLIOverheadReserve, estimate.runes, estimate.bytes)
 	}
 	return estimate, nil
 }
