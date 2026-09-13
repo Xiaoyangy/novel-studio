@@ -13,8 +13,15 @@ import (
 	"sync"
 )
 
-//go:embed server.py static/index.html
+//go:embed server.py static/index.html static/broadcast.html static/broadcast.css static/broadcast.js
 var bundled embed.FS
+
+// Keep this order identical to Python _dashboard_version and the CLI launcher.
+// One inventory covers both version identity and release materialization.
+var bundledFiles = [...]string{
+	"server.py", "static/index.html", "static/broadcast.html",
+	"static/broadcast.css", "static/broadcast.js",
+}
 
 var (
 	versionOnce sync.Once
@@ -25,7 +32,7 @@ var (
 func Version() string {
 	versionOnce.Do(func() {
 		h := sha256.New()
-		for _, name := range []string{"server.py", "static/index.html"} {
+		for _, name := range bundledFiles {
 			data, err := bundled.ReadFile(name)
 			if err != nil {
 				version = "unavailable"
@@ -46,7 +53,7 @@ func Materialize(baseDir string) (string, error) {
 		return "", fmt.Errorf("dashboard runtime directory is unavailable")
 	}
 	root := filepath.Join(baseDir, Version())
-	for _, name := range []string{"server.py", "static/index.html"} {
+	for _, name := range bundledFiles {
 		data, err := bundled.ReadFile(name)
 		if err != nil {
 			return "", fmt.Errorf("read embedded dashboard %s: %w", name, err)

@@ -350,7 +350,7 @@ func stopDashboardProcesses(flags serviceFlags) error {
 
 // runningDashboardMatchesCheckout reports whether the healthy dashboard on the
 // port is serving the current checkout's code. It compares the content version
-// stamped by /api/health against a hash of the local server.py + index.html, so
+// stamped by /api/health against a hash of the local server and bundled pages, so
 // a stale instance from another checkout (or older code) is detected and
 // replaced instead of silently pinning the user to an outdated board.
 func runningDashboardMatchesCheckout(flags serviceFlags, scriptPath string, expectedRunsDirs ...string) (bool, string) {
@@ -414,13 +414,14 @@ func expectedDashboardRunsDir(projectRoot, novelDir string) string {
 }
 
 // currentDashboardVersion hashes the local dashboard code identically to the
-// Python server's /api/health version stamp: sha256(server.py + index.html)
+// Python server's /api/health version stamp: ordered server and static bytes.
 // truncated to 16 hex chars.
 func currentDashboardVersion(scriptPath string) string {
 	h := sha256.New()
-	indexPath := filepath.Join(filepath.Dir(scriptPath), "static", "index.html")
+	staticDir := filepath.Join(filepath.Dir(scriptPath), "static")
 	wrote := false
-	for _, p := range []string{scriptPath, indexPath} {
+	// Match the Python health stamp and the embedded release asset order.
+	for _, p := range []string{scriptPath, filepath.Join(staticDir, "index.html"), filepath.Join(staticDir, "broadcast.html"), filepath.Join(staticDir, "broadcast.css"), filepath.Join(staticDir, "broadcast.js")} {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			h.Write([]byte{0})

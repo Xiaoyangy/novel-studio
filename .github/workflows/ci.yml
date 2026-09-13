@@ -32,7 +32,7 @@ jobs:
       - name: Dashboard tests
         run: python -m unittest discover -s services/dashboard -p 'test_*.py'
       - name: Dashboard client tests
-        run: node --test services/dashboard/test_client.js
+        run: node --test services/dashboard/test_client.js services/dashboard/test_broadcast_client.js
       - name: Build release binary
         run: go build -trimpath -o /tmp/novel-studio ./cmd/novel-studio
       - name: Smoke test release binary

@@ -36,7 +36,8 @@ def _dashboard_version() -> str:
     stale instance serving from an old checkout and replace it instead of leaving
     the user pinned to outdated code that still answers /api/novels."""
     h = hashlib.sha256()
-    for p in (Path(__file__).resolve(), STATIC_DIR / "index.html"):
+    for p in (Path(__file__).resolve(), STATIC_DIR / "index.html", STATIC_DIR / "broadcast.html",
+              STATIC_DIR / "broadcast.css", STATIC_DIR / "broadcast.js"):
         try:
             h.update(p.read_bytes())
         except OSError:
@@ -1521,6 +1522,7 @@ def character_agent_payload(nd: Path, planning_workspace: Path | None = None, pl
             row = ensure_row(entry["agent_id"], entry.get("character"), entry.get("tier"))
             if is_current(row, chapter, cycle, scope):
                 row["_latest_chapter"], row["_latest_cycle"] = chapter, cycle
+                row["evidence_scope"] = scope
                 row["activation_cycle"] = cycle
                 row["status"] = entry.get("state") or row["status"]
                 row["activation_reasons"] = [clip(x, 80) for x in (entry.get("reasons") or [])][:8]
@@ -1539,6 +1541,8 @@ def character_agent_payload(nd: Path, planning_workspace: Path | None = None, pl
                 row["_latest_chapter"] = chapter
                 row["_latest_cycle"] = cycle
                 row["decision_cycle"] = cycle
+                row["proposal_cycle"] = cycle
+                row["proposal_round"] = proposal.get("round")
                 row["evidence_scope"] = scope
                 row["recent_decision"] = clip(proposal.get("decision"), 180)
                 row["recent_action"] = clip(proposal.get("intended_action"), 180)
@@ -1562,6 +1566,8 @@ def character_agent_payload(nd: Path, planning_workspace: Path | None = None, pl
                 row["recent_decision"] = clip(proposal.get("decision"), 180)
                 row["recent_action"] = clip(proposal.get("intended_action"), 180)
                 row["arbitration_outcome"] = resolution.get("outcome") or ""
+                row["arbitration_round"] = final.get("round")
+                row["arbitration_cycle"] = cycle
                 row["arbitration_result"] = clip(resolution.get("immediate_result"), 220)
                 row["conflict_rounds"] = max(0, int(final.get("round") or 1) - 1)
                 row["conflict_count"] = sum(
@@ -1680,7 +1686,7 @@ def character_agent_payload(nd: Path, planning_workspace: Path | None = None, pl
 
     public_rows = []
     for row in rows.values():
-        row.pop("_latest_chapter", None)
+        row["evidence_chapter"] = row.pop("_latest_chapter", None)
         row.pop("_latest_cycle", None)
         finalize_character_usage(row)
         public_rows.append(row)
@@ -2394,6 +2400,399 @@ def quality_payload(run: Path) -> dict:
 
 # ---------- HTTP ----------
 
+# ---------- 直播：白名单投影，不复用详情响应/自由文本 ----------
+
+BROADCAST_TTL_SECONDS = 2.0
+BROADCAST_CACHE_ENTRIES = 128
+_broadcast_cache: OrderedDict = OrderedDict()
+_broadcast_cache_lock = Lock()
+BROADCAST_STATUSES = frozenset(("running", "idle", "complete", "error", "attention", "unknown"))
+BROADCAST_STAGES = frozenset(("zero-init", "architect", "foundation", "outline-all", "preplan", "rehearse-arc",
+    "project-all", "seal", "promote", "render", "write", "review", "rewrite", "deliver", "finalize",
+    "arc-cycle", "rag-build", "rag-init", "simulate", "plan", "draft", "check", "commit"))
+BROADCAST_PHASES = PLANNING_COMMIT_PHASES | frozenset(("context_bound", "collecting", "assessing",
+    "ready", "hard_conflict", "exhausted"))
+BROADCAST_STATIC = {"/broadcast": ("broadcast.html", "text/html; charset=utf-8"),
+    "/broadcast.html": ("broadcast.html", "text/html; charset=utf-8"),
+    "/broadcast.css": ("broadcast.css", "text/css; charset=utf-8"),
+    "/broadcast.js": ("broadcast.js", "text/javascript; charset=utf-8")}
+
+
+def _broadcast_number(value, *, integer=False, positive=False):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        if not math.isfinite(value) or value < 0 or (positive and value <= 0):
+            return None
+        if integer and (value != int(value) or value > 2 ** 53 - 1):
+            return None
+        return int(value) if integer else value
+    except (ValueError, OverflowError):
+        return None
+
+
+def _broadcast_enum(value, allowed, default=None):
+    return value if isinstance(value, str) and value in allowed else default
+
+
+def _broadcast_text(value, fallback="", limit=80):
+    if not isinstance(value, str):
+        return fallback
+    # Only title/name fields use text. Do not stringify arbitrary source data.
+    text = "".join(c for c in value if c.isprintable()).strip()
+    if "/" in text or "\\" in text or re.search(r"\b(?:file|https?)://", text, re.I):
+        return fallback
+    return text[:limit] or fallback
+
+
+def _broadcast_iso(value):
+    try:
+        ts = timestamp(value)
+        if not math.isfinite(ts) or ts <= 0:
+            return None
+        return iso_time(ts)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _broadcast_id(value, prefix="book"):
+    return prefix + "_" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+def _broadcast_runs():
+    return [run for run in list_runs() if contained_regular_path(RUNS_DIR, run)
+            and contained_regular_path(run, novel_dir(run) / "meta")]
+
+
+def _broadcast_cached(key, build):
+    # One in-flight builder across polling requests. Cache only serialized safe
+    # projections, never raw logs/prompts/observations, and return detached data.
+    identity = (str(RUNS_DIR.resolve()), key)
+    with _broadcast_cache_lock:
+        cached = _broadcast_cache.get(identity)
+        if cached is None or time.monotonic() >= cached[0]:
+            encoded = json.dumps(build(), ensure_ascii=False, allow_nan=False)
+            cached = (time.monotonic() + BROADCAST_TTL_SECONDS, encoded)
+            _broadcast_cache[identity] = cached
+        _broadcast_cache.move_to_end(identity)
+        while len(_broadcast_cache) > BROADCAST_CACHE_ENTRIES:
+            _broadcast_cache.popitem(last=False)
+        return json.loads(cached[1])
+
+
+def _broadcast_summary(run):
+    try:
+        value = summarize_run(run)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError, OverflowError, AttributeError, KeyError):
+        return {}  # No exception or source path becomes livestream content.
+
+
+def _broadcast_status(summary):
+    runtime = summary.get("runtime") if isinstance(summary.get("runtime"), dict) else {}
+    status = _broadcast_enum(runtime.get("status"), BROADCAST_STATUSES, "unknown")
+    if status == "complete":
+        total = _broadcast_number(summary.get("chapters_total"), integer=True, positive=True)
+        completed = _broadcast_number(summary.get("chapters_completed"), integer=True)
+        if total is None or completed is None:
+            return "unknown"
+        if completed < total:
+            return "attention"
+    return status
+
+
+def _broadcast_usage(raw, *, totals=False):
+    raw = raw if isinstance(raw, dict) else {}
+    calls = _broadcast_number(raw.get("usage_calls"), integer=True)
+    sources = raw.get("cost_sources") if isinstance(raw.get("cost_sources"), dict) else {}
+    reported, estimated, unknown = (_broadcast_number(sources.get(key), integer=True) for key in ("reported", "estimated", "unknown"))
+    amount = _broadcast_number(raw.get("cost_usd"))
+    unpriced = _broadcast_number(raw.get("unpriced_calls"), integer=True)
+    priced = (reported or 0) + (estimated or 0)
+    if not calls:
+        cost_source, amount = "unknown", None
+    elif (unknown or 0) or (unpriced or 0):
+        cost_source = "partial" if priced or (amount is not None and amount > 0) else "unknown"
+        if cost_source == "unknown":
+            amount = None
+    elif priced == calls and amount is not None:
+        cost_source = "estimated" if estimated else "reported"
+    else:
+        cost_source, amount = "unknown", None
+    result = {"calls": calls if calls else None,
+        "input_tokens": _broadcast_number(raw.get("tokens_in"), integer=True) if calls else None,
+        "output_tokens": _broadcast_number(raw.get("tokens_out"), integer=True) if calls else None,
+        "cost_usd": amount, "cost_source": cost_source}
+    if totals:
+        result.update(scope="character_agents", reported_calls=reported, estimated_calls=estimated, unknown_calls=unknown)
+    return result
+
+
+def _broadcast_session(workspace, projection, chapter):
+    if workspace is None or not isinstance(projection, dict) or chapter is None:
+        return {}, None
+    generation = projection.get("generation_id")
+    if (not isinstance(generation, str) or not re.fullmatch(r"pg2_[A-Za-z0-9_-]+", generation)
+            or not projection.get("first_chapter", 1) <= chapter <= projection.get("last_chapter", 0)):
+        return {}, None
+    path = workspace / "meta/character_agents/activation_sessions" / generation / f"{chapter:06d}" / "session.json"
+    if not contained_regular_path(workspace, path):
+        return {}, None
+    value = read_json(path)
+    if (not isinstance(value, dict) or value.get("generation_id") != generation or value.get("chapter") != chapter
+            or value.get("phase") not in {"collecting", "assessing", "ready", "hard_conflict", "exhausted"}):
+        return {}, None
+    cycles, reviews = value.get("cycle_digests"), value.get("readiness_digests")
+    maximum = _broadcast_number(value.get("max_cycles"), integer=True, positive=True)
+    initial, current = _broadcast_number(value.get("initial_day")), _broadcast_number(value.get("current_day"))
+    if (value.get("version") != "character-activation-session.v1" or not _broadcast_digest(value.get("digest"))
+            or maximum is None or maximum > 64 or not isinstance(cycles, list) or not isinstance(reviews, list)
+            or len(cycles) > maximum or len(reviews) > len(cycles)
+            or not all(_broadcast_digest(x) for x in cycles + reviews)
+            or initial is None or current is None or current < initial
+            or (value["phase"] == "assessing" and len(cycles) != len(reviews) + 1)
+            or (value["phase"] in {"collecting", "ready", "hard_conflict"} and len(cycles) != len(reviews))):
+        return {}, None
+    return value, path
+
+
+def _broadcast_digest(value):
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _broadcast_position(workspace, projection, formal, working, agents):
+    current = _broadcast_number(working.get("target_chapter") or working.get("chapter"), integer=True, positive=True)
+    if workspace is None or not isinstance(projection, dict):
+        return current, {}, None
+    first, last = projection["first_chapter"], projection["last_chapter"]
+    candidates = []
+    planned = _broadcast_number(formal.get("planned_chapters"), integer=True)
+    if planned is not None and first + planned <= last:
+        candidates.append(first + planned)
+    candidates.extend([current, _broadcast_number(projection.get("chapter"), integer=True, positive=True)])
+    # These rows were ingested from the exact bound projected generation, not
+    # whichever session directory has the newest timestamp.
+    candidates.extend(sorted({chapter for row in agents.get("characters", []) if isinstance(row, dict)
+        and row.get("evidence_scope") == "projected"
+        and (chapter := _broadcast_number(row.get("evidence_chapter"), integer=True, positive=True)) is not None}, reverse=True))
+    seen = set()
+    for chapter in candidates:
+        if chapter is None or chapter in seen or not first <= chapter <= last:
+            continue
+        seen.add(chapter)
+        session, path = _broadcast_session(workspace, projection, chapter)
+        if path is not None:
+            return chapter, session, path
+    return current if current is not None and first <= current <= last else None, {}, None
+
+
+def _broadcast_bound_json(root, path):
+    try:
+        if not contained_regular_path(root, path) or not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+            return {}
+        value = read_json(path)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return {}
+
+
+def _broadcast_session_activity(workspace, session, session_path):
+    """Bounded public milestones; never expose observation or memory contents.
+
+    File mtimes date already identified durable records, never select a session
+    or manufacture an execution. This viewer is not a domain receipt validator.
+    """
+    if workspace is None or session_path is None:
+        return [], set(), None
+    root = session_path.parent
+    generation, chapter = session["generation_id"], session["chapter"]
+    count = len(session["cycle_digests"])
+    current = count + (1 if session["phase"] == "collecting" and count < session["max_cycles"] else 0)
+    events, continuing = [], set()
+    def identity(value):
+        return value.get("generation_id") == generation and value.get("chapter") == chapter
+    def add(kind, index, path, raw=None, revision=None):
+        raw = raw or {}
+        at = _broadcast_iso(raw.get("generated_at")) or _broadcast_iso(latest_mtime(path))
+        if at:
+            events.append({"id": _broadcast_id(f"{generation}:{chapter}:{index}:{revision}:{kind}:{path.name}", "event"),
+                "kind": kind, "stage": "project-all", "chapter": chapter, "cycle": index, "round": revision, "time": at})
+    for index in range(max(1, current - 7), current + 1):
+        proof = root / "work" / f"{index:06d}" / "proof"
+        activation = _broadcast_bound_json(workspace, proof / "activation.json")
+        entries = activation.get("entries")
+        if not identity(activation) or not _broadcast_digest(activation.get("digest")) or not isinstance(entries, list) or len(entries) > 64:
+            continue
+        owners = {entry["agent_id"]: entry for entry in entries if isinstance(entry, dict)
+                  and isinstance(entry.get("agent_id"), str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", entry["agent_id"])}
+        revised = set()
+        for revision in (1, 2):
+            for owner in owners:
+                path = proof / "proposals" / f"round-{revision:02d}" / f"{owner}.json"
+                proposal = _broadcast_bound_json(workspace, path)
+                if identity(proposal) and proposal.get("agent_id") == owner and proposal.get("round") == revision and _broadcast_digest(proposal.get("digest")):
+                    add("proposal_committed", index, path, proposal, revision)
+                    if revision == 2:
+                        revised.add(owner)
+            path = proof / f"arbitration-round-{revision:02d}.json"
+            receipt = _broadcast_bound_json(workspace, path)
+            if (identity(receipt) and receipt.get("round") == revision and receipt.get("activation_digest") == activation["digest"]
+                    and _broadcast_digest(receipt.get("digest"))):
+                add("arbitration_committed", index, path, receipt, revision)
+        if index <= count:
+            cycle_path = root / "cycles" / f"{index:06d}.json"
+            if contained_regular_path(workspace, cycle_path) and cycle_path.is_file():
+                # The cursor explicitly records this committed cycle digest.
+                add("cycle_committed", index, cycle_path)
+            if index <= len(session["readiness_digests"]):
+                path = root / "readiness" / f"{index:06d}.json"
+                review = _broadcast_bound_json(workspace, path)
+                if (identity(review) and review.get("digest") == session["readiness_digests"][index - 1]
+                        and review.get("cycle_digest") == session["cycle_digests"][index - 1]):
+                    add("readiness_committed", index, path)
+        if index == current and session["phase"] == "collecting":
+            admission = _broadcast_bound_json(workspace, proof / "round_sources_v3.json")
+            if (admission.get("version") == "character-arbitration-admission.v3" and admission.get("session_digest") == session["digest"]
+                    and _broadcast_digest(admission.get("input_digest")) and _broadcast_digest(admission.get("protocol"))):
+                for item in admission.get("continuations", []) if isinstance(admission.get("continuations"), list) else []:
+                    if (isinstance(item, dict) and identity(item) and item.get("version") == "character-work-continuation:explicit.v1"
+                            and item.get("cycle") == current and item.get("input_set_digest") == admission["input_digest"]
+                            and item.get("agent_id") in owners and item["agent_id"] not in revised
+                            and item.get("observation_digest") == owners[item["agent_id"]].get("observation_digest")
+                            and _broadcast_digest(item.get("digest"))):
+                        continuing.add(item["agent_id"])
+        elif index == current and index == count:
+            # A terminal/assessing cursor names the exact last cycle. Its
+            # admission session has already advanced, so use the named cycle,
+            # not an admission copied from another collection boundary.
+            cycle = _broadcast_bound_json(workspace, root / "cycles" / f"{index:06d}.json")
+            if identity(cycle) and cycle.get("index") == index and cycle.get("digest") == session["cycle_digests"][index - 1]:
+                for item in cycle.get("work_continuations", []) if isinstance(cycle.get("work_continuations"), list) else []:
+                    if (isinstance(item, dict) and identity(item) and item.get("cycle") == index
+                            and item.get("version") == "character-work-continuation:explicit.v1"
+                            and item.get("input_set_digest") == cycle.get("input_set_digest")
+                            and _broadcast_digest(item.get("input_set_digest")) and _broadcast_digest(item.get("digest"))
+                            and item.get("agent_id") in owners and item["agent_id"] not in revised):
+                        continuing.add(item["agent_id"])
+    return events, continuing, current or None
+
+
+def _broadcast_events(runtime, milestones=()):
+    result = []
+    for event in runtime.get("recent_events", []) if isinstance(runtime.get("recent_events"), list) else []:
+        if not isinstance(event, dict) or event.get("category") != "PIPELINE":
+            continue
+        stage = _broadcast_enum(event.get("stage"), BROADCAST_STAGES)
+        at = _broadcast_iso(event.get("finished_at"))
+        if stage and at and isinstance(event.get("failed"), bool):
+            kind = "stage_failed" if event["failed"] else "stage_completed"
+            result.append({"id": _broadcast_id(kind + stage + at, "event"), "kind": kind,
+                "stage": stage, "chapter": None, "cycle": None, "round": None, "time": at})
+    progress = runtime.get("planning_progress") if isinstance(runtime.get("planning_progress"), dict) else {}
+    kind = _broadcast_enum(progress.get("last_progress_kind"), PLANNING_COMMIT_PHASES)
+    at = _broadcast_iso(progress.get("last_progress_at"))
+    if kind and at and _broadcast_number(progress.get("progress_seq"), integer=True, positive=True):
+        result.append({"id": _broadcast_id(str(progress.get("progress_seq")) + kind + at, "event"),
+            "kind": kind, "stage": "project-all", "chapter": _broadcast_number(progress.get("chapter"), integer=True, positive=True),
+            "cycle": _broadcast_number(progress.get("cycle"), integer=True, positive=True),
+            "round": _broadcast_number(progress.get("round"), integer=True, positive=True), "time": at})
+    result.extend(milestones)
+    return sorted({item["id"]: item for item in result}.values(), key=lambda item: timestamp(item["time"]), reverse=True)[:16]
+
+
+def _build_broadcast_snapshot(run):
+    nd = novel_dir(run)
+    summary = _broadcast_summary(run)
+    runtime = summary.get("runtime") if isinstance(summary.get("runtime"), dict) else {}
+    working = summary.get("working") if isinstance(summary.get("working"), dict) else {}
+    formal = summary.get("formal_planning") if isinstance(summary.get("formal_planning"), dict) else {}
+    progress = runtime.get("planning_progress") if isinstance(runtime.get("planning_progress"), dict) else {}
+    workspace, projection = current_character_planning_workspace(nd, formal)
+    try:
+        agents = character_agent_payload(nd, workspace, projection)
+    except (OSError, ValueError, TypeError, OverflowError, AttributeError, KeyError):
+        agents = {}
+    if not isinstance(agents, dict):
+        agents = {}
+    chapter, session, session_path = _broadcast_position(workspace, projection, formal, working, agents)
+    milestones, continuing, session_cycle = _broadcast_session_activity(workspace, session, session_path)
+    cycle = _broadcast_number(progress.get("cycle"), integer=True, positive=True)
+    digests = session.get("cycle_digests")
+    completed_cycles = len(digests) if isinstance(digests, list) and all(isinstance(x, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", x) for x in digests) else None
+    if cycle is None and completed_cycles is not None:
+        cycle = session_cycle
+    revision = _broadcast_number(progress.get("round"), integer=True, positive=True)
+    characters = []
+    for row in agents.get("characters", []) if isinstance(agents.get("characters"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        current_scope = projection is None or (row.get("evidence_scope") == "projected" and row.get("evidence_chapter") == chapter)
+        row_cycle = _broadcast_number(row.get("activation_cycle") or row.get("decision_cycle"), integer=True, positive=True) if current_scope else None
+        proposal_cycle = _broadcast_number(row.get("proposal_cycle"), integer=True, positive=True)
+        submitted = (proposal_cycle == row_cycle) if row_cycle is not None else None
+        has_arbitration = row_cycle is not None and row.get("arbitration_cycle") == row_cycle
+        row_round = max((_broadcast_number(row.get("proposal_round"), integer=True, positive=True) or 0) if submitted else 0,
+                        (_broadcast_number(row.get("arbitration_round"), integer=True, positive=True) or 0) if has_arbitration else 0) or None
+        characters.append({"id": _broadcast_id(row.get("agent_id", ""), "character"),
+            "name": _broadcast_text(row.get("character"), "未命名角色"),
+            "tier": _broadcast_enum(row.get("tier"), {"core", "important", "minor", "background"}, "unknown"),
+            "state": "continuing" if row.get("agent_id") in continuing and row_cycle == cycle else _broadcast_enum(row.get("status"), {"active", "sleeping", "dormant", "retired"}, "unknown") if current_scope else "unknown",
+            "submitted": submitted, "outcome": _broadcast_enum(row.get("arbitration_outcome"), {"success", "partial", "blocked", "failed"}) if has_arbitration else None,
+            "cycle": row_cycle, "round": row_round,
+            "memory_chapter": _broadcast_number(row.get("memory_chapter"), integer=True), "usage": _broadcast_usage(row)})
+    current_day = _broadcast_number(session.get("current_day"))
+    story_minutes = _broadcast_number(current_day * 1440) if current_day is not None else None
+    actual_progress = read_json(nd / "meta/progress.json")
+    actual_progress = actual_progress if isinstance(actual_progress, dict) else {}
+    updated = max((_broadcast_number(summary.get("updated_at")) or 0), latest_mtime(session_path) if session_path else 0)
+    last_progress = _broadcast_iso(progress.get("last_progress_at"))
+    if last_progress is None and session_path is not None:
+        last_progress = _broadcast_iso(latest_mtime(session_path))
+    if milestones:
+        latest = max(milestones, key=lambda event: timestamp(event["time"]))["time"]
+        if last_progress is None or timestamp(latest) > timestamp(last_progress):
+            last_progress = latest
+        updated = max(updated, timestamp(latest))
+    return {"schema": "broadcast.v1", "id": _broadcast_id(run.name), "title": _broadcast_text(summary.get("name"), _broadcast_text(run.name, "未命名小说")),
+        "status": _broadcast_status(summary),
+        "stage": _broadcast_enum(runtime.get("current_stage") or working.get("step"), BROADCAST_STAGES),
+        "updated_at": _broadcast_iso(updated),
+        "chapter": {"current": chapter, "total": _broadcast_number(summary.get("chapters_total"), integer=True, positive=True),
+            "completed": _broadcast_number(summary.get("chapters_completed"), integer=True) if "completed_chapters" in actual_progress else None,
+            "words": _broadcast_number(summary.get("words_total"), integer=True) if "total_word_count" in actual_progress or summary.get("chapters_on_disk") else None},
+        "planning": {"cycle": cycle, "round": revision, "completed_cycles": completed_cycles, "story_minutes": story_minutes,
+            "planned_chapters": _broadcast_number(summary.get("chapters_formally_planned"), integer=True) if formal.get("state") not in (None, "unknown") else None},
+        "execution": {"phase": _broadcast_enum(progress.get("planning_phase") or session.get("phase"), BROADCAST_PHASES),
+            "last_progress_at": last_progress, "heartbeat_at": _broadcast_iso(progress.get("heartbeat_at")),
+            "stalled": progress.get("status") == "stalled" if progress.get("status") in ("running", "stalled") else None},
+        "characters": characters, "usage": _broadcast_usage(agents.get("usage_summary"), totals=True), "events": _broadcast_events(runtime, milestones)}
+
+
+def broadcast_catalog():
+    def build():
+        novels = []
+        for run in _broadcast_runs():
+            summary = _broadcast_summary(run)
+            runtime = summary.get("runtime") if isinstance(summary.get("runtime"), dict) else {}
+            novels.append({"id": _broadcast_id(run.name), "title": _broadcast_text(summary.get("name"), _broadcast_text(run.name, "未命名小说")),
+                "status": _broadcast_status(summary)})
+        return {"novels": novels}
+    result = _broadcast_cached("catalog", build)
+    result["server_time"] = _broadcast_number(time.time())
+    return result
+
+
+def broadcast_detail(book_id):
+    if not isinstance(book_id, str) or not re.fullmatch(r"book_[0-9a-f]{16}", book_id):
+        return None
+    runs = [run for run in _broadcast_runs() if _broadcast_id(run.name) == book_id]
+    if len(runs) != 1:
+        return None
+    result = _broadcast_cached(book_id, lambda: _build_broadcast_snapshot(runs[0]))
+    result["server_time"] = _broadcast_number(time.time())
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "novel-studio-dashboard/3.0"
 
@@ -2412,9 +2811,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _broadcast_json(self, obj, code: int = 200):
+        try:
+            body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            return self._json({"error": "broadcast unavailable"}, 503)
+        return self._send(code, body, "application/json; charset=utf-8")
+
     def do_GET(self):
         path = urllib.parse.unquote(self.path.split("?", 1)[0])
         try:
+            if path in BROADCAST_STATIC:
+                filename, content_type = BROADCAST_STATIC[path]
+                return self._send(200, (STATIC_DIR / filename).read_bytes(), content_type)
+            if path == "/api/broadcast":
+                return self._broadcast_json(broadcast_catalog())
+            broadcast_match = re.fullmatch(r"/api/novels/([^/]+)/broadcast", path)
+            if broadcast_match:
+                result = broadcast_detail(broadcast_match.group(1))
+                return self._broadcast_json(result if result is not None else {"error": "not found"}, 200 if result is not None else 404)
             if path in ("/", "/index.html"):
                 page = (STATIC_DIR / "index.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
@@ -2447,6 +2862,8 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
         except Exception as exc:  # 看板永不 500 裸奔，返回结构化错误
+            if path in BROADCAST_STATIC or path == "/api/broadcast" or path.endswith("/broadcast"):
+                return self._json({"error": "broadcast unavailable"}, 503)
             return self._json({"error": str(exc)}, 500)
 
 

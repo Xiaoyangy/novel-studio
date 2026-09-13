@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Novel Studio · 创作直播间</title>
+  <link rel="stylesheet" href="/broadcast.css">
+  <script src="/broadcast.js" defer></script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <div class="studio" id="studio">
+    <header class="topbar">
+      <div class="brand" aria-label="Novel Studio 创作直播间"><span class="brand-mark">N<span>·</span></span><span>NOVEL STUDIO<small>故事正在发生</small></span></div>
+      <div class="live-badge" id="connection"><i></i><span>连接实时数据</span></div>
+      <div class="toolbar">
+        <label class="book-picker"><span class="sr-only">选择小说</span><select id="book-select" aria-label="选择小说"><option>正在读取书目…</option></select></label>
+        <button id="pause-button" title="只暂停页面刷新，不暂停小说运行">暂停画面</button>
+        <button id="clean-button" title="隐藏操作区，按 Esc 返回">净屏</button>
+        <button id="fullscreen-button" title="全屏 · F">全屏 ↗</button>
+      </div>
+      <time class="wall-clock" id="wall-clock">--:--:--</time>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy"><div class="eyebrow"><span class="tiny-line"></span>LIVE WRITING SESSION <span id="session-status">等待连接</span></div><h1 id="book-title">一部小说的诞生</h1><p id="stage-description">连接真实运行，观察角色选择如何成为故事。</p><div class="hero-tags"><span>独立角色 Agent</span><span>世界规则裁决</span><span>正文验收后入正史</span></div></div>
+        <div class="hero-position"><div class="position-label" id="position-label">当前推进</div><div class="chapter-position"><span id="chapter-number">—</span><span class="chapter-unit">章<small id="chapter-total">等待书目数据</small></span></div><div class="cycle-position" id="cycle-position">尚无周期记录</div></div>
+      </section>
+
+      <section class="stage-rail" id="stage-rail" aria-label="创作阶段"></section>
+
+      <section class="workspace-grid">
+        <div class="simulation-panel panel">
+          <div class="panel-heading"><div><span class="section-number">01</span><h2 id="characters-heading">角色活动</h2></div><span class="muted" id="agent-count">等待角色注册</span></div>
+          <div class="world-hub" id="world-hub"><div class="hub-route route-left"></div><div class="hub-route route-right"></div><div class="hub-orbit"><span></span><div class="hub-core"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 4 35 12v16L20 36 5 28V12Z M5 12l15 8 15-8 M20 20v16 M20 4v16"/></svg></div></div><div class="hub-copy"><span class="eyebrow">WORLD ARBITER</span><h3 id="hub-title">等待世界输入</h3><p id="hub-caption">决定属于角色，结果接受世界规则检验。</p></div><div class="hub-state" id="hub-state">待命</div></div>
+          <div class="character-grid" id="character-grid"><div class="empty-state">角色注册后，将在这里逐一出现。</div></div>
+          <div class="simulation-footer"><span><i class="legend-dot mint"></i>已提交 / 已裁决</span><span><i class="legend-dot amber"></i>本轮处理</span><span><i class="legend-dot gray"></i>休眠 / 等待</span><span class="privacy-lock">▣ 直播安全视图 · 不展示角色私有上下文</span></div>
+        </div>
+
+        <aside class="telemetry-panel panel">
+          <div class="panel-heading"><div><span class="section-number">02</span><h2>交付仪表</h2></div><span class="telemetry-icon">◴</span></div>
+          <div class="delivery-metric"><span class="metric-label">已验收正文</span><div><strong id="accepted-number">—</strong><span id="accepted-total">章</span></div><div class="progress-track"><span id="accepted-bar"></span></div><p id="accepted-caption">以正式验收为准，不把模拟周期算成章节。</p></div>
+          <div class="metric-pair"><div><span>正式章节计划</span><strong id="planned-number">—</strong></div><div><span>正文字数</span><strong id="words-number">—</strong></div></div>
+          <div class="metric-pair"><div><span>已落盘周期</span><strong id="committed-number">—</strong></div><div><span>故事时钟</span><strong id="story-clock">—</strong></div></div>
+          <div class="usage-box"><div><span>角色推演用量 <small id="usage-scope">已记录</small></span><strong id="usage-tokens">—</strong></div><div class="token-split"><span id="input-tokens">输入 —</span><span id="output-tokens">输出 —</span></div><div class="usage-cost"><span id="usage-calls">调用 —</span><strong id="usage-cost">未计价</strong></div></div>
+          <div class="durable-state"><i id="durable-dot"></i><div><span id="durable-label">等待持久进展</span><small id="durable-time">尚无提交时间</small></div></div>
+        </aside>
+      </section>
+
+      <section class="events-panel panel"><div class="panel-heading"><div><span class="section-number">03</span><h2>现场播报</h2></div><span class="muted">只播报实际记录，不模拟进度</span></div><div class="event-list" id="event-list"><div class="empty-state">等待第一条运行记录。</div></div></section>
+    </main>
+    <footer class="bottom-bar"><span><span class="footer-mark">N</span> 每个选择，都要在世界里留下后果。</span><span id="refresh-state">只读连接 · 每 3 秒更新</span><span class="footer-shortcuts">F 全屏 · Esc 退出净屏</span></footer>
+  </div>
+  <div class="connection-warning" id="connection-warning" hidden role="status"></div>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

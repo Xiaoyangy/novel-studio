@@ -73,10 +73,19 @@ func TestCurrentDashboardVersionMatchesPythonStamp(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(static, "index.html"), indexBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	broadcastBytes := [][]byte{[]byte("<html>broadcast</html>\n"), []byte("body { color: white; }\n"), []byte("console.log('broadcast');\n")}
+	for i, name := range []string{"broadcast.html", "broadcast.css", "broadcast.js"} {
+		if err := os.WriteFile(filepath.Join(static, name), broadcastBytes[i], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	h := sha256.New()
 	h.Write(serverBytes)
 	h.Write(indexBytes)
+	for _, data := range broadcastBytes {
+		h.Write(data)
+	}
 	want := hex.EncodeToString(h.Sum(nil))[:16]
 
 	if got := currentDashboardVersion(script); got != want {
@@ -119,7 +128,7 @@ func TestRecognizesSourceAndEmbeddedDashboardCommands(t *testing.T) {
 	}
 }
 
-// A change to either file must change the version so `service start` replaces the
+// A change to any bundled file must change the version so `service start` replaces the
 // running board.
 func TestCurrentDashboardVersionChangesWithContent(t *testing.T) {
 	dir := t.TempDir()
@@ -142,6 +151,17 @@ func TestCurrentDashboardVersionChangesWithContent(t *testing.T) {
 	}
 	if v2 := currentDashboardVersion(script); v1 == v2 {
 		t.Fatalf("version did not change after editing index.html: %q", v1)
+	}
+	for _, name := range []string{"broadcast.html", "broadcast.css", "broadcast.js"} {
+		t.Run(name, func(t *testing.T) {
+			before := currentDashboardVersion(script)
+			if err := os.WriteFile(filepath.Join(static, name), []byte(name+"-v1"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if after := currentDashboardVersion(script); after == before {
+				t.Fatal("broadcast asset was omitted from the launcher's content identity")
+			}
+		})
 	}
 }
 
