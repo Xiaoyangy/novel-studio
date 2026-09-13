@@ -276,9 +276,18 @@ func (v *CharacterArbitrationV3) Sources(round int) (domain.VerifiedCharacterArb
 }
 
 func (v *CharacterArbitrationV3) sources(round int) (domain.VerifiedCharacterArbitrationSourcesV1, error) {
+	return v.sourcesAfterFirst(round, nil)
+}
+
+// A prior round is supplied only by the current lock-held validation walk.
+// It is never stored on the view or reused by a later public operation.
+func (v *CharacterArbitrationV3) sourcesAfterFirst(round int, first *domain.VerifiedCharacterArbitrationRoundV1) (domain.VerifiedCharacterArbitrationSourcesV1, error) {
 	var zero domain.VerifiedCharacterArbitrationSourcesV1
 	if round != 1 && round != 2 {
 		return zero, fmt.Errorf("v3 arbitration supports exactly R1 and bounded R2")
+	}
+	if round == 2 && first != nil {
+		return v.revisionSources(*first)
 	}
 	var proposals []domain.CharacterDecisionProposal
 	for _, entry := range v.input.Activation.Entries {
@@ -304,8 +313,13 @@ func (v *CharacterArbitrationV3) sources(round int) (domain.VerifiedCharacterArb
 	if r1 == nil {
 		return zero, fmt.Errorf("v3 R2 requires its durable verified R1")
 	}
+	return v.revisionSources(*r1)
+}
+
+func (v *CharacterArbitrationV3) revisionSources(first domain.VerifiedCharacterArbitrationRoundV1) (domain.VerifiedCharacterArbitrationSourcesV1, error) {
+	var zero domain.VerifiedCharacterArbitrationSourcesV1
 	var observations []domain.CharacterObservationPacket
-	proposals = nil
+	var proposals []domain.CharacterDecisionProposal
 	for _, entry := range v.input.Registry.Entries {
 		o, err := v.proofs.LoadObservation(v.input.Stimulus.GenerationID, v.input.Stimulus.Chapter, 2, entry.AgentID)
 		if err != nil {
@@ -322,10 +336,14 @@ func (v *CharacterArbitrationV3) sources(round int) (domain.VerifiedCharacterArb
 			proposals = append(proposals, *p)
 		}
 	}
-	return domain.ResolveCharacterArbitrationRevisionV1(*r1, observations, proposals)
+	return domain.ResolveCharacterArbitrationRevisionV1(first, observations, proposals)
 }
 
 func (v *CharacterArbitrationV3) loadRound(round int) (*domain.VerifiedCharacterArbitrationRoundV1, error) {
+	return v.loadRoundAfterFirst(round, nil)
+}
+
+func (v *CharacterArbitrationV3) loadRoundAfterFirst(round int, first *domain.VerifiedCharacterArbitrationRoundV1) (*domain.VerifiedCharacterArbitrationRoundV1, error) {
 	if round != 1 && round != 2 {
 		return nil, fmt.Errorf("invalid v3 arbitration round")
 	}
@@ -336,7 +354,7 @@ func (v *CharacterArbitrationV3) loadRound(round int) (*domain.VerifiedCharacter
 		}
 		return nil, err
 	}
-	sources, err := v.sources(round)
+	sources, err := v.sourcesAfterFirst(round, first)
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +417,23 @@ func (v *CharacterArbitrationV3) FinalizeCycle(usage []domain.CharacterAgentUsag
 }
 
 func (v *CharacterArbitrationV3) finalizeCycle(usage []domain.CharacterAgentUsage) (domain.CharacterActivationCycle, error) {
+	var rounds [2]*domain.VerifiedCharacterArbitrationRoundV1
+	for round := 1; round <= 2; round++ {
+		verified, err := v.loadRoundAfterFirst(round, rounds[0])
+		if err != nil {
+			return domain.CharacterActivationCycle{}, err
+		}
+		if verified == nil {
+			break
+		}
+		rounds[round-1] = verified
+	}
+	return v.finalizeCycleWithRounds(usage, rounds)
+}
+
+// rounds are local outputs of this same lock-held source-validation walk.
+// Domain finalization still rechecks the complete cycle/source/kernel contract.
+func (v *CharacterArbitrationV3) finalizeCycleWithRounds(usage []domain.CharacterAgentUsage, rounds [2]*domain.VerifiedCharacterArbitrationRoundV1) (domain.CharacterActivationCycle, error) {
 	session := v.prefix.Session()
 	cycle := domain.CharacterActivationCycle{Version: domain.CharacterActivationCycleV3Version, GenerationID: session.GenerationID, Chapter: session.Chapter, Index: len(session.CycleDigests) + 1, ChapterContextDigest: session.ChapterContextDigest, InputSetDigest: v.input.Digest, WorkContinuations: v.Continuations()}
 	if len(session.CycleDigests) > 0 {
@@ -406,11 +441,7 @@ func (v *CharacterArbitrationV3) finalizeCycle(usage []domain.CharacterAgentUsag
 	}
 	cycle.Evidence = domain.CharacterAgentEvidenceBundle{Version: domain.CharacterActivationRoundEvidenceV3Version, GenerationID: session.GenerationID, Chapter: session.Chapter, Registry: v.input.Registry, Stimulus: v.input.Stimulus, Activation: v.input.Activation, ProtocolDigest: v.admission.Protocol, Usage: copyContinuationStoreValue(usage)}
 	var last *domain.VerifiedCharacterArbitrationRoundV1
-	for round := 1; round <= 2; round++ {
-		verified, err := v.loadRound(round)
-		if err != nil {
-			return cycle, err
-		}
+	for _, verified := range rounds {
 		if verified == nil {
 			break
 		}

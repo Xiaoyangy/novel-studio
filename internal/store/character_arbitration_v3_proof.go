@@ -219,6 +219,13 @@ func (v *CharacterArbitrationV3) validateProofInventory() error {
 }
 
 func (v *CharacterArbitrationV3) validatePartialProofs() error {
+	return v.validatePartialProofsWithRounds(nil)
+}
+
+// Any returned rounds belong only to this lock-held read. Inventory and all
+// frozen/partial owner artifacts are always checked; no prior result is read
+// from out, and nothing is published there until the entire walk succeeds.
+func (v *CharacterArbitrationV3) validatePartialProofsWithRounds(out *[2]*domain.VerifiedCharacterArbitrationRoundV1) error {
 	if err := v.validateProofInventory(); err != nil {
 		return err
 	}
@@ -240,6 +247,7 @@ func (v *CharacterArbitrationV3) validatePartialProofs() error {
 	// Read proposals directly as well as through their observation. The legacy
 	// loader returns nil when O is absent, which must not hide an orphan P here.
 	var first *domain.VerifiedCharacterArbitrationRoundV1
+	var rounds [2]*domain.VerifiedCharacterArbitrationRoundV1
 	for round := 1; round <= 2; round++ {
 		for _, entry := range v.input.Registry.Entries {
 			var o domain.CharacterObservationPacket
@@ -271,13 +279,17 @@ func (v *CharacterArbitrationV3) validatePartialProofs() error {
 				return err
 			}
 		}
-		verified, err := v.loadRound(round)
+		verified, err := v.loadRoundAfterFirst(round, first)
 		if err != nil {
 			return err
 		}
 		if round == 1 {
 			first = verified
 		}
+		rounds[round-1] = verified
+	}
+	if out != nil {
+		*out = rounds
 	}
 	return nil
 }
@@ -304,10 +316,11 @@ func (s *Store) validateArbitrationV3CycleProofs(prefix domain.VerifiedCharacter
 	if err := v.loadAdmission(); err != nil {
 		return err
 	}
-	if err := v.validatePartialProofs(); err != nil {
+	var rounds [2]*domain.VerifiedCharacterArbitrationRoundV1
+	if err := v.validatePartialProofsWithRounds(&rounds); err != nil {
 		return err
 	}
-	expected, err := v.finalizeCycle(cycle.Evidence.Usage)
+	expected, err := v.finalizeCycleWithRounds(cycle.Evidence.Usage, rounds)
 	if err != nil {
 		return err
 	}
