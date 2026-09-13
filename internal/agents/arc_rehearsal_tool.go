@@ -12,16 +12,20 @@ import (
 )
 
 type submitArcRehearsalTool struct {
-	input domain.ArcRehearsalInput
-	draft *domain.ArcRehearsalDraft // Host-only; never decoded from submission.
-	body  *domain.ArcRehearsalBody
+	input       domain.ArcRehearsalInput
+	draft       *domain.ArcRehearsalDraft // Host-only; never decoded from submission.
+	deltaReview bool                      // Host-selected from the exact input protocol; never a wire field.
+	body        *domain.ArcRehearsalBody
 }
 
 func (*submitArcRehearsalTool) Name() string { return "submit_arc_rehearsal" }
 func (*submitArcRehearsalTool) Description() string {
 	return "提交整弧条件性宏观预演；不执行角色行动、生成正文或更新正史。身份、阶段和模型调用来源由Host绑定。"
 }
-func (*submitArcRehearsalTool) Schema() map[string]any {
+func (t *submitArcRehearsalTool) Schema() map[string]any {
+	if t.deltaReview {
+		return arcRehearsalReviewDeltaSchema()
+	}
 	texts := func(description string) map[string]any { return schema.Array(description, schema.String("")) }
 	chapter := schema.Object(
 		schema.Property("chapter", schema.Int("原章位")).Required(),
@@ -80,13 +84,21 @@ func (t *submitArcRehearsalTool) Execute(_ context.Context, raw json.RawMessage)
 		return nil, fmt.Errorf("arc rehearsal output exceeds bounded size")
 	}
 	var body domain.ArcRehearsalBody
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
-		return nil, err
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, fmt.Errorf("rehearsal output must contain one JSON object")
+	if t.deltaReview {
+		var err error
+		body, err = t.compileReviewDelta(raw)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("rehearsal output must contain one JSON object")
+		}
 	}
 	if err := domain.ValidateArcRehearsalBody(t.input, body); err != nil {
 		return nil, err

@@ -210,7 +210,7 @@ func (m *arcRehearsalFakeModel) Generate(_ context.Context, messages []agentcore
 	if m.bodyFactory != nil {
 		body = m.bodyFactory(payload.Input)
 	}
-	raw, err := json.Marshal(body)
+	raw, err := rehearsalFakeWireForSchema(body, payload.Draft, specs[0])
 	if err != nil {
 		return nil, err
 	}

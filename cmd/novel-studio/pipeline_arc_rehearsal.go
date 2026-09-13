@@ -56,7 +56,60 @@ func buildPipelineArcRehearsalInput(st *store.Store, configs ...bootstrap.Config
 	if err != nil {
 		return input, err
 	}
-	return agents.BuildArcRehearsalInput(st, input, configs...)
+	input, err = agents.BuildArcRehearsalInput(st, input, configs...)
+	if err != nil {
+		return input, err
+	}
+	return recoverPipelineArcRehearsalProtocolInput(st, input)
+}
+
+// A transport upgrade must not rerun the Architect for an exact, already
+// persisted draft. Derive only supported identities from today's complete
+// sources; never pick a historical input by filename order or modification time.
+func recoverPipelineArcRehearsalProtocolInput(st *store.Store, current domain.ArcRehearsalInput) (domain.ArcRehearsalInput, error) {
+	legacy, err := agents.LegacyArcRehearsalProtocolDigest()
+	if err != nil {
+		return current, err
+	}
+	var selected *domain.ArcRehearsalInput
+	seen := map[string]bool{}
+	for _, protocol := range []string{current.ProtocolDigest, legacy} {
+		if seen[protocol] {
+			continue
+		}
+		seen[protocol] = true
+		candidate := current
+		candidate.ProtocolDigest = protocol
+		candidate, err = domain.FinalizeArcRehearsalInput(candidate)
+		if err != nil {
+			return current, err
+		}
+		draft, saved, err := st.LoadArcRehearsalDraftForInput(candidate.InputDigest)
+		if err != nil {
+			return current, fmt.Errorf("verify existing rehearsal protocol input: %w", err)
+		}
+		if draft == nil {
+			continue
+		}
+		if saved == nil || pipelineProjectAllDigest(*saved) != pipelineProjectAllDigest(candidate) {
+			return current, fmt.Errorf("persisted rehearsal draft belongs to different source or execution inputs")
+		}
+		if err := st.ValidateArcRehearsalInputFresh(*saved); err != nil {
+			return current, err
+		}
+		// A corrupt completed report must not be silently treated as a draft.
+		if _, err := st.LoadVerifiedArcRehearsalForInput(candidate.InputDigest); err != nil {
+			return current, err
+		}
+		if selected != nil {
+			return current, fmt.Errorf("multiple supported rehearsal drafts match current sources; explicit resolution is required")
+		}
+		selected = saved
+	}
+	if selected != nil {
+		return *selected, nil
+	}
+	return current, nil
 }
 
 func pipelineRehearseArc(opts cliOptions, flags pipelineFlags) (returnErr error) {

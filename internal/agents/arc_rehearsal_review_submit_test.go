@@ -34,7 +34,7 @@ func (m *rehearsalReviewCorrectionModel) Generate(ctx context.Context, messages 
 		}
 		if message.Role == agentcore.RoleTool {
 			raw, _ := json.Marshal(message)
-			m.sawRejection = m.sawRejection || strings.Contains(string(raw), "review cannot rewrite declared execution dependencies")
+			m.sawRejection = m.sawRejection || strings.Contains(string(raw), "review cannot rewrite declared execution dependencies") || (strings.Contains(string(raw), "unknown field") && strings.Contains(string(raw), "capability_requirements"))
 		}
 	}
 	if payload.Draft != nil {
