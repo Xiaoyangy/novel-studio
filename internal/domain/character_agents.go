@@ -65,6 +65,7 @@ type CharacterAgentSuccessorPlan struct {
 	ReadinessDigest       string         `json:"readiness_digest,omitempty"`
 	AcceptedCanonRoot     string         `json:"accepted_canon_root"`
 	EndingDirection       string         `json:"ending_direction"`
+	AuthorContractPolicy  string         `json:"author_contract_policy,omitempty"`
 	NonNegotiables        []string       `json:"non_negotiables"`
 	HardContractConflicts []string       `json:"hard_contract_conflicts"`
 	RevisedChapters       []OutlineEntry `json:"revised_chapters"`
@@ -79,6 +80,9 @@ func ComputeCharacterAgentSuccessorPlanDigest(plan CharacterAgentSuccessorPlan) 
 }
 
 func FinalizeCharacterAgentSuccessorPlan(plan CharacterAgentSuccessorPlan) (CharacterAgentSuccessorPlan, error) {
+	if plan.AuthorContractPolicy != "" && plan.AuthorContractPolicy != AuthorSourcesPolicyV1 {
+		return plan, fmt.Errorf("character-agent successor plan has an unsupported author contract policy")
+	}
 	if plan.ReadinessDigest != "" {
 		if err := validatePlanningV2Digest("successor readiness source", plan.ReadinessDigest); err != nil {
 			return plan, err
@@ -91,7 +95,7 @@ func FinalizeCharacterAgentSuccessorPlan(plan CharacterAgentSuccessorPlan) (Char
 		plan.BaseCanonChapter < 0 || plan.ArcFirstChapter != plan.BaseCanonChapter+1 ||
 		plan.TriggerChapter < plan.ArcFirstChapter || plan.TriggerChapter > plan.ArcLastChapter ||
 		plan.BookLastChapter < plan.ArcLastChapter || strings.TrimSpace(plan.ArbitrationDigest) == "" ||
-		strings.TrimSpace(plan.AcceptedCanonRoot) == "" || strings.TrimSpace(plan.EndingDirection) == "" ||
+		strings.TrimSpace(plan.AcceptedCanonRoot) == "" || (plan.AuthorContractPolicy == "" && strings.TrimSpace(plan.EndingDirection) == "") ||
 		len(plan.NonNegotiables) == 0 || len(plan.HardContractConflicts) == 0 ||
 		strings.TrimSpace(plan.ArchitectSummary) == "" {
 		return plan, fmt.Errorf("character-agent successor plan identity/constraints are incomplete")

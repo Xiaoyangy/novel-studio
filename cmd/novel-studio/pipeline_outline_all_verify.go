@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -59,11 +60,11 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 	if err != nil || compass == nil {
 		return nil, fmt.Errorf("outline-all verifier requires compass: %w", err)
 	}
-	if len(compass.NonNegotiables) == 0 {
+	if !pipelineCompassHasAuthorContractBoundary(compass) {
 		return nil, fmt.Errorf("outline-all verifier refuses empty compass.non_negotiables")
 	}
 	compassDigest, err := domain.ComputeStoryCompassDigest(*compass)
-	if err != nil || compassDigest != receipt.CompassDigest {
+	if err != nil || compassDigest != receipt.CompassDigest || !reflect.DeepEqual(receipt.AuthorContracts, compass.AuthorContracts) {
 		return nil, fmt.Errorf("outline-all compass digest drift")
 	}
 	mode, err := st.LoadWritingPipelineMode()

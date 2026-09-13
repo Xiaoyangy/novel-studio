@@ -54,11 +54,12 @@ func (v *VolumeOutline) IsExpanded() bool { return len(v.Arcs) > 0 }
 // StoryCompass 终局方向指南针，替代固定的骨架卷列表。
 // Architect 在每次卷边界时可更新，允许故事方向随创作演化。
 type StoryCompass struct {
-	EndingDirection string   `json:"ending_direction"`          // 终局方向（主题性描述）
-	OpenThreads     []string `json:"open_threads,omitempty"`    // 活跃长线（需收束才能结局）
-	NonNegotiables  []string `json:"non_negotiables,omitempty"` // 全书规划不得推迟或删除的硬合同
-	EstimatedScale  string   `json:"estimated_scale,omitempty"` // 模糊规模（如"预计 4-6 卷"）
-	LastUpdated     int      `json:"last_updated,omitempty"`    // 更新时的已完成章节数
+	EndingDirection string                    `json:"ending_direction"`          // 终局方向（主题性描述）
+	OpenThreads     []string                  `json:"open_threads,omitempty"`    // 活跃长线（需收束才能结局）
+	NonNegotiables  []string                  `json:"non_negotiables,omitempty"` // 全书规划不得推迟或删除的硬合同
+	EstimatedScale  string                    `json:"estimated_scale,omitempty"` // 模糊规模（如"预计 4-6 卷"）
+	LastUpdated     int                       `json:"last_updated,omitempty"`    // 更新时的已完成章节数
+	AuthorContracts *CompassAuthorContractsV1 `json:"author_contracts,omitempty"`
 }
 
 // UnmarshalJSON 容忍 LLM 把 open_threads 当字符串而不是字符串数组返回。
@@ -66,11 +67,12 @@ type StoryCompass struct {
 // 这里手动读取字段，再把 string / []any / []string 三种形态都归一为 []string。
 func (c *StoryCompass) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		EndingDirection   string `json:"ending_direction"`
-		OpenThreadsRaw    any    `json:"open_threads"`
-		NonNegotiablesRaw any    `json:"non_negotiables"`
-		EstimatedScale    string `json:"estimated_scale"`
-		LastUpdated       int    `json:"last_updated"`
+		EndingDirection   string                    `json:"ending_direction"`
+		OpenThreadsRaw    any                       `json:"open_threads"`
+		NonNegotiablesRaw any                       `json:"non_negotiables"`
+		EstimatedScale    string                    `json:"estimated_scale"`
+		LastUpdated       int                       `json:"last_updated"`
+		AuthorContracts   *CompassAuthorContractsV1 `json:"author_contracts"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("compass unmarshal: %w", err)
@@ -78,8 +80,20 @@ func (c *StoryCompass) UnmarshalJSON(data []byte) error {
 	c.EndingDirection = raw.EndingDirection
 	c.EstimatedScale = raw.EstimatedScale
 	c.LastUpdated = raw.LastUpdated
+	c.AuthorContracts = raw.AuthorContracts
 	c.OpenThreads = normalizeCompassStringList(raw.OpenThreadsRaw)
 	c.NonNegotiables = normalizeCompassStringList(raw.NonNegotiablesRaw)
+	if raw.AuthorContracts != nil {
+		// Source-bound contracts are exact evidence, so legacy LLM coercions
+		// must not discard an extra/non-string value and hide on-disk drift.
+		var exact struct {
+			NonNegotiables []string `json:"non_negotiables"`
+		}
+		if err := json.Unmarshal(data, &exact); err != nil {
+			return fmt.Errorf("source-bound compass contracts: %w", err)
+		}
+		c.NonNegotiables = exact.NonNegotiables
+	}
 	return nil
 }
 

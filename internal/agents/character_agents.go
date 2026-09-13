@@ -59,6 +59,12 @@ const characterAgentSuccessorArchitectPrompt = `你是角色独立决策协议�
 你只能重写冲突章到当前弧末每章的 title、core_event、hook、scenes；不得增删或调换章节号，不得编辑 contract_refs，不得让角色改选，也不得把角色未来选择写成既定事实。
 revised_chapters 必须覆盖连续的完整剩余章位。只调用 submit_character_agent_successor_plan 一次；architect_summary 写简短、可审计的重排说明，不输出思维链或正文。`
 
+const characterAgentAuthorSourceSuccessorPrompt = `你是角色独立决策协议中的 Architect，只处理硬合同冲突后的 successor generation 软大纲。
+
+必须完整保留 immutable_constraints 中宿主绑定的已接受正史、全书与当前弧篇幅、不可协商设定、硬合同，以及 World Arbiter 原样保留的角色选择。用户实际终局要求仅由已验证的 non_negotiables 表达，不得删改。
+soft_guidance.ending_direction 是模型此前选择的可调整方向，不是用户硬合同，不要求复现。可以依据真实角色选择重排或放弃这一软方向，但不能借此放弃 non_negotiables 中的真实用户终局义务；不得自行补造泛化的用户条款。
+只能重写冲突章到当前弧末每章的 title、core_event、hook、scenes；不得增删或调换章节号，不得编辑 contract_refs，不得让角色改选，也不得把角色未来选择写成既定事实。revised_chapters 必须覆盖连续的完整剩余章位。只调用 submit_character_agent_successor_plan 一次；architect_summary 写简短、可审计的重排说明，不输出思维链或正文。`
+
 const characterAgentCoordinatorPrompt = `你是角色独立决策协议的调度入口，不替任何角色作决定。
 
 从任务中取得章节号，只调用 simulate_chapter_world 一次。该工具会在服务端完成角色筛选、严格观察包、并发角色 Agent、World Arbiter 两轮裁决、恢复和持久化。工具返回 simulated=true 后立即停止；不得生成 POV plan、正文或解释。`
@@ -393,6 +399,13 @@ func runCharacterAgentSuccessorArchitectForCause(ctx context.Context, cfg bootst
 	if existing, err := st.CharacterAgents.LoadCurrentSuccessorPlan(); err != nil {
 		return nil, err
 	} else if existing != nil && existing.ParentGenerationID == receipt.GenerationID && existing.ArbitrationDigest == receipt.Digest && existing.ReadinessDigest == readinessDigest {
+		catalog, err := st.LoadAuthorSources()
+		if err != nil {
+			return nil, err
+		}
+		if (catalog != nil) != (existing.AuthorContractPolicy == domain.AuthorSourcesPolicyV1) {
+			return nil, fmt.Errorf("cached successor author-contract semantics differ from the current source mode")
+		}
 		return existing, nil
 	}
 	if err := projectedAccountingBefore(ctx); err != nil {
@@ -438,7 +451,11 @@ func runCharacterAgentSuccessorArchitectForCause(ctx context.Context, cfg bootst
 		ArbitrationDigest: receipt.Digest, AcceptedCanonRoot: acceptedRoot, EndingDirection: ending,
 		NonNegotiables: nonNegotiables, HardContractConflicts: append([]string(nil), conflicts...), ReadinessDigest: readinessDigest,
 	}
+	if compass != nil && compass.AuthorContracts != nil {
+		base.AuthorContractPolicy = domain.AuthorSourcesPolicyV1
+	}
 	tool := tools.NewSubmitCharacterAgentSuccessorPlanTool(st, base, original)
+	successorPrompt := characterAgentSuccessorArchitectPrompt
 	payload, _ := json.Marshal(struct {
 		Constraints domain.CharacterAgentSuccessorPlan `json:"immutable_constraints"`
 		Original    []domain.OutlineEntry              `json:"current_soft_outline"`
@@ -451,6 +468,32 @@ func runCharacterAgentSuccessorArchitectForCause(ctx context.Context, cfg bootst
 		}
 		return nil
 	}()})
+	if base.AuthorContractPolicy == domain.AuthorSourcesPolicyV1 {
+		// The persisted plan retains the original soft hint with an explicit
+		// semantic marker. It must not be presented as an immutable requirement.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return nil, err
+		}
+		var constraints map[string]json.RawMessage
+		if err := json.Unmarshal(fields["immutable_constraints"], &constraints); err != nil {
+			return nil, err
+		}
+		delete(constraints, "ending_direction")
+		fields["immutable_constraints"], err = json.Marshal(constraints)
+		if err != nil {
+			return nil, err
+		}
+		fields["soft_guidance"], err = json.Marshal(map[string]string{"ending_direction": base.EndingDirection})
+		if err != nil {
+			return nil, err
+		}
+		payload, err = json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		successorPrompt = characterAgentAuthorSourceSuccessorPrompt
+	}
 	inputMessage, err := modelinput.NewExactAgentPacketMessage(modelinput.KindCharacterSuccessor, "只重排软章位并提交 successor plan：\n<successor_input>\n"+string(payload)+"\n</successor_input>")
 	if err != nil {
 		return nil, err
@@ -459,7 +502,7 @@ func runCharacterAgentSuccessorArchitectForCause(ctx context.Context, cfg bootst
 	events := agentcore.AgentLoop(
 		ctx,
 		[]agentcore.AgentMessage{inputMessage},
-		agentcore.AgentContext{SystemPrompt: characterAgentSuccessorArchitectPrompt, Tools: []agentcore.Tool{tool}},
+		agentcore.AgentContext{SystemPrompt: successorPrompt, Tools: []agentcore.Tool{tool}},
 		agentcore.LoopConfig{
 			Model: accounted, OnMessage: onMessage, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns("architect", 8), 10), MaxRetries: subagentMaxRetries,
 			MaxToolErrors: 0, ThinkingLevel: resolvedRoleThinking(model, cfg, "architect"), ToolsAreIdempotent: false,
@@ -877,10 +920,19 @@ func buildWorldStimulusDraft(st *store.Store, generationID string, chapter int, 
 		packet.SoftGuidance = append(packet.SoftGuidance, entry.Scenes...)
 	}
 	packet.SoftGuidance = append(packet.SoftGuidance, "arc_goal: "+boundary.Goal)
-	if compass, _ := st.Outline.LoadCompass(); compass != nil {
+	compass, err := st.Outline.LoadCompass()
+	if err != nil {
+		return packet, fmt.Errorf("load verified character compass: %w", err)
+	}
+	if compass != nil {
 		packet.HardContracts = append(packet.HardContracts, compass.NonNegotiables...)
 		if compass.EndingDirection != "" {
-			packet.HardContracts = append(packet.HardContracts, "ending_direction: "+compass.EndingDirection)
+			if compass.AuthorContracts == nil {
+				// Historical producers keep their exact hard-contract payload.
+				packet.HardContracts = append(packet.HardContracts, "ending_direction: "+compass.EndingDirection)
+			} else {
+				packet.SoftGuidance = append(packet.SoftGuidance, "ending_direction: "+compass.EndingDirection)
+			}
 		}
 	}
 	rules, err := st.World.LoadWorldRules()

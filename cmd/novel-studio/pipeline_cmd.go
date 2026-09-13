@@ -73,6 +73,7 @@ type pipelineFlags struct {
 	RebaseAllChapters   bool
 	OutlineRepairFile   string
 	OutlineRepairDigest string
+	ArchitectRepairFile string
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -110,8 +111,12 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.BoolVar(&f.RefreshRenderInput, "refresh-render-input", false, "render 阶段显式升级尚未开始的 sealed 候选稿的 model/provider/prompt 绑定；保留 plan/context 并写入审计回执")
 	fs.BoolVar(&f.RebaseAllChapters, "rebase-all-chapters", false, "将现有正文和活动台账完整归档后，把正史安全回到第0章，再按逐弧闭环重推")
 	fs.StringVar(&f.OutlineRepairFile, "outline-repair-file", "", "fresh outline-all 前在隔离候选中应用 chapter-zero 定向大纲修复 manifest")
+	fs.StringVar(&f.ArchitectRepairFile, "architect-repair-file", "", "章零隔离候选的定向源修复 manifest；须 refresh-architect、明确 target 与单独 architect 阶段，不替换创作总令")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
+	}
+	if f.ArchitectRepairFile != "" && (!f.RefreshArchitect || f.ArchitectTarget == "" || f.Stages != "architect" || f.InitializeOnly || f.NewNovel || f.OutlineRepairFile != "") {
+		return f, nil, fmt.Errorf("--architect-repair-file requires --refresh-architect, an explicit --architect-target and --stages architect only")
 	}
 	if f.InitializeOnly {
 		if strings.TrimSpace(f.Stages) != "" || f.Start != 0 || f.End != 0 || f.WriteTo != 0 || f.ForceRerender || f.RefreshRenderInput || f.RebaseAllChapters {
@@ -171,6 +176,9 @@ func pipelinePipeline(opts cliOptions, args []string) error {
 	prompt, err := resolvePipelinePrompt(flags, opts)
 	if err != nil {
 		return err
+	}
+	if flags.ArchitectRepairFile != "" {
+		return runPipelineFoundationRepair(opts, flags, prompt)
 	}
 
 	// 新建小说：先跑头脑风暴，落盘 data/runs/<书名>/brainstorm.md，再把项目目录设为它，

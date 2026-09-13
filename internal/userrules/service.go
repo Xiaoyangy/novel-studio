@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/chenhongyang/novel-studio/internal/domain"
 	"github.com/chenhongyang/novel-studio/internal/rules"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/voocel/agentcore"
@@ -29,8 +30,33 @@ func NewService(st *store.Store, model agentcore.ChatModel, opts rules.LoadOptio
 // Build 从静态来源（system_defaults + rules 文件 + 启动 prompt）归一化生成快照并落盘。
 // 开书/刷新时调用。startupPrompt 可空。
 func (s *Service) Build(ctx context.Context, startupPrompt string) (*rules.Snapshot, error) {
+	installedSources, err := s.store.LoadAuthorSources()
+	if err != nil {
+		return nil, err
+	}
+	// Only a genuinely new author-led initialization enables the new source
+	// contract. Lazy legacy reads and an existing book's normalization must not
+	// silently reinterpret an already frozen compass or generation.
+	current, err := s.store.UserRules.Load()
+	if err != nil {
+		return nil, err
+	}
+	compass, err := s.store.Outline.LoadCompass()
+	if err != nil {
+		return nil, err
+	}
+	files := rules.RawFileSources(s.rulesOpts)
+	if installedSources == nil && current == nil && compass == nil && strings.TrimSpace(startupPrompt) != "" {
+		catalog, err := authorSourceCatalog(startupPrompt, files)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.store.SaveAuthorSources(catalog); err != nil {
+			return nil, err
+		}
+	}
 	cands := []rules.Candidate{rules.SystemDefaults()}
-	for _, rs := range rules.RawFileSources(s.rulesOpts) {
+	for _, rs := range files {
 		cands = append(cands, s.norm.Normalize(ctx, rs.Label, rs.Text))
 	}
 	if strings.TrimSpace(startupPrompt) != "" {
@@ -41,6 +67,30 @@ func (s *Service) Build(ctx context.Context, startupPrompt string) (*rules.Snaps
 		return nil, err
 	}
 	return &snap, nil
+}
+
+// BuildAuthorSourceCatalog captures author input only, without normalization or
+// a model call. A CLI repair must pass the original creative source here, never
+// its repair note, coordinator task, stage instructions or generated foundation.
+func BuildAuthorSourceCatalog(startupPrompt string, opts rules.LoadOptions) (domain.AuthorSourcesV1, error) {
+	return authorSourceCatalog(startupPrompt, rules.RawFileSources(opts))
+}
+
+func authorSourceCatalog(startupPrompt string, files []rules.RawSource) (domain.AuthorSourcesV1, error) {
+	catalog := domain.AuthorSourcesV1{Policy: domain.AuthorSourcesPolicyV1}
+	for _, source := range files {
+		if strings.TrimSpace(source.Text) != "" {
+			text := source.OriginalText
+			if text == "" {
+				text = source.Text
+			}
+			catalog.Sources = append(catalog.Sources, domain.AuthorSourceV1{ID: source.Label, Text: text})
+		}
+	}
+	if strings.TrimSpace(startupPrompt) != "" {
+		catalog.Sources = append(catalog.Sources, domain.AuthorSourceV1{ID: "startup_prompt", Text: startupPrompt})
+	}
+	return domain.FinalizeAuthorSourcesV1(catalog)
 }
 
 // GetOrBuild 返回当前快照；老书无快照时惰性生成（无启动 prompt 原文，故只含

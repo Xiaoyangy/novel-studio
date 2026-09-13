@@ -932,7 +932,9 @@ func BuildStoryContractRegistry(compass StoryCompass) []StoryContractRef {
 			SourceDigest: digest,
 		})
 	}
-	appendRef(StoryContractEnding, 0, compass.EndingDirection)
+	if compass.AuthorContracts == nil {
+		appendRef(StoryContractEnding, 0, compass.EndingDirection)
+	}
 	for i, source := range compass.NonNegotiables {
 		appendRef(StoryContractNonNegotiable, i, source)
 	}

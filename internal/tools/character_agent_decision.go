@@ -261,6 +261,9 @@ func (t *SubmitCharacterAgentSuccessorPlanTool) Label() string {
 func (t *SubmitCharacterAgentSuccessorPlanTool) ReadOnly(json.RawMessage) bool        { return false }
 func (t *SubmitCharacterAgentSuccessorPlanTool) ConcurrencySafe(json.RawMessage) bool { return false }
 func (t *SubmitCharacterAgentSuccessorPlanTool) Description() string {
+	if t.base.AuthorContractPolicy == domain.AuthorSourcesPolicyV1 {
+		return "保留已验用户硬合同、篇幅、章节号、既有正史和角色选择，重排冲突章至弧末的软大纲；原soft_guidance结局方向可调整，用户实际终局义务仍由non_negotiables约束。"
+	}
 	return "在不改结局、篇幅、硬合同、章节号、既有正史和角色选择的前提下，重排冲突章至当前弧末的软大纲。"
 }
 

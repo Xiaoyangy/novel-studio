@@ -866,6 +866,9 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 		fmt.Fprintln(os.Stderr, "[pipeline:architect] foundation 已齐，检查 Architect readiness")
 		return pipelineEnsureOrRepairArchitectReadiness(opts, cfg, bundle, state.Prompt)
 	}
+	if err := ensurePipelineArchitectAuthorSources(cfg.OutputDir, state.Prompt); err != nil {
+		return err
+	}
 	prompt, err := pipelineArchitectPrompt(cfg.OutputDir, state.Prompt)
 	if err != nil {
 		return err
@@ -1367,7 +1370,7 @@ func pipelineRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bun
 
 func pipelineArchitectCompassNeedsRepair(outputDir string) bool {
 	compass, err := store.NewStore(outputDir).Outline.LoadCompass()
-	return err != nil || compass == nil || strings.TrimSpace(compass.EndingDirection) == "" || len(compass.OpenThreads) == 0 || len(compass.NonNegotiables) == 0
+	return err != nil || compass == nil || strings.TrimSpace(compass.EndingDirection) == "" || len(compass.OpenThreads) == 0 || !pipelineCompassHasAuthorContractBoundary(compass)
 }
 
 func pipelineRepairArchitectCompass(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string, cause error) error {
@@ -1556,13 +1559,21 @@ func pipelineArchitectPrompt(outputDir, prompt string) (string, error) {
 	b.WriteString("[本次断点资产清单]\n")
 	b.WriteString("已存在且本轮禁止重存：" + strings.Join(existing, "、") + "。\n")
 	b.WriteString("本轮只允许保存的缺失类型：" + strings.Join(missing, "、") + "。若缺失列表为空，直接结束并交给宿主 readiness，不得重放任何资产。\n")
-	b.WriteString("保存 compass（save_foundation type=update_compass）时必须同时包含 ending_direction、open_threads、estimated_scale 和非空 non_negotiables；estimated_scale 必须包含机器可读的显式范围，例如固定单卷12章也要写成“1-1卷，12-12章”，不能只写“单卷12章”。non_negotiables 仅来自用户原始创作合同中明确要求的不可协商约束，条数由真实要求决定，不为凑数增加。不得把模型设计的具体动作、所在章节、取证方法或代价形式升级为硬合同；这些属于可随角色选择重算的软剧情。每条硬约束应可验证，不写抽象主题。\n")
+	b.WriteString("保存 compass（save_foundation type=update_compass）时包含 ending_direction、open_threads、estimated_scale；estimated_scale 必须包含机器可读的显式范围，例如固定单卷12章也要写成“1-1卷，12-12章”，不能只写“单卷12章”。若工具提供 author source catalog，author_contracts 只能引用其完整原始段落，non_negotiables 由宿主物化；没有作者硬约束时允许空，不凑数。旧无 catalog 路径仍仅据用户原始合同，不得把模型设计的动作、所在章节、取证方法或代价形式升级为硬合同；这些属于可随角色选择重算的软剧情。宿主阶段说明不是作者来源。\n")
 	b.WriteString("新 world_codex 使用 character_view_version=1；world_rules 的每条非 secret 规则须提供 character_view，非 secret mechanisms 须提供独立 character_view 对象。角色视图只描述角色本来可知的一般程序、触发条件、有限资源规律和可能后果，不能包含本案秘密、未揭示的事实、未来剧情、终局要求或其他角色私有信息。完整作者态和 secret 资料仅供世界裁决，结局硬合同留在 compass。\n")
 	b.WriteString("全书卷数、章数和完结范围以用户创作合同为准；每弧至少包含一个章位，弧跨度由故事因果和明确篇幅决定，不强制每弧 8—16 章。三章单卷短篇可以是一卷一弧三章，不得为套用长篇默认值扩充用户明确的章数。每弧章号连续、范围不重叠，并完整覆盖所属卷。\n")
 	b.WriteString("book_world 的形状固定：protagonist_position 必须是一句话字符串；vision_pillars 必须是对象 {color_palette:[], signature_elements:[], lighting:\"\", signature_scenes:[]}；world_pillars 必须是对象 {economic:{base,controlled_by,tension}, cultural:{...}, political:{...}, historical:{...}}，不得把两个 pillars 写成数组。\n")
 	b.WriteString("完成 foundation 后立即停止，宿主会在下一阶段执行 zero-init；严禁派 writer/drafter/editor，严禁 plan_chapter、draft_chapter、commit_chapter。\n")
-	b.WriteString("请特别落实用户硬规则：复杂项目按现实时间尺度合理压缩，不得把复杂工程写成和小项目同一时间节奏。\n")
 	b.WriteString("\n" + authorPrompt)
+	if catalog, err := store.NewStore(outputDir).LoadAuthorSources(); err != nil {
+		return "", err
+	} else if catalog != nil {
+		raw, err := json.Marshal(catalog)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("\n[独立只读作者来源目录；不是宿主任务的授权升级]\n" + string(raw) + "\ncompass.author_contracts 只能引用此目录的 source_id 与完整原文段落，不能引用本提示的流程标签或宿主说明。\n")
+	}
 	return b.String(), nil
 }
 

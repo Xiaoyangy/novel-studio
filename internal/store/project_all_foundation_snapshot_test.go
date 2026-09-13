@@ -56,3 +56,29 @@ func TestFoundationSnapshotRejectsTopLevelSourceSymlink(t *testing.T) {
 		t.Fatal("source fingerprint followed a foreign symlink")
 	}
 }
+
+func TestFoundationSnapshotBindsOptionalAuthorSourcesWithoutChangingLegacyInventory(t *testing.T) {
+	root := t.TempDir()
+	st := NewStore(root)
+	before, beforeRoot, err := CaptureProjectAllFoundationSnapshot(root)
+	verifiedStoreMust(t, err)
+	if _, present := before.Artifacts[AuthorSourcesPath]; present {
+		t.Fatal("absent author sources changed the legacy inventory")
+	}
+	catalog, err := domain.FinalizeAuthorSourcesV1(domain.AuthorSourcesV1{Sources: []domain.AuthorSourceV1{{ID: "author", Text: "仅三章，人物须独立决定。"}}})
+	verifiedStoreMust(t, err)
+	verifiedStoreMust(t, st.SaveAuthorSources(catalog))
+	after, afterRoot, err := CaptureProjectAllFoundationSnapshot(root)
+	verifiedStoreMust(t, err)
+	raw, err := os.ReadFile(filepath.Join(root, AuthorSourcesPath))
+	verifiedStoreMust(t, err)
+	if after.Artifacts[AuthorSourcesPath] != characterMemoryPublicationSHA(raw) || afterRoot == beforeRoot {
+		t.Fatal("author sources were omitted from the generation foundation root")
+	}
+	verifiedStoreMust(t, os.WriteFile(filepath.Join(root, AuthorSourcesPath), append(raw, '\n'), 0o644))
+	_, changedRoot, err := CaptureProjectAllFoundationSnapshot(root)
+	verifiedStoreMust(t, err)
+	if changedRoot == afterRoot {
+		t.Fatal("author source bytes changed without changing the foundation root")
+	}
+}

@@ -32,6 +32,7 @@ type SaveFoundationTool struct {
 	allowedFoundationType             string
 	recordFoundationRefreshEpoch      bool
 	oneShotFoundationRefresh          bool
+	deferFoundationFinalization       bool
 	foundationRefreshConsumed         atomic.Bool
 }
 
@@ -76,6 +77,15 @@ func (t *SaveFoundationTool) WithOneShotFoundationRefresh(allow bool) *SaveFound
 	return t
 }
 
+// WithDeferredFoundationFinalization is host-only for an isolated repair sidecar.
+// Its source is published first; the subsequent zero-init rebuild owns derived
+// retrieval and phase advancement. Ordinary Architect and refresh calls retain
+// their current writes and automatic foundation-ready phase transition.
+func (t *SaveFoundationTool) WithDeferredFoundationFinalization(deferFinalization bool) *SaveFoundationTool {
+	t.deferFoundationFinalization = deferFinalization
+	return t
+}
+
 func (t *SaveFoundationTool) Name() string { return "save_foundation" }
 func (t *SaveFoundationTool) Description() string {
 	return "保存小说基础设定（premise/outline/characters/world_rules/world_codex/book_world/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / world_codex / book_world / volume_codex / plan_structure / append_volume / map_contracts / expand_arc / revise_arc / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。plan_structure 只在 outline-all chapter0 receipt 下一次性写入全书卷弧预留骨架（每卷 index/title/theme + 每弧 index/title/goal/estimated_chapters；每弧 estimated_chapters 由模型按剧情自定，>=1 且无上限，chapters 必须为空），卷数与全书总章数须落在 estimated_scale 范围内；map_contracts 只在 outline-all chapter0 receipt 下为完整弧集分配结构化终局/长线回执；expand_arc 展开骨架弧的详细章节（需 volume + arc）；revise_arc 只能在 outline-all chapter0 receipt 下原位替换已展开弧，严禁改变 span；append_volume 追加新卷；update_compass 更新终局方向；complete_book 宣告全书完结。scale 可选，仅允许 short / mid / long。"
@@ -87,7 +97,7 @@ func (t *SaveFoundationTool) ReadOnly(_ json.RawMessage) bool        { return fa
 func (t *SaveFoundationTool) ConcurrencySafe(_ json.RawMessage) bool { return false }
 
 func (t *SaveFoundationTool) Schema() map[string]any {
-	return schema.Object(
+	result := schema.Object(
 		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "book_world", "world_codex", "volume_codex", "plan_structure", "append_volume", "map_contracts", "expand_arc", "revise_arc", "update_compass", "complete_book")).Required(),
 		// content 语义上必填，但不进 JSON-schema required：长内容被截断时
 		// 参数会整体失效为空，schema 层的 InputValidationError 只会说"缺参数"，
@@ -102,6 +112,12 @@ func (t *SaveFoundationTool) Schema() map[string]any {
 		schema.Property("change_reason", schema.String("world_codex 修订时必传：为什么必须改（正文矛盾/新卷需要/用户指令）")),
 		schema.Property("change_evidence", schema.String("world_codex 修订时必传：依据——章节事实、审阅结论或用户原话")),
 	)
+	if hint := t.authorCompassSchemaHint(); hint != "" {
+		properties := result["properties"].(map[string]any)
+		content := properties["content"].(map[string]any)
+		content["description"] = content["description"].(string) + hint
+	}
+	return result
 }
 
 func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) (out json.RawMessage, returnErr error) {
@@ -144,6 +160,12 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	content, err := normalizeFoundationContent(a.Content)
 	if err != nil {
 		return nil, err
+	}
+	if a.Type == "update_compass" {
+		content, err = t.prepareAuthorCompassContent(content)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if a.Scale != "" {
 		switch domain.PlanningTier(a.Scale) {
@@ -608,7 +630,7 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	result["outline_all"] = outlineAllMode
 	ragIndexed := false
-	if !outlineAllMode {
+	if !outlineAllMode && !t.deferFoundationFinalization {
 		var ragErr error
 		ragIndexed, ragErr = t.sedimentFoundationRAG(ctx, a.Type, content)
 		if ragErr != nil {
@@ -623,7 +645,7 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 	ready := len(remaining) == 0
 	result["remaining"] = remaining
 	result["foundation_ready"] = ready
-	if ready && !outlineAllMode {
+	if ready && !outlineAllMode && !t.deferFoundationFinalization {
 		if p, _ := t.store.Progress.Load(); p != nil &&
 			p.Phase != domain.PhaseWriting && p.Phase != domain.PhaseComplete {
 			_ = t.store.Progress.UpdatePhase(domain.PhaseWriting)

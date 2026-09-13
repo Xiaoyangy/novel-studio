@@ -73,6 +73,7 @@ func CaptureProjectAllFoundationSnapshot(outputDir string) (ProjectAllFoundation
 		"foreshadow_ledger.json",
 		"timeline.json",
 		"meta/compass.json",
+		AuthorSourcesPath,
 		"meta/run.json",
 		"meta/world_foundation.json",
 		"meta/world_coherence_report.json",

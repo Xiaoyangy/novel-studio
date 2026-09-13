@@ -81,6 +81,7 @@ type NewOptions struct {
 	FoundationRefreshTarget           string
 	RecordFoundationRefreshEpoch      bool
 	OneShotFoundationRefresh          bool
+	DeferFoundationFinalization       bool
 }
 
 // New 创建 Host。
@@ -141,6 +142,7 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		FoundationRefreshTarget:           opts.FoundationRefreshTarget,
 		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
 		OneShotFoundationRefresh:          opts.OneShotFoundationRefresh,
+		DeferFoundationFinalization:       opts.DeferFoundationFinalization,
 	})
 	store.Signals.ClearStaleSignals()
 

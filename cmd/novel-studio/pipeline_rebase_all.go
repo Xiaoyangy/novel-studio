@@ -37,6 +37,12 @@ type pipelineAllChapterRebaseReceipt struct {
 // canon, prepares a chapter-zero candidate, then swaps directories with the
 // same recoverable publisher used by sealed render.
 func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
+	return pipelineRebaseAllChaptersWithFoundationRepair(opts, nil)
+}
+
+// The optional repair runs only in the already archived chapter-zero candidate,
+// before the existing recoverable publisher changes live canon.
+func pipelineRebaseAllChaptersWithFoundationRepair(opts cliOptions, repair *pipelineFoundationRepairPlan) (returnErr error) {
 	live, err := pipelineRebaseOutputDirBeforeLoad(opts)
 	if err != nil {
 		return err
@@ -59,7 +65,12 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 	if err := recoverAllDirectoryPublishesWithControlHeld(live); err != nil {
 		return err
 	}
-	cfg, _, err := loadCfgBundle(opts)
+	var cfg bootstrap.Config
+	if repair == nil {
+		cfg, _, err = loadCfgBundle(opts)
+	} else {
+		cfg, err = pipelineFoundationRepairConfig(opts)
+	}
 	if err != nil {
 		return err
 	}
@@ -67,7 +78,16 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 		return fmt.Errorf("全书 rebase output directory 在独占控制后发生变化")
 	}
 	st := store.NewStore(live)
-	if lock, err := st.Runtime.LoadPipelineExecution(); err != nil {
+	if repair != nil {
+		if err := repair.preflight(live); err != nil {
+			return err
+		}
+	}
+	loadExecution := st.Runtime.LoadPipelineExecution
+	if repair != nil {
+		loadExecution = st.Runtime.InspectPipelineExecution
+	}
+	if lock, err := loadExecution(); err != nil {
 		return err
 	} else if lock != nil {
 		return fmt.Errorf("全书 rebase 前仍有 execution lock：mode=%s owner=%s", lock.Mode, lock.Owner)
@@ -112,6 +132,11 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 	runRoot := pipelineRebaseRunRoot(live)
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	archiveOutput := filepath.Join(runRoot, "archives", "sealed-rebase-"+stamp, "output", "novel")
+	if repair != nil {
+		if err := validatePipelineFoundationRepairCopyTarget(live, archiveOutput); err != nil {
+			return err
+		}
+	}
 	if err := copyPipelineRenderCandidateTree(live, archiveOutput); err != nil {
 		return fmt.Errorf("全书 rebase 归档旧正史: %w", err)
 	}
@@ -143,6 +168,11 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 
 	candidateRoot := filepath.Join(pipelineRebaseCandidateRoot(live), "rebase-"+stamp)
 	candidate := filepath.Join(candidateRoot, "output")
+	if repair != nil {
+		if err := validatePipelineFoundationRepairCopyTarget(live, candidate); err != nil {
+			return err
+		}
+	}
 	if err := copyPipelineRenderCandidateTree(live, candidate); err != nil {
 		return fmt.Errorf("全书 rebase 准备候选正史: %w", err)
 	}
@@ -210,6 +240,11 @@ func pipelineRebaseAllChapters(opts cliOptions) (returnErr error) {
 		receipt,
 	); err != nil {
 		return err
+	}
+	if repair != nil {
+		if err := repair.prepare(cfg, live, candidate); err != nil {
+			return fmt.Errorf("Architect repair rejected; live unchanged, candidate retained at %s: %w", candidate, err)
+		}
 	}
 	transactionID := "canon-rebase-" + strings.TrimPrefix(sourceRoot, "sha256:")[:24]
 	publisher := store.NewDirectoryPublishStore(pipelineRebaseTransactionRoot(live))

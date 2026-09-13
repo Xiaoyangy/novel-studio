@@ -12,9 +12,10 @@ import (
 //
 // 砍 YAML 后，rules 文件就是普通自然语言提示词；归一化只需要原文，不再做 front matter 解析。
 type RawSource struct {
-	Label string     // 来源标签，进入 Snapshot.Sources（如 global:my-style.md）
-	Kind  SourceKind // 优先级层级
-	Text  string     // 文件原始内容
+	Label        string     // 来源标签，进入 Snapshot.Sources（如 global:my-style.md）
+	Kind         SourceKind // 优先级层级
+	Text         string     // 文件原始内容
+	OriginalText string     `json:"-"` // Exact file bytes for source authentication; Text retains legacy normalization input.
 }
 
 // RawFileSources 按 Global → Project 顺序枚举 rules 目录下的 .md 文件并返回原始文本。
@@ -63,9 +64,10 @@ func rawDir(dir string, kind SourceKind) []RawSource {
 			continue
 		}
 		out = append(out, RawSource{
-			Label: kind.String() + ":" + name,
-			Kind:  kind,
-			Text:  text,
+			Label:        kind.String() + ":" + name,
+			Kind:         kind,
+			Text:         text,
+			OriginalText: string(data),
 		})
 	}
 	return out

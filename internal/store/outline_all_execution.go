@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
@@ -100,10 +102,17 @@ func (s *Store) SaveOutlineAllExecutionReceipt(
 	if err := domain.ValidateOutlineAllExecutionReceipt(receipt); err != nil {
 		return err
 	}
+	s.Outline.io.mu.RLock()
+	defer s.Outline.io.mu.RUnlock()
+	if err := s.validateOutlineAllReceiptAuthorContractsUnlocked(receipt); err != nil {
+		return err
+	}
 	return s.Progress.io.WriteJSON(OutlineAllExecutionReceiptPath, receipt)
 }
 
 func (s *Store) LoadOutlineAllExecutionReceipt() (*domain.OutlineAllExecutionReceipt, error) {
+	s.Outline.io.mu.RLock()
+	defer s.Outline.io.mu.RUnlock()
 	var receipt domain.OutlineAllExecutionReceipt
 	if err := s.Progress.io.ReadJSON(OutlineAllExecutionReceiptPath, &receipt); err != nil {
 		if os.IsNotExist(err) {
@@ -112,6 +121,9 @@ func (s *Store) LoadOutlineAllExecutionReceipt() (*domain.OutlineAllExecutionRec
 		return nil, err
 	}
 	if err := domain.ValidateOutlineAllExecutionReceipt(receipt); err != nil {
+		return nil, err
+	}
+	if err := s.validateOutlineAllReceiptAuthorContractsUnlocked(receipt); err != nil {
 		return nil, err
 	}
 	return &receipt, nil
@@ -133,6 +145,10 @@ func (s *Store) UpdateOutlineAllExecutionReceipt(
 		return nil, fmt.Errorf("outline-all receipt update requires mutate function")
 	}
 	var updated domain.OutlineAllExecutionReceipt
+	// Match cross-domain outline/progress mutations' lock order. Validation
+	// below uses unlocked outline reads and never reacquires this RWMutex.
+	s.Outline.io.mu.RLock()
+	defer s.Outline.io.mu.RUnlock()
 	err := s.Progress.io.WithWriteLock(func() error {
 		var current domain.OutlineAllExecutionReceipt
 		if err := s.Progress.io.ReadJSONUnlocked(OutlineAllExecutionReceiptPath, &current); err != nil {
@@ -142,6 +158,9 @@ func (s *Store) UpdateOutlineAllExecutionReceipt(
 			return err
 		}
 		if err := domain.ValidateOutlineAllExecutionReceipt(current); err != nil {
+			return err
+		}
+		if err := s.validateOutlineAllReceiptAuthorContractsUnlocked(current); err != nil {
 			return err
 		}
 		if current.ReceiptDigest != expectedDigest {
@@ -154,6 +173,9 @@ func (s *Store) UpdateOutlineAllExecutionReceipt(
 		if err != nil {
 			return err
 		}
+		if err := s.validateOutlineAllReceiptAuthorContractsUnlocked(signed); err != nil {
+			return err
+		}
 		if err := s.Progress.io.WriteJSONUnlocked(OutlineAllExecutionReceiptPath, signed); err != nil {
 			return err
 		}
@@ -164,4 +186,44 @@ func (s *Store) UpdateOutlineAllExecutionReceipt(
 		return nil, err
 	}
 	return &updated, nil
+}
+
+// Domain validation checks the receipt's shape. New source-bound receipts
+// additionally require the actual immutable author catalog and current exact
+// source-materialized compass; a self-signed policy marker is not authority.
+func (s *Store) validateOutlineAllReceiptAuthorContractsUnlocked(receipt domain.OutlineAllExecutionReceipt) error {
+	catalog, err := loadAuthorSourcesUnlocked(s.Outline.io)
+	if err != nil {
+		return err
+	}
+	if catalog == nil && receipt.AuthorContracts == nil {
+		return s.Outline.requireLegacyCompassWithoutAuthorBindingUnlocked()
+	}
+	if catalog == nil || receipt.AuthorContracts == nil {
+		return fmt.Errorf("outline-all receipt author source mode differs from the actual catalog")
+	}
+	var compass domain.StoryCompass
+	if err := s.Outline.io.ReadJSONUnlocked("meta/compass.json", &compass); err != nil {
+		return err
+	}
+	if compass.AuthorContracts == nil {
+		return fmt.Errorf("outline-all source-bound receipt lacks its actual bound compass")
+	}
+	materialized, err := domain.MaterializeCompassAuthorContractsV1(compass, *catalog)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(materialized.NonNegotiables, compass.NonNegotiables) {
+		return fmt.Errorf("outline-all receipt cannot repair altered stored author contracts")
+	}
+	digest, err := domain.ComputeStoryCompassDigest(compass)
+	if err != nil {
+		return err
+	}
+	if digest != receipt.CompassDigest || !reflect.DeepEqual(receipt.AuthorContracts, compass.AuthorContracts) ||
+		receipt.AuthorContracts.SourcesDigest != catalog.Digest || receipt.EstimatedScale != compass.EstimatedScale ||
+		receipt.EndingDirection != compass.EndingDirection || !slices.Equal(receipt.NonNegotiables, compass.NonNegotiables) {
+		return fmt.Errorf("outline-all receipt author binding differs from the exact current compass/catalog")
+	}
+	return nil
 }

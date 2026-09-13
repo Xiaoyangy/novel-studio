@@ -789,6 +789,21 @@ func loadPipelineOutlineAllFrozenFoundation(outputDir string) (pipelineOutlineAl
 		digests[rel] = pipelineBytesSHA(raw)
 	}
 	authorities := make(map[string]string)
+	catalog, err := store.NewStore(outputDir).LoadAuthorSources()
+	if err != nil {
+		return pipelineOutlineAllFrozenFoundation{}, err
+	}
+	if catalog != nil {
+		if _, err := store.NewStore(outputDir).Outline.LoadCompass(); err != nil {
+			return pipelineOutlineAllFrozenFoundation{}, fmt.Errorf("outline-all requires source-bound compass: %w", err)
+		}
+		raw, err := read(store.AuthorSourcesPath)
+		if err != nil {
+			return pipelineOutlineAllFrozenFoundation{}, err
+		}
+		authorities[store.AuthorSourcesPath] = string(raw)
+		digests[store.AuthorSourcesPath] = pipelineBytesSHA(raw)
+	}
 	brainstormPath := filepath.Join(outputDir, "meta", "brainstorm.md")
 	if _, err := os.Stat(brainstormPath); os.IsNotExist(err) {
 		brainstormPath = filepath.Join(pipelineOutlineAllRunRoot(outputDir), "brainstorm.md")

@@ -518,16 +518,37 @@ func (s *OutlineStore) SaveCompass(compass domain.StoryCompass) error {
 	if compass.EndingDirection == "" {
 		return fmt.Errorf("ending_direction 不能为空")
 	}
-	return s.io.WriteJSON("meta/compass.json", compass)
+	return s.io.WithWriteLock(func() error {
+		catalog, err := loadAuthorSourcesUnlocked(s.io)
+		if err != nil {
+			return err
+		}
+		if catalog == nil && compass.AuthorContracts == nil {
+			if err := s.requireLegacyCompassWithoutAuthorBindingUnlocked(); err != nil {
+				return err
+			}
+			// Preserve the exact legacy write path without new runtime files.
+			return s.io.WriteJSONUnlocked("meta/compass.json", compass)
+		}
+		if _, err := s.prepareCompassUnlocked(compass); err != nil {
+			return err
+		}
+		return withAuthorSourcesFileLock(s.io, func() error { return s.savePreparedCompassUnlocked(compass) })
+	})
 }
 
 // LoadCompass 读取终局方向指南针。
 func (s *OutlineStore) LoadCompass() (*domain.StoryCompass, error) {
+	s.io.mu.RLock()
+	defer s.io.mu.RUnlock()
 	var c domain.StoryCompass
-	if err := s.io.ReadJSON("meta/compass.json", &c); err != nil {
+	if err := s.io.ReadJSONUnlocked("meta/compass.json", &c); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if err := s.validateLoadedCompassAuthorContracts(c); err != nil {
 		return nil, err
 	}
 	return &c, nil

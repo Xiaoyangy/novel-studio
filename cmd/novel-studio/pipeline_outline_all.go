@@ -138,7 +138,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err != nil || len(liveVolumes) == 0 {
 		return fmt.Errorf("outline-all requires layered_outline: %w", err)
 	}
-	if len(compass.NonNegotiables) == 0 {
+	if !pipelineCompassHasAuthorContractBoundary(compass) {
 		return fmt.Errorf("outline-all requires compass.non_negotiables; rerun the restricted architect compass migration before full-book planning")
 	}
 	if issues := domain.OutlineAllArcSpanIssues(liveVolumes); len(issues) > 0 {
@@ -716,7 +716,8 @@ func ensurePipelineOutlineAllReceipt(
 			WritingMode:  mode.Mode, WritingModeReceiptDigest: mode.ReceiptDigest,
 			CompassDigest: compassDigest, EstimatedScale: compass.EstimatedScale,
 			EndingDirection: compass.EndingDirection, NonNegotiables: append([]string(nil), compass.NonNegotiables...),
-			MinVolumes: target.Range.MinVolumes, MaxVolumes: target.Range.MaxVolumes,
+			AuthorContracts: copyPipelineCompassAuthorContracts(compass.AuthorContracts),
+			MinVolumes:      target.Range.MinVolumes, MaxVolumes: target.Range.MaxVolumes,
 			MinChapters: target.Range.MinChapters, MaxChapters: target.Range.MaxChapters,
 			TargetVolumes: target.TargetVolumes, TargetChapters: target.TargetChapters,
 			TargetWords: target.TargetWords, TargetWordsPerChapter: target.TargetWordsPerChapter,
@@ -751,7 +752,7 @@ func ensurePipelineOutlineAllReceipt(
 		existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
 		existing.StableProgressRoot != stableProgressRoot || existing.FoundationContextRoot != foundationContextRoot ||
 		existing.AttemptID != attemptID || filepath.Clean(existing.CandidateDir) != filepath.Clean(candidateDir) ||
-		existing.CompassDigest != compassDigest || existing.ModelIdentityDigest != modelDigest ||
+		existing.CompassDigest != compassDigest || !reflect.DeepEqual(existing.AuthorContracts, compass.AuthorContracts) || existing.ModelIdentityDigest != modelDigest ||
 		existing.PromptProtocolDigest != promptDigest || existing.TargetWords != target.TargetWords ||
 		existing.StoryTimeHint != target.StoryTimeHint {
 		return nil, fmt.Errorf("outline-all recovered attempt identity drift; start a new deterministic attempt")
@@ -1133,7 +1134,7 @@ func pipelineOutlineAllArcMap(volumes []domain.VolumeOutline) []pipelineOutlineA
 func pipelineOutlineAllContractRegistry(compass domain.StoryCompass) []pipelineOutlineAllContractSource {
 	refs := domain.BuildStoryContractRegistry(compass)
 	sources := make([]string, 0, len(refs))
-	if strings.TrimSpace(compass.EndingDirection) != "" {
+	if compass.AuthorContracts == nil && strings.TrimSpace(compass.EndingDirection) != "" {
 		sources = append(sources, compass.EndingDirection)
 	}
 	for _, source := range compass.NonNegotiables {

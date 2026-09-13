@@ -67,6 +67,34 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, c
 			return input, err
 		}
 	}
+	// Hash the exact compass bytes above, but never treat a model-authored
+	// "user quote" as authority without the Store's author-source validation.
+	verifiedCompass, err := st.Outline.LoadCompass()
+	if err != nil {
+		return input, fmt.Errorf("verify rehearsal compass author sources: %w", err)
+	}
+	if verifiedCompass == nil {
+		return input, fmt.Errorf("rehearsal compass disappeared while capturing its source")
+	}
+	left, _ := domain.DeterministicPlanningHash(compass)
+	right, _ := domain.DeterministicPlanningHash(*verifiedCompass)
+	if left != right {
+		return input, fmt.Errorf("rehearsal compass changed while capturing its source")
+	}
+	authorSources, err := st.LoadAuthorSources()
+	if err != nil {
+		return input, fmt.Errorf("load rehearsal author sources: %w", err)
+	}
+	if authorSources != nil {
+		var captured domain.AuthorSourcesV1
+		if err := read(store.AuthorSourcesPath, &captured); err != nil {
+			return input, err
+		}
+		checked, err := domain.FinalizeAuthorSourcesV1(captured)
+		if err != nil || checked.Digest != captured.Digest || captured.Digest != authorSources.Digest {
+			return input, fmt.Errorf("rehearsal author sources changed while capturing their bytes")
+		}
+	}
 	if successor, err := st.CharacterAgents.LoadCurrentSuccessorPlan(); err != nil {
 		return input, err
 	} else if successor != nil && successor.BaseCanonChapter == input.BaseCanonChapter && successor.ArcFirstChapter == input.ArcFirstChapter && successor.ArcLastChapter == input.ArcLastChapter {
@@ -93,7 +121,7 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, c
 		}
 	}
 	sort.Slice(input.Outline, func(i, j int) bool { return input.Outline[i].Chapter < input.Outline[j].Chapter })
-	input.HardContracts = compactAgentStrings(append([]string{compass.EndingDirection}, compass.NonNegotiables...))
+	input.HardContracts = compactAgentStrings(domain.CompassHardContractsV1(compass))
 	if userRules.Status != rules.StatusReady {
 		return input, fmt.Errorf("arc rehearsal requires ready normalized user rules")
 	}

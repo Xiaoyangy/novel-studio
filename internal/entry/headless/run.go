@@ -56,6 +56,7 @@ type Options struct {
 	FoundationRefreshTarget                    string
 	RecordFoundationRefreshEpoch               bool
 	OneShotFoundationRefresh                   bool
+	DeferFoundationFinalization                bool
 	SkipQueueReplay                            bool
 	DisableLiveRAG                             bool
 	// WriterSessionIdentity is an internal pipeline-only audit identity for a
@@ -94,6 +95,7 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		FoundationRefreshTarget:           opts.FoundationRefreshTarget,
 		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
 		OneShotFoundationRefresh:          opts.OneShotFoundationRefresh,
+		DeferFoundationFinalization:       opts.DeferFoundationFinalization,
 	})
 	if err != nil {
 		return err

@@ -105,61 +105,62 @@ type OutlineAllModelIdentity struct {
 // bound to the exact active OutlineAll lease and the exact compass/writing
 // mode receipts, so copying it into another run grants no capability.
 type OutlineAllExecutionReceipt struct {
-	Version                       int                      `json:"version"`
-	Mode                          string                   `json:"mode"`
-	Status                        string                   `json:"status"`
-	BaseCanonChapter              int                      `json:"base_canon_chapter"`
-	GenerationID                  string                   `json:"generation_id,omitempty"`
-	WritingMode                   string                   `json:"writing_mode"`
-	WritingModeReceiptDigest      string                   `json:"writing_mode_receipt_digest"`
-	CompassDigest                 string                   `json:"compass_digest"`
-	EstimatedScale                string                   `json:"estimated_scale"`
-	EndingDirection               string                   `json:"ending_direction"`
-	NonNegotiables                []string                 `json:"non_negotiables,omitempty"`
-	MinVolumes                    int                      `json:"min_volumes"`
-	MaxVolumes                    int                      `json:"max_volumes"`
-	MinChapters                   int                      `json:"min_chapters"`
-	MaxChapters                   int                      `json:"max_chapters"`
-	TargetVolumes                 int                      `json:"target_volumes"`
-	TargetChapters                int                      `json:"target_chapters"`
-	StructurePlan                 *OutlineAllStructurePlan `json:"structure_plan,omitempty"`
-	TargetWords                   int                      `json:"target_words"`
-	TargetWordsPerChapter         int                      `json:"target_words_per_chapter"`
-	StoryTimeHint                 string                   `json:"story_time_hint"`
-	SourceSnapshotRoot            string                   `json:"source_snapshot_root"`
-	ProtectedCanonRoot            string                   `json:"protected_canon_root"`
-	StableProgressRoot            string                   `json:"stable_progress_root"`
-	FoundationContextRoot         string                   `json:"foundation_context_root"`
-	AttemptID                     string                   `json:"attempt_id"`
-	CandidateDir                  string                   `json:"candidate_dir"`
-	CoordinatorProvider           string                   `json:"coordinator_provider"`
-	CoordinatorModel              string                   `json:"coordinator_model"`
-	CoordinatorReasoning          string                   `json:"coordinator_reasoning"`
-	ArchitectProvider             string                   `json:"architect_provider"`
-	ArchitectModel                string                   `json:"architect_model"`
-	ArchitectReasoning            string                   `json:"architect_reasoning"`
-	ModelIdentityDigest           string                   `json:"model_identity_digest"`
-	PromptProtocolDigest          string                   `json:"prompt_protocol_digest"`
-	FinalLayeredDigest            string                   `json:"final_layered_digest,omitempty"`
-	FinalFlatDigest               string                   `json:"final_flat_digest,omitempty"`
-	ArchitectReadinessJSONDigest  string                   `json:"architect_readiness_json_digest,omitempty"`
-	ArchitectReadinessMDDigest    string                   `json:"architect_readiness_md_digest,omitempty"`
-	ExpectedLiveDirectoryRoot     string                   `json:"expected_live_directory_root,omitempty"`
-	PublishedCandidateRoot        string                   `json:"published_candidate_root,omitempty"`
-	DirectoryPublishReceiptDigest string                   `json:"directory_publish_receipt_digest,omitempty"`
-	LockVersion                   int                      `json:"lock_version"`
-	LockMode                      PipelineExecutionMode    `json:"lock_mode"`
-	LockTargetChapter             int                      `json:"lock_target_chapter"`
-	LockPlanDigest                string                   `json:"lock_plan_digest,omitempty"`
-	LockOwner                     string                   `json:"lock_owner"`
-	LockProcessID                 int                      `json:"lock_process_id"`
-	LockAcquiredAt                time.Time                `json:"lock_acquired_at"`
-	LockExpiresAt                 time.Time                `json:"lock_expires_at"`
-	PendingAction                 *OutlineAllPendingAction `json:"pending_action,omitempty"`
-	CompletedActionCount          int                      `json:"completed_action_count,omitempty"`
-	StartedAt                     time.Time                `json:"started_at"`
-	UpdatedAt                     time.Time                `json:"updated_at"`
-	ReceiptDigest                 string                   `json:"receipt_digest"`
+	Version                       int                       `json:"version"`
+	Mode                          string                    `json:"mode"`
+	Status                        string                    `json:"status"`
+	BaseCanonChapter              int                       `json:"base_canon_chapter"`
+	GenerationID                  string                    `json:"generation_id,omitempty"`
+	WritingMode                   string                    `json:"writing_mode"`
+	WritingModeReceiptDigest      string                    `json:"writing_mode_receipt_digest"`
+	CompassDigest                 string                    `json:"compass_digest"`
+	EstimatedScale                string                    `json:"estimated_scale"`
+	EndingDirection               string                    `json:"ending_direction"`
+	NonNegotiables                []string                  `json:"non_negotiables,omitempty"`
+	AuthorContracts               *CompassAuthorContractsV1 `json:"author_contracts,omitempty"`
+	MinVolumes                    int                       `json:"min_volumes"`
+	MaxVolumes                    int                       `json:"max_volumes"`
+	MinChapters                   int                       `json:"min_chapters"`
+	MaxChapters                   int                       `json:"max_chapters"`
+	TargetVolumes                 int                       `json:"target_volumes"`
+	TargetChapters                int                       `json:"target_chapters"`
+	StructurePlan                 *OutlineAllStructurePlan  `json:"structure_plan,omitempty"`
+	TargetWords                   int                       `json:"target_words"`
+	TargetWordsPerChapter         int                       `json:"target_words_per_chapter"`
+	StoryTimeHint                 string                    `json:"story_time_hint"`
+	SourceSnapshotRoot            string                    `json:"source_snapshot_root"`
+	ProtectedCanonRoot            string                    `json:"protected_canon_root"`
+	StableProgressRoot            string                    `json:"stable_progress_root"`
+	FoundationContextRoot         string                    `json:"foundation_context_root"`
+	AttemptID                     string                    `json:"attempt_id"`
+	CandidateDir                  string                    `json:"candidate_dir"`
+	CoordinatorProvider           string                    `json:"coordinator_provider"`
+	CoordinatorModel              string                    `json:"coordinator_model"`
+	CoordinatorReasoning          string                    `json:"coordinator_reasoning"`
+	ArchitectProvider             string                    `json:"architect_provider"`
+	ArchitectModel                string                    `json:"architect_model"`
+	ArchitectReasoning            string                    `json:"architect_reasoning"`
+	ModelIdentityDigest           string                    `json:"model_identity_digest"`
+	PromptProtocolDigest          string                    `json:"prompt_protocol_digest"`
+	FinalLayeredDigest            string                    `json:"final_layered_digest,omitempty"`
+	FinalFlatDigest               string                    `json:"final_flat_digest,omitempty"`
+	ArchitectReadinessJSONDigest  string                    `json:"architect_readiness_json_digest,omitempty"`
+	ArchitectReadinessMDDigest    string                    `json:"architect_readiness_md_digest,omitempty"`
+	ExpectedLiveDirectoryRoot     string                    `json:"expected_live_directory_root,omitempty"`
+	PublishedCandidateRoot        string                    `json:"published_candidate_root,omitempty"`
+	DirectoryPublishReceiptDigest string                    `json:"directory_publish_receipt_digest,omitempty"`
+	LockVersion                   int                       `json:"lock_version"`
+	LockMode                      PipelineExecutionMode     `json:"lock_mode"`
+	LockTargetChapter             int                       `json:"lock_target_chapter"`
+	LockPlanDigest                string                    `json:"lock_plan_digest,omitempty"`
+	LockOwner                     string                    `json:"lock_owner"`
+	LockProcessID                 int                       `json:"lock_process_id"`
+	LockAcquiredAt                time.Time                 `json:"lock_acquired_at"`
+	LockExpiresAt                 time.Time                 `json:"lock_expires_at"`
+	PendingAction                 *OutlineAllPendingAction  `json:"pending_action,omitempty"`
+	CompletedActionCount          int                       `json:"completed_action_count,omitempty"`
+	StartedAt                     time.Time                 `json:"started_at"`
+	UpdatedAt                     time.Time                 `json:"updated_at"`
+	ReceiptDigest                 string                    `json:"receipt_digest"`
 }
 
 func (receipt OutlineAllExecutionReceipt) ModelIdentity() OutlineAllModelIdentity {
@@ -359,8 +360,23 @@ func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) erro
 	if receipt.ModelIdentityDigest != wantModelDigest {
 		return fmt.Errorf("outline-all model identity digest mismatch")
 	}
-	if len(receipt.NonNegotiables) == 0 {
+	if receipt.AuthorContracts == nil && len(receipt.NonNegotiables) == 0 {
 		return fmt.Errorf("outline-all execution receipt requires at least one terminal non_negotiable")
+	}
+	if binding := receipt.AuthorContracts; binding != nil {
+		if binding.Policy != AuthorSourcesPolicyV1 || len(binding.Refs) > 4096 || len(binding.Refs) != len(receipt.NonNegotiables) {
+			return fmt.Errorf("outline-all author contract policy/reference count mismatch")
+		}
+		if err := validatePlanningV2Digest("outline-all author sources digest", binding.SourcesDigest); err != nil {
+			return err
+		}
+		seen := map[AuthorSourceParagraphRefV1]bool{}
+		for _, ref := range binding.Refs {
+			if !validAuthorSourceIDV1(ref.SourceID) || ref.Paragraph < 0 || seen[ref] {
+				return fmt.Errorf("outline-all author source paragraph reference is invalid or duplicated")
+			}
+			seen[ref] = true
+		}
 	}
 	seenContracts := make(map[string]struct{}, len(receipt.NonNegotiables))
 	for _, contract := range receipt.NonNegotiables {
@@ -368,7 +384,7 @@ func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) erro
 		if contract == "" {
 			return fmt.Errorf("outline-all execution receipt has an empty non_negotiable")
 		}
-		if _, exists := seenContracts[contract]; exists {
+		if _, exists := seenContracts[contract]; exists && receipt.AuthorContracts == nil {
 			return fmt.Errorf("outline-all execution receipt has duplicate non_negotiable %q", contract)
 		}
 		seenContracts[contract] = struct{}{}

@@ -216,6 +216,7 @@ type CoordinatorBuildOptions struct {
 	FoundationRefreshTarget           string
 	RecordFoundationRefreshEpoch      bool
 	OneShotFoundationRefresh          bool
+	DeferFoundationFinalization       bool
 }
 
 var subAgentSessionIdentityRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
@@ -335,7 +336,8 @@ func BuildCoordinatorWithOptions(
 		WithChapterZeroFoundationRefresh(buildOpts.AllowChapterZeroFoundationRefresh).
 		WithFoundationTypeRestriction(buildOpts.FoundationRefreshTarget).
 		WithFoundationRefreshEpoch(buildOpts.RecordFoundationRefreshEpoch).
-		WithOneShotFoundationRefresh(buildOpts.OneShotFoundationRefresh)
+		WithOneShotFoundationRefresh(buildOpts.OneShotFoundationRefresh).
+		WithDeferredFoundationFinalization(buildOpts.DeferFoundationFinalization)
 	saveReview := tools.NewSaveReviewTool(store)
 	if !cfg.DisableLiveRAG {
 		if qdrantClient, enabled, err := bootstrap.NewRAGQdrantClient(cfg, false); err != nil {
