@@ -82,6 +82,8 @@ JSON 数组，每条含：category、rule、boundary、visibility；需要角色
 
 `rule` / `boundary` 是完整作者态；`character_view` 才是角色实际接收的规则文本。公开视图只写普遍适用的程序、条件、资源规律与可观察边界，不能写本案秘密、幕后角色身份、未来揭示、预定选择或硬合同结局。秘密事实留在 `visibility="secret"` 的作者态；缺少显式视图时宿主不向角色投放，不能靠 `formal` / `informal` 标签把完整作者源当作角色已知内容。
 
+已定义且应公开的操作必要工时、数值门槛和前置必须完整保留在 `character_view`，不能只留在作者态 `rule/boundary`；保留既有值、单位、适用条件及约束强度，不把具体要求泛化成“占实际工时”。
+
 调用 `save_foundation(type="world_rules", scale="long", content=<JSON数组>)`。
 
 ### 5. 生成 World Codex
@@ -105,6 +107,10 @@ World Rules 是人能读的总边界；World Codex v2 还要把本书反复发�
   - 每条机制至少被一个探针覆盖
   - 至少覆盖资源不足、前置失败、跨地点/跨时间、信息不可见或能力越级中与本书有关的情形
   - `forbidden_outcome` 明写为了推进剧情也绝不能出现的便利捷径
+
+公开操作条件完整性：将已定义且应公开的必要工时、数值门槛和前置写入 `character_view` 对应的 `costs/timing/preconditions`，保留既有值、单位、适用对象、每次或累计口径，以及“最低/预计/通常”的原有约束强度。例如已有“至少 N 分钟”不能改写成“占实际工时”，也不能把预计预算升级为绝对最低条件。公开操作数值不等于未观测实例数量：公开的耗时或阈值可以用于排程，未测余额、当前状态、他人秘密及未来结果仍不得成为角色已知。不得为补齐视图而新造固定工时、数值门槛或额外程序，也不得扩大已有规则的适用范围。
+
+保存前复用已有 `counterfactual_tests` 做角色视图自检：模拟只读角色视图、具备所列已知前置的角色安排一个合法行动，检查其能否从公开视图获得必需工时与门槛，而无需猜测 Arbiter 私有条款。若遗漏应公开条件，修正对应视图；确属应隐藏的条件仍保留未知及合法获知途径，不能借自检公开秘密。沿用原有 `given/action/expected_outcome/forbidden_outcome/mechanism_refs`，在本次创建内完成，不新增 schema 字段、额外模型调用或常态评审阶段。
 
 能力分级的每一级都要有 `cost`；适用的 section 必须同时有设定正文和至少一条可执行 `rules`；技能、族群、武器与装备都必须写 constraints。重复信息用 `section_refs` / `mechanism_refs` 连接，不要在多个字段改写同一句规则。
 

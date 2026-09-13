@@ -111,6 +111,7 @@
 - 规则必须直接服务当前冲突
 - 写作禁区和世界规则边界要互相一致
 - `rule` / `boundary` 保存完整作者态；`character_view` 仅包含普遍适用的程序、条件、资源规律与可观察边界。不要向公开视图写入本案秘密、幕后角色身份、未来揭示、预定选择或硬合同结局；秘密事实保留在 secret 作者态。缺少显式视图时不向角色投放，formal / informal 标签本身不授予角色完整作者知识。
+- 已定义且应公开的操作必要工时、数值门槛和前置必须完整保留在 `character_view`，不能只留在作者态 `rule/boundary`；保留既有值、单位、适用条件及约束强度，不把具体要求泛化成“占实际工时”。
 
 调用 save_foundation(type="world_rules", scale="short", content=<JSON数组>)
 
@@ -119,6 +120,10 @@
 短篇不做百科式世界观，但仍要让唯一主冲突经得起反推。生成 `schema_version: 2` 的完整世界法典：保留能力/技能/族群/武器/装备与 16 个 sections；只为会直接推动本篇选择的因果建立 `mechanisms`，每项写 `{id,name,visibility,section_refs,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}`，visibility 只能是 formal / informal / secret，secret 不得泄露给未知情角色；用 `counterfactual_tests` 逐条覆盖机制，写清不利初态、行动、应得结果和绝不能出现的便利捷径。能力级别要有 cost，适用 section 要有可执行 rules，所有门类要有 constraints。用 refs 连接已有内容，不重复改写规则。
 
 顶层同时写 `character_view_version: 1`，新建时宿主会固定启用。formal / informal 机制必须另有 `character_view` 对象：`{name,actor_scope,trigger,preconditions,inputs,costs,effects,failure_modes,observability,timing}`，其中 `name/trigger/timing` 为字符串，其余为字符串数组。此视图只写角色可获知的一般机制，不带本案私密实例和未来结果；角色只读显式视图，完整作者源给 Arbiter，secret 机制不投放。不得把完整作者机制复制过去充数。
+
+公开操作条件完整性：将已定义且应公开的必要工时、数值门槛和前置写入 `character_view` 对应的 `costs/timing/preconditions`，保留既有值、单位、适用对象、每次或累计口径，以及“最低/预计/通常”的原有约束强度。例如已有“至少 N 分钟”不能改写成“占实际工时”，也不能把预计预算升级为绝对最低条件。公开操作数值不等于未观测实例数量：公开的耗时或阈值可以用于排程，未测余额、当前状态、他人秘密及未来结果仍不得成为角色已知。不得为补齐视图而新造固定工时、数值门槛或额外程序，也不得扩大已有规则的适用范围。
+
+保存前复用已有 `counterfactual_tests` 做角色视图自检：模拟只读角色视图、具备所列已知前置的角色安排一个合法行动，检查其能否从公开视图获得必需工时与门槛，而无需猜测 Arbiter 私有条款。若遗漏应公开条件，修正对应视图；确属应隐藏的条件仍保留未知及合法获知途径，不能借自检公开秘密。沿用原有 `given/action/expected_outcome/forbidden_outcome/mechanism_refs`，在本次创建内完成，不新增 schema 字段、额外模型调用或常态评审阶段。
 
 未知字段会拒绝本次保存。设备细节、证据流程等信息写入对应 `sections[].content/rules`，可执行条件写入 `mechanisms` 的已有字段；不要另造顶层 `equipment` / `evidence_contract` 或引用未保存对象。修正 schema 时保留原设定信息。
 

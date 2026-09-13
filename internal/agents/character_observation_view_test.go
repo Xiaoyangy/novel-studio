@@ -44,7 +44,7 @@ func TestCharacterObservationConsumesOnlyExplicitWorldViews(t *testing.T) {
 	const authorTruth = "第三章须证明父亲只领六十升，许岚另外转走三十升。"
 	const privateView = "不得向不知情角色透露的秘密投影"
 	rules := []domain.WorldRule{
-		{Category: "终局合同", Rule: authorTruth, Boundary: "终局不得反转", Visibility: "formal", CharacterView: "有来源的原件可以交叉核对，记账更正必须保留原页。"},
+		{Category: "终局合同", Rule: authorTruth, Boundary: "终局不得反转", Visibility: "formal", CharacterView: "有来源的原件可以交叉核对，记账更正必须保留原页。每处原件核对预留五分钟，完整清点封存预留八分钟。"},
 		{Category: "作者约束", Rule: "第一章拆封第二章取证第三章结案", Visibility: "formal"},
 		{Category: "隐秘事实", Rule: "许岚是改账者", Visibility: "secret", CharacterView: privateView},
 		{Category: "非法标签", Rule: "不应公开", Visibility: "unrecognized", CharacterView: "非法可见性投影"},
@@ -121,10 +121,19 @@ func TestCharacterObservationConsumesOnlyExplicitWorldViews(t *testing.T) {
 		if len(observation.PublicRules) != 2 || len(observation.PublicMechanisms) != 1 {
 			t.Fatalf("explicit safe views were dropped: %+v", observation)
 		}
+		publicWorkRule := false
+		for _, rule := range observation.PublicRules {
+			publicWorkRule = publicWorkRule || rule.Text == rules[0].CharacterView
+		}
+		if !publicWorkRule {
+			t.Fatal("explicit public work requirements were generalized or omitted")
+		}
 		projected := observation.PublicMechanisms[0]
 		if projected.ID != mechanism.ID || projected.Name != mechanism.CharacterView.Name ||
 			!reflect.DeepEqual(projected.Effects, mechanism.CharacterView.Effects) ||
 			!reflect.DeepEqual(projected.Preconditions, mechanism.CharacterView.Preconditions) ||
+			!reflect.DeepEqual(projected.Costs, mechanism.CharacterView.Costs) ||
+			projected.Timing != mechanism.CharacterView.Timing ||
 			projected.CharacterView != nil || len(projected.SectionRefs) != 0 || projected.Cooldown != "" {
 			t.Fatalf("public mechanism was not rebuilt from its explicit view: %+v", projected)
 		}
@@ -135,6 +144,10 @@ func TestCharacterObservationConsumesOnlyExplicitWorldViews(t *testing.T) {
 		t.Fatal("private established knowledge was leaked or deleted instead of kept per character")
 	}
 	observer.PublicMechanisms[0].Effects[0] = "mutated observation"
+	observer.PublicMechanisms[0].Costs[0] = "mutated cost"
+	if stimulus.Mechanisms[0].CharacterView.Costs[0] != mechanism.CharacterView.Costs[0] || witness.PublicMechanisms[0].Costs[0] != mechanism.CharacterView.Costs[0] {
+		t.Fatal("public work costs share mutable storage between actor views or author source")
+	}
 	if stimulus.Mechanisms[0].CharacterView.Effects[0] == "mutated observation" || witness.PublicMechanisms[0].Effects[0] == "mutated observation" {
 		t.Fatal("public mechanism views share mutable slices across character observations or Arbiter source")
 	}
