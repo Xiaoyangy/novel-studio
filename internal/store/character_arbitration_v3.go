@@ -213,10 +213,8 @@ func (v *CharacterArbitrationV3) validateAdmission() error {
 	if err := domain.ValidateCharacterSelfEvaluationContextAgainstSessionV1(*v.input.Stimulus.SelfEvaluationContext, v.prefix.Session()); err != nil {
 		return err
 	}
-	for _, step := range v.prefix.Steps() {
-		if step.Cycle().Version != domain.CharacterActivationCycleV3Version || step.Cycle().Evidence.ProtocolDigest != a.Protocol {
-			return fmt.Errorf("v3 cannot upgrade old history or change execution protocol")
-		}
+	if err := v.prefix.ValidateCycleProtocol(domain.CharacterActivationCycleV3Version, a.Protocol); err != nil {
+		return fmt.Errorf("v3 cannot upgrade old history or change execution protocol")
 	}
 	seen := map[string]bool{}
 	for _, receipt := range a.Continuations {

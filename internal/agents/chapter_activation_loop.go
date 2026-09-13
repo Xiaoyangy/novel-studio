@@ -100,9 +100,12 @@ func RunChapterActivationLoop(ctx context.Context, st *store.Store, baseline dom
 					prefix, loadErr := st.LoadVerifiedCharacterActivationPrefix(current.GenerationID, current.Chapter)
 					err = loadErr
 					if err == nil && prefix != nil && prefix.Session().Digest == current.Digest {
-						steps := prefix.Steps()
-						value := steps[len(steps)-1].Cycle()
-						cycle = &value
+						// Source verification above covers the complete prefix; this
+						// assessment only needs its final detached cycle.
+						if step, ok := prefix.Step(len(current.CycleDigests) - 1); ok {
+							value := step.Cycle()
+							cycle = &value
+						}
 					}
 				} else {
 					cycle, err = st.LoadCharacterActivationCycle(current.GenerationID, current.Chapter, len(current.CycleDigests))

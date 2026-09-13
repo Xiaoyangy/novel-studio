@@ -71,6 +71,22 @@ func (p VerifiedCharacterActivationPrefix) Steps() []VerifiedCharacterActivation
 	return result
 }
 
+// ValidateCycleProtocol checks only scalar metadata of this already-verified
+// runtime prefix. It neither constructs source authority nor exposes/copies
+// the immutable history. A verified empty prefix is valid for initial admission;
+// a zero or JSON-unmarshaled wrapper is not a verified empty prefix.
+func (p VerifiedCharacterActivationPrefix) ValidateCycleProtocol(version, protocolDigest string) error {
+	if !p.verified {
+		return fmt.Errorf("cycle protocol check requires a verified activation prefix")
+	}
+	for _, step := range p.steps {
+		if !step.verified || step.cycle.Version != version || step.cycle.Evidence.ProtocolDigest != protocolDigest {
+			return fmt.Errorf("verified activation history has a different cycle version or execution protocol")
+		}
+	}
+	return nil
+}
+
 // Step returns one detached verified step (zero-based), avoiding copies of the
 // entire history for an indexed lookup. It does not skip source verification:
 // callers must already have obtained this runtime-only verified prefix.
