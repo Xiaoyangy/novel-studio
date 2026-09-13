@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -104,6 +105,19 @@ func rehearsalCapabilityKeyV1(s string) bool {
 func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehearsalBody) (resultErr error) {
 	materialIndex, requirementIndex := -1, -1
 	var diagnosticRequirement ArcRehearsalCapabilityRequirementV1
+	var coverageErrors []error
+	defer func() {
+		if len(coverageErrors) == 0 {
+			return
+		}
+		// The inner defer first locates any later structural rejection. Only
+		// independent coverage omissions are accumulated; none can be accepted.
+		if resultErr != nil {
+			coverageErrors = append(coverageErrors, resultErr)
+		}
+		coverageErrors = append(coverageErrors, errors.New("Each available material_check must cover every resource_ref in its own capability_requirements.resource_refs or valid first artifact_write.material_inputs, as appropriate to the actual operation; depends_on alone does not cover that resource. Do not invent resources, permissions or actions to satisfy coverage."))
+		resultErr = errors.Join(coverageErrors...)
+	}()
 	defer func() {
 		if resultErr == nil || materialIndex < 0 {
 			return
@@ -327,7 +341,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			}
 			for _, id := range m.ResourceRefs {
 				if !covered[id] {
-					return fmt.Errorf("material resource %q lacks an executable dependency", id)
+					coverageErrors = append(coverageErrors, fmt.Errorf("material_checks[%d]: material resource %q lacks an executable dependency", i, id))
 				}
 			}
 		}
