@@ -84,8 +84,9 @@
 - `traits`: **string[]**（特质字符串数组，如 `["冷静","多疑"]`，不是 object）
 - `tier`: string（`core` / `important` / `secondary` / `decorative`；缺省视为重要角色）
 - `initial_state`: object（新建主角、core/important 及默认重要角色必填），字段 `{time?,location,current_goal,current_action?,pressure,known_facts,resources,relationships,commitments,resource_balances?}`。`time/location/current_goal/current_action/pressure` 为字符串；原有其他字段为字符串数组。`location/current_goal/pressure` 必须非空，`known_facts` 至少一条明确已知事实且不得重复。
-- 独立角色 v2 的可见资源使用 `resource_balances` 对象数组，旧 `resources` 字符串仅保留作者态。每条 `{resource_id,name,perceived_name,unit,perceived_unit,actual_amount,access,perception,evidence_refs}`：ID为`res_`加16—64位小写十六进制稳定标识，不编码秘密/数量；同ID各角色引用的name/unit/actual_amount必须一致，世界只结算一次。`actual_amount`为世界真值number或null；纯权限/材料用null且unit为空，不强迫量化。`perceived_name/perceived_unit`独立写角色真正知道的名称/量纲，不从作者态name或world unit自动补；未知名称用“未识别资源”。access=exclusive/shared/none，独占不能克隆，共享不重复余额。
+- 独立角色 v2 的可见资源使用 `resource_balances` 对象数组，旧 `resources` 字符串仅保留作者态。每条 `{resource_id,name,perceived_name,unit,perceived_unit,actual_amount,access,perception,evidence_refs}`：ID为`res_`加16—64位小写十六进制稳定标识，不编码秘密/数量；同ID各角色引用的name/unit/actual_amount必须一致，世界只结算一次。`actual_amount`为世界真值number或null；仅用于定性身份/权限且不承担数量判断的资源可用null、空unit，不能因为是文书或材料就一律定性。若实际件数将影响清点、交接或数量核验，创建设定时须明确同一物理计数对象、unit及有依据的实际数量；离散件数用非负整数，物理集合的范围不能含糊。对象本身的份数不等于容器全部内容件数；一个资源ID也不证明只有一件实物。不新增假资源副本来绕过数量定义。若世界源仍未确定真值，就保留null，并不得把清单记载、传言或裁决自由文字当作实际数量。`perceived_name/perceived_unit`独立写角色真正知道的名称/量纲，不从作者态name或world unit自动补；未知名称用“未识别资源”。access=exclusive/shared/none，独占不能克隆，共享不重复余额。
 - perception={kind,amount?,estimate_min?,estimate_max?,as_of_chapter,evidence_refs}，kind=unaware/unknown/last_observed/estimated/reported；初态as_of_chapter=0。未知/未感知不填数值，观测/未核实报告填amount，估计给有来源上下界；有数值时必须有已知perceived_unit。真值与角色读数/估计可以不同，不用未来StateAfter补初态，不凭空测出精确余量。
+- 需要后续实际清点/测量时，必须有角色可知的适用机制和可解释的单位来源。角色初始仍可不知道真实数量；执行时复用绑定本人work任务与真实时点的resource_measurements，不能靠“清点动作completed”自动获得件数。没有结构化观测结果，就不能要求角色在后续记录里引用实际件数。本条只用于新设定或明确修复世界源，不从旧自由文字补写封存代次和既有角色记忆。
 
 要求：
 

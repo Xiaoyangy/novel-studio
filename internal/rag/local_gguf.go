@@ -25,10 +25,11 @@ import (
 
 // LocalGGUFConfig 本地 GGUF embedding 服务配置。
 type LocalGGUFConfig struct {
-	GGUFPath string        // 模型文件路径（项目内）
-	Port     int           // 默认 18434
-	CtxSize  int           // 默认 8192
-	Timeout  time.Duration // 单次 embed 超时
+	BeforeCall func() error  // Runtime only; does not change the selected local model.
+	GGUFPath   string        // 模型文件路径（项目内）
+	Port       int           // 默认 18434
+	CtxSize    int           // 默认 8192
+	Timeout    time.Duration // 单次 embed 超时
 }
 
 func (c *LocalGGUFConfig) fillDefaults() {
@@ -179,6 +180,7 @@ func NewLocalGGUFEmbedder(cfg LocalGGUFConfig, model string) (Embedder, error) {
 		model = "qwen3-embedding-0.6b"
 	}
 	inner, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
+		BeforeCall:        cfg.BeforeCall,
 		BaseURL:           cfg.baseURL() + "/v1",
 		Model:             model,
 		Timeout:           cfg.Timeout,
@@ -213,10 +215,16 @@ func (e *localGGUFEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 		return nil, ctx.Err()
 	}
 	firstErr := err
+	if e.cfg.BeforeCall != nil {
+		if err := e.cfg.BeforeCall(); err != nil {
+			return nil, err
+		}
+	}
 	if err := EnsureLocalGGUFServer(ctx, e.cfg); err != nil {
 		return nil, fmt.Errorf("local gguf embedding failed and restart failed: %w (original: %v)", err, firstErr)
 	}
 	inner, err := NewOpenAIEmbedder(OpenAIEmbedderConfig{
+		BeforeCall:        e.cfg.BeforeCall,
 		BaseURL:           e.cfg.baseURL() + "/v1",
 		Model:             e.model,
 		Timeout:           e.cfg.Timeout,

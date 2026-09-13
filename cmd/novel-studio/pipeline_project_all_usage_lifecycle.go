@@ -13,6 +13,9 @@ func pipelineUsageProcessIdentity(pid int) (string, bool, error) {
 }
 
 func (a *pipelineProjectAllAccounting) startCall(id, agent string) error {
+	if err := a.deliveryGuard.Check(); err != nil {
+		return err
+	}
 	if err := context.Cause(a.ctx); err != nil {
 		return err
 	}

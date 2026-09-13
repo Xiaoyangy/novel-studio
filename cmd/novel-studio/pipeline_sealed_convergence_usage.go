@@ -28,7 +28,19 @@ func newPipelineSealedConvergenceUsage(cfg bootstrap.Config, st *store.Store, in
 	if _, err := validatePipelineSealedConvergenceReplanIntent(st.Dir(), *intent); err != nil {
 		return nil, nil, fmt.Errorf("sealed convergence usage live binding: %w", err)
 	}
-	scope, err := host.NewScopedUsageAccounting(context.Background(), st, intent.SourceFrozen.PlanningGenerationID, cfg.Budget)
+	generation, err := st.ProjectedV2().LoadSealedGeneration(intent.SourceFrozen.PlanningGenerationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var callGuards []func() error
+	if generation != nil && generation.ChapterDeliveryBudget != nil {
+		if err := requirePipelineChapterDeliveryStarted(st, *generation, intent.SourceFrozen.Chapter); err != nil {
+			return nil, nil, err
+		}
+		guard := pipelineGenerationDeliveryGuard(st, *generation, intent.SourceFrozen.Chapter)
+		callGuards = append(callGuards, guard.Check)
+	}
+	scope, err := host.NewScopedUsageAccounting(context.Background(), st, intent.SourceFrozen.PlanningGenerationID, cfg.Budget, callGuards...)
 	if err != nil {
 		return nil, nil, err
 	}

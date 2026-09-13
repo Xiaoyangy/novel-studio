@@ -904,6 +904,7 @@ func validatePipelineSealedGenerationDependencies(
 		if err != nil {
 			return "", err
 		}
+		root = pipelineChapterDeliveryDependencyRoot(root, generation.ChapterDeliveryBudget)
 		if successor != nil {
 			root = pipelineProjectAllDigest(struct {
 				Version            string `json:"version"`

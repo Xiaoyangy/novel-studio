@@ -77,7 +77,7 @@ func NewRAGEmbedderWithOverride(cfg Config, override RAGEmbeddingConfig) (rag.Em
 	// Task 071：项目内 GGUF 本地语义模型优先（Qwen3-Embedding-0.6B，llama-server 自启动）——
 	// 必须先于 provider=="local" 的哈希兜底判断，否则旧配置残留的 provider 会吞掉真模型。
 	if gguf := strings.TrimSpace(emb.LocalGGUF); gguf != "" {
-		lcfg := rag.LocalGGUFConfig{GGUFPath: gguf, Port: emb.LocalPort, Timeout: timeout}
+		lcfg := rag.LocalGGUFConfig{GGUFPath: gguf, Port: emb.LocalPort, Timeout: timeout, BeforeCall: cfg.BeforeProviderCall}
 		if err := rag.EnsureLocalGGUFServer(context.Background(), lcfg); err != nil {
 			return nil, true, fmt.Errorf("本地 embedding 服务不可用: %w", err)
 		}
@@ -92,12 +92,13 @@ func NewRAGEmbedderWithOverride(cfg Config, override RAGEmbeddingConfig) (rag.Em
 	}
 	headers, userAgent := providerHTTPExtras(pc)
 	embedder, err := rag.NewOpenAIEmbedder(rag.OpenAIEmbedderConfig{
-		APIKey:    apiKey,
-		BaseURL:   baseURL,
-		Model:     emb.Model,
-		UserAgent: userAgent,
-		Headers:   headers,
-		Timeout:   timeout,
+		BeforeCall: cfg.BeforeProviderCall,
+		APIKey:     apiKey,
+		BaseURL:    baseURL,
+		Model:      emb.Model,
+		UserAgent:  userAgent,
+		Headers:    headers,
+		Timeout:    timeout,
 	})
 	if err != nil {
 		return nil, true, fmt.Errorf("初始化 RAG embedding 失败: %w", err)

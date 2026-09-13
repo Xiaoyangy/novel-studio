@@ -130,7 +130,12 @@
   // "budget": {
   //   "book_usd": 50,
   //   "warn_ratio": 0.8,
-  //   "hard_stop": false
+  //   "hard_stop": false,
+  //   // 仅新 generation 显式启用：每章首次细推到真实验收的墙钟秒数。
+  //   // 包含前三章窗口等待、重试、验证与返工；1200 = 20 分钟。
+  //   // 到期停止新模型派发，保留在途结果；超时不等于章节完成。
+  //   // 0 对新代次不启用；已启用代次恢复原值，不能用 0 或改值重置计时。
+  //   "chapter_delivery_seconds": 1200
   // },
 
   // 可选。无人值守告警，缺省启用（macOS osascript / Linux notify-send 桌面通知）。

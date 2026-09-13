@@ -1413,6 +1413,8 @@ func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Confi
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
+	stopDispatch := make(chan struct{})
+	var stopDispatchOnce sync.Once
 	// A fixed worker pool bounds goroutines as well as provider concurrency;
 	// large casts do not allocate one waiting goroutine per character.
 	for range min(limit, len(pending)) {
@@ -1427,6 +1429,9 @@ func runCharacterProposalRoundWithModel(ctx context.Context, cfg bootstrap.Confi
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
+					}
+					stopDispatchOnce.Do(func() { close(stopDispatch) })
+					if !errors.Is(err, store.ErrChapterDeliveryDeadline) {
 						cancel()
 					}
 					mu.Unlock()
@@ -1440,6 +1445,8 @@ dispatch:
 		select {
 		case jobs <- observation:
 		case <-runCtx.Done():
+			break dispatch
+		case <-stopDispatch:
 			break dispatch
 		}
 	}

@@ -15,12 +15,13 @@ import (
 const defaultEmbeddingMaxAttempts = 6
 
 type OpenAIEmbedderConfig struct {
-	APIKey    string
-	BaseURL   string
-	Model     string
-	UserAgent string
-	Headers   map[string]string
-	Timeout   time.Duration
+	BeforeCall func() error // Runtime guard, checked before every real HTTP attempt.
+	APIKey     string
+	BaseURL    string
+	Model      string
+	UserAgent  string
+	Headers    map[string]string
+	Timeout    time.Duration
 	// DisableKeepAlives is useful for local llama-server processes that may be
 	// restarted in place while an old pooled socket still exists.
 	DisableKeepAlives bool
@@ -110,6 +111,11 @@ func (e *OpenAIEmbedder) embedOnce(ctx context.Context, data []byte) ([]float32,
 		v = strings.TrimSpace(v)
 		if k != "" && v != "" {
 			req.Header.Set(k, v)
+		}
+	}
+	if e.cfg.BeforeCall != nil {
+		if err := e.cfg.BeforeCall(); err != nil {
+			return nil, err
 		}
 	}
 	resp, err := e.client.Do(req)

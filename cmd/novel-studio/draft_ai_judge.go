@@ -85,6 +85,9 @@ func draftAIJudgePipeline(opts cliOptions, argv []string) error {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
 	projectDir := strings.TrimSpace(opts.Dir)
+	if opts.providerCallGuard != nil {
+		cfg.BeforeProviderCall = opts.providerCallGuard.Check
+	}
 	if projectDir == "" {
 		projectDir, _ = os.Getwd()
 	}

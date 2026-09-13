@@ -140,9 +140,10 @@ var knownRoles = map[string]bool{
 // Config 小说应用配置。
 type Config struct {
 	// 运行时字段（不序列化到 JSON）
-	OutputDir            string `json:"-"` // 输出根目录
-	DisableLiveRAG       bool   `json:"-"` // 冻结 render 会话：不初始化 embedding/Qdrant 或实时召回
-	DisableModelFailover bool   `json:"-"` // sealed render：只允许配置的主 provider/model，不降级
+	OutputDir            string       `json:"-"` // 输出根目录
+	DisableLiveRAG       bool         `json:"-"` // 冻结 render 会话：不初始化 embedding/Qdrant 或实时召回
+	DisableModelFailover bool         `json:"-"` // sealed render：只允许配置的主 provider/model，不降级
+	BeforeProviderCall   func() error `json:"-"` // Runtime host guard; not a persisted/model setting.
 
 	// 默认 LLM 配置
 	Provider  string `json:"provider"` // 默认 provider（Providers map 中的 key）
@@ -175,7 +176,8 @@ type Config struct {
 	// 稳妥窗口。key 是配置里写的模型名（原样匹配，含 [1M] 后缀）。
 	ContextWindows map[string]int `json:"context_windows,omitempty"`
 
-	// Budget 单本书的成本预算政策；book_usd > 0 才启用。
+	// Budget keeps monetary policy and an independently frozen generation wall limit.
+	// book_usd controls only the cost sentinel; chapter_delivery_seconds is opt-in for new generations.
 	Budget BudgetConfig `json:"budget,omitzero"`
 
 	// Notify 无人值守告警配置；缺省启用（system 通道兜底）。
@@ -303,12 +305,14 @@ type RAGQdrantConfig struct {
 // BudgetConfig 是用户对单本书钱包的政策声明。越线停机等同于用户在那一刻
 // 手动 Abort——Host 只代为执行，不评估模型行为（架构 §10 合宪边界）。
 type BudgetConfig struct {
-	BookUSD   float64 `json:"book_usd,omitempty"`   // 必填才启用；0/缺省 = 不限
-	WarnRatio float64 `json:"warn_ratio,omitempty"` // 告警水位，默认 0.8
-	HardStop  bool    `json:"hard_stop,omitempty"`  // true=越线立即停；默认等当前子代理任务结束
+	ChapterDeliverySeconds int     `json:"chapter_delivery_seconds,omitempty"` // 0=legacy off; new generation explicitly freezes the detail-to-accept wall limit.
+	BookUSD                float64 `json:"book_usd,omitempty"`                 // 必填才启用；0/缺省 = 不限
+	WarnRatio              float64 `json:"warn_ratio,omitempty"`               // 告警水位，默认 0.8
+	HardStop               bool    `json:"hard_stop,omitempty"`                // true=越线立即停；默认等当前子代理任务结束
 }
 
-// Enabled 返回预算政策是否启用。
+// Enabled reports only the monetary sentinel. A generation's wall deadline is
+// independently frozen and must never be enabled/disabled through this method.
 func (b BudgetConfig) Enabled() bool { return b.BookUSD > 0 }
 
 // NotifyConfig 无人值守告警通道配置。
@@ -323,6 +327,9 @@ func (n NotifyConfig) IsEnabled() bool { return n.Enabled == nil || *n.Enabled }
 
 // ValidateBase 校验基础配置。
 func (c *Config) ValidateBase() error {
+	if c.Budget.ChapterDeliverySeconds < 0 || c.Budget.ChapterDeliverySeconds > 86400 {
+		return fmt.Errorf("budget.chapter_delivery_seconds must be 0 or 1..86400: %w", errs.ErrConfig)
+	}
 	if err := validateConfigText("provider", c.Provider); err != nil {
 		return err
 	}

@@ -27,6 +27,9 @@ func loadCfgBundle(opts cliOptions) (bootstrap.Config, assets.Bundle, error) {
 		return bootstrap.Config{}, assets.Bundle{}, fmt.Errorf("加载配置失败: %w", err)
 	}
 	// host.New 内部也会 FillDefaults（幂等），这里先填一遍让 cfg.OutputDir 等默认值
+	if opts.providerCallGuard != nil {
+		cfg.BeforeProviderCall = opts.providerCallGuard.Check
+	}
 	// 对直接读 cfg 的调用方（如 --pipeline 解析 statePath）可见。
 	// --dir 指定项目根时以它为基准解析相对 OutputDir，不再要求 cwd 必须是项目目录。
 	if err := normalizeOutputAndRAGForInvocation(&cfg, opts.Dir, hasConfiguredRAGQdrantCollection(opts)); err != nil {

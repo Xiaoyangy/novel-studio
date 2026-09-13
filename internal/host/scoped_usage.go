@@ -19,7 +19,7 @@ type ScopedUsageAccounting struct {
 	cancel     context.CancelCauseFunc
 }
 
-func NewScopedUsageAccounting(ctx context.Context, live *store.Store, generationID string, budget bootstrap.BudgetConfig) (*ScopedUsageAccounting, error) {
+func NewScopedUsageAccounting(ctx context.Context, live *store.Store, generationID string, budget bootstrap.BudgetConfig, callGuards ...func() error) (*ScopedUsageAccounting, error) {
 	if ctx == nil || ctx.Err() != nil || live == nil || generationID == "" {
 		return nil, fmt.Errorf("scoped usage requires an active context and bound live generation")
 	}
@@ -39,6 +39,13 @@ func NewScopedUsageAccounting(ctx context.Context, live *store.Store, generation
 	a.beforeCall = func() error {
 		if err := context.Cause(runCtx); err != nil {
 			return err
+		}
+		for _, guard := range callGuards {
+			if guard != nil {
+				if err := guard(); err != nil {
+					return err
+				}
+			}
 		}
 		if budget.HardStop {
 			return sentinel.Refuse()

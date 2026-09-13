@@ -123,6 +123,7 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		return nil, fmt.Errorf("load authoritative host usage: %w", err)
 	}
 	models.SetAttemptDecorator(accounting.decorate)
+	accounting.beforeCall = cfg.BeforeProviderCall
 	usage := accounting.meter.Tracker()
 
 	var router *flow.Dispatcher
@@ -186,7 +187,15 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		// therefore also refuse the next provider dispatch. Soft budgets keep
 		// their existing sub-agent-boundary behavior.
 		if cfg.Budget.HardStop {
-			accounting.beforeCall = sentinel.Refuse
+			previousGuard := accounting.beforeCall
+			accounting.beforeCall = func() error {
+				if previousGuard != nil {
+					if err := previousGuard(); err != nil {
+						return err
+					}
+				}
+				return sentinel.Refuse()
+			}
 		}
 		usage.SetOnCost(sentinel.OnCost)
 		h.budgetDetach = coordinator.Subscribe(sentinel.HandleEvent)

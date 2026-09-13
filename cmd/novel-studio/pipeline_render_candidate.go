@@ -2793,7 +2793,11 @@ func runPipelineSealedRenderCandidate(
 	}
 	semanticReviewRejected := false
 	defer func() {
+		returnErr = errors.Join(returnErr, opts.providerCallGuard.Err())
 		if returnErr != nil {
+			if errors.Is(returnErr, store.ErrChapterDeliveryDeadline) {
+				return
+			}
 			// Budget exhaustion is a successful convergence decision, not a bad
 			// candidate. Keep the exact body, all judgments and the formal rewrite
 			// feedback active for the explicitly requested plan stage.

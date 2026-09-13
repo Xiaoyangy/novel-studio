@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -376,6 +377,13 @@ func savePipelineChapterAcceptance(
 	if _, err := st.ArcCycle().SaveChapterAcceptanceReceipt(receipt); err != nil {
 		return nil, err
 	}
+	if generation.ChapterDeliveryBudget != nil {
+		timing, err := st.CompleteChapterDeliveryNow(*generation, receipt)
+		if err != nil {
+			return nil, err
+		}
+		reportPipelineChapterDeliveryTiming(timing)
+	}
 	if err := pipelineWatchdogProgressBody(
 		pipelineWatchdogEventRenderChapterAccepted,
 		bodySHA,
@@ -387,14 +395,15 @@ func savePipelineChapterAcceptance(
 
 func pipelineChapterAcceptanceAlreadySaved(
 	st *store.Store,
-	generationID string,
+	generation *domain.PlanningGenerationV2,
 	chapter int,
 	bodySHA string,
 	outcomeDigest string,
 ) (bool, error) {
-	if st == nil || generationID == "" || chapter <= 0 {
+	if st == nil || generation == nil || generation.GenerationID == "" || chapter <= 0 {
 		return false, nil
 	}
+	generationID := generation.GenerationID
 	receipts, err := st.ArcCycle().ListChapterAcceptanceReceipts(generationID)
 	if err != nil {
 		return false, err
@@ -408,6 +417,21 @@ func pipelineChapterAcceptanceAlreadySaved(
 		}
 		if err := st.ArcCycle().ValidateArcCycle(generationID); err != nil {
 			return false, err
+		}
+		if generation.ChapterDeliveryBudget != nil {
+			// This is recovered acceptance, not an observed original close.
+			// Check verifies the receipt and marks the missing close time unknown.
+			if err := st.CheckChapterDeliveryBudgetNow(generationID); err != nil && !errors.Is(err, store.ErrChapterDeliveryDeadline) {
+				return false, err
+			}
+			timing, err := st.LoadChapterDeliveryTiming(generationID, chapter)
+			if err != nil {
+				return false, err
+			}
+			if timing == nil || timing.ClosedAt.IsZero() || timing.AcceptanceReceiptDigest != receipt.ReceiptDigest {
+				return false, fmt.Errorf("accepted chapter lacks its exact recovered delivery timing")
+			}
+			reportPipelineChapterDeliveryTiming(timing)
 		}
 		return true, nil
 	}

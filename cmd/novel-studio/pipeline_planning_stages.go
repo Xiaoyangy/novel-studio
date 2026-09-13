@@ -950,6 +950,14 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 		if err != nil {
 			return fmt.Errorf("render 第 %d 章锁内 typed preflight: %w", chapter, err)
 		}
+		if err := requirePipelineChapterDeliveryStarted(st, sealedBinding.Generation, chapter); err != nil {
+			return err
+		}
+		opts.providerCallGuard = pipelineGenerationDeliveryGuard(st, sealedBinding.Generation, chapter)
+		if opts.providerCallGuard != nil {
+			cfg.BeforeProviderCall = opts.providerCallGuard.Check
+			defer func() { returnErr = errors.Join(returnErr, opts.providerCallGuard.Err()) }()
+		}
 		// During an active prose pass the render lease makes the shared tool
 		// guard select the immutable sealed RAG receipt. Post-commit recovery has
 		// no Writer call and its cursor is already closed, so invoking this guard
@@ -1143,10 +1151,10 @@ func pipelineRender(opts cliOptions, flags pipelineFlags, state *domain.Pipeline
 			)
 		}
 	}
-	if sealedV2 && !reviewAlreadyAccepted && sealedBinding.Outcome != nil {
+	if sealedV2 && sealedBinding.Outcome != nil {
 		alreadySaved, acceptanceErr := pipelineChapterAcceptanceAlreadySaved(
 			st,
-			sealedBinding.Generation.GenerationID,
+			&sealedBinding.Generation,
 			chapter,
 			bodySHA,
 			sealedBinding.Outcome.ReceiptDigest,

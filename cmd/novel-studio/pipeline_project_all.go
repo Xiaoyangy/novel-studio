@@ -213,6 +213,11 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 		if err := projected.CreateBuildingGeneration(identity.Generation, identity.Source, identity.Registry); err != nil {
 			return fmt.Errorf("project-all 创建 generation: %w", err)
 		}
+		if identity.Generation.ChapterDeliveryBudget != nil {
+			if err := st.ArmChapterDeliveryBudgetNow(identity.Generation); err != nil {
+				return err
+			}
+		}
 		building = &identity.Generation
 	} else if err := validatePipelineProjectAllGenerationIdentity(*building, identity.Generation); err != nil {
 		return err
@@ -262,6 +267,10 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 		if err != nil {
 			return err
 		}
+		accounting.deliveryGuard = pipelineGenerationDeliveryGuard(st, identity.Generation)
+		if accounting.deliveryGuard != nil {
+			cfg.BeforeProviderCall = accounting.deliveryGuard.Check
+		}
 		if len(bundles) > 0 && bundles[len(bundles)-1].Chapter >= chapter {
 			continue
 		}
@@ -302,6 +311,11 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 			chapter,
 			last,
 		)
+		if currentGeneration.ChapterDeliveryBudget != nil {
+			if _, err := st.BeginChapterDeliveryNow(*currentGeneration, chapter); err != nil {
+				return err
+			}
+		}
 		artifacts, err := pipelineProjectedChapterPlanner(
 			accounting.ctx,
 			cfg,
@@ -478,6 +492,10 @@ func buildPipelineProjectAllIdentityForPreflight(
 			return identity, err
 		}
 	}
+	deliveryBudget, err := resolvePipelineChapterDeliveryBudget(cfg.Budget.ChapterDeliverySeconds, originalAttempt)
+	if err != nil {
+		return identity, err
+	}
 	if detailWindow == nil && first != arcScope.FirstChapter {
 		return identity, fmt.Errorf("旧式整弧 generation 只能从弧边界开始；不能在弧内静默切换协议")
 	}
@@ -571,6 +589,7 @@ func buildPipelineProjectAllIdentityForPreflight(
 		if err != nil {
 			return "", err
 		}
+		root = pipelineChapterDeliveryDependencyRoot(root, deliveryBudget)
 		if successorPlan != nil {
 			root = pipelineProjectAllDigest(struct {
 				Version            string `json:"version"`
@@ -730,6 +749,7 @@ func buildPipelineProjectAllIdentityForPreflight(
 		return identity, err
 	}
 	generation := domain.PlanningGenerationV2{
+		ChapterDeliveryBudget:  deliveryBudget,
 		DetailWindow:           detailWindow,
 		Version:                domain.PlanningGenerationV2Version,
 		GenerationID:           generationID,
@@ -1101,6 +1121,7 @@ func validatePipelineProjectAllGenerationIdentity(
 	want domain.PlanningGenerationV2,
 ) error {
 	if got.GenerationID != want.GenerationID ||
+		!samePipelineChapterDeliveryBudget(got.ChapterDeliveryBudget, want.ChapterDeliveryBudget) ||
 		got.ParentGenerationID != want.ParentGenerationID ||
 		got.ProjectionScope != want.ProjectionScope ||
 		got.ScopeID != want.ScopeID ||

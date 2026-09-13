@@ -20,15 +20,16 @@ import (
 )
 
 type pipelineProjectAllAccounting struct {
-	ctx          context.Context
-	cancel       context.CancelCauseFunc
-	meter        *host.DurableUsageMeter
-	budget       *host.BudgetSentinel
-	generationID string
-	mu           sync.Mutex
-	err          error
-	ownerPID     int
-	ownerStart   string
+	deliveryGuard *pipelineProviderCallGuard
+	ctx           context.Context
+	cancel        context.CancelCauseFunc
+	meter         *host.DurableUsageMeter
+	budget        *host.BudgetSentinel
+	generationID  string
+	mu            sync.Mutex
+	err           error
+	ownerPID      int
+	ownerStart    string
 }
 
 func newPipelineProjectAllAccounting(ctx context.Context, cfg bootstrap.Config, live, shadow *store.Store, generationID string) (*pipelineProjectAllAccounting, error) {
@@ -170,6 +171,9 @@ func (a *pipelineProjectAllAccounting) importCharacterUsage(record domain.Charac
 }
 
 func (a *pipelineProjectAllAccounting) beforeAgent() error {
+	if err := a.deliveryGuard.Check(); err != nil {
+		return err
+	}
 	if err := context.Cause(a.ctx); err != nil {
 		return err
 	}
@@ -178,7 +182,7 @@ func (a *pipelineProjectAllAccounting) beforeAgent() error {
 
 func (a *pipelineProjectAllAccounting) afterAgent() error {
 	a.budget.HandleBoundary()
-	return context.Cause(a.ctx)
+	return errors.Join(context.Cause(a.ctx), a.deliveryGuard.Err())
 }
 
 func (a *pipelineProjectAllAccounting) hooks() agents.ProjectedPlanningAccounting {
@@ -193,5 +197,5 @@ func (a *pipelineProjectAllAccounting) close() error {
 	a.mu.Unlock()
 	cause := context.Cause(a.ctx)
 	a.cancel(nil)
-	return errors.Join(persistedErr, flushErr, cause)
+	return errors.Join(persistedErr, flushErr, cause, a.deliveryGuard.Err())
 }

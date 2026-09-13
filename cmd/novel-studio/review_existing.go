@@ -191,6 +191,9 @@ func reviewExistingPipelineAtOutputWithPolicy(
 	}
 
 	projDir := flags.ReviewExisting
+	if opts.providerCallGuard != nil {
+		cfg.BeforeProviderCall = opts.providerCallGuard.Check
+	}
 	if projDir == "" {
 		projDir = opts.Dir // --pipeline --dir <项目> 经此传入；此前漏用导致回落到 cwd/output/novel
 	}

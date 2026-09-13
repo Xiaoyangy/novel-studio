@@ -274,15 +274,16 @@ func runWithConfig(_ bootstrap.Config, opts cliOptions, args []string) {
 }
 
 type cliOptions struct {
-	ConfigPath    string
-	Dir           string
-	Headless      bool
-	Prompt        string
-	PromptFile    string
-	Version       bool
-	Update        bool
-	UpdateVersion string
-	Help          bool
+	providerCallGuard *pipelineProviderCallGuard
+	ConfigPath        string
+	Dir               string
+	Headless          bool
+	Prompt            string
+	PromptFile        string
+	Version           bool
+	Update            bool
+	UpdateVersion     string
+	Help              bool
 }
 
 // parseCLIOptions 提取 CLI flag，返回选项和剩余参数。

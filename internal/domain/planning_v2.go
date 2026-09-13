@@ -78,6 +78,7 @@ type PlanningGenerationV2 struct {
 	MaxCharacterActivationCycles int                        `json:"max_character_activation_cycles,omitempty"`
 	PlanGroundingPolicy          string                     `json:"plan_grounding_policy,omitempty"`
 	DetailWindow                 *PlanningDetailWindowV1    `json:"detail_window,omitempty"`
+	ChapterDeliveryBudget        *ChapterDeliveryBudgetV1   `json:"chapter_delivery_budget,omitempty"`
 	Status                       PlanningGenerationStatusV2 `json:"status"`
 	BaseCanonChapter             int                        `json:"base_canon_chapter"`
 	BaseCanonRoot                string                     `json:"base_canon_root"`
@@ -808,6 +809,9 @@ func ValidatePlanningGenerationV2(g PlanningGenerationV2) error {
 		return fmt.Errorf("planning generation v2: first_projected_chapter must immediately follow base_canon_chapter")
 	}
 	if err := ValidatePlanningDetailWindowV1(g); err != nil {
+		return fmt.Errorf("planning generation v2: %w", err)
+	}
+	if err := ValidateChapterDeliveryBudgetV1(g.ChapterDeliveryBudget); err != nil {
 		return fmt.Errorf("planning generation v2: %w", err)
 	}
 	if g.LastProjectedChapter < g.FirstProjectedChapter {
