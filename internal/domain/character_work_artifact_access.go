@@ -36,7 +36,7 @@ func artifactBoundTaskTimeV1(receipt WorldArbitrationReceipt, resolution Charact
 	return false
 }
 
-func validateArtifactDeliveriesV1(receipt WorldArbitrationReceipt, before, after WorldPhysicalStateV2, proposals map[string]CharacterDecisionProposal) error {
+func validateArtifactDeliveriesV1(receipt WorldArbitrationReceipt, stimulus WorldStimulusPacket, before, after WorldPhysicalStateV2, proposals map[string]CharacterDecisionProposal) error {
 	for _, delivery := range receipt.ResourceDeliveries {
 		resource, exists := artifactStateResourceV1(before, delivery.ResourceID)
 		if !exists || resource.Artifact == nil {
@@ -48,6 +48,12 @@ func validateArtifactDeliveriesV1(receipt WorldArbitrationReceipt, before, after
 		artifact := resource.Artifact
 		if delivery.ArtifactVersionDigest != artifact.VersionDigest {
 			return fmt.Errorf("artifact delivery lacks its exact content version")
+		}
+		if delivery.DeliveredAtDay != nil {
+			if err := validateIncomingMaterialDeliveryV1(receipt, stimulus, before, after, proposals, delivery); err != nil {
+				return err
+			}
+			continue
 		}
 		sender, ok := proposals[delivery.FromAgentID]
 		if !ok {
@@ -215,6 +221,13 @@ func (transition *workArtifactTransitionV1) finish(receipt WorldArbitrationRecei
 			for _, intent := range proposal.ArtifactReads {
 				if intent.ResourceID == result.ResourceID && intent.VersionDigest == result.VersionDigest && (len(intent.ClaimIDs) == 0 || physicalContainsAllRefsV2(intent.ClaimIDs, result.ClaimIDs)) && artifactBoundTaskTimeV1(receipt, resolution, proposal, old, intent.TaskID, result.ResourceID, result.AtDay) {
 					bound = true
+				}
+			}
+			if !bound && HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources) {
+				var err error
+				bound, err = bindIncomingMaterialArtifactReadV1(receipt, stimulus, before, *after, proposals, proposal, resolution, result)
+				if err != nil {
+					return err
 				}
 			}
 			if !bound {

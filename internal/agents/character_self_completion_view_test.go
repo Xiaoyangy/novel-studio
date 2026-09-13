@@ -36,7 +36,7 @@ func TestSelfCompletionViewProducerPreservesBothHistoricalIdentities(t *testing.
 			t.Fatal("frozen marker inventory selected another producer")
 		}
 	}
-	if len(seen) != 4 {
+	if len(seen) != 5 {
 		t.Fatal("lost executable historical producer")
 	}
 }
@@ -82,7 +82,7 @@ func TestSelfCompletionViewPromptOnlyReachesNewProducerOwners(t *testing.T) {
 			boundary.FrozenActivationProducer = producer
 			// Stop at the first actual owner request after checking its prompt;
 			// full persisted recovery is exercised by the three-producer test.
-			model := &completionViewPromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3CompletionDigest()}
+			model := &completionViewPromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3CompletionDigest()}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "completion-view", model)}
 			if _, err := runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_completion_prompt", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4); !errors.Is(err, context.Canceled) {
 				t.Fatal(err)

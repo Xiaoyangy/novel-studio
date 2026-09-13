@@ -90,6 +90,9 @@ func (t *SubmitCharacterDecisionTool) Schema() map[string]any {
 		properties := result["properties"].(map[string]any)
 		properties["communications"] = characterCommunicationsSchema()
 		properties["resource_reads"] = characterResourceReadsSchema()
+		if domain.HasCharacterIncomingMaterialReadPolicyV1(t.observation.Sources) {
+			properties["resource_reads"] = characterIncomingMaterialReadsSchemaV1()
+		}
 		if domain.HasCharacterSelfExperiencePolicyV2(t.observation.Sources) {
 			properties["self_tasks"] = characterSelfTasksSchema(domain.HasCharacterOperationalAvailabilityPolicyV1(t.observation.Sources))
 			if domain.HasCharacterSurfaceInspectionPolicyV1(t.observation.Sources) {
@@ -456,6 +459,9 @@ func (t *ResolveChapterWorldTool) Schema() map[string]any {
 	}
 	if t.stimulus.Version == domain.WorldStimulusPacketV2Version {
 		result["properties"].(map[string]any)["resource_deliveries"] = characterResourceDeliveriesSchema()
+		if domain.HasCharacterIncomingMaterialReadPolicyV1(t.stimulus.Sources) {
+			result["properties"].(map[string]any)["resource_deliveries"] = characterIncomingMaterialDeliveriesSchemaV1()
+		}
 		if domain.HasCharacterWorkArtifactPolicyV1(t.stimulus.Sources) {
 			deliveries := result["properties"].(map[string]any)["resource_deliveries"].(map[string]any)
 			deliveries["items"].(map[string]any)["properties"].(map[string]any)["artifact_version_digest"] = schema.String("产物出示/交付必填发送者artifact_access明确授权的正文版本；普通资源省略")

@@ -110,6 +110,7 @@ type ResourceSettlementV2 struct {
 
 type ResourceDeliveryV2 struct {
 	ArtifactVersionDigest string   `json:"artifact_version_digest,omitempty"`
+	DeliveredAtDay        *float64 `json:"delivered_at_day,omitempty"`
 	ResourceID            string   `json:"resource_id"`
 	FromAgentID           string   `json:"from_agent_id"`
 	ToAgentID             string   `json:"to_agent_id"`

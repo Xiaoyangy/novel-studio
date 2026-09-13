@@ -156,6 +156,9 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 		}
 		return nil
 	}
+	if err := validateIncomingMaterialReadReceiptFieldsV1(receipt, stimulus); err != nil {
+		return after, err
+	}
 	if err := applyResourceObservationSettlementsV1(receipt, stimulus, before, &after, resourceIndex, requireSettlementRefs, proposals); err != nil {
 		return after, err
 	}
@@ -235,7 +238,10 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 	if err := validateResourceDeliveriesV2(receipt, before, after, proposalByAgent, resolved, requireRefs); err != nil {
 		return after, err
 	}
-	if err := validateArtifactDeliveriesV1(receipt, before, after, proposalByAgent); err != nil {
+	if err := validateIncomingMaterialReadTransitionsV1(receipt, stimulus, before, after, proposalByAgent); err != nil {
+		return after, err
+	}
+	if err := validateArtifactDeliveriesV1(receipt, stimulus, before, after, proposalByAgent); err != nil {
 		return after, err
 	}
 	// Report independent perception defects together, in a stable order. A

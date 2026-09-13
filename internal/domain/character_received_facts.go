@@ -18,6 +18,7 @@ type CharacterCommunicationV2 struct {
 type ResourceReadRequestV2 struct {
 	ResourceID           string `json:"resource_id,omitempty"`
 	IncomingDeliveryFrom string `json:"incoming_delivery_from,omitempty"`
+	TaskID               string `json:"task_id,omitempty"`
 }
 
 type ResourceReadableFactV2 struct {
@@ -96,6 +97,9 @@ func ValidateCharacterKnowledgeIntentV2(proposal CharacterDecisionProposal, obse
 			return fmt.Errorf("communication/read intents require v2 observation")
 		}
 		return nil
+	}
+	if err := validateIncomingMaterialReadIntentV1(proposal, observation); err != nil {
+		return err
 	}
 	allowed := observation.AllowedFactIDs()
 	seen := map[string]bool{}
@@ -238,6 +242,14 @@ func validateReceivedFactsTransitionV2(receipt WorldArbitrationReceipt, before, 
 						requested = true
 					}
 					if request.IncomingDeliveryFrom != "" {
+						if request.TaskID != "" {
+							bound, err := bindIncomingMaterialFoundationReadV1(receipt, before, after, proposals, owner, ownerResolution, request, fact.ResourceID)
+							if err != nil {
+								return err
+							}
+							requested = requested || bound
+							continue
+						}
 						for _, delivery := range receipt.ResourceDeliveries {
 							if delivery.ResourceID == fact.ResourceID && delivery.ToAgentID == actor.AgentID && delivery.Access != "none" && oldActors[delivery.FromAgentID].Character == request.IncomingDeliveryFrom {
 								requested = true

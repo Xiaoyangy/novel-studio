@@ -447,6 +447,9 @@ func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, er
 	if err := validateSurfaceInspectionStimulusV1(p); err != nil {
 		return p, err
 	}
+	if err := validateIncomingMaterialReadPolicyV1(p); err != nil {
+		return p, err
+	}
 	if err := validateWorkArtifactStimulusV1(p); err != nil {
 		return p, err
 	}

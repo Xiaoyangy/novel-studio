@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -31,6 +31,9 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
+	if domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources)) {
+		return ""
+	}
 	if policy == domain.CharacterActivationCyclePolicyV3 {
 		if domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) && (!domain.HasCharacterWorkContinuationHistoryPolicyV1(stimulus.Sources) || !domain.HasCharacterSelfCompletionViewPolicyV1(stimulus.Sources)) {
 			return "" // No older producer can acquire only the new wire marker.
@@ -43,6 +46,9 @@ func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket)
 		}
 		if !domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3CompletionDigest()
+		}
+		if !domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3Digest()
 		}
 	}
 	return characterActivationProtocolForPolicy(policy)
@@ -58,6 +64,8 @@ func characterActivationV3PoliciesForProducer(producer string) []string {
 		return characterActivationV3CompletionPolicies()
 	case characterActivationProtocolV3Digest():
 		return characterActivationV3Policies()
+	case characterActivationProtocolV3IncomingReadDigest():
+		return characterActivationV3IncomingReadPolicies()
 	}
 	return nil
 }

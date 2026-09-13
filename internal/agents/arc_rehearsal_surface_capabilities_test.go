@@ -151,14 +151,19 @@ func TestSurfaceRehearsalCapabilitiesRejectWrongTypedClaims(t *testing.T) {
 
 func TestSurfaceRehearsalProfilePreservesEveryHistoricalProducer(t *testing.T) {
 	st, input, cfg := surfaceRehearsalFixture(t)
-	for index, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
+	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		selected := cfg
 		selected.CharacterAgents.FrozenActivationProducer = producer
 		profile, err := ArcRehearsalExecutionCapabilities(selected)
 		selectionMust(t, err)
-		if index == 0 {
+		if producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() {
 			if profile.Policy != domain.ArcRehearsalCapabilityPolicyV2 || !slices.Contains(profile.ActionKinds, "surface_inspection") {
 				t.Fatal("new producer lost its explicit surface capability")
+			}
+			want, err := domain.BuildArcRehearsalExecutionCapabilitiesV2(domain.CharacterAgentDecisionProtocolV2Version, domain.CharacterActivationCyclePolicyV3, producer)
+			selectionMust(t, err)
+			if !reflect.DeepEqual(profile, want) {
+				t.Fatal("surface-capable producer changed its exact capability profile")
 			}
 			continue
 		}

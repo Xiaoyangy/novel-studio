@@ -102,6 +102,9 @@ func artifactFlowRebind(t *testing.T, input domain.CharacterActivationInputSet, 
 	if domain.HasCharacterSurfaceInspectionPolicyV1(input.Stimulus.Sources) {
 		policies = append(policies, domain.CharacterOperationalAvailabilityPolicyV1, domain.CharacterSurfaceInspectionPolicyV1)
 	}
+	if domain.HasCharacterIncomingMaterialReadPolicyV1(input.Stimulus.Sources) {
+		policies = append(policies, domain.CharacterIncomingMaterialReadPolicyV1)
+	}
 	input.Stimulus.Sources = append(append([]string(nil), policies...), token)
 	input.Stimulus.SelfEvaluationContext, err = domain.NewCharacterSelfEvaluationContextV1(session)
 	artifactFlowMust(t, err)

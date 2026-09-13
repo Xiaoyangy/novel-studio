@@ -77,6 +77,10 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 	wantFullHistory := HasCharacterWorkContinuationHistoryPolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantCompletions := HasCharacterSelfCompletionViewPolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantSurfaces := HasCharacterSurfaceInspectionPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	wantIncomingRead := HasCharacterIncomingMaterialReadPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	if wantIncomingRead && !wantV3 {
+		return fmt.Errorf("incoming material reading requires a v3 generation")
+	}
 	if wantSurfaces && !wantV3 {
 		return fmt.Errorf("surface inspection observations require a v3 generation")
 	}
@@ -90,6 +94,9 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 		return fmt.Errorf("timed resource observations require a v3 generation")
 	}
 	check := func(label string, sources []string) error {
+		if HasCharacterIncomingMaterialReadPolicyV1(sources) != wantIncomingRead {
+			return fmt.Errorf("generation incoming material read policy differs from %s", label)
+		}
 		if HasCharacterSurfaceInspectionPolicyV1(sources) != wantSurfaces {
 			return fmt.Errorf("generation surface inspection policy differs from %s", label)
 		}

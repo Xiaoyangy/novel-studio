@@ -58,7 +58,8 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 		if domain.HasCharacterSelfCompletionViewPolicyV1(view.Input().Stimulus.Sources) != completions {
 			t.Fatal("initial source changed its frozen completion strategy")
 		}
-		if domain.HasCharacterSurfaceInspectionPolicyV1(view.Input().Stimulus.Sources) != (producer == characterActivationProtocolV3Digest()) {
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()
+		if domain.HasCharacterSurfaceInspectionPolicyV1(view.Input().Stimulus.Sources) != wantSurface {
 			t.Fatal("initial source changed its frozen surface strategy")
 		}
 		proof, err := runCharacterActivationChapter(context.Background(), cfg, store.NewStore(st.Dir()), models, generation, 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
@@ -70,7 +71,7 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 			if cycle.Evidence.ProtocolDigest != producer || domain.HasCharacterWorkContinuationHistoryPolicyV1(cycle.Evidence.Stimulus.Sources) != full || domain.HasCharacterSelfCompletionViewPolicyV1(cycle.Evidence.Stimulus.Sources) != completions {
 				t.Fatal("cycle evidence upgraded or downgraded its frozen producer")
 			}
-			if domain.HasCharacterSurfaceInspectionPolicyV1(cycle.Evidence.Stimulus.Sources) != (producer == characterActivationProtocolV3Digest()) {
+			if domain.HasCharacterSurfaceInspectionPolicyV1(cycle.Evidence.Stimulus.Sources) != wantSurface {
 				t.Fatal("cycle evidence changed its frozen surface strategy")
 			}
 		}

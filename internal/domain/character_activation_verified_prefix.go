@@ -189,6 +189,9 @@ func validateVerifiedActivationInputSession(prefix VerifiedCharacterActivationPr
 	if err := ValidateCharacterActivationInputSet(input); err != nil {
 		return err
 	}
+	if len(prefix.steps) > 0 && HasCharacterIncomingMaterialReadPolicyV1(input.Stimulus.Sources) != HasCharacterIncomingMaterialReadPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
+		return fmt.Errorf("incoming material read policy cannot change inside a verified generation prefix")
+	}
 	if len(prefix.steps) > 0 && HasCharacterSurfaceInspectionPolicyV1(input.Stimulus.Sources) != HasCharacterSurfaceInspectionPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
 		return fmt.Errorf("activation input surface inspection policy differs from the verified session origin")
 	}

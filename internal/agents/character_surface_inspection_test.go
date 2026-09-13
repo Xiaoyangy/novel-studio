@@ -21,6 +21,7 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 		"legacy":     {characterActivationProtocolV3LegacyDigest(), "sha256:3d9cce9681fd3e0978d6eb7e728c8b9e5fca3075bd82a091ffe050106d79370e"},
 		"full-owner": {characterActivationProtocolV3HistoryDigest(), "sha256:b0513dc83d43f3b52964ecafe0355abfa677dfd829988c276009ec281db9a296"},
 		"completion": {characterActivationProtocolV3CompletionDigest(), "sha256:19eca2f61d4e47dc07692f7898575a2f6c645a911e5b6a98b5097f874788f0d5"},
+		"surface":    {characterActivationProtocolV3Digest(), "sha256:89202d2f87d7a33b5d81d55982e48b4b3d87cae19647d788a086a6b1357dcbdc"},
 	} {
 		if value.got != value.want {
 			t.Fatalf("%s frozen producer changed: %s", name, value.got)
@@ -33,7 +34,8 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 			t.Fatal("producer candidates are not distinct exact executable inventories")
 		}
 		seen[producer] = true
-		if domain.HasCharacterSurfaceInspectionPolicyV1(policies) != (producer == characterActivationProtocolV3Digest()) {
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()
+		if domain.HasCharacterSurfaceInspectionPolicyV1(policies) != wantSurface {
 			t.Fatal("old producer gained or current producer lost surface capability")
 		}
 		policies = append(policies, domain.CharacterSelfExperiencePolicyV2, domain.CharacterOperationalAvailabilityPolicyV1)
@@ -41,12 +43,12 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 		resolve := tools.NewResolveChapterWorldTool(nil, domain.WorldStimulusPacket{Version: domain.WorldStimulusPacketV2Version, Sources: policies}, domain.CharacterAgentActivation{}, nil, "", nil, 1)
 		for _, contract := range []map[string]any{submit.Schema(), resolve.Schema()} {
 			raw, _ := json.Marshal(contract)
-			if strings.Contains(string(raw), `"surface"`) != (producer == characterActivationProtocolV3Digest()) {
+			if strings.Contains(string(raw), `"surface"`) != wantSurface {
 				t.Fatal("surface wire schema crossed the frozen producer boundary")
 			}
 		}
 	}
-	if len(seen) != 4 {
+	if len(seen) != 5 {
 		t.Fatal("missing historical executable producer")
 	}
 	for _, old := range [][]string{characterActivationV3LegacyPolicies(), characterActivationV3HistoryPolicies()} {
@@ -122,7 +124,7 @@ func TestSurfaceInspectionPromptAndOwnerCapabilityAreProducerBound(t *testing.T)
 			}
 			selectionMust(t, st.Characters.Save(characters))
 			cfg.CharacterAgents.FrozenActivationProducer, boundary.FrozenActivationProducer = producer, producer
-			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest()}
+			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "surface-view", model)}
 			_, err = runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_surface_view", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 			if !errors.Is(err, context.Canceled) || model.seen.Load() != 1 {
