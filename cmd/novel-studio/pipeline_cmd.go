@@ -1066,7 +1066,13 @@ func runPipelineFoundationStage(
 	if err != nil {
 		return err
 	}
-	st := store.NewStore(cfg.OutputDir)
+	return runPipelineFoundationStageAtOutput(cfg.OutputDir, stage, run)
+}
+
+// Already-isolated callers use their resolved candidate output directly;
+// reloading the invocation config here could route a repair back to live.
+func runPipelineFoundationStageAtOutput(outputDir, stage string, run func() error) (returnErr error) {
+	st := store.NewStore(outputDir)
 	if err := st.Init(); err != nil {
 		return err
 	}

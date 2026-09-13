@@ -173,12 +173,18 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 			oldHost := pipelineFoundationRepairHost
 			defer func() { pipelineFoundationRepairHost = oldHost }()
 			calls := 0
+			lastCandidate := ""
 			pipelineFoundationRepairHost = func(cfg bootstrap.Config, _ assets.Bundle, h headless.Options) error {
 				calls++
+				lastCandidate = cfg.OutputDir
 				if cfg.OutputDir == live || !h.PreserveUserRules || !h.SkipQueueReplay || !strings.Contains(h.Prompt, m.Instruction) {
 					t.Fatal("host did not run in scoped candidate")
 				}
 				st := store.NewStore(cfg.OutputDir)
+				assertFoundationRepairRuntimeLease(t, cfg.OutputDir)
+				if _, err := tools.NewFoundationSourceContextTool(st, "characters").Execute(context.Background(), json.RawMessage(`{}`)); err != nil {
+					return fmt.Errorf("real character source context under prepare lease: %w", err)
+				}
 				chars, err := st.Characters.Load()
 				if err != nil {
 					return err
@@ -205,11 +211,6 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 				}
 				raw, _ := json.Marshal(chars)
 				args, _ := json.Marshal(map[string]any{"type": "characters", "content": json.RawMessage(raw)})
-				owner := "fixture-repair"
-				if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner, ExpiresAt: time.Now().Add(time.Minute)}); err != nil {
-					return err
-				}
-				defer st.Runtime.ReleasePipelineExecution(owner)
 				_, err = tools.NewSaveFoundationTool(st).WithFoundationTypeRestriction("characters").WithFoundationRefreshEpoch(true).WithOneShotFoundationRefresh(true).WithDeferredFoundationFinalization(h.DeferFoundationFinalization).Execute(context.Background(), args)
 				if (bad == "wrong-name" || bad == "wrong-unit" || bad == "generator-instead-of-pen") && err != nil {
 					t.Fatalf("fixture must reach successful typed SaveFoundation before field authorization rejects publication: %v", err)
@@ -233,6 +234,7 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 				if before != after {
 					t.Fatalf("failed repair changed live: %s != %s: %v", before, after, err)
 				}
+				assertFoundationRepairRuntimeReleased(t, lastCandidate)
 				return
 			}
 			if err != nil {
@@ -241,6 +243,7 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 			if calls != 1 {
 				t.Fatalf("calls=%d", calls)
 			}
+			assertFoundationRepairRuntimeReleased(t, live)
 			var got domain.PipelineState
 			if err := readPipelinePlanningJSON(filepath.Join(live, "meta/pipeline.json"), &got); err != nil {
 				t.Fatal(err)
@@ -271,7 +274,9 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 			omitRequired := true
 			pipelineFoundationRepairHost = func(cfg bootstrap.Config, _ assets.Bundle, h headless.Options) error {
 				calls++
+				lastCandidate = cfg.OutputDir
 				st := store.NewStore(cfg.OutputDir)
+				assertFoundationRepairRuntimeLease(t, cfg.OutputDir)
 				if cfg.OutputDir == live {
 					t.Fatal("second target wrote live")
 				}
@@ -285,11 +290,6 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 				if _, err := st.Outline.LoadCompass(); err == nil {
 					t.Fatal("new source-bound mode accepted the old unbound compass")
 				}
-				owner := "fixture-compass"
-				if err := st.Runtime.AcquirePipelineExecution(domain.PipelineExecutionLock{Mode: domain.PipelineExecutionFoundation, TargetChapter: 1, Owner: owner, ExpiresAt: time.Now().Add(time.Minute)}); err != nil {
-					return err
-				}
-				defer st.Runtime.ReleasePipelineExecution(owner)
 				if _, err := tools.NewFoundationSourceContextTool(st, "update_compass").Execute(context.Background(), json.RawMessage(`{}`)); err != nil {
 					return fmt.Errorf("raw migration context: %w", err)
 				}
@@ -315,6 +315,7 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 			if beforeMissing != afterMissing {
 				t.Fatal("missing author requirement candidate changed live")
 			}
+			assertFoundationRepairRuntimeReleased(t, lastCandidate)
 			omitRequired = false
 			if err := runPipelineFoundationRepair(opts, pipelineFlags{Stages: "architect", RefreshArchitect: true, ArchitectTarget: "update_compass", ArchitectRepairFile: manifestPath}, ""); err != nil {
 				t.Fatalf("second COW source repair: %v", err)
@@ -322,6 +323,7 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 			if calls != 3 {
 				t.Fatalf("unexpected model invocation count=%d", calls)
 			}
+			assertFoundationRepairRuntimeReleased(t, live)
 			if err := store.NewStore(live).ValidateRebasedChapterZeroFoundationRefresh(); err != nil {
 				t.Fatalf("second COW lost original rebase authorization: %v", err)
 			}
@@ -329,6 +331,32 @@ func TestFoundationRepairRebaseCandidateNeverPublishesRejectedSource(t *testing.
 				t.Fatalf("second target changed original Prompt: %v", err)
 			}
 		})
+	}
+}
+
+func assertFoundationRepairRuntimeLease(t *testing.T, outputDir string) {
+	t.Helper()
+	lease, err := store.NewStore(outputDir).Runtime.InspectPipelineExecution()
+	if err != nil || lease == nil || lease.Mode != domain.PipelineExecutionFoundation || lease.TargetChapter != 1 || lease.ProcessID != os.Getpid() || !strings.HasPrefix(lease.Owner, "pipeline-architect-ch000001-pid") || !lease.ActiveAt(time.Now().UTC()) {
+		t.Fatalf("prepare did not supply the real foundation lease: %+v %v", lease, err)
+	}
+	if lease.ExpiresAt.Sub(lease.AcquiredAt) < pipelineExecutionLease-time.Minute {
+		t.Fatal("repair did not reuse the normal bounded foundation lease")
+	}
+	watchdog := loadPipelineWatchdogStateForTest(t, outputDir)
+	if watchdog.Stage != "architect" || watchdog.Chapter != 1 || watchdog.Status != pipelineWatchdogRunning || watchdog.HeartbeatAt == "" {
+		t.Fatalf("repair model call lacks the normal stage heartbeat: %+v", watchdog)
+	}
+}
+
+func assertFoundationRepairRuntimeReleased(t *testing.T, outputDir string) {
+	t.Helper()
+	if outputDir == "" {
+		t.Fatal("repair never entered a candidate")
+	}
+	lease, err := store.NewStore(outputDir).Runtime.InspectPipelineExecution()
+	if err != nil || lease != nil {
+		t.Fatalf("repair retained a lease after success/failure: %+v %v", lease, err)
 	}
 }
 

@@ -327,7 +327,21 @@ func (p *pipelineFoundationRepairPlan) prepare(cfg bootstrap.Config, live, candi
 	opts.SkipQueueReplay = true
 	opts.DisableLiveRAG = true
 	opts.DeferFoundationFinalization = true
-	if err := pipelineFoundationRepairHost(cfg, bundle, opts); err != nil {
+	invocationID := newPipelineTimingInvocationID(time.Now())
+	if err := withPipelineStageWatchdog(pipelineWatchdogConfig{
+		OutputDir: candidate, InvocationID: pipelineWatchdogStageInvocationID(p.Digest, invocationID, "architect"),
+		RunIdentity: p.Digest, Stage: "architect", Chapter: 1,
+	}, func() error {
+		return runPipelineFoundationStageAtOutput(candidate, "architect", func() error {
+			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageDispatched); err != nil {
+				return err
+			}
+			if err := pipelineFoundationRepairHost(cfg, bundle, opts); err != nil {
+				return err
+			}
+			return pipelineWatchdogProgress(pipelineWatchdogEventStageExecutionCompleted)
+		})
+	}); err != nil {
 		return err
 	}
 	st = store.NewStore(candidate)
