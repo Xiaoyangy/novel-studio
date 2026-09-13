@@ -50,9 +50,30 @@ jobs:
           go-version: '1.27.1'
           cache-dependency-path: go.sum
       - name: Race sharding contract tests
-        run: bash scripts/test-agents-race-shard-test.sh
+        run: |
+          bash scripts/test-agents-race-shard-test.sh
+          bash scripts/test-store-race-shard-test.sh
       - name: Race-sensitive packages
-        run: go test -race -count=1 -timeout=10m ./internal/store ./internal/tools ./services/dashboard
+        run: go test -race -count=1 -timeout=10m ./internal/tools ./services/dashboard
+
+  race_store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: go.sum
+      - name: Store race shard
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: bash scripts/test-store-race-shard.sh "$SHARD_INDEX"
 
   race_agents:
     runs-on: ubuntu-latest
@@ -76,7 +97,7 @@ jobs:
 
   race:
     name: race
-    needs: [race_core, race_agents]
+    needs: [race_core, race_agents, race_store]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -85,9 +106,10 @@ jobs:
         env:
           CORE_RESULT: ${{ needs.race_core.result }}
           AGENTS_RESULT: ${{ needs.race_agents.result }}
+          STORE_RESULT: ${{ needs.race_store.result }}
         run: |
-          printf 'race_core=%s race_agents=%s\n' "$CORE_RESULT" "$AGENTS_RESULT"
-          test "$CORE_RESULT" = success && test "$AGENTS_RESULT" = success
+          printf 'race_core=%s race_agents=%s race_store=%s\n' "$CORE_RESULT" "$AGENTS_RESULT" "$STORE_RESULT"
+          test "$CORE_RESULT" = success && test "$AGENTS_RESULT" = success && test "$STORE_RESULT" = success
 
   container:
     runs-on: ubuntu-latest

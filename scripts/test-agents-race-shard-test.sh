@@ -2,8 +2,15 @@
 # Fake-go contract tests. An optional argument checks an actual go -list output.
 set -euo pipefail
 
+scope=${RACE_SHARD_TEST_SCOPE:-agents}
+case "$scope" in
+    agents) package=./internal/agents; shards=4; timeout=20m ;;
+    store) package=./internal/store; shards=2; timeout=10m ;;
+    *) printf 'Unsupported contract-test scope: %s\n' "$scope" >&2; exit 2 ;;
+esac
+
 if [[ ${RACE_SHARD_FAKE_GO:-0} == 1 ]]; then
-    if [[ $# -eq 5 && $1 == test && $2 == -race && $3 == -list && $4 == . && $5 == ./internal/agents ]]; then
+    if [[ $# -eq 5 && $1 == test && $2 == -race && $3 == -list && $4 == . && $5 == "$package" ]]; then
         printf '%s\n' "$RACE_SHARD_LIST"
         exit "${RACE_SHARD_LIST_STATUS:-0}"
     fi
@@ -15,7 +22,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 ln -s "$script_dir/test-agents-race-shard-test.sh" "$tmp/go"
-sharder="$script_dir/test-agents-race-shard.sh"
+sharder="$script_dir/test-$scope-race-shard.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -33,18 +40,18 @@ check_partition() {
     ordered=$(printf '%s\n' "$inventory" | awk '/^(Test|Example|Fuzz)[^[:space:]]*$/ { print }' | LC_ALL=C sort -u)
     [[ -n $ordered ]] || fail 'test fixture has no names'
     mapfile -t names <<< "$ordered"
-    for shard in 0 1 2 3; do
+    for ((shard = 0; shard < shards; shard++)); do
         invoke "$inventory" "$shard" "$tmp/capture.$shard" || fail "valid shard $shard failed"
         mapfile -t args < "$tmp/capture.$shard"
         [[ ${#args[@]} -eq 7 && ${args[0]} == test && ${args[1]} == -race && \
-            ${args[2]} == -count=1 && ${args[3]} == -timeout=20m && \
-            ${args[4]} == -run && ${args[6]} == ./internal/agents ]] || fail 'race flags/package changed'
+            ${args[2]} == -count=1 && ${args[3]} == "-timeout=$timeout" && \
+            ${args[4]} == -run && ${args[6]} == "$package" ]] || fail 'race flags/package changed'
         pattern=${args[5]}
         [[ $pattern == '^('*')$' && $pattern != */* ]] || fail 'top-level anchors or unrestricted subtests lost'
         matched=0
         for i in "${!names[@]}"; do
             expected=0
-            (( i % 4 != shard )) || expected=1
+            (( i % shards != shard )) || expected=1
             if [[ ${names[i]} =~ $pattern ]]; then
                 (( expected == 1 )) || fail "${names[i]} selected in wrong shard $shard"
                 matched=$((matched + 1))
@@ -55,7 +62,7 @@ check_partition() {
         done
         (( matched > 0 )) || fail 'valid inventory produced an empty shard'
     done
-    printf 'PASS: %s top-level names partitioned exactly once; descendants unrestricted\n' "${#names[@]}"
+    printf 'PASS: %s %s top-level names partitioned exactly once across %s shards; descendants unrestricted\n' "$scope" "${#names[@]}" "$shards"
 }
 
 inventory=$'TestZulu\nExampleAlpha\nTestAlpha\nTestAlphabet\nFuzzSeedCorpus\nTestMeta.[x]+($)^?{2}|Back\\slash\nTestBeta\nTest中文\nBenchmarkIgnored\nok\tpackage\t0.1s\nTestAlpha'
@@ -71,7 +78,7 @@ if invoke $'ok\tpackage\t0.1s\nBenchmarkOnly' 0 "$tmp/unexpected-empty-run"; the
 fi
 [[ ! -e $tmp/unexpected-empty-run ]] || fail 'empty regex was passed to go test'
 
-if invoke TestOnly 3 "$tmp/unexpected-shard-run"; then
+if invoke TestOnly "$((shards - 1))" "$tmp/unexpected-shard-run"; then
     fail 'empty shard became success'
 fi
 [[ ! -e $tmp/unexpected-shard-run ]] || fail 'empty shard ran go test'
@@ -80,11 +87,21 @@ status=0
 invoke "$inventory" 0 "$tmp/failed-test-run" 0 23 || status=$?
 [[ $status -eq 23 ]] || fail 'test failure exit code was swallowed'
 
-for invalid in -1 4 invalid; do
+for invalid in -1 "$shards" 4 00 invalid; do
     if invoke "$inventory" "$invalid" "$tmp/invalid-run"; then
         fail "invalid shard $invalid was accepted"
     fi
 done
+
+if bash "$sharder" > "$tmp/output" 2> "$tmp/error"; then
+    fail 'missing shard argument was accepted'
+fi
+if bash "$sharder" 0 extra > "$tmp/output" 2> "$tmp/error"; then
+    fail 'extra shard argument was accepted'
+fi
+if bash "$script_dir/test-race-shard.sh" unknown 0 > "$tmp/output" 2> "$tmp/error"; then
+    fail 'unknown package scope was accepted'
+fi
 
 if [[ $# -gt 0 ]]; then
     check_partition "$(< "$1")"
