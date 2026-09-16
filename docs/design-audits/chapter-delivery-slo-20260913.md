@@ -24,6 +24,12 @@
 
 下一工程优先级仍是：先用真实失败样本收口阻止成章的校验问题，再减少连续行动的重复激活/readiness 和重复上下文；保留完整因果、硬合同与真实审核。改动中运行相关回归，阶段冻结后运行全量测试；不以新增功能、提交数量或测试通过替代同合同三章的实际交付验证。本次复盘本身没有修改生产代码、运行配置或小说事实。
 
+## 后续修复：持续约束不再伪装成终章事件
+
+`StoryContractRef` 新增可选 `evidence_mode`。缺省或 `payoff` 完整保留原门禁：唯一弧、唯一章位、具体 `planned_resolution`，且目标章 `core_event/scenes` 必须真实兑现。宿主按来源原文确定模式；`continuous` 仅允许来源明确包含持续禁止、保密、未知或保持语义的 `non_negotiable` 使用。它以 `planned_payoff_chapter=0`、空 `planned_resolution` 绑定末弧，不复制到任何章节，也不要求把“不得发生”改写成虚构事件；其权威检查文本始终是 source digest 绑定的作者原文。ending 与 open_thread 仍只能使用 payoff。
+
+这一区分只解决结构合同类型混用，不降低正文、世界或知识门禁。持续约束是否被违反，仍由原 Hard Canon、Knowledge Boundary、World State 与 Host receipt 检查负责；host-only 阶段说明仍不得进入作者合同。旧 receipt 没有 `evidence_mode` 时按 payoff 读取，保持原行为与签名语义。
+
 02:52 后续结果：章纲重建已正式完成（16 分 51 秒），进入 zero-init，尚非正文。第 5 次调用耗时 552.370 秒，输入 60,862 tokens，其中 60,416 命中缓存；高缓存并未让本次调用快速结束。只读量化显示全量 save_foundation 参数 schema 约 6,159 字符，按当前操作收窄可省约 5,294 字符，仅总提示的 5.9–7.6%。这确实是可优化冗余，但不能把它包装为解决 20 分钟目标的主因；本次没有据此另开实现。
 
 ## 后续修复：一次反馈多个资源覆盖缺项

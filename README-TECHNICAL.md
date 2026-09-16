@@ -440,6 +440,8 @@ manifest 使用当前分层大纲的逻辑 digest 做 CAS，并逐弧绑定原�
 
 `chapter_replacements` 是稀疏全量替换，必须同时给出 `title/core_event/hook/scenes`；其中 `chapter` 只用于定位全局目标章，不能覆盖 layered entry 的内部编号，manifest 也不接受 `contract_refs`。宿主会逐字保留原卷弧标题、弧/章合同引用、章节跨度、全局章号以及全部非目标内容。manifest 摘要同时进入 pipeline run identity 和 outline-all attempt ID；候选内的 intent/receipt 绑定修复前后 layered/flat digest，CAS 或边界不匹配时不会发布任何修改。
 
+outline-all 的合同回执区分两种证据模式：`payoff`（缺省）仍须绑定唯一目标章，并由该章的具体行动与终态兑现；宿主按原始来源确定 `evidence_mode`，模型不得改写。`continuous` 仅用于来源明确表达持续禁止、保密、未知或保持边界的 `non_negotiable`，以 `planned_payoff_chapter=0`、空 `planned_resolution` 绑定末弧且不得复制进章节；权威检查文本仍是 source digest 绑定的作者原文。`ending` 与 `open_thread` 始终是 `payoff`。这不会把宿主阶段说明升级成故事合同，也不会替代 Hard Canon、Knowledge Boundary、World State 或 Host receipt 的真实验证。
+
 推荐把 rebase/定向修复与后续派生分开运行：
 
 ```bash

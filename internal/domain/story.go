@@ -129,16 +129,27 @@ type ArcOutline struct {
 	ContractRefs      []StoryContractRef `json:"contract_refs,omitempty"`
 }
 
-// StoryContractRef is a structural receipt, not prose. Architect binds a
-// compass obligation to one planned payoff chapter without copying the source
-// sentence into title/core_event/hook.
+// StoryContractRef is a structural receipt, not prose. Payoff contracts bind a
+// compass obligation to one planned payoff chapter. Continuous contracts bind
+// a source-backed invariant to the final arc without forcing a prohibition or
+// persistent boundary to masquerade as a terminal story event.
 type StoryContractRef struct {
 	ID                   string `json:"id"`
 	Kind                 string `json:"kind"`
 	SourceDigest         string `json:"source_digest"`
+	EvidenceMode         string `json:"evidence_mode,omitempty"`
 	PlannedPayoffChapter int    `json:"planned_payoff_chapter"`
 	PlannedResolution    string `json:"planned_resolution,omitempty"`
 }
+
+const (
+	// StoryContractEvidencePayoff is the legacy/default mode: the contract must
+	// be realized by one concrete chapter action and terminal state.
+	StoryContractEvidencePayoff = "payoff"
+	// StoryContractEvidenceContinuous keeps a source-backed prohibition or
+	// invariant on the arc contract without inventing a terminal story event.
+	StoryContractEvidenceContinuous = "continuous"
+)
 
 // ArcContractAssignment is the only payload accepted by outline-all's
 // map_contracts mutation. It changes structural payoff receipts, never story

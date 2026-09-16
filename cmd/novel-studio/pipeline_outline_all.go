@@ -18,11 +18,11 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-const pipelineOutlineAllPromptProtocol = `outline-all.single-mutation.direct-architect.v3
+const pipelineOutlineAllPromptProtocol = `outline-all.single-mutation.direct-architect.v5
 - host dispatches the complete frozen operation prompt directly to the configured Architect primary model
 - the direct Architect receives only save_foundation and may make exactly one receipt-authorized mutation
 - append_volume is reservation-only; expand_arc and revise_arc preserve the exact span
-- title/core_event/hook/scenes are prose design, contract_refs are structural receipts
+- title/core_event/hook/scenes are prose design; payoff contract_refs are chapter receipts, continuous refs remain arc-only invariants
 - each payoff chapter must contain planned_resolution evidence in core_event/scenes
 - model-visible context is bounded and digest-bound to the complete layered outline
 - no Coordinator execution dependency, prose, world tick, user rules, compass, foundation replacement, fallback model, or global renumbering`
@@ -1073,7 +1073,7 @@ func pipelineOutlineAllOperationPrompt(
 		arcMap := pipelineOutlineAllArcMap(volumes)
 		arcMapJSON, _ := json.MarshalIndent(arcMap, "", "  ")
 		fmt.Fprintf(&b, "只调用 save_foundation(type=\"map_contracts\", content=<ArcContractAssignment数组>)。数组必须为全书每个弧各提供且只提供一项 {volume,arc,contract_refs}，空分配也必须显式列出。不得改 title/goal/span/chapters。\n")
-		fmt.Fprintf(&b, "每个 registry ref 全书必须恰好出现一次；planned_payoff_chapter 必须落在所分配弧的闭区间内；planned_resolution 必须为至少18个有效字的具体‘行动者+行动+终态’，不得占位且各合同互异。ending/non_negotiable 必须全部分配给末弧，planned_payoff_chapter=%d。open_thread 按真实因果回收点唯一分配。\n全书弧区间：\n", target.TargetChapters)
+		fmt.Fprintf(&b, "每个 registry ref 全书必须恰好出现一次，并逐字保留 id/kind/source_digest/evidence_mode；evidence_mode 已由宿主按原始来源确定，禁止改写。payoff 必须给出弧内 planned_payoff_chapter 和至少18个有效字的具体‘行动者+行动+终态’ planned_resolution；ending 与 payoff non_negotiable 必须位于末弧末章 planned_payoff_chapter=%d，open_thread 按真实因果回收点唯一分配。continuous 必须放在末弧，planned_payoff_chapter=0 且 planned_resolution=\"\"；它的权威检查文本就是 source_digest 绑定的原始作者约束，不得另写较弱摘要，也不是终章故事事件。所有 payoff resolution 不得占位且彼此不同。\n全书弧区间：\n", target.TargetChapters)
 		b.Write(arcMapJSON)
 		b.WriteString("\n")
 	case domain.OutlineAllActionExpandArc, domain.OutlineAllActionReviseArc:
@@ -1085,7 +1085,7 @@ func pipelineOutlineAllOperationPrompt(
 		verb := string(action.Type)
 		fmt.Fprintf(&b, "目标弧 V%dA%d，全局章号 %d-%d，固定 span=%d。只调用 save_foundation(type=\"%s\", volume=%d, arc=%d, content=<%d个 OutlineEntry>)。\n", action.Volume, action.Arc, start, start+action.ExpectedChapterSpan-1, action.ExpectedChapterSpan, verb, action.Volume, action.Arc, action.ExpectedChapterSpan)
 		b.WriteString("每章必须：唯一且具体的 title；core_event 写清行动者+阻力+选择+状态变化；hook 是可执行后果；scenes 至少3条可直接阅读的场景句，严禁JSON字符串壳、待细化、重复金句/通用悬念。\n")
-		b.WriteString("弧上 contract_refs（含 planned_resolution）必须逐字段原样复制到各自 planned_payoff_chapter 对应的那一个 OutlineEntry.contract_refs 中，各出现且只出现一次；core_event/scenes 必须真正落实该 planned_resolution 的行动与终态，其他章不得携带。\n目标弧当前合同：\n")
+		b.WriteString("弧上 evidence_mode=payoff 的 contract_refs（含 planned_resolution）必须逐字段原样复制到各自 planned_payoff_chapter 对应的唯一 OutlineEntry.contract_refs 中；core_event/scenes 必须真正落实其行动与终态，其他章不得携带。evidence_mode=continuous 的 ref 只保留在弧级，任何章节都不得复制，也不得把持续禁止、知识边界或宿主约束改写成虚构故事事件；章节内容仍不得违反该边界。\n目标弧当前合同：\n")
 		b.Write(arcJSON)
 		b.WriteString("\n")
 	}
