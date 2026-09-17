@@ -434,7 +434,7 @@ func TestMissingCompassCoverageRequiresTerminalContractAndThreads(t *testing.T) 
 	compass := StoryCompass{
 		EndingDirection: "\u4e24\u4eba\u5b8c\u6210\u5c0f\u57ce\u6837\u677f\u5e76\u56de\u5f52\u5bb6\u5ead",
 		OpenThreads:     []string{"\u65e7\u5382\u5b8c\u6210\u81ea\u8f6c"},
-		NonNegotiables:  []string{"\u4e0d\u5f97\u727a\u7272\u666e\u901a\u5546\u6237"},
+		NonNegotiables:  []string{"\u666e\u901a\u5546\u6237\u83b7\u5f97\u8db3\u989d\u8fd4\u8fd8\u548c\u957f\u671f\u5e2d\u4f4d"},
 	}
 	registry := BuildStoryContractRegistry(compass)
 	refs := make([]StoryContractRef, len(registry))
@@ -484,6 +484,79 @@ func TestMissingCompassCoverageRejectsBareResolutionReceiptWithoutChapterEvidenc
 	)
 	if missing := MissingCompassCoverage(volumes, compass); len(missing) != 0 {
 		t.Fatalf("resolution evidence should satisfy binding: %v", missing)
+	}
+}
+
+func TestContinuousNonNegotiableBindsFinalArcWithoutChapterPayoff(t *testing.T) {
+	compass := StoryCompass{NonNegotiables: []string{"全书不得泄露九尾狐的私密潮痕，其他角色始终保持未知"}}
+	ref := BuildStoryContractRegistry(compass)[0]
+	if ref.EvidenceMode != StoryContractEvidenceContinuous {
+		t.Fatalf("source-backed continuous mode not derived: %+v", ref)
+	}
+	ref.PlannedPayoffChapter = 0
+	ref.PlannedResolution = ""
+	volumes := []VolumeOutline{{Index: 1, Arcs: []ArcOutline{{
+		Index: 1, ContractRefs: []StoryContractRef{ref},
+		Chapters: []OutlineEntry{{Chapter: 1, Title: "潮线", CoreEvent: "九九巡看公开水线。", Scenes: []string{"九尾狐独自在礁影停留。"}}},
+	}}}}
+	if issues := StoryContractSkeletonIssues(volumes, compass, true); len(issues) != 0 {
+		t.Fatalf("continuous skeleton rejected: %v", issues)
+	}
+	if issues := OutlineArcContractPayoffIssues(volumes[0].Arcs[0], 1); len(issues) != 0 {
+		t.Fatalf("continuous arc demanded a chapter payoff: %v", issues)
+	}
+	if missing := MissingCompassCoverage(volumes, compass); len(missing) != 0 {
+		t.Fatalf("continuous contract reported missing payoff: %v", missing)
+	}
+
+	volumes[0].Arcs[0].Chapters[0].ContractRefs = []StoryContractRef{ref}
+	issues := strings.Join(OutlineArcContractPayoffIssues(volumes[0].Arcs[0], 1), ",")
+	if !strings.Contains(issues, "continuous_contract_ref_must_not_bind_chapter") {
+		t.Fatalf("continuous contract leaked into chapter without rejection: %s", issues)
+	}
+}
+
+func TestContinuousNonNegotiableAcceptsSourceBoundEnglishProhibition(t *testing.T) {
+	compass := StoryCompass{NonNegotiables: []string{"No selected path may require locating a sender. Keep the opportunity unverified."}}
+	ref := BuildStoryContractRegistry(compass)[0]
+	if ref.EvidenceMode != StoryContractEvidenceContinuous {
+		t.Fatalf("English continuous mode not derived: %+v", ref)
+	}
+	volumes := []VolumeOutline{{Index: 1, Arcs: []ArcOutline{{
+		Index: 1, EstimatedChapters: 3, ContractRefs: []StoryContractRef{ref},
+	}}}}
+	if issues := StoryContractSkeletonIssues(volumes, compass, true); len(issues) != 0 {
+		t.Fatalf("source-bound English prohibition rejected: %v", issues)
+	}
+}
+
+func TestContinuousEvidenceModeIsFailClosed(t *testing.T) {
+	for name, compass := range map[string]StoryCompass{
+		"positive non-negotiable": {NonNegotiables: []string{"主角在终章完成婚礼并接管旧城议会"}},
+		"open thread":             {OpenThreads: []string{"旧厂工人最终独立接管排产"}},
+		"ending":                  {EndingDirection: "主角回到故乡并完成最终交付"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ref := BuildStoryContractRegistry(compass)[0]
+			ref.EvidenceMode = StoryContractEvidenceContinuous
+			ref.PlannedPayoffChapter = 0
+			ref.PlannedResolution = "该边界在全书范围持续保持并由后续系统验证"
+			volumes := []VolumeOutline{{Index: 1, Arcs: []ArcOutline{{
+				Index: 1, ContractRefs: []StoryContractRef{ref}, EstimatedChapters: 1,
+			}}}}
+			issues := strings.Join(StoryContractSkeletonIssues(volumes, compass, true), ",")
+			if !strings.Contains(issues, "invalid_contract_ref") {
+				t.Fatalf("unsupported continuous mode passed: %s", issues)
+			}
+		})
+	}
+	compass := StoryCompass{NonNegotiables: []string{"全书不得泄露私密潮痕"}}
+	ref := BuildStoryContractRegistry(compass)[0]
+	ref.EvidenceMode = "model-selected-bypass"
+	ref.PlannedResolution = "私密潮痕在全书范围持续保持为仅九尾狐可知"
+	volumes := []VolumeOutline{{Index: 1, Arcs: []ArcOutline{{Index: 1, EstimatedChapters: 1, ContractRefs: []StoryContractRef{ref}}}}}
+	if issues := strings.Join(StoryContractSkeletonIssues(volumes, compass, true), ","); !strings.Contains(issues, "invalid_contract_ref") {
+		t.Fatalf("unknown evidence mode passed: %s", issues)
 	}
 }
 
