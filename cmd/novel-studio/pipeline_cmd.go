@@ -306,7 +306,7 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			hasDownstream = pipelineStagesConsumePublishedOutlineAll(stages)
 		}
 		if flags.RefreshArchitect {
-			if err := validateExplicitArchitectRefreshState(outputDir); err != nil {
+			if err := validateExplicitArchitectRefreshState(outputDir, flags.ArchitectTarget); err != nil {
 				_ = releaseExclusive()
 				return err
 			}
@@ -631,16 +631,16 @@ func validateExplicitArchitectRefreshParameters(prompt, target string) error {
 	return nil
 }
 
-func validateExplicitArchitectRefreshState(outputDir string) error {
+func validateExplicitArchitectRefreshState(outputDir string, targets ...string) error {
 	if !tools.FoundationCoreComplete(outputDir) {
 		return fmt.Errorf("--refresh-architect 只用于已完成的 foundation；当前应先跑普通 architect 补齐缺失项")
 	}
-	shortChapterZero, _, err := pipelineArchitectShortChapterZero(outputDir)
+	chapterZero, _, err := pipelineArchitectRefreshChapterZero(outputDir, firstArchitectRefreshTarget(targets))
 	if err != nil {
 		return err
 	}
-	if !shortChapterZero {
-		return fmt.Errorf("--refresh-architect 当前只允许第0章、16章以内且无下游正史的项目；其他项目请使用显式 rebase")
+	if !chapterZero {
+		return fmt.Errorf("--refresh-architect 需要无下游正史的第0章；长篇来源刷新还须已验证的显式 rebase 和明确来源 target")
 	}
 	if err := tools.RequireChapterZeroFoundationRefreshState(store.NewStore(outputDir)); err != nil {
 		return fmt.Errorf("Architect refresh 在流水线完成证据失效前被章零门禁拒绝: %w", err)

@@ -1170,7 +1170,7 @@ func pipelineNormalizeOutlineAllArcSpans(outputDir string) (bool, error) {
 }
 
 func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt, requestedTarget string) error {
-	refreshPrompt, err := pipelineArchitectRefreshPrompt(cfg.OutputDir, prompt)
+	refreshPrompt, err := pipelineArchitectRefreshPrompt(cfg.OutputDir, prompt, requestedTarget)
 	if err != nil {
 		return err
 	}
@@ -1178,11 +1178,11 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 	if err != nil {
 		return err
 	}
-	shortChapterZero, _, err := pipelineArchitectShortChapterZero(cfg.OutputDir)
+	chapterZero, _, err := pipelineArchitectRefreshChapterZero(cfg.OutputDir, requestedTarget)
 	if err != nil {
 		return err
 	}
-	if shortChapterZero {
+	if chapterZero {
 		targets, err := pipelineArchitectShortSelectedTargets(requestedTarget)
 		if err != nil {
 			return err
@@ -1235,7 +1235,7 @@ func pipelineRefreshArchitectOpening(opts cliOptions, cfg bootstrap.Config, bund
 		}
 		return pipelineEnsureArchitectReadiness(opts, cfg.OutputDir)
 	}
-	return fmt.Errorf("--refresh-architect 当前只允许无 outline-all/zero-init/正文证据的第0章、16章以内项目；已进入长篇或下游阶段请使用显式 rebase 流程")
+	return fmt.Errorf("--refresh-architect 需要无 outline-all/zero-init/正文证据的第0章；长篇来源刷新还须已验证的显式 rebase 和明确来源 target")
 }
 
 func pipelineArchitectRefreshHeadlessOptions(
@@ -1650,17 +1650,26 @@ func pipelineArchitectFoundationPresence(outputDir string) (existing, missing []
 	return existing, missing
 }
 
-func pipelineArchitectRefreshPrompt(outputDir, prompt string) (string, error) {
+func pipelineArchitectRefreshPrompt(outputDir, prompt string, targets ...string) (string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("--refresh-architect 需要 --prompt/--prompt-file 说明本次重规划目标")
 	}
-	shortChapterZero, totalChapters, err := pipelineArchitectShortChapterZero(outputDir)
+	target := firstArchitectRefreshTarget(targets)
+	chapterZero, totalChapters, err := pipelineArchitectRefreshChapterZero(outputDir, target)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	if shortChapterZero {
+	if chapterZero && totalChapters > 16 {
+		fmt.Fprintf(&b, "[Pipeline Architect 显式 rebase 后章零长篇来源刷新]\n已验证本项目的显式归档和新章零 epoch，全书仍为%d章。本轮仅修订指定 foundation 来源 %s，不预写角色未来选择。\n", totalChapters, target)
+		b.WriteString("必须派 architect_long，先读取 novel_context 和当前 foundation。只保存本次明确指定的来源类型，保留原用户要求及其他来源；不能把作者掌握的历史事实、秘密或未来结果写入角色公开视图。\n")
+		b.WriteString("本阶段不得修改 layered_outline/outline，不重写前三章或全书章纲；旧结构只是待重新核验的输入，后续由正式 outline-all 重规划，不冒充沿用旧不可变回执。每轮只调用一次受限 save_foundation 成功保存后立即停止，宿主检查真实刷新 checkpoint。严禁 zero-init、plan_chapter、draft_chapter、commit_chapter，严禁派 writer/drafter/editor。\n\n[本次作者来源修订要求]\n")
+		b.WriteString(prompt)
+		b.WriteString("\n")
+		return b.String(), nil
+	}
+	if chapterZero {
 		fmt.Fprintf(&b, "[Pipeline Architect 章零短篇全书刷新阶段]\n这是尚未写正文的%d章短篇全书重规划，只允许 Architect 工作，不进入 zero-init、章节计划或正文。必须派 architect_long，先读取 novel_context 和当前 foundation。\n", totalChapters)
 		b.WriteString("按以下顺序逐项检查并修复；每轮只调用一次 save_foundation 保存最靠前的未完成项，随后立即停止，宿主会以新回合继续：\n")
 		b.WriteString("1. premise：恢复本项目创作总令的一句话故事、题材引擎与主角关系，不得用相邻但不同的故事替换。\n")
@@ -1698,6 +1707,45 @@ func pipelineArchitectShortChapterZero(outputDir string) (bool, int, error) {
 	}
 	return progress.LatestCompleted() == 0 && len(progress.PendingRewrites) == 0,
 		progress.TotalChapters, nil
+}
+
+func firstArchitectRefreshTarget(targets []string) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(targets[0])
+}
+
+// Keep the historical short-book path intact. A larger book receives no
+// authority from chapter count or a bare chapter-zero cursor: its existing
+// rebase archive must prove the retired epoch before any source refresh.
+func pipelineArchitectRefreshChapterZero(outputDir, target string) (bool, int, error) {
+	short, total, err := pipelineArchitectShortChapterZero(outputDir)
+	if err != nil || short {
+		return short, total, err
+	}
+	st := store.NewStore(outputDir)
+	p, err := st.Progress.Load()
+	if err != nil {
+		return false, 0, err
+	}
+	if p == nil || p.TotalChapters <= 16 {
+		return false, 0, nil
+	}
+	if p.LatestCompleted() != 0 || len(p.PendingRewrites) != 0 {
+		return false, p.TotalChapters, nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" || target == "layered_outline" {
+		return false, p.TotalChapters, fmt.Errorf("long-book chapter-zero refresh requires an explicit foundation source target; outline rebuilding belongs to outline-all")
+	}
+	if _, err := pipelineArchitectShortSelectedTargets(target); err != nil {
+		return false, p.TotalChapters, err
+	}
+	if err := st.ValidateRebasedChapterZeroFoundationRefresh(); err != nil {
+		return false, p.TotalChapters, fmt.Errorf("long-book source refresh requires a verified explicit rebase: %w", err)
+	}
+	return true, p.TotalChapters, nil
 }
 
 func pipelineArchitectRepairPrompt(outputDir, prompt string, cause error) (string, error) {
