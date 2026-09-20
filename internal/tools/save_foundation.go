@@ -796,23 +796,23 @@ func decodeFoundationJSON(typeName, content string, out any) error {
 		decoder.DisallowUnknownFields()
 		return decoder.Decode(out)
 	}
-	unknownFieldError := func(err error) error {
+	unknownFieldError := func(raw []byte, err error) error {
 		if typeName != "world_codex" || err == nil || !strings.HasPrefix(err.Error(), "json: unknown field ") {
 			return nil
 		}
-		return fmt.Errorf("parse world_codex JSON: %v。此字段不在世界法典 schema 中，本次提交未保存、未合并草稿。不要删除领域信息来凑 schema：请将不支持的设备、证据流程等完整写入对应 sections[].content/rules，并将可执行条件放入 mechanisms 的已定义字段；只修正本次提交，已暂存的合法部分不必重发: %w%s", err, errs.ErrToolArgs, foundationShapeHint("world_codex"))
+		return fmt.Errorf("parse world_codex JSON: %v%s。未知字段在其所在对象层不受支持，不代表其他层已定义的同名字段也被禁止。本次提交未保存、未合并草稿。不要删除领域信息来凑 schema：请将不支持的设备、证据流程等完整写入对应 sections[].content/rules，并将可执行条件放入 mechanisms 的已定义字段；修正后重发本次未保存的提交，此前已暂存的部分不必重发: %w%s", err, worldCodexUnknownFieldContext(raw, err), errs.ErrToolArgs, foundationShapeHint("world_codex"))
 	}
 	err := decode([]byte(content))
 	if err == nil {
 		return nil
 	}
-	if unknown := unknownFieldError(err); unknown != nil {
+	if unknown := unknownFieldError([]byte(content), err); unknown != nil {
 		return unknown
 	}
 	if repaired, changed := repairLooseJSON(content); changed {
 		if repairErr := decode([]byte(repaired)); repairErr == nil {
 			return nil
-		} else if unknown := unknownFieldError(repairErr); unknown != nil {
+		} else if unknown := unknownFieldError([]byte(repaired), repairErr); unknown != nil {
 			return unknown
 		}
 	}
@@ -823,7 +823,7 @@ func decodeFoundationJSON(typeName, content string, out any) error {
 		if coerced, changed := coerceJSONShape(json.RawMessage(content), rv.Elem().Type()); changed {
 			if coerceErr := decode(coerced); coerceErr == nil {
 				return nil
-			} else if unknown := unknownFieldError(coerceErr); unknown != nil {
+			} else if unknown := unknownFieldError(coerced, coerceErr); unknown != nil {
 				return unknown
 			}
 		}
@@ -1467,7 +1467,7 @@ func (t *SaveFoundationTool) saveWorldCodex(codex *domain.WorldCodex, changeReas
 			strings.Join(missing, ", "), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
 	}
 	if err := domain.ValidateWorldCodexV2(*codex); err != nil {
-		return fmt.Errorf("world_codex 未通过操作合同校验: %w: %w%s", err, errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
+		return fmt.Errorf("world_codex 未通过操作合同校验: %w。%s: %w%s", err, t.worldCodexUnchangedDraftHint(), errs.ErrToolPrecondition, foundationShapeHint("world_codex"))
 	}
 	if world, worldErr := t.store.World.LoadBookWorld(); worldErr != nil {
 		return fmt.Errorf("load book_world for world_codex audit: %w: %w", errs.ErrStoreRead, worldErr)
