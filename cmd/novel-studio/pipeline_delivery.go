@@ -2116,6 +2116,7 @@ func pipelineInitialWorldTickPrompt(outputDir string) (string, error) {
 	b.WriteString("[Pipeline zero-init 初始 world_tick 阶段]\n")
 	b.WriteString("Architect foundation 与 zero-init readiness 已完成；本阶段只补齐第 1 章写作前的离屏世界信息流。\n")
 	b.WriteString("必须派 architect_long 调用 save_world_tick，为第 1 章前生成开局镜头外事件、可见路径、势力/角色 agenda 推进和信息回收路径。\n")
+	b.WriteString("architect_long 如需上下文，只调用 novel_context(chapter=1, profile=\"world_simulation\")；Coordinator 必须把这条具体参数要求原样转交到 subagent task，不得改成无 chapter 或 full 的全书查询。chapter=1 只是只读上下文定位，不得提前执行第1章；本次 world_tick 仍只设置 chapter0 条件。\n")
 	b.WriteString("Coordinator 派 architect_long 时，必须把下列合同整块逐字复制进 subagent task；不得摘要、改写、截断或只转交 marker。执行门会按当前 authoritative 第1章逐字验签。\n")
 	b.WriteString(dispatchContract.Block)
 	b.WriteString("\n")
