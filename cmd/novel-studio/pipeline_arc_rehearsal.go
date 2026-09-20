@@ -67,13 +67,17 @@ func buildPipelineArcRehearsalInput(st *store.Store, configs ...bootstrap.Config
 // persisted draft. Derive only supported identities from today's complete
 // sources; never pick a historical input by filename order or modification time.
 func recoverPipelineArcRehearsalProtocolInput(st *store.Store, current domain.ArcRehearsalInput) (domain.ArcRehearsalInput, error) {
+	previous, err := agents.ReviewDeltaArcRehearsalProtocolDigest()
+	if err != nil {
+		return current, err
+	}
 	legacy, err := agents.LegacyArcRehearsalProtocolDigest()
 	if err != nil {
 		return current, err
 	}
 	var selected *domain.ArcRehearsalInput
 	seen := map[string]bool{}
-	for _, protocol := range []string{current.ProtocolDigest, legacy} {
+	for _, protocol := range []string{current.ProtocolDigest, previous, legacy} {
 		if seen[protocol] {
 			continue
 		}

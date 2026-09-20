@@ -30,7 +30,9 @@ requires_readable=true的resource_refs只引用实际读取的既有文书或已
 
 const arcRehearsalReviewPrompt = "\n你是复核者：独立检查Architect草案，不因已有草案便同意。保留每个material_checks.operation及读取依赖，可新增遗漏操作。资料缺口未解决时明确missing/unclear，不伪造可行性或把预测不通当实际世界冲突。"
 
-func ArcRehearsalProtocolDigest() (string, error) {
+// ReviewDeltaArcRehearsalProtocolDigest preserves the exact protocol before
+// current-arc contract assessment guidance was introduced.
+func ReviewDeltaArcRehearsalProtocolDigest() (string, error) {
 	legacy, err := LegacyArcRehearsalProtocolDigest()
 	if err != nil {
 		return "", err
@@ -73,16 +75,8 @@ func RunArcRehearsal(ctx context.Context, cfg bootstrap.Config, models *bootstra
 	if st == nil || models == nil || len(accounting) > 1 {
 		return nil, fmt.Errorf("invalid rehearsal runner dependencies")
 	}
-	protocol, err := ArcRehearsalProtocolDigest()
-	if err != nil {
+	if _, _, err := arcRehearsalProtocolFeatures(input.ProtocolDigest); err != nil {
 		return nil, err
-	}
-	legacyProtocol, err := LegacyArcRehearsalProtocolDigest()
-	if err != nil {
-		return nil, err
-	}
-	if input.ProtocolDigest != protocol && input.ProtocolDigest != legacyProtocol {
-		return nil, fmt.Errorf("rehearsal execution policy changed; rebuild a new input without rewriting historical reports")
 	}
 	capabilities, err := ArcRehearsalExecutionCapabilities(cfg)
 	if err != nil {
@@ -203,16 +197,19 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 		return domain.ArcRehearsalBody{}, call, err
 	}
 	prompt := arcRehearsalPrompt + arcRehearsalCapabilityPromptV1 + arcRehearsalSurfaceCapabilityPromptV1
+	scoped, deltaReview, err := arcRehearsalProtocolFeatures(input.ProtocolDigest)
+	if err != nil {
+		return domain.ArcRehearsalBody{}, call, err
+	}
 	if role == "world_arbiter" {
-		current, err := ArcRehearsalProtocolDigest()
-		if err != nil {
-			return domain.ArcRehearsalBody{}, call, err
-		}
-		if input.ProtocolDigest == current {
+		if deltaReview {
 			prompt += arcRehearsalReviewDeltaPrompt
 		} else {
 			prompt += arcRehearsalReviewPrompt
 		}
+	}
+	if scoped {
+		prompt += arcRehearsalContractScopePrompt
 	}
 	tool := &submitArcRehearsalTool{input: input}
 	if role == "world_arbiter" {
@@ -220,11 +217,7 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 			return domain.ArcRehearsalBody{}, call, fmt.Errorf("rehearsal review requires its host-bound draft")
 		}
 		tool.draft = draft
-		current, err := ArcRehearsalProtocolDigest()
-		if err != nil {
-			return domain.ArcRehearsalBody{}, call, err
-		}
-		tool.deltaReview = input.ProtocolDigest == current
+		tool.deltaReview = deltaReview
 	}
 	inputMessage, err := modelinput.NewExactAgentPacketMessage(modelinput.KindArcRehearsal, string(payload))
 	if err != nil {

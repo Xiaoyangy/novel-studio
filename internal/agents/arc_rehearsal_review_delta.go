@@ -56,11 +56,11 @@ func (t *submitArcRehearsalTool) compileReviewDelta(raw json.RawMessage) (domain
 	if t.draft == nil {
 		return zero, fmt.Errorf("review delta requires its host-bound draft")
 	}
-	current, err := ArcRehearsalProtocolDigest()
+	_, deltaReview, err := arcRehearsalProtocolFeatures(t.input.ProtocolDigest)
 	if err != nil {
 		return zero, err
 	}
-	if t.input.ProtocolDigest != current {
+	if !deltaReview {
 		return zero, fmt.Errorf("review delta does not match its input protocol")
 	}
 	verified, err := domain.FinalizeArcRehearsalDraft(t.input, *t.draft)
