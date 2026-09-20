@@ -476,7 +476,7 @@ func BuildCoordinatorWithOptions(
 		// spending the one-shot permit on a read/check/edit control response.
 		drafterTools = serverPrimedRenderTools(drafterTools)
 	}
-	architectModel := roleModel("architect")
+	architectModel := withInitialWorldTickTransport(roleModel("architect"), store)
 	writerModel := writersampler.New(roleModel("writer"))
 	drafterBaseModel := roleModel("drafter")
 	coordinatorModel := roleModel("coordinator")

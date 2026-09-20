@@ -136,6 +136,22 @@ func (t *ContextTool) Schema() map[string]any {
 }
 
 func (t *ContextTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if raw, active, err := InitialWorldTickExactContext(t.store); active || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		var scope struct {
+			Chapter int    `json:"chapter"`
+			Profile string `json:"profile"`
+		}
+		if err := unmarshalToolArgs(args, &scope); err != nil {
+			return nil, err
+		}
+		if scope.Chapter != 1 || scope.Profile != "world_simulation" {
+			return nil, fmt.Errorf("initial world_tick only permits novel_context(chapter=1, profile=world_simulation)")
+		}
+		return raw, nil
+	}
 	if err := guardOutlineAllDynamicMaterialExecution(t.store, t.Name()); err != nil {
 		return nil, err
 	}
