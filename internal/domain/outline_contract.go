@@ -707,6 +707,55 @@ var outlineContractNegativeIntentMarkers = []string{
 	"拒绝", "保密", "守密", "秘密", "隐藏", "隐瞒", "禁止", "停止", "退出", "取消", "否决", "放弃",
 }
 
+var outlineContractContinuousSourceMarkers = []string{
+	"不得", "不能", "不许", "不可", "禁止", "保持", "始终", "持续", "保密", "守密", "未知", "仅作为", "仅可",
+	"must not", "do not", "does not", "cannot", "may not", "never", "remain", "keep", "preserve", "forbidden", "environmental pressure only",
+	"unknown", "unverified", "unavailable", "none",
+}
+
+// StoryContractEvidenceMode returns the effective mode while preserving the
+// legacy wire contract: an omitted evidence_mode remains a payoff contract.
+func StoryContractEvidenceMode(ref StoryContractRef) string {
+	mode := strings.TrimSpace(ref.EvidenceMode)
+	if mode == "" {
+		return StoryContractEvidencePayoff
+	}
+	return mode
+}
+
+func storyContractSourcesByDigest(compass StoryCompass) map[string]string {
+	sources := make(map[string]string, len(compass.NonNegotiables)+len(compass.OpenThreads)+1)
+	appendSource := func(source string) {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			return
+		}
+		sum := sha256.Sum256([]byte(source))
+		sources[fmt.Sprintf("sha256:%x", sum[:])] = source
+	}
+	if compass.AuthorContracts == nil {
+		appendSource(compass.EndingDirection)
+	}
+	for _, source := range compass.NonNegotiables {
+		appendSource(source)
+	}
+	for _, source := range compass.OpenThreads {
+		appendSource(source)
+	}
+	return sources
+}
+
+// storyContractSupportsContinuous is deliberately fail-closed. Only a
+// non-negotiable whose exact source text carries a persistent/prohibitive
+// marker may opt out of terminal payoff evidence. Endings and open threads
+// remain concrete payoff contracts.
+func storyContractSupportsContinuous(ref StoryContractRef, source string) bool {
+	if ref.Kind != StoryContractNonNegotiable {
+		return false
+	}
+	return containsAnyContractMarker(strings.ToLower(source), outlineContractContinuousSourceMarkers)
+}
+
 // OutlineContractResolutionRealized is the single deterministic proof
 // predicate shared by arc mutation validation, repair selection, and final
 // outline validation. It accepts a concrete paraphrase only when evidence
@@ -871,6 +920,10 @@ func OutlineArcContractPayoffIssues(arc ArcOutline, globalStart int) []string {
 			case ref != expected:
 				issues = append(issues, fmt.Sprintf("contract_ref_drift=%q@chapter-%d", ref.ID, chapterNo))
 				continue
+			case StoryContractEvidenceMode(ref) == StoryContractEvidenceContinuous:
+				issues = append(issues, fmt.Sprintf("continuous_contract_ref_must_not_bind_chapter=%q@chapter-%d", ref.ID, chapterNo))
+				seen[ref.ID]++
+				continue
 			case ref.PlannedPayoffChapter != chapterNo:
 				issues = append(issues, fmt.Sprintf("misplaced_contract_ref=%q@chapter-%d want-%d", ref.ID, chapterNo, ref.PlannedPayoffChapter))
 			}
@@ -887,7 +940,11 @@ func OutlineArcContractPayoffIssues(arc ArcOutline, globalStart int) []string {
 		if parentCounts[id] != 1 {
 			issues = append(issues, fmt.Sprintf("arc_contract_ref=%q count=%d want-1", id, parentCounts[id]))
 		}
-		if seen[id] != 1 {
+		if StoryContractEvidenceMode(want[id]) == StoryContractEvidenceContinuous {
+			if seen[id] != 0 {
+				issues = append(issues, fmt.Sprintf("continuous_contract_ref=%q chapter_count=%d want-0", id, seen[id]))
+			}
+		} else if seen[id] != 1 {
 			issues = append(issues, fmt.Sprintf("contract_ref=%q payoff_count=%d want-1", id, seen[id]))
 		}
 	}
@@ -926,11 +983,16 @@ func BuildStoryContractRegistry(compass StoryCompass) []StoryContractRef {
 		}
 		sum := sha256.Sum256([]byte(source))
 		digest := fmt.Sprintf("sha256:%x", sum[:])
-		refs = append(refs, StoryContractRef{
+		ref := StoryContractRef{
 			ID:           fmt.Sprintf("%s-%02d-%x", kind, index, sum[:6]),
 			Kind:         kind,
 			SourceDigest: digest,
-		})
+			EvidenceMode: StoryContractEvidencePayoff,
+		}
+		if storyContractSupportsContinuous(ref, source) {
+			ref.EvidenceMode = StoryContractEvidenceContinuous
+		}
+		refs = append(refs, ref)
 	}
 	if compass.AuthorContracts == nil {
 		appendRef(StoryContractEnding, 0, compass.EndingDirection)
@@ -952,6 +1014,7 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 	for _, ref := range BuildStoryContractRegistry(compass) {
 		expected[ref.ID] = ref
 	}
+	sources := storyContractSourcesByDigest(compass)
 	counts := make(map[string]int)
 	resolutionOwner := make(map[string]string)
 	finalVolume, finalArc, finalChapter := finalOutlinePosition(volumes)
@@ -968,21 +1031,33 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 					continue
 				}
 				counts[ref.ID]++
-				if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest ||
-					ref.PlannedPayoffChapter < start || ref.PlannedPayoffChapter > end {
+				mode := StoryContractEvidenceMode(ref)
+				invalidMode := mode != StoryContractEvidencePayoff && mode != StoryContractEvidenceContinuous
+				invalidPlacement := mode == StoryContractEvidencePayoff &&
+					(ref.PlannedPayoffChapter < start || ref.PlannedPayoffChapter > end)
+				invalidContinuous := mode == StoryContractEvidenceContinuous &&
+					(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuous(ref, sources[ref.SourceDigest]))
+				if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || mode != StoryContractEvidenceMode(want) || invalidMode || invalidPlacement || invalidContinuous {
 					issues = append(issues, "invalid_contract_ref@"+where+":"+ref.ID)
 				}
 				resolutionKey := normalizeContractText(ref.PlannedResolution)
-				if meaningfulRuneCount(ref.PlannedResolution) < 18 || containsOutlinePlaceholder(ref.PlannedResolution) {
+				if mode == StoryContractEvidencePayoff && (meaningfulRuneCount(ref.PlannedResolution) < 18 || containsOutlinePlaceholder(ref.PlannedResolution)) {
 					issues = append(issues, "contract_resolution_not_concrete@"+where+":"+ref.ID)
-				} else if owner := resolutionOwner[resolutionKey]; owner != "" && owner != ref.ID {
-					issues = append(issues, "duplicate_contract_resolution@"+where+":"+ref.ID+":"+owner)
-				} else {
-					resolutionOwner[resolutionKey] = ref.ID
+				} else if mode == StoryContractEvidencePayoff {
+					if owner := resolutionOwner[resolutionKey]; owner != "" && owner != ref.ID {
+						issues = append(issues, "duplicate_contract_resolution@"+where+":"+ref.ID+":"+owner)
+					} else {
+						resolutionOwner[resolutionKey] = ref.ID
+					}
 				}
-				if (want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable) &&
-					(volume.Index != finalVolume || arc.Index != finalArc || ref.PlannedPayoffChapter != finalChapter) {
-					issues = append(issues, ref.ID+" must_bind_final_arc_and_chapter")
+				if want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable {
+					if mode == StoryContractEvidenceContinuous {
+						if volume.Index != finalVolume || arc.Index != finalArc {
+							issues = append(issues, ref.ID+" continuous_must_bind_final_arc")
+						}
+					} else if volume.Index != finalVolume || arc.Index != finalArc || ref.PlannedPayoffChapter != finalChapter {
+						issues = append(issues, ref.ID+" must_bind_final_arc_and_chapter")
+					}
 				}
 			}
 			cursor += arc.ChapterSpan()
@@ -1011,15 +1086,17 @@ type outlineContractPlacement struct {
 	payoffChapter  OutlineEntry
 }
 
-// MissingCompassCoverage validates references, source digests and unique
-// payoff positions. Ending/non-negotiable contracts must resolve in the final
-// arc and final chapter; every open thread gets exactly one arc and one chapter
-// payoff at the same planned chapter.
+// MissingCompassCoverage validates references, source digests and evidence
+// placement. Payoff contracts keep the legacy unique arc/chapter realization.
+// Continuous non-negotiables bind once to the final arc and deliberately have
+// no chapter payoff: downstream hard-canon, knowledge and host gates remain the
+// authorities for the invariant itself.
 func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []string {
 	expected := make(map[string]StoryContractRef)
 	for _, ref := range BuildStoryContractRegistry(compass) {
 		expected[ref.ID] = ref
 	}
+	sources := storyContractSourcesByDigest(compass)
 	arcRefs := make(map[string][]outlineContractPlacement)
 	chapterRefs := make(map[string][]outlineContractPlacement)
 	finalVolume, finalArc, finalChapter := finalOutlinePosition(volumes)
@@ -1033,16 +1110,24 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 			return false
 		}
 		resolutionKey := normalizeContractText(ref.PlannedResolution)
-		if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || ref.PlannedPayoffChapter <= 0 ||
-			meaningfulRuneCount(ref.PlannedResolution) < 18 || containsOutlinePlaceholder(ref.PlannedResolution) {
+		mode := StoryContractEvidenceMode(ref)
+		invalidMode := mode != StoryContractEvidencePayoff && mode != StoryContractEvidenceContinuous
+		invalidPlacement := mode == StoryContractEvidencePayoff && ref.PlannedPayoffChapter <= 0
+		invalidContinuous := mode == StoryContractEvidenceContinuous &&
+			(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuous(ref, sources[ref.SourceDigest]))
+		invalidResolution := mode == StoryContractEvidencePayoff &&
+			(meaningfulRuneCount(ref.PlannedResolution) < 18 || containsOutlinePlaceholder(ref.PlannedResolution))
+		if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || mode != StoryContractEvidenceMode(want) || invalidMode || invalidPlacement || invalidContinuous || invalidResolution {
 			invalid = append(invalid, "invalid_contract_ref@"+where+":"+ref.ID)
 			return false
 		}
-		if owner := resolutionOwner[resolutionKey]; owner != "" && owner != ref.ID {
-			invalid = append(invalid, "duplicate_contract_resolution@"+where+":"+ref.ID+":"+owner)
-			return false
+		if mode == StoryContractEvidencePayoff {
+			if owner := resolutionOwner[resolutionKey]; owner != "" && owner != ref.ID {
+				invalid = append(invalid, "duplicate_contract_resolution@"+where+":"+ref.ID+":"+owner)
+				return false
+			}
+			resolutionOwner[resolutionKey] = ref.ID
 		}
-		resolutionOwner[resolutionKey] = ref.ID
 		return true
 	}
 	for _, volume := range volumes {
@@ -1088,11 +1173,21 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 			missing = append(missing, fmt.Sprintf("%s arc_payoff_count=%d", id, len(arcs)))
 			continue
 		}
+		a := arcs[0]
+		if StoryContractEvidenceMode(a.ref) == StoryContractEvidenceContinuous {
+			if len(chapters) != 0 {
+				missing = append(missing, fmt.Sprintf("%s continuous_chapter_payoff_count=%d", id, len(chapters)))
+			}
+			if !a.isFinalArc {
+				missing = append(missing, id+" continuous_must_bind_final_arc")
+			}
+			continue
+		}
 		if len(chapters) != 1 {
 			missing = append(missing, fmt.Sprintf("%s chapter_payoff_count=%d", id, len(chapters)))
 			continue
 		}
-		a, c := arcs[0], chapters[0]
+		c := chapters[0]
 		if a.ref.PlannedPayoffChapter != c.ref.PlannedPayoffChapter ||
 			c.chapter != c.ref.PlannedPayoffChapter ||
 			c.chapter < a.arcStart || c.chapter > a.arcEnd ||
