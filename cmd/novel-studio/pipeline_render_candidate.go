@@ -3365,6 +3365,34 @@ func publishPipelineRenderCandidate(
 	publisher := store.NewDirectoryPublishStore(candidate.TransactionRoot)
 	var receipt *store.DirectoryPublishReceipt
 	err := withPipelineWatchdogPaused(func() error {
+		state, err := publisher.LoadDirectoryPublishState(candidate.ID)
+		if err != nil {
+			return err
+		}
+		// A journaled transaction already binds its complete before/candidate
+		// roots. Recovery must use those original bytes, never resynchronize it.
+		if state == nil {
+			root, err := store.NewStore(liveOutputDir).SyncChapterDeliveryBudgetForPublish(candidate.OutputDir, candidate.SourceLiveRoot)
+			if err != nil {
+				return err
+			}
+			if root != candidate.SourceLiveRoot {
+				manifest, err := loadPipelineRenderCandidateManifest(candidate.OutputDir)
+				if err != nil {
+					return err
+				}
+				if manifest == nil || manifest.CandidateID != candidate.ID ||
+					filepath.Clean(manifest.SourceOutputDir) != filepath.Clean(liveOutputDir) ||
+					manifest.SourceLiveRoot != candidate.SourceLiveRoot {
+					return fmt.Errorf("render candidate publication source binding differs from its manifest")
+				}
+				manifest.SourceLiveRoot = root
+				if _, err := writePipelinePlanningJSON(filepath.Join(candidate.OutputDir, "meta/planning/render_candidate.json"), manifest); err != nil {
+					return err
+				}
+			}
+			candidate.SourceLiveRoot = root
+		}
 		var publishErr error
 		receipt, publishErr = publisher.PublishDirectory(store.PublishDirectoryRequest{
 			TransactionID:    candidate.ID,

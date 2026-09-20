@@ -1527,6 +1527,12 @@ func directoryContentRoot(root string) (string, error) {
 }
 
 func directoryContentRootOnce(root string) (string, error) {
+	return directoryContentRootOnceWithFileOverride(root, "", nil)
+}
+
+// The override is used only to prove that a budget observation changed one
+// existing file. It never changes the tree or the ordinary publish CAS root.
+func directoryContentRootOnceWithFileOverride(root, overridePath string, overrideData []byte) (string, error) {
 	if err := requireRegularDirectory(root, "directory"); err != nil {
 		return "", err
 	}
@@ -1568,6 +1574,9 @@ func directoryContentRootOnce(root string) (string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		if relative == overridePath {
+			data = overrideData
 		}
 		entries = append(entries, entry{path: relative, kind: 'f', data: data})
 		return nil
