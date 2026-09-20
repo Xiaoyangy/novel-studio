@@ -50,6 +50,12 @@ type Host struct {
 	notifier                   *notify.Notifier // 无人值守告警；未启用为 nil（Send nil 安全）
 	preserveCheckpointsOnStart bool
 	disableFlowRouter          bool
+	foundationRefreshTarget    string
+	foundationRefreshDispatch  agents.FoundationRefreshDispatch
+	foundationRefreshCancel    context.CancelFunc
+	foundationRefreshDone      chan struct{}
+	foundationRefreshErr       error
+	closing                    bool
 
 	events   chan Event
 	streamCh chan string
@@ -129,6 +135,7 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 
 	var router *flow.Dispatcher
 	var budget *BudgetSentinel
+	var foundationRefreshDispatch agents.FoundationRefreshDispatch
 	coordinator, askUser, restore, coordinatorCtxMgr, applyThinking := agents.BuildCoordinatorWithOptions(cfg, store, models, bundle, accounting.record, func(string) {
 		if budget != nil && budget.HandleBoundary() {
 			return
@@ -143,6 +150,9 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
 		OneShotFoundationRefresh:          opts.OneShotFoundationRefresh,
 		DeferFoundationFinalization:       opts.DeferFoundationFinalization,
+		OnFoundationRefreshReady: func(dispatch agents.FoundationRefreshDispatch) {
+			foundationRefreshDispatch = dispatch
+		},
 	})
 	store.Signals.ClearStaleSignals()
 
@@ -160,6 +170,8 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		usageAccounting:            accounting,
 		preserveCheckpointsOnStart: opts.PreserveCheckpointsOnStart,
 		disableFlowRouter:          opts.DisableFlowRouter,
+		foundationRefreshTarget:    strings.TrimSpace(opts.FoundationRefreshTarget),
+		foundationRefreshDispatch:  foundationRefreshDispatch,
 		events:                     make(chan Event, 100),
 		streamCh:                   make(chan string, 256),
 		done:                       make(chan struct{}, 4),
@@ -296,6 +308,10 @@ func logUserRulesSnapshot(snap *rules.Snapshot) {
 // StartPrepared 使用已编排完成的启动 prompt 开始创作。
 func (h *Host) StartPrepared(promptText string) error {
 	h.mu.Lock()
+	if h.closed || h.closing || h.foundationRefreshBusyLocked() {
+		h.mu.Unlock()
+		return fmt.Errorf("host is closed or a direct foundation refresh is still finishing")
+	}
 	if h.lifecycle == lifecycleRunning {
 		h.mu.Unlock()
 		return fmt.Errorf("already running")
@@ -377,6 +393,10 @@ func (h *Host) ensureStartProgressInitialized() error {
 // Resume 恢复模式：从 checkpoint + progress 生成 resume prompt 并启动。
 func (h *Host) Resume() (string, error) {
 	h.mu.Lock()
+	if h.closed || h.closing || h.foundationRefreshBusyLocked() {
+		h.mu.Unlock()
+		return "", fmt.Errorf("host is closed or a direct foundation refresh is still finishing")
+	}
 	if h.lifecycle == lifecycleRunning {
 		h.mu.Unlock()
 		return "", fmt.Errorf("already running")
@@ -454,6 +474,10 @@ func (h *Host) Continue(text string) error {
 		return fmt.Errorf("text is required")
 	}
 	h.mu.Lock()
+	if h.closed || h.closing || h.foundationRefreshBusyLocked() {
+		h.mu.Unlock()
+		return fmt.Errorf("host is closed or a direct foundation refresh is still finishing")
+	}
 	if h.cocreating {
 		h.mu.Unlock()
 		return fmt.Errorf("阶段共创进行中，请先结束共创")
@@ -487,6 +511,10 @@ func (h *Host) Continue(text string) error {
 // Steer 提交用户干预。
 func (h *Host) Steer(text string) {
 	h.mu.Lock()
+	if h.closed || h.closing || h.foundationRefreshBusyLocked() {
+		h.mu.Unlock()
+		return // A restricted one-shot source task cannot start Coordinator work.
+	}
 	running := h.lifecycle == lifecycleRunning
 	h.mu.Unlock()
 
@@ -517,6 +545,7 @@ func (h *Host) abortWithEvent(summary, level string) bool {
 	if running {
 		h.lifecycle = lifecyclePaused
 	}
+	directCancel := h.foundationRefreshCancel
 	h.mu.Unlock()
 	if !running {
 		return false
@@ -524,6 +553,9 @@ func (h *Host) abortWithEvent(summary, level string) bool {
 	// 置位必须在 coordinator.Abort 之前：cancel 传播会立刻引发 stream init / subagent
 	// 失败事件，observer 凭此标志识别为 abort 衍生噪声并抑制。
 	h.observer.setAborting(true)
+	if directCancel != nil {
+		directCancel() // Never wait here: provider accounting may call Abort inline.
+	}
 	h.coordinator.Abort()
 	h.emitEvent(Event{Time: time.Now(), Category: "SYSTEM", Summary: summary, Level: level})
 	return true
@@ -534,11 +566,22 @@ func (h *Host) abortWithEvent(summary, level string) bool {
 // Provider observers keep the durable meter alive after AbortSilent: late
 // responses are written synchronously, without relying on session replay.
 func (h *Host) Close() {
+	h.mu.Lock()
+	h.closing = true
+	directCancel, directDone := h.foundationRefreshCancel, h.foundationRefreshDone
+	detach := h.budgetDetach
+	h.budgetDetach = nil
+	h.mu.Unlock()
 	h.observer.setAborting(true)
+	if directCancel != nil {
+		directCancel()
+	}
 	h.coordinator.AbortSilent()
-	if h.budgetDetach != nil {
-		h.budgetDetach()
-		h.budgetDetach = nil
+	if directDone != nil {
+		<-directDone // All observer callbacks must finish before channel closure.
+	}
+	if detach != nil {
+		detach()
 	}
 	var usageErr error
 	if h.usageAccounting != nil {

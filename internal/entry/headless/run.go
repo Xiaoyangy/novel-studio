@@ -1,6 +1,7 @@
 package headless
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -71,6 +72,10 @@ type Options struct {
 // 未来若新增“续写已有小说”等共享启动方式，不应直接堆到这里，
 // 而应先落到 internal/entry/startup，再由 headless 入口调用。
 func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
+	directTask, directRefresh, err := directFoundationRefreshTask(opts)
+	if err != nil {
+		return err
+	}
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
@@ -145,7 +150,12 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		if err := prepareUserRules(opts, plan.RawPrompt, eng.PrepareUserRules); err != nil {
 			return err
 		}
-		if err := eng.StartPrepared(plan.StartPrompt); err != nil {
+		start := eng.StartPrepared
+		startPrompt := plan.StartPrompt
+		if directRefresh {
+			start, startPrompt = eng.StartFoundationRefresh, directTask
+		}
+		if err := start(startPrompt); err != nil {
 			return err
 		}
 	} else {
@@ -171,7 +181,47 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		return consume(eng, stdout, stderr, roundHasContent, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
 	}
 
-	return consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
+	consumeErr := consume(eng, stdout, stderr, false, opts.StopAfterChapter, opts.StopAfterPlanChapter, planSeq, opts.StopAfterRewriteCommit, rewriteCommitSeq, opts.StopAfterGlobalReviewChapter, globalReviewSeq, opts.StopOnRenderReplanChapter, opts.StopOnSealedConvergencePreconditionChapter, opts.StopAfterFoundation, opts.StopAfterFoundationChange, opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest, opts.StopAfterInitialWorldTick, renderDraftSeq)
+	if directRefresh {
+		runErr := waitDirectFoundationRefresh(consumeErr, eng.Abort, eng.WaitFoundationRefresh)
+		if runErr != nil && !(errors.Is(runErr, context.Canceled) && consumeErr == nil && shouldStopAfterFoundationChanged(eng.Dir(), opts.FoundationChangeArtifacts, opts.FoundationRefreshTarget, opts.FoundationChangeCheckpointStep, foundationCheckpointSeq, foundationDigest)) {
+			// A failed paid child must not be reclassified as the recoverable
+			// ErrFoundationChangeIncomplete and automatically dispatched again.
+			return fmt.Errorf("direct foundation refresh %s failed: %w", opts.FoundationRefreshTarget, runErr)
+		}
+	}
+	return consumeErr
+}
+
+func waitDirectFoundationRefresh(consumeErr error, abort func() bool, wait func() error) error {
+	// A failed output consumer cannot reach deferred Close while it waits for
+	// the child. Cancel through the normal Host path before draining callbacks.
+	cancelledForConsumeError := consumeErr != nil && abort()
+	runErr := wait()
+	if cancelledForConsumeError && errors.Is(runErr, context.Canceled) {
+		return nil // Preserve consumeErr; this cancellation was only cleanup.
+	}
+	return runErr
+}
+
+func directFoundationRefreshTask(opts Options) (string, bool, error) {
+	if strings.TrimSpace(opts.FoundationRefreshTarget) == "" {
+		return "", false, nil
+	}
+	if !opts.StopAfterFoundationChange || !opts.OneShotFoundationRefresh || !opts.RecordFoundationRefreshEpoch || !opts.DisableFlowRouter || !opts.PreserveCheckpointsOnStart || !opts.PreserveUserRules {
+		return "", true, fmt.Errorf("direct foundation refresh requires the complete restricted checkpoint/stop contract")
+	}
+	const header = "[宿主强制路由：Coordinator 必须逐字服从]"
+	const marker = "\n\n[Architect 执行任务]\n"
+	prompt := strings.TrimSpace(opts.Prompt)
+	if !strings.HasPrefix(prompt, header) {
+		return "", true, fmt.Errorf("direct foundation refresh requires the host-authored Architect task boundary")
+	}
+	_, task, found := strings.Cut(prompt, marker)
+	if !found || strings.TrimSpace(task) == "" {
+		return "", true, fmt.Errorf("direct foundation refresh is missing its Architect task")
+	}
+	return "[Architect 执行任务]\n" + task, true, nil
 }
 
 func prepareUserRules(opts Options, rawPrompt string, prepare func(string) error) error {

@@ -217,7 +217,12 @@ type CoordinatorBuildOptions struct {
 	RecordFoundationRefreshEpoch      bool
 	OneShotFoundationRefresh          bool
 	DeferFoundationFinalization       bool
+	OnFoundationRefreshReady          func(FoundationRefreshDispatch)
 }
+
+// FoundationRefreshDispatch is a host-only capability for the already-bound
+// source target. Neither the agent name nor model selection comes from task.
+type FoundationRefreshDispatch func(context.Context, string) (json.RawMessage, error)
 
 var subAgentSessionIdentityRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 
@@ -793,10 +798,64 @@ func BuildCoordinatorWithOptions(
 		},
 	})
 
+	dispatchTool := singleSubagentTool{Tool: subagentTool}
+	coordinatorGate := combineToolGates(
+		singleSubagentModeGate(),
+		foundationRefreshCoordinatorGate(buildOpts.FoundationRefreshTarget),
+		pipelineInitialWorldTickAgentGate(store),
+		pipelineRenderAgentGate(store),
+		pipelineOutlineAllAgentGate(store),
+		completePhaseGate(store),
+		writerExpandedChapterGate(store),
+		writerZeroInitGate(store),
+		expandArcWorldTickGate(store),
+		pipelineRenderProsePermitGate(store),
+	)
+	if buildOpts.OnFoundationRefreshReady != nil && architectRefreshTarget != "" {
+		buildOpts.OnFoundationRefreshReady(func(ctx context.Context, task string) (json.RawMessage, error) {
+			if ctx == nil || strings.TrimSpace(task) == "" || !buildOpts.OneShotFoundationRefresh || !buildOpts.RecordFoundationRefreshEpoch {
+				return nil, fmt.Errorf("direct foundation refresh requires a task and one-shot checkpoint-bound capability")
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			switch architectRefreshTarget {
+			case "premise", "characters", "world_rules", "book_world", "world_codex", "update_compass", "layered_outline":
+			default:
+				return nil, fmt.Errorf("unsupported direct foundation refresh target %q", architectRefreshTarget)
+			}
+			args, err := json.Marshal(struct {
+				Agent string `json:"agent"`
+				Task  string `json:"task"`
+			}{Agent: "architect_long", Task: task})
+			if err != nil {
+				return nil, err
+			}
+			decision, err := coordinatorGate(ctx, agentcore.GateRequest{Tool: dispatchTool, Call: agentcore.ToolCall{Name: "subagent", Args: args}})
+			if err != nil {
+				return nil, err
+			}
+			if decision != nil && !decision.Allowed {
+				return nil, fmt.Errorf("direct foundation refresh dispatch refused: %s", decision.Reason)
+			}
+			result, err := dispatchTool.Execute(ctx, args)
+			if err != nil {
+				return result, err
+			}
+			var terminal struct {
+				Result json.RawMessage `json:"terminal_result"`
+			}
+			if err := json.Unmarshal(result, &terminal); err != nil || !foundationRefreshShouldStopAfterToolResult(architectRefreshTarget, "save_foundation", terminal.Result) {
+				return result, fmt.Errorf("direct foundation refresh ended without its successful target save")
+			}
+			return result, nil
+		})
+	}
+
 	agent := agentcore.NewAgent(
 		agentcore.WithModel(coordinatorModel),
 		agentcore.WithSystemPrompt(bundle.Prompts.Coordinator),
-		agentcore.WithTools(singleSubagentTool{Tool: subagentTool}, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
+		agentcore.WithTools(dispatchTool, contextTool, tools.NewSaveUserRulesTool(userRulesSvc, store), tools.NewReopenBookTool(store)),
 		agentcore.WithMaxTurns(coordinatorMaxTurns),
 		agentcore.WithOnMessage(coordinatorOnMessage),
 		agentcore.WithToolsAreIdempotent(false),
@@ -809,18 +868,7 @@ func BuildCoordinatorWithOptions(
 		agentcore.WithStopGuard(reminder.NewStopGuard(store, nil)),
 		agentcore.WithMiddlewares(flowBoundaryMiddleware(onFlowBoundary)),
 		// phase=complete 时硬拦截 subagent 派发，防止 Writer 死循环。
-		agentcore.WithToolGate(combineToolGates(
-			singleSubagentModeGate(),
-			foundationRefreshCoordinatorGate(buildOpts.FoundationRefreshTarget),
-			pipelineInitialWorldTickAgentGate(store),
-			pipelineRenderAgentGate(store),
-			pipelineOutlineAllAgentGate(store),
-			completePhaseGate(store),
-			writerExpandedChapterGate(store),
-			writerZeroInitGate(store),
-			expandArcWorldTickGate(store),
-			pipelineRenderProsePermitGate(store),
-		)),
+		agentcore.WithToolGate(coordinatorGate),
 	)
 	// Coordinator 推理强度：无条件应用解析结果。未配置时为空（不发 thinking，用 provider
 	// 默认），与各子代理（Config.ThinkingLevel 默认空）一致——避免覆盖 agentcore 默认
