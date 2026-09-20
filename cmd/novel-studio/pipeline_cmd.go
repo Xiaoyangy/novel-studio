@@ -441,6 +441,11 @@ func runPipelineWithStages(opts cliOptions, flags pipelineFlags, stages []string
 			storedEvidence := state.Evidence[stage]
 			evidence := storedEvidence
 			err := verifyStoredPipelineArtifactDigests(cfg.OutputDir, storedEvidence)
+			if err == nil && stage == "architect" && hasOutlineAll {
+				if normalizeErr := pipelineNormalizeArchitectOutlineAllCompassScale(cfg.OutputDir); normalizeErr != nil {
+					return normalizeErr
+				}
+			}
 			if err == nil {
 				evidence, err = verifyPipelineStage(stage, cfg.OutputDir, flags, state, cfg)
 			}

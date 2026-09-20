@@ -848,12 +848,8 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 			return pipelineRepairArchitectCompass(opts, cfg, bundle, state.Prompt, fmt.Errorf("compass.non_negotiables 缺失，outline-all 无法映射全书硬合同"))
 		}
 		if pipelineStageListContains(state.Stages, "outline-all") {
-			normalizedScale, err := pipelineNormalizeOutlineAllCompassScale(cfg.OutputDir)
-			if err != nil {
+			if err := pipelineNormalizeArchitectOutlineAllCompassScale(cfg.OutputDir); err != nil {
 				return err
-			}
-			if normalizedScale {
-				fmt.Fprintln(os.Stderr, "[pipeline:architect] 已为 compass.estimated_scale 补齐 outline-all 可解析的卷/章显式区间")
 			}
 			normalized, err := pipelineNormalizeOutlineAllArcSpans(cfg.OutputDir)
 			if err != nil {
@@ -900,11 +896,48 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 }
 
 func pipelineEnsureOrRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string) error {
+	if err := pipelineNormalizeArchitectOutlineAllCompassScale(cfg.OutputDir); err != nil {
+		return err
+	}
 	if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err != nil {
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] Architect readiness 未通过，进入 foundation 修复：%v\n", err)
 		return pipelineRepairArchitectReadiness(opts, cfg, bundle, prompt, err)
 	}
 	return nil
+}
+
+// Both fresh Architect completion and verified completed-stage recovery must
+// prepare the same mechanical scale before outline-all consumes the foundation.
+// This is not permission to rewrite a published/in-flight planning dependency.
+func pipelineNormalizeArchitectOutlineAllCompassScale(outputDir string) error {
+	required, err := loadPipelineOutlineAllRequirement(outputDir)
+	if err != nil || !required {
+		return err
+	}
+	st := store.NewStore(outputDir)
+	compass, err := st.Outline.LoadCompass()
+	if err != nil || compass == nil {
+		return err
+	}
+	if _, err := domain.ParseBookScaleRange(compass.EstimatedScale); err == nil {
+		return nil
+	}
+	// Reject persisted planning artifacts before the refresh guard's generation
+	// readers can establish recovery/locking sidecars in that frozen workspace.
+	if err := st.ValidateOutlineAllChapterZeroWorkspace(); err != nil {
+		return fmt.Errorf("outline-all compass normalization requires an untouched chapter-zero workspace: %w", err)
+	}
+	if err := tools.RequireChapterZeroFoundationRefreshState(st); err != nil {
+		return fmt.Errorf("outline-all compass normalization requires mutable chapter-zero foundation: %w", err)
+	}
+	changed, err := pipelineNormalizeOutlineAllCompassScale(outputDir)
+	if err != nil || !changed {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "[pipeline:architect] 已为 compass.estimated_scale 补齐 outline-all 可解析的卷/章显式区间")
+	// The readiness receipt belongs to the normalized source, not its old bytes.
+	// A still-unready report must reach the caller's existing repair path.
+	return writeArchitectReadiness(outputDir, assessArchitectReadiness(outputDir))
 }
 
 // Architect creates the sources that RAG indexes. A genuinely empty project

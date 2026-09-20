@@ -231,8 +231,21 @@ func parseBookChapterScaleRange(value string) (int, int, error) {
 }
 
 func chapterScaleHasPerUnitSuffix(value string, end int) bool {
-	const separators = "，,；;。.!！?？\n\r"
+	const separators = "，,；;。.!！?？\n\r()（）"
 	suffix := value[end:]
+	// A parenthesized unit-only qualifier still belongs to this range (for
+	// example "20-22章（每卷）"). A new range inside the parentheses is a
+	// separate clause, not a qualifier of the preceding whole-book total.
+	trimmed := strings.TrimLeft(suffix, " \t:：")
+	if strings.HasPrefix(trimmed, "(") || strings.HasPrefix(trimmed, "（") {
+		qualifier := strings.TrimLeft(trimmed, "(（ \t")
+		if right := strings.IndexAny(qualifier, separators); right >= 0 {
+			qualifier = qualifier[:right]
+		}
+		if !chapterScaleRangeRE.MatchString(qualifier) && perUnitChapterScaleSuffixRE.MatchString(strings.ToLower(qualifier)) {
+			return true
+		}
+	}
 	if right := strings.IndexAny(suffix, separators); right >= 0 {
 		suffix = suffix[:right]
 	}
