@@ -167,6 +167,17 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 			return nil, err
 		}
 	}
+	// Check the frozen delivery contract before even optional planning-tier
+	// writes. A failed terminal request must not mutate authoring metadata.
+	if a.Type == "complete_book" {
+		progress, err := t.store.Progress.Load()
+		if err != nil {
+			return nil, fmt.Errorf("load progress for book completion: %w", err)
+		}
+		if err := requireFrozenBookCompletion(t.store, progress, domain.PlanningTier(a.Scale)); err != nil {
+			return nil, err
+		}
+	}
 	if a.Scale != "" {
 		switch domain.PlanningTier(a.Scale) {
 		case domain.PlanningTierShort, domain.PlanningTierMid, domain.PlanningTierLong:

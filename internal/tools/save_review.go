@@ -570,6 +570,9 @@ func (t *SaveReviewTool) completeBookIfReady(r domain.ReviewEntry, progress *dom
 	}
 	if progress.Layered {
 		if progress.ReopenedFromComplete {
+			if err := requireFrozenBookCompletion(t.store, progress); err != nil {
+				return false, "", err
+			}
 			if err := t.store.Progress.MarkComplete(); err != nil {
 				return false, "", fmt.Errorf("mark reopened layered book complete: %w", err)
 			}
@@ -583,6 +586,9 @@ func (t *SaveReviewTool) completeBookIfReady(r domain.ReviewEntry, progress *dom
 	meta, _ := t.store.RunMeta.Load()
 	if domain.RequiresFinalGlobalReview(progress, meta) {
 		return false, "", nil
+	}
+	if err := requireFrozenBookCompletion(t.store, progress); err != nil {
+		return false, "", err
 	}
 	if err := t.store.Progress.MarkComplete(); err != nil {
 		return false, "", fmt.Errorf("mark non-layered book complete: %w", err)
@@ -600,6 +606,9 @@ func (t *SaveReviewTool) completeShortBookAfterGlobalReview(r domain.ReviewEntry
 	}
 	if !t.store.World.HasAcceptedChapterReviews(progress.CompletedChapters) {
 		return false, "", nil
+	}
+	if err := requireFrozenBookCompletion(t.store, progress); err != nil {
+		return false, "", err
 	}
 	if err := t.writeMergedManuscript(progress); err != nil {
 		return false, "", fmt.Errorf("write merged manuscript: %w", err)
