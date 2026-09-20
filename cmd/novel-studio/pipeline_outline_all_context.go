@@ -98,7 +98,12 @@ func buildPipelineOutlineAllModelVisibleContext(
 	action domain.OutlineAllPendingAction,
 	foundation pipelineOutlineAllFrozenFoundation,
 	references tools.References,
+	policies ...string,
 ) (pipelineOutlineAllModelVisibleContext, []byte, string, error) {
+	policy := pipelineOutlineAllContractPolicyArgument(policies)
+	if err := domain.ValidateStoryContractEvidencePolicy(policy); err != nil {
+		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
+	}
 	fullDigest, err := domain.ComputeLayeredOutlineDigest(volumes)
 	if err != nil {
 		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
@@ -140,7 +145,7 @@ func buildPipelineOutlineAllModelVisibleContext(
 				"production_playbook":       pipelineOutlineAllBoundText(references.ProductionPlaybook, 6*1024),
 			},
 		},
-		ContractRegistry:      pipelineOutlineAllContractRegistry(compass),
+		ContractRegistry:      pipelineOutlineAllContractRegistry(compass, policy),
 		CompleteLayeredArcMap: pipelineOutlineAllArcMap(volumes),
 	}
 	if len(foundation.Authorities) > 0 {

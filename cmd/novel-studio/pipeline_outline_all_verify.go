@@ -90,7 +90,7 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 		resolved.StoryTimeHint != target.StoryTimeHint {
 		return nil, fmt.Errorf("outline-all deterministic scale target drift")
 	}
-	volumes, err := validatePipelineOutlineAllFinal(st, *compass, target)
+	volumes, err := validatePipelineOutlineAllFinal(st, *compass, target, receipt.ContractEvidencePolicy)
 	if err != nil {
 		return nil, err
 	}

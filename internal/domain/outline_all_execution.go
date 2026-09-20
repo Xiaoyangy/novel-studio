@@ -117,6 +117,7 @@ type OutlineAllExecutionReceipt struct {
 	EndingDirection               string                    `json:"ending_direction"`
 	NonNegotiables                []string                  `json:"non_negotiables,omitempty"`
 	AuthorContracts               *CompassAuthorContractsV1 `json:"author_contracts,omitempty"`
+	ContractEvidencePolicy        string                    `json:"contract_evidence_policy,omitempty"`
 	MinVolumes                    int                       `json:"min_volumes"`
 	MaxVolumes                    int                       `json:"max_volumes"`
 	MinChapters                   int                       `json:"min_chapters"`
@@ -275,6 +276,9 @@ func ValidateOutlineAllExecutionLockBinding(
 }
 
 func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) error {
+	if err := ValidateStoryContractEvidencePolicy(receipt.ContractEvidencePolicy); err != nil {
+		return err
+	}
 	if receipt.Version != OutlineAllExecutionReceiptVersion ||
 		receipt.Mode != OutlineAllExecutionMode ||
 		receipt.BaseCanonChapter != 0 ||

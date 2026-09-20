@@ -107,6 +107,7 @@ func validatePipelineOutlineAllMutation(
 	action domain.OutlineAllPendingAction,
 	compass domain.StoryCompass,
 	target domain.BookScaleTarget,
+	policies ...string,
 ) error {
 	if err := domain.ValidateOutlineAllPendingAction(action); err != nil {
 		return err
@@ -191,7 +192,10 @@ func validatePipelineOutlineAllMutation(
 				}
 			}
 		}
-		if issues := domain.StoryContractSkeletonIssues(after, compass, true); len(issues) > 0 {
+		if err := domain.ValidateStoryContractMapMutationModes(before, after, pipelineOutlineAllContractPolicyArgument(policies)); err != nil {
+			return err
+		}
+		if issues := domain.StoryContractSkeletonIssuesForPolicy(after, compass, true, pipelineOutlineAllContractPolicyArgument(policies)); len(issues) > 0 {
 			return fmt.Errorf("map_contracts coverage invalid: %s", strings.Join(issues, "; "))
 		}
 	case domain.OutlineAllActionExpandArc, domain.OutlineAllActionReviseArc:
@@ -284,6 +288,7 @@ func outlineAllNextStructuralAction(
 	compass domain.StoryCompass,
 	target domain.BookScaleTarget,
 	planFrozen bool,
+	policies ...string,
 ) (domain.OutlineAllPendingAction, bool, error) {
 	// Until the model's structure plan is frozen, the only structural action is
 	// plan_structure: the model authors the whole-book volume/arc reservation
@@ -300,7 +305,7 @@ func outlineAllNextStructuralAction(
 			realVolumes, target.TargetVolumes, total, target.TargetChapters,
 		)
 	}
-	if issues := domain.StoryContractSkeletonIssues(volumes, compass, true); len(issues) > 0 {
+	if issues := domain.StoryContractSkeletonIssuesForPolicy(volumes, compass, true, pipelineOutlineAllContractPolicyArgument(policies)); len(issues) > 0 {
 		return domain.OutlineAllPendingAction{
 			Type:                domain.OutlineAllActionMapContracts,
 			ExpectedChapterSpan: total,
@@ -372,6 +377,7 @@ func validatePipelineOutlineAllFinal(
 	st *store.Store,
 	compass domain.StoryCompass,
 	target domain.BookScaleTarget,
+	policies ...string,
 ) ([]domain.VolumeOutline, error) {
 	volumes, err := st.Outline.LoadLayeredOutline()
 	if err != nil {
@@ -389,10 +395,10 @@ func validatePipelineOutlineAllFinal(
 	if issues := domain.OutlineChapterContractIssues(volumes); len(issues) > 0 {
 		return nil, fmt.Errorf("outline-all chapter contracts are not ready: %s", summarizeOutlineContractIssues(issues, 12))
 	}
-	if issues := domain.StoryContractSkeletonIssues(volumes, compass, true); len(issues) > 0 {
+	if issues := domain.StoryContractSkeletonIssuesForPolicy(volumes, compass, true, pipelineOutlineAllContractPolicyArgument(policies)); len(issues) > 0 {
 		return nil, fmt.Errorf("outline-all skeleton compass coverage invalid: %s", strings.Join(issues, "; "))
 	}
-	if missing := domain.MissingCompassCoverage(volumes, compass); len(missing) > 0 {
+	if missing := domain.MissingCompassCoverageForPolicy(volumes, compass, pipelineOutlineAllContractPolicyArgument(policies)); len(missing) > 0 {
 		return nil, fmt.Errorf("outline-all chapter payoff coverage invalid: %s", strings.Join(missing, "; "))
 	}
 	if err := validatePipelineOutlineAllFlatIdentity(st, volumes); err != nil {

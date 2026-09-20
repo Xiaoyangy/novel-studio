@@ -194,7 +194,10 @@ func validateOutlineAllMapContractsContent(
 	if err != nil || compass == nil {
 		return fmt.Errorf("outline_all map_contracts requires compass: %w", err)
 	}
-	if issues := domain.StoryContractSkeletonIssues(after, *compass, true); len(issues) > 0 {
+	if err := domain.ValidateStoryContractMapMutationModes(volumes, after, receipt.ContractEvidencePolicy); err != nil {
+		return fmt.Errorf("outline_all map_contracts invalid modes: %w: %w", err, errs.ErrToolPrecondition)
+	}
+	if issues := domain.StoryContractSkeletonIssuesForPolicy(after, *compass, true, receipt.ContractEvidencePolicy); len(issues) > 0 {
 		return fmt.Errorf("outline_all map_contracts invalid: %s: %w", strings.Join(issues, "; "), errs.ErrToolPrecondition)
 	}
 	return nil

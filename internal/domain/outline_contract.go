@@ -726,6 +726,15 @@ var outlineContractContinuousSourceMarkers = []string{
 	"unknown", "unverified", "unavailable", "none",
 }
 
+const StoryContractEvidencePolicyNarrationV1 = "story-contract-evidence.narration.v1"
+
+func ValidateStoryContractEvidencePolicy(policy string) error {
+	if policy != "" && policy != StoryContractEvidencePolicyNarrationV1 {
+		return fmt.Errorf("unknown story contract evidence policy %q", policy)
+	}
+	return nil
+}
+
 // StoryContractEvidenceMode returns the effective mode while preserving the
 // legacy wire contract: an omitted evidence_mode remains a payoff contract.
 func StoryContractEvidenceMode(ref StoryContractRef) string {
@@ -763,10 +772,20 @@ func storyContractSourcesByDigest(compass StoryCompass) map[string]string {
 // marker may opt out of terminal payoff evidence. Endings and open threads
 // remain concrete payoff contracts.
 func storyContractSupportsContinuous(ref StoryContractRef, source string) bool {
+	return storyContractSupportsContinuousForPolicy(ref, source, "")
+}
+
+// This deliberately recognizes only a standalone, explicitly book-wide
+// narration-person rule. A plot character changing perspective, or a compound
+// rule that also promises a terminal event, must not lose payoff evidence.
+var storyNarrationPersonInvariantV1 = regexp.MustCompile(`^(?:小说(?:写作)?(?:无论长篇还是短篇)?|全文|全书|本书)[，,:：\s]*(?:一律|始终|统一|全程)?(?:采用|使用|保持|运用)第[一二三]人称(?:视角|叙述|叙事)(?:[。.!！])?$`)
+
+func storyContractSupportsContinuousForPolicy(ref StoryContractRef, source, policy string) bool {
 	if ref.Kind != StoryContractNonNegotiable {
 		return false
 	}
-	return containsAnyContractMarker(strings.ToLower(source), outlineContractContinuousSourceMarkers)
+	return containsAnyContractMarker(strings.ToLower(source), outlineContractContinuousSourceMarkers) ||
+		(policy == StoryContractEvidencePolicyNarrationV1 && storyNarrationPersonInvariantV1.MatchString(strings.TrimSpace(source)))
 }
 
 // OutlineContractResolutionRealized is the single deterministic proof
@@ -988,6 +1007,17 @@ const (
 // identifiers. The identifiers are copied into structural contract_refs; the
 // prose fields remain free to describe the story naturally.
 func BuildStoryContractRegistry(compass StoryCompass) []StoryContractRef {
+	return buildStoryContractRegistryForPolicy(compass, "")
+}
+
+func BuildStoryContractRegistryForPolicy(compass StoryCompass, policy string) ([]StoryContractRef, error) {
+	if err := ValidateStoryContractEvidencePolicy(policy); err != nil {
+		return nil, err
+	}
+	return buildStoryContractRegistryForPolicy(compass, policy), nil
+}
+
+func buildStoryContractRegistryForPolicy(compass StoryCompass, policy string) []StoryContractRef {
 	var refs []StoryContractRef
 	appendRef := func(kind string, index int, source string) {
 		source = strings.TrimSpace(source)
@@ -1002,7 +1032,7 @@ func BuildStoryContractRegistry(compass StoryCompass) []StoryContractRef {
 			SourceDigest: digest,
 			EvidenceMode: StoryContractEvidencePayoff,
 		}
-		if storyContractSupportsContinuous(ref, source) {
+		if storyContractSupportsContinuousForPolicy(ref, source, policy) {
 			ref.EvidenceMode = StoryContractEvidenceContinuous
 		}
 		refs = append(refs, ref)
@@ -1023,8 +1053,16 @@ func BuildStoryContractRegistry(compass StoryCompass) []StoryContractRef {
 // arcs may still be reservations. final=true additionally requires every
 // compass contract to be assigned exactly once.
 func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, final bool) []string {
+	return StoryContractSkeletonIssuesForPolicy(volumes, compass, final, "")
+}
+
+func StoryContractSkeletonIssuesForPolicy(volumes []VolumeOutline, compass StoryCompass, final bool, policy string) []string {
+	registry, err := BuildStoryContractRegistryForPolicy(compass, policy)
+	if err != nil {
+		return []string{err.Error()}
+	}
 	expected := make(map[string]StoryContractRef)
-	for _, ref := range BuildStoryContractRegistry(compass) {
+	for _, ref := range registry {
 		expected[ref.ID] = ref
 	}
 	sources := storyContractSourcesByDigest(compass)
@@ -1049,8 +1087,12 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 				invalidPlacement := mode == StoryContractEvidencePayoff &&
 					(ref.PlannedPayoffChapter < start || ref.PlannedPayoffChapter > end)
 				invalidContinuous := mode == StoryContractEvidenceContinuous &&
-					(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuous(ref, sources[ref.SourceDigest]))
-				if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || mode != StoryContractEvidenceMode(want) || invalidMode || invalidPlacement || invalidContinuous {
+					(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuousForPolicy(ref, sources[ref.SourceDigest], policy))
+				// Legacy persisted refs keep their own mode; absent means payoff.
+				// Fresh policy-bound submissions must echo the explicit Host mode.
+				legacyOmitted := policy == "" && strings.TrimSpace(ref.EvidenceMode) == ""
+				modeDrift := !legacyOmitted && (strings.TrimSpace(ref.EvidenceMode) == "" || mode != StoryContractEvidenceMode(want))
+				if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || modeDrift || invalidMode || invalidPlacement || invalidContinuous {
 					issues = append(issues, "invalid_contract_ref@"+where+":"+ref.ID)
 				}
 				resolutionKey := normalizeContractText(ref.PlannedResolution)
@@ -1105,8 +1147,16 @@ type outlineContractPlacement struct {
 // no chapter payoff: downstream hard-canon, knowledge and host gates remain the
 // authorities for the invariant itself.
 func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []string {
+	return MissingCompassCoverageForPolicy(volumes, compass, "")
+}
+
+func MissingCompassCoverageForPolicy(volumes []VolumeOutline, compass StoryCompass, policy string) []string {
+	registry, err := BuildStoryContractRegistryForPolicy(compass, policy)
+	if err != nil {
+		return []string{err.Error()}
+	}
 	expected := make(map[string]StoryContractRef)
-	for _, ref := range BuildStoryContractRegistry(compass) {
+	for _, ref := range registry {
 		expected[ref.ID] = ref
 	}
 	sources := storyContractSourcesByDigest(compass)
@@ -1127,10 +1177,12 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 		invalidMode := mode != StoryContractEvidencePayoff && mode != StoryContractEvidenceContinuous
 		invalidPlacement := mode == StoryContractEvidencePayoff && ref.PlannedPayoffChapter <= 0
 		invalidContinuous := mode == StoryContractEvidenceContinuous &&
-			(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuous(ref, sources[ref.SourceDigest]))
+			(ref.PlannedPayoffChapter != 0 || strings.TrimSpace(ref.PlannedResolution) != "" || !storyContractSupportsContinuousForPolicy(ref, sources[ref.SourceDigest], policy))
 		invalidResolution := mode == StoryContractEvidencePayoff &&
 			(meaningfulRuneCount(ref.PlannedResolution) < 18 || containsOutlinePlaceholder(ref.PlannedResolution))
-		if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || mode != StoryContractEvidenceMode(want) || invalidMode || invalidPlacement || invalidContinuous || invalidResolution {
+		legacyOmitted := policy == "" && strings.TrimSpace(ref.EvidenceMode) == ""
+		modeDrift := !legacyOmitted && (strings.TrimSpace(ref.EvidenceMode) == "" || mode != StoryContractEvidenceMode(want))
+		if ref.Kind != want.Kind || ref.SourceDigest != want.SourceDigest || modeDrift || invalidMode || invalidPlacement || invalidContinuous || invalidResolution {
 			invalid = append(invalid, "invalid_contract_ref@"+where+":"+ref.ID)
 			return false
 		}

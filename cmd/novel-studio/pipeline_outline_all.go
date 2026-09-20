@@ -183,7 +183,11 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err != nil {
 		return err
 	}
-	identity, modelDigest, promptDigest, executionIdentity, err := pipelineOutlineAllExecutionIdentity(cfg, bundle)
+	contractPolicy, err := selectPipelineOutlineAllContractPolicy(cfg, bundle, sourceRoot, flags.OutlineRepairDigest)
+	if err != nil {
+		return err
+	}
+	identity, modelDigest, promptDigest, executionIdentity, err := pipelineOutlineAllExecutionIdentity(cfg, bundle, contractPolicy)
 	if err != nil {
 		return err
 	}
@@ -297,7 +301,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	receipt, err := ensurePipelineOutlineAllReceipt(
 		candidate, *lock, *compass, target, sourceRoot, protectedRoot,
 		stableProgressRoot, frozenFoundation.Root,
-		attemptID, candidateDir, identity, modelDigest, promptDigest,
+		attemptID, candidateDir, identity, modelDigest, promptDigest, contractPolicy,
 	)
 	if err != nil {
 		return err
@@ -368,7 +372,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		if err != nil {
 			return err
 		}
-		action, ok, err := outlineAllNextStructuralAction(volumes, *compass, target, receipt.StructurePlan != nil)
+		action, ok, err := outlineAllNextStructuralAction(volumes, *compass, target, receipt.StructurePlan != nil, receipt.ContractEvidencePolicy)
 		if err != nil {
 			return err
 		}
@@ -376,7 +380,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			action, ok = outlineAllNextRevisionAction(volumes, *compass)
 		}
 		if !ok {
-			finalVolumes, err := validatePipelineOutlineAllFinal(candidate, *compass, target)
+			finalVolumes, err := validatePipelineOutlineAllFinal(candidate, *compass, target, receipt.ContractEvidencePolicy)
 			if err != nil {
 				return err
 			}
@@ -415,7 +419,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		action.Operation = receipt.CompletedActionCount + 1
 		action.BeforeLayeredDigest = beforeDigest
 		_, visibleRaw, visibleDigest, err := buildPipelineOutlineAllModelVisibleContext(
-			volumes, *compass, target, action, frozenFoundation, bundle.References,
+			volumes, *compass, target, action, frozenFoundation, bundle.References, receipt.ContractEvidencePolicy,
 		)
 		if err != nil {
 			return err
@@ -440,7 +444,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if receipt.Status != domain.OutlineAllExecutionComplete {
 		return fmt.Errorf("outline-all exceeded operation safety limit")
 	}
-	if _, err := validatePipelineOutlineAllFinal(candidate, *compass, target); err != nil {
+	if _, err := validatePipelineOutlineAllFinal(candidate, *compass, target, receipt.ContractEvidencePolicy); err != nil {
 		return err
 	}
 	if currentProtected, err := pipelineOutlineAllProtectedCanonRoot(candidateDir); err != nil {
@@ -630,6 +634,7 @@ func loadCompletedPipelineOutlineAll(st *store.Store) (bool, error) {
 func pipelineOutlineAllExecutionIdentity(
 	cfg bootstrap.Config,
 	bundle assets.Bundle,
+	policies ...string,
 ) (domain.OutlineAllModelIdentity, string, string, string, error) {
 	role := func(name string) (provider, model, reasoning string) {
 		provider, model = cfg.Provider, cfg.ModelName
@@ -670,6 +675,13 @@ func pipelineOutlineAllExecutionIdentity(
 	promptBinding := pipelineOutlineAllPromptProtocol + "\ndirect_architect_protocol=" +
 		directArchitectDigest + "\nreference_pack=" +
 		pipelineProjectAllDigest(bundle.References)
+	policy := pipelineOutlineAllContractPolicyArgument(policies)
+	if err := domain.ValidateStoryContractEvidencePolicy(policy); err != nil {
+		return identity, "", "", "", err
+	}
+	if policy != "" {
+		promptBinding += "\ncontract_evidence_policy=" + policy
+	}
 	promptDigest, err := domain.ComputeOutlineAllPromptProtocolDigest(promptBinding)
 	if err != nil {
 		return identity, "", "", "", err
@@ -686,7 +698,12 @@ func ensurePipelineOutlineAllReceipt(
 	sourceRoot, protectedRoot, stableProgressRoot, foundationContextRoot, attemptID, candidateDir string,
 	identity domain.OutlineAllModelIdentity,
 	modelDigest, promptDigest string,
+	policies ...string,
 ) (*domain.OutlineAllExecutionReceipt, error) {
+	policy := pipelineOutlineAllContractPolicyArgument(policies)
+	if err := domain.ValidateStoryContractEvidencePolicy(policy); err != nil {
+		return nil, err
+	}
 	mode, err := st.LoadWritingPipelineMode()
 	if err != nil || mode == nil || mode.Mode != domain.WritingPipelineModeSealedTwoPassV2 {
 		return nil, fmt.Errorf("outline-all candidate requires sealed_two_pass_v2 receipt: %w", err)
@@ -712,8 +729,9 @@ func ensurePipelineOutlineAllReceipt(
 		receipt := domain.OutlineAllExecutionReceipt{
 			Version: domain.OutlineAllExecutionReceiptVersion, Mode: domain.OutlineAllExecutionMode,
 			Status: domain.OutlineAllExecutionBuilding, BaseCanonChapter: 0,
-			GenerationID: generationID,
-			WritingMode:  mode.Mode, WritingModeReceiptDigest: mode.ReceiptDigest,
+			GenerationID:           generationID,
+			ContractEvidencePolicy: policy,
+			WritingMode:            mode.Mode, WritingModeReceiptDigest: mode.ReceiptDigest,
 			CompassDigest: compassDigest, EstimatedScale: compass.EstimatedScale,
 			EndingDirection: compass.EndingDirection, NonNegotiables: append([]string(nil), compass.NonNegotiables...),
 			AuthorContracts: copyPipelineCompassAuthorContracts(compass.AuthorContracts),
@@ -748,7 +766,7 @@ func ensurePipelineOutlineAllReceipt(
 	// chosen by the model's frozen StructurePlan, not deterministically derived
 	// from inputs, so they are no longer part of the resume identity anchor. The
 	// input-derived scale range and every content-addressed root/digest still are.
-	if existing.GenerationID != generationID ||
+	if existing.ContractEvidencePolicy != policy || existing.GenerationID != generationID ||
 		existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
 		existing.StableProgressRoot != stableProgressRoot || existing.FoundationContextRoot != foundationContextRoot ||
 		existing.AttemptID != attemptID || filepath.Clean(existing.CandidateDir) != filepath.Clean(candidateDir) ||
@@ -919,7 +937,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 		return receipt, fmt.Errorf("outline-all operation %d frozen context root drifted", action.Operation)
 	}
 	visibleContext, visibleRaw, visibleDigest, err := buildPipelineOutlineAllModelVisibleContext(
-		intent.BeforeVolumes, compass, target, action, foundation, bundle.References,
+		intent.BeforeVolumes, compass, target, action, foundation, bundle.References, receipt.ContractEvidencePolicy,
 	)
 	if err != nil {
 		return receipt, err
@@ -954,7 +972,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 	if currentDigest == action.BeforeLayeredDigest {
 		return receipt, fmt.Errorf("outline-all operation %d returned without its one authorized mutation", action.Operation)
 	}
-	if err := validatePipelineOutlineAllMutation(intent.BeforeVolumes, current, action, compass, target); err != nil {
+	if err := validatePipelineOutlineAllMutation(intent.BeforeVolumes, current, action, compass, target, receipt.ContractEvidencePolicy); err != nil {
 		return receipt, fmt.Errorf("outline-all operation %d exact delta invalid: %w", action.Operation, err)
 	}
 	derivedFlatDigest, err := repairPipelineOutlineAllDerivedArtifacts(st, current)
@@ -1034,7 +1052,7 @@ func pipelineOutlineAllOperationPrompt(
 	if err != nil {
 		return "", err
 	}
-	registry := pipelineOutlineAllContractRegistry(compass)
+	registry := visible.ContractRegistry
 	registryJSON, _ := json.MarshalIndent(registry, "", "  ")
 	var b strings.Builder
 	b.WriteString("[PIPELINE OUTLINE-ALL / SINGLE MUTATION]\n")
@@ -1131,8 +1149,8 @@ func pipelineOutlineAllArcMap(volumes []domain.VolumeOutline) []pipelineOutlineA
 	return result
 }
 
-func pipelineOutlineAllContractRegistry(compass domain.StoryCompass) []pipelineOutlineAllContractSource {
-	refs := domain.BuildStoryContractRegistry(compass)
+func pipelineOutlineAllContractRegistry(compass domain.StoryCompass, policies ...string) []pipelineOutlineAllContractSource {
+	refs, _ := domain.BuildStoryContractRegistryForPolicy(compass, pipelineOutlineAllContractPolicyArgument(policies))
 	sources := make([]string, 0, len(refs))
 	if compass.AuthorContracts == nil && strings.TrimSpace(compass.EndingDirection) != "" {
 		sources = append(sources, compass.EndingDirection)
