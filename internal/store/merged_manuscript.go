@@ -82,10 +82,24 @@ func chapterHeadingNumberMatches(raw string, chapter int) bool {
 }
 
 func chineseChapterNumber(value int) string {
-	if value <= 0 || value >= 100 {
+	if value <= 0 || value >= 1000 {
 		return ""
 	}
 	digits := []string{"零", "一", "二", "三", "四", "五", "六", "七", "八", "九"}
+	if value >= 100 {
+		result := digits[value/100] + "百"
+		remainder := value % 100
+		if remainder == 0 {
+			return result
+		}
+		if remainder < 10 {
+			return result + "零" + digits[remainder]
+		}
+		if remainder < 20 {
+			return result + "一" + chineseChapterNumber(remainder)
+		}
+		return result + chineseChapterNumber(remainder)
+	}
 	if value < 10 {
 		return digits[value]
 	}
