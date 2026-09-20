@@ -138,7 +138,7 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 		} else if current != receipt.ProtectedCanonRoot {
 			return nil, fmt.Errorf("outline-all published protected canon drift")
 		}
-		if err := validatePipelineOutlineAllStableInputs(outputDir, receipt.StableProgressRoot, receipt.FoundationContextRoot); err != nil {
+		if err := validatePipelineOutlineAllStableInputs(outputDir, receipt.StableProgressRoot, receipt.FoundationContextRoot, receipt.InputPolicy); err != nil {
 			return nil, err
 		}
 	}

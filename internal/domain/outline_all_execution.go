@@ -11,13 +11,23 @@ import (
 const (
 	// Version 2 replaces the arithmetic volume/arc partition with a
 	// model-allocated, host-frozen StructurePlan (see plan_structure).
-	OutlineAllExecutionReceiptVersion = 2
-	OutlineAllExecutionMode           = "sealed_full_book_outline_v1"
-	OutlineAllIntentMarker            = "OUTLINE_ALL_INTENT "
+	OutlineAllExecutionReceiptVersion         = 2
+	OutlineAllExecutionMode                   = "sealed_full_book_outline_v1"
+	OutlineAllIntentMarker                    = "OUTLINE_ALL_INTENT "
+	OutlineAllInputPolicyCompleteFoundationV1 = "outline-all-input.complete-foundation.v1"
 
 	OutlineAllExecutionBuilding = "building"
 	OutlineAllExecutionComplete = "complete"
 )
+
+func ValidateOutlineAllInputPolicy(policy string) error {
+	switch policy {
+	case "", OutlineAllInputPolicyCompleteFoundationV1:
+		return nil
+	default:
+		return fmt.Errorf("unsupported outline-all input policy %q", policy)
+	}
+}
 
 // FormatOutlineAllIntent emits the host-controlled, single-line action marker
 // consumed by the Architect dispatch gate. Natural-language task text is not
@@ -118,6 +128,7 @@ type OutlineAllExecutionReceipt struct {
 	NonNegotiables                []string                  `json:"non_negotiables,omitempty"`
 	AuthorContracts               *CompassAuthorContractsV1 `json:"author_contracts,omitempty"`
 	ContractEvidencePolicy        string                    `json:"contract_evidence_policy,omitempty"`
+	InputPolicy                   string                    `json:"input_policy,omitempty"`
 	MinVolumes                    int                       `json:"min_volumes"`
 	MaxVolumes                    int                       `json:"max_volumes"`
 	MinChapters                   int                       `json:"min_chapters"`
@@ -277,6 +288,9 @@ func ValidateOutlineAllExecutionLockBinding(
 
 func ValidateOutlineAllExecutionReceipt(receipt OutlineAllExecutionReceipt) error {
 	if err := ValidateStoryContractEvidencePolicy(receipt.ContractEvidencePolicy); err != nil {
+		return err
+	}
+	if err := ValidateOutlineAllInputPolicy(receipt.InputPolicy); err != nil {
 		return err
 	}
 	if receipt.Version != OutlineAllExecutionReceiptVersion ||

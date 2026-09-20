@@ -758,7 +758,14 @@ type pipelineOutlineAllFrozenFoundation struct {
 	Authorities map[string]string `json:"authorities,omitempty"`
 }
 
-func loadPipelineOutlineAllFrozenFoundation(outputDir string) (pipelineOutlineAllFrozenFoundation, error) {
+func loadPipelineOutlineAllFrozenFoundation(outputDir string, inputPolicies ...string) (pipelineOutlineAllFrozenFoundation, error) {
+	inputPolicy := ""
+	if len(inputPolicies) > 0 {
+		inputPolicy = inputPolicies[0]
+	}
+	if err := domain.ValidateOutlineAllInputPolicy(inputPolicy); err != nil {
+		return pipelineOutlineAllFrozenFoundation{}, err
+	}
 	read := func(rel string) ([]byte, error) {
 		raw, err := os.ReadFile(filepath.Join(outputDir, filepath.FromSlash(rel)))
 		if err != nil {
@@ -816,8 +823,25 @@ func loadPipelineOutlineAllFrozenFoundation(outputDir string) (pipelineOutlineAl
 		"meta/prewrite_storycraft_plan.json": filepath.Join(outputDir, "meta", "prewrite_storycraft_plan.json"),
 		"meta/prewrite_storycraft_plan.md":   filepath.Join(outputDir, "meta", "prewrite_storycraft_plan.md"),
 	}
+	rootVersion := "outline-all-foundation-context.v1"
+	if inputPolicy == domain.OutlineAllInputPolicyCompleteFoundationV1 {
+		// Missing remains explicit for historical fixtures; existing preflight
+		// decides whether a book requires a codex. Existing unreadable files fail.
+		optional["world_codex.json"] = filepath.Join(outputDir, "world_codex.json")
+		rootVersion = "outline-all-foundation-context.v2-complete"
+	}
 	for rel, path := range optional {
 		raw, err := os.ReadFile(path)
+		if rel == "world_codex.json" {
+			if err == nil && !json.Valid(raw) {
+				return pipelineOutlineAllFrozenFoundation{}, fmt.Errorf("outline-all frozen context world_codex.json is invalid JSON")
+			}
+			if os.IsNotExist(err) {
+				if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+					return pipelineOutlineAllFrozenFoundation{}, fmt.Errorf("outline-all existing world_codex.json could not be read: %w", err)
+				}
+			}
+		}
 		switch {
 		case err == nil:
 			authorities[rel] = string(raw)
@@ -831,7 +855,7 @@ func loadPipelineOutlineAllFrozenFoundation(outputDir string) (pipelineOutlineAl
 	root := pipelineProjectAllDigest(struct {
 		Version   string            `json:"version"`
 		Artifacts map[string]string `json:"artifacts"`
-	}{Version: "outline-all-foundation-context.v1", Artifacts: digests})
+	}{Version: rootVersion, Artifacts: digests})
 	return pipelineOutlineAllFrozenFoundation{
 		Root: root, Premise: string(premise),
 		Characters:  append(json.RawMessage(nil), rawJSON["characters.json"]...),
@@ -854,7 +878,7 @@ func pipelineOutlineAllOperationContextRoot(foundationRoot, beforeLayeredDigest 
 	})
 }
 
-func validatePipelineOutlineAllStableInputs(outputDir, stableProgressRoot, foundationContextRoot string) error {
+func validatePipelineOutlineAllStableInputs(outputDir, stableProgressRoot, foundationContextRoot string, inputPolicies ...string) error {
 	currentProgress, err := pipelineOutlineAllStableProgressRoot(outputDir)
 	if err != nil {
 		return err
@@ -862,7 +886,7 @@ func validatePipelineOutlineAllStableInputs(outputDir, stableProgressRoot, found
 	if currentProgress != stableProgressRoot {
 		return fmt.Errorf("outline-all progress changed outside the authorized total_chapters field")
 	}
-	currentFoundation, err := loadPipelineOutlineAllFrozenFoundation(outputDir)
+	currentFoundation, err := loadPipelineOutlineAllFrozenFoundation(outputDir, inputPolicies...)
 	if err != nil {
 		return err
 	}
@@ -1053,7 +1077,7 @@ func bindRecoveredPipelineOutlineAllPublish(
 	} else if currentProtected != receipt.ProtectedCanonRoot {
 		return fmt.Errorf("outline-all recovered publish %s protected canon drift", attemptID)
 	}
-	if err := validatePipelineOutlineAllStableInputs(live, receipt.StableProgressRoot, receipt.FoundationContextRoot); err != nil {
+	if err := validatePipelineOutlineAllStableInputs(live, receipt.StableProgressRoot, receipt.FoundationContextRoot, receipt.InputPolicy); err != nil {
 		return err
 	}
 	_, err = st.UpdateOutlineAllExecutionReceipt(receipt.ReceiptDigest, func(current *domain.OutlineAllExecutionReceipt) error {

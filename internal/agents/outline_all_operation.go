@@ -12,6 +12,7 @@ import (
 	"github.com/chenhongyang/novel-studio/assets"
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/modelinput"
 	"github.com/chenhongyang/novel-studio/internal/store"
 	"github.com/chenhongyang/novel-studio/internal/tools"
 	"github.com/voocel/agentcore"
@@ -27,11 +28,20 @@ const outlineAllOperationSystemBoundary = `你是 outline-all 的 Architect 主�
 // would only disable the tool and leave the model looping until MaxTurns.
 const outlineAllOperationMaxTurns = 4
 
+const OutlineAllCompleteFoundationPromptPrefix = "OUTLINE_ALL_INPUT_POLICY " + domain.OutlineAllInputPolicyCompleteFoundationV1 + "\n"
+
 // OutlineAllOperationProtocolDigest binds the direct Architect system
 // boundary to outline-all's generation identity without exposing prompt text
 // in receipts. Coordinator prompts are intentionally not part of this root.
-func OutlineAllOperationProtocolDigest(architectLongPrompt string) (string, error) {
-	return domain.DeterministicPlanningHash(struct {
+func OutlineAllOperationProtocolDigest(architectLongPrompt string, inputPolicies ...string) (string, error) {
+	inputPolicy := ""
+	if len(inputPolicies) > 0 {
+		inputPolicy = inputPolicies[0]
+	}
+	if err := domain.ValidateOutlineAllInputPolicy(inputPolicy); err != nil {
+		return "", err
+	}
+	legacy, err := domain.DeterministicPlanningHash(struct {
 		Version           string `json:"version"`
 		ArchitectLong     string `json:"architect_long"`
 		OperationBoundary string `json:"operation_boundary"`
@@ -40,6 +50,14 @@ func OutlineAllOperationProtocolDigest(architectLongPrompt string) (string, erro
 		ArchitectLong:     architectLongPrompt,
 		OperationBoundary: outlineAllOperationSystemBoundary,
 	})
+	if err != nil || inputPolicy == "" {
+		return legacy, err
+	}
+	return domain.DeterministicPlanningHash(struct {
+		Legacy      string `json:"legacy"`
+		InputPolicy string `json:"input_policy"`
+		Transport   string `json:"transport"`
+	}{legacy, inputPolicy, modelinput.ExactAgentPacketPolicy})
 }
 
 type outlineAllOperationModel = directAgentModelIdentity
@@ -114,6 +132,15 @@ func runOutlineAllOperationWithModel(
 	finalAuthorization, err := outlineAllFinalAuthorization(prompt)
 	if err != nil {
 		return err
+	}
+	inputMessage := agentcore.UserMsg(prompt)
+	if strings.HasPrefix(prompt, OutlineAllCompleteFoundationPromptPrefix) {
+		inputMessage, err = modelinput.NewExactAgentPacketMessage(modelinput.KindOutlineAll, prompt)
+		if err != nil {
+			return err
+		}
+	} else if strings.HasPrefix(prompt, "OUTLINE_ALL_INPUT_POLICY ") {
+		return fmt.Errorf("outline-all direct Architect rejects unknown input policy marker")
 	}
 	logger := st.Sessions.SubAgentLogger(func(string) (string, string) {
 		return resolved.Provider, resolved.Name
@@ -202,7 +229,7 @@ func runOutlineAllOperationWithModel(
 			// Keep the persisted operation prompt byte-for-byte intact. The final
 			// message is derived only from its host-issued intent marker, so a
 			// large historical context cannot become the model's effective target.
-			agentcore.UserMsg(prompt),
+			inputMessage,
 			agentcore.UserMsg(finalAuthorization),
 		},
 		agentcore.AgentContext{

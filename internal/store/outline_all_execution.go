@@ -120,6 +120,9 @@ func (s *Store) SaveOutlineAllExecutionReceipt(
 			if current.AttemptID == receipt.AttemptID && current.ContractEvidencePolicy != receipt.ContractEvidencePolicy {
 				return fmt.Errorf("outline-all contract evidence policy cannot change within an existing attempt")
 			}
+			if current.AttemptID == receipt.AttemptID && current.InputPolicy != receipt.InputPolicy {
+				return fmt.Errorf("outline-all input policy cannot change within an existing attempt")
+			}
 		}
 		return s.Progress.io.WriteJSONUnlocked(OutlineAllExecutionReceiptPath, receipt)
 	})
@@ -182,11 +185,15 @@ func (s *Store) UpdateOutlineAllExecutionReceipt(
 			return fmt.Errorf("outline-all execution receipt changed before update")
 		}
 		originalPolicy := current.ContractEvidencePolicy
+		originalInputPolicy := current.InputPolicy
 		if err := mutate(&current); err != nil {
 			return err
 		}
 		if current.ContractEvidencePolicy != originalPolicy {
 			return fmt.Errorf("outline-all contract evidence policy cannot change during receipt update")
+		}
+		if current.InputPolicy != originalInputPolicy {
+			return fmt.Errorf("outline-all input policy cannot change during receipt update")
 		}
 		signed, err := domain.SignOutlineAllExecutionReceipt(current)
 		if err != nil {

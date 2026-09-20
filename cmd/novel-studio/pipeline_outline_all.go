@@ -179,15 +179,16 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	if err != nil {
 		return err
 	}
-	frozenFoundation, err := loadPipelineOutlineAllFrozenFoundation(cfg.OutputDir)
+	selectedPolicies, err := selectPipelineOutlineAllPolicies(cfg, bundle, sourceRoot, flags.OutlineRepairDigest)
 	if err != nil {
 		return err
 	}
-	contractPolicy, err := selectPipelineOutlineAllContractPolicy(cfg, bundle, sourceRoot, flags.OutlineRepairDigest)
+	contractPolicy, inputPolicy := selectedPolicies.ContractEvidence, selectedPolicies.Input
+	frozenFoundation, err := loadPipelineOutlineAllFrozenFoundation(cfg.OutputDir, inputPolicy)
 	if err != nil {
 		return err
 	}
-	identity, modelDigest, promptDigest, executionIdentity, err := pipelineOutlineAllExecutionIdentity(cfg, bundle, contractPolicy)
+	identity, modelDigest, promptDigest, executionIdentity, err := pipelineOutlineAllExecutionIdentity(cfg, bundle, contractPolicy, inputPolicy)
 	if err != nil {
 		return err
 	}
@@ -271,7 +272,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	} else if candidateStable != stableProgressRoot {
 		return fmt.Errorf("outline-all candidate stable progress differs from live baseline")
 	}
-	if candidateFoundation, err := loadPipelineOutlineAllFrozenFoundation(candidateDir); err != nil {
+	if candidateFoundation, err := loadPipelineOutlineAllFrozenFoundation(candidateDir, inputPolicy); err != nil {
 		return err
 	} else if candidateFoundation.Root != frozenFoundation.Root {
 		return fmt.Errorf("outline-all candidate frozen foundation differs from live baseline")
@@ -301,7 +302,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	receipt, err := ensurePipelineOutlineAllReceipt(
 		candidate, *lock, *compass, target, sourceRoot, protectedRoot,
 		stableProgressRoot, frozenFoundation.Root,
-		attemptID, candidateDir, identity, modelDigest, promptDigest, contractPolicy,
+		attemptID, candidateDir, identity, modelDigest, promptDigest, contractPolicy, inputPolicy,
 	)
 	if err != nil {
 		return err
@@ -345,7 +346,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		} else if currentProtected != protectedRoot {
 			return fmt.Errorf("outline-all candidate modified protected canon")
 		}
-		if err := validatePipelineOutlineAllStableInputs(candidateDir, stableProgressRoot, frozenFoundation.Root); err != nil {
+		if err := validatePipelineOutlineAllStableInputs(candidateDir, stableProgressRoot, frozenFoundation.Root, receipt.InputPolicy); err != nil {
 			return err
 		}
 		if receipt.PendingAction != nil {
@@ -419,7 +420,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		action.Operation = receipt.CompletedActionCount + 1
 		action.BeforeLayeredDigest = beforeDigest
 		_, visibleRaw, visibleDigest, err := buildPipelineOutlineAllModelVisibleContext(
-			volumes, *compass, target, action, frozenFoundation, bundle.References, receipt.ContractEvidencePolicy,
+			volumes, *compass, target, action, frozenFoundation, bundle.References, receipt.ContractEvidencePolicy, receipt.InputPolicy,
 		)
 		if err != nil {
 			return err
@@ -452,7 +453,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	} else if currentProtected != protectedRoot {
 		return fmt.Errorf("outline-all final candidate modified protected canon")
 	}
-	if err := validatePipelineOutlineAllStableInputs(candidateDir, stableProgressRoot, frozenFoundation.Root); err != nil {
+	if err := validatePipelineOutlineAllStableInputs(candidateDir, stableProgressRoot, frozenFoundation.Root, receipt.InputPolicy); err != nil {
 		return err
 	}
 	if err := validatePipelineOutlineAllEntry(candidate); err != nil {
@@ -471,7 +472,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 	} else if currentProtected != protectedRoot {
 		return fmt.Errorf("outline-all live protected canon changed before publish")
 	}
-	if err := validatePipelineOutlineAllStableInputs(cfg.OutputDir, stableProgressRoot, frozenFoundation.Root); err != nil {
+	if err := validatePipelineOutlineAllStableInputs(cfg.OutputDir, stableProgressRoot, frozenFoundation.Root, receipt.InputPolicy); err != nil {
 		return err
 	}
 	if err := validatePipelineOutlineAllCandidateNamespace(cfg.OutputDir, candidateDir, attemptID, true); err != nil {
@@ -668,7 +669,8 @@ func pipelineOutlineAllExecutionIdentity(
 	if err != nil {
 		return identity, "", "", "", err
 	}
-	directArchitectDigest, err := agents.OutlineAllOperationProtocolDigest(bundle.Prompts.ArchitectLong)
+	inputPolicy := pipelineOutlineAllInputPolicyArgument(policies)
+	directArchitectDigest, err := agents.OutlineAllOperationProtocolDigest(bundle.Prompts.ArchitectLong, inputPolicy)
 	if err != nil {
 		return identity, "", "", "", err
 	}
@@ -681,6 +683,9 @@ func pipelineOutlineAllExecutionIdentity(
 	}
 	if policy != "" {
 		promptBinding += "\ncontract_evidence_policy=" + policy
+	}
+	if inputPolicy != "" {
+		promptBinding += "\ninput_policy=" + inputPolicy
 	}
 	promptDigest, err := domain.ComputeOutlineAllPromptProtocolDigest(promptBinding)
 	if err != nil {
@@ -702,6 +707,10 @@ func ensurePipelineOutlineAllReceipt(
 ) (*domain.OutlineAllExecutionReceipt, error) {
 	policy := pipelineOutlineAllContractPolicyArgument(policies)
 	if err := domain.ValidateStoryContractEvidencePolicy(policy); err != nil {
+		return nil, err
+	}
+	inputPolicy := pipelineOutlineAllInputPolicyArgument(policies)
+	if err := domain.ValidateOutlineAllInputPolicy(inputPolicy); err != nil {
 		return nil, err
 	}
 	mode, err := st.LoadWritingPipelineMode()
@@ -731,6 +740,7 @@ func ensurePipelineOutlineAllReceipt(
 			Status: domain.OutlineAllExecutionBuilding, BaseCanonChapter: 0,
 			GenerationID:           generationID,
 			ContractEvidencePolicy: policy,
+			InputPolicy:            inputPolicy,
 			WritingMode:            mode.Mode, WritingModeReceiptDigest: mode.ReceiptDigest,
 			CompassDigest: compassDigest, EstimatedScale: compass.EstimatedScale,
 			EndingDirection: compass.EndingDirection, NonNegotiables: append([]string(nil), compass.NonNegotiables...),
@@ -766,7 +776,7 @@ func ensurePipelineOutlineAllReceipt(
 	// chosen by the model's frozen StructurePlan, not deterministically derived
 	// from inputs, so they are no longer part of the resume identity anchor. The
 	// input-derived scale range and every content-addressed root/digest still are.
-	if existing.ContractEvidencePolicy != policy || existing.GenerationID != generationID ||
+	if existing.ContractEvidencePolicy != policy || existing.InputPolicy != inputPolicy || existing.GenerationID != generationID ||
 		existing.SourceSnapshotRoot != sourceRoot || existing.ProtectedCanonRoot != protectedRoot ||
 		existing.StableProgressRoot != stableProgressRoot || existing.FoundationContextRoot != foundationContextRoot ||
 		existing.AttemptID != attemptID || filepath.Clean(existing.CandidateDir) != filepath.Clean(candidateDir) ||
@@ -929,7 +939,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 	if err != nil {
 		return receipt, err
 	}
-	foundation, loadErr := loadPipelineOutlineAllFrozenFoundation(st.Dir())
+	foundation, loadErr := loadPipelineOutlineAllFrozenFoundation(st.Dir(), receipt.InputPolicy)
 	if loadErr != nil {
 		return receipt, loadErr
 	}
@@ -937,7 +947,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 		return receipt, fmt.Errorf("outline-all operation %d frozen context root drifted", action.Operation)
 	}
 	visibleContext, visibleRaw, visibleDigest, err := buildPipelineOutlineAllModelVisibleContext(
-		intent.BeforeVolumes, compass, target, action, foundation, bundle.References, receipt.ContractEvidencePolicy,
+		intent.BeforeVolumes, compass, target, action, foundation, bundle.References, receipt.ContractEvidencePolicy, receipt.InputPolicy,
 	)
 	if err != nil {
 		return receipt, err
@@ -1067,6 +1077,9 @@ func pipelineOutlineAllOperationPrompt(
 	registry := visible.ContractRegistry
 	registryJSON, _ := json.MarshalIndent(registry, "", "  ")
 	var b strings.Builder
+	if visible.Version == pipelineOutlineAllCompleteContextVersion {
+		b.WriteString(agents.OutlineAllCompleteFoundationPromptPrefix)
+	}
 	b.WriteString("[PIPELINE OUTLINE-ALL / SINGLE MUTATION]\n")
 	b.WriteString("宿主已将本次冻结 operation 直接交给 Architect 主模型；完整执行下面唯一的 OUTLINE_ALL_INTENT，不得转派。\n")
 	b.WriteString(marker + "\n")

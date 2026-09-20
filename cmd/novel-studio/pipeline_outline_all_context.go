@@ -14,8 +14,11 @@ import (
 
 const (
 	pipelineOutlineAllVisibleContextVersion  = "outline-all-visible-context.v1"
+	pipelineOutlineAllCompleteContextVersion = "outline-all-visible-context.v2-complete-foundation"
 	pipelineOutlineAllVisibleContextMaxBytes = 192 * 1024
-	pipelineOutlineAllBoundaryChapterCount   = 2
+	// Defensive serialization bound, not the configured model token window.
+	pipelineOutlineAllCompleteContextMaxBytes = 2 * 1024 * 1024
+	pipelineOutlineAllBoundaryChapterCount    = 2
 )
 
 type pipelineOutlineAllBoundedText struct {
@@ -104,6 +107,16 @@ func buildPipelineOutlineAllModelVisibleContext(
 	if err := domain.ValidateStoryContractEvidencePolicy(policy); err != nil {
 		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
 	}
+	inputPolicy := pipelineOutlineAllInputPolicyArgument(policies)
+	if err := domain.ValidateOutlineAllInputPolicy(inputPolicy); err != nil {
+		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
+	}
+	version, maxContextBytes := pipelineOutlineAllVisibleContextVersion, pipelineOutlineAllVisibleContextMaxBytes
+	bound := func(legacy int) int { return legacy }
+	if inputPolicy == domain.OutlineAllInputPolicyCompleteFoundationV1 {
+		version, maxContextBytes = pipelineOutlineAllCompleteContextVersion, pipelineOutlineAllCompleteContextMaxBytes
+		bound = func(int) int { return 0 }
+	}
 	fullDigest, err := domain.ComputeLayeredOutlineDigest(volumes)
 	if err != nil {
 		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
@@ -119,7 +132,7 @@ func buildPipelineOutlineAllModelVisibleContext(
 	}
 
 	view := pipelineOutlineAllModelVisibleContext{
-		Version:                  pipelineOutlineAllVisibleContextVersion,
+		Version:                  version,
 		Operation:                action.Operation,
 		Action:                   action,
 		FoundationContextRoot:    foundation.Root,
@@ -128,11 +141,11 @@ func buildPipelineOutlineAllModelVisibleContext(
 		TargetChapters:           target.TargetChapters,
 		Foundation: pipelineOutlineAllFoundationView{
 			Root:       foundation.Root,
-			Premise:    pipelineOutlineAllBoundText(foundation.Premise, 16*1024),
-			Characters: pipelineOutlineAllBoundJSON(foundation.Characters, 28*1024),
-			WorldRules: pipelineOutlineAllBoundJSON(foundation.WorldRules, 20*1024),
-			BookWorld:  pipelineOutlineAllBoundJSON(foundation.BookWorld, 24*1024),
-			Compass:    pipelineOutlineAllBoundJSON(foundation.Compass, 16*1024),
+			Premise:    pipelineOutlineAllBoundText(foundation.Premise, bound(16*1024)),
+			Characters: pipelineOutlineAllBoundJSON(foundation.Characters, bound(28*1024)),
+			WorldRules: pipelineOutlineAllBoundJSON(foundation.WorldRules, bound(20*1024)),
+			BookWorld:  pipelineOutlineAllBoundJSON(foundation.BookWorld, bound(24*1024)),
+			Compass:    pipelineOutlineAllBoundJSON(foundation.Compass, bound(16*1024)),
 		},
 		References: pipelineOutlineAllReferenceView{
 			FullPackDigest: pipelineProjectAllDigest(references),
@@ -158,7 +171,7 @@ func buildPipelineOutlineAllModelVisibleContext(
 		for _, key := range keys {
 			// These include the frozen web/RAG brief, user rules, brainstorm,
 			// and prewrite plan. Each remains digest-bound even when excerpted.
-			view.Foundation.Authorities[key] = pipelineOutlineAllBoundText(foundation.Authorities[key], 8*1024)
+			view.Foundation.Authorities[key] = pipelineOutlineAllBoundText(foundation.Authorities[key], bound(8*1024))
 		}
 	}
 	if action.Type == domain.OutlineAllActionExpandArc || action.Type == domain.OutlineAllActionReviseArc {
@@ -181,10 +194,10 @@ func buildPipelineOutlineAllModelVisibleContext(
 	if err != nil {
 		return pipelineOutlineAllModelVisibleContext{}, nil, "", err
 	}
-	if len(raw) > pipelineOutlineAllVisibleContextMaxBytes {
+	if len(raw) > maxContextBytes {
 		return pipelineOutlineAllModelVisibleContext{}, nil, "", fmt.Errorf(
 			"outline-all model-visible context is %d bytes, limit=%d; reduce pathological outline field sizes without dropping contracts",
-			len(raw), pipelineOutlineAllVisibleContextMaxBytes,
+			len(raw), maxContextBytes,
 		)
 	}
 	return view, raw, pipelineBytesSHA(raw), nil
