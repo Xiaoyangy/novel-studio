@@ -3,6 +3,9 @@ package domain
 import "fmt"
 
 func validateGenerationContinuationHistoryPredecessor(previous, current ProjectedChapterBundle) error {
+	if HasCharacterMemoryTextTransportPolicyV1(previous.ChapterWorldSimulation.Sources) != HasCharacterMemoryTextTransportPolicyV1(current.ChapterWorldSimulation.Sources) {
+		return fmt.Errorf("generation memory text transport policy cannot change between chapters")
+	}
 	if HasCharacterSurfaceInspectionPolicyV1(previous.ChapterWorldSimulation.Sources) != HasCharacterSurfaceInspectionPolicyV1(current.ChapterWorldSimulation.Sources) {
 		return fmt.Errorf("generation surface inspection policy cannot change between chapters")
 	}
@@ -79,6 +82,10 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 	wantSurfaces := HasCharacterSurfaceInspectionPolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantIncomingRead := HasCharacterIncomingMaterialReadPolicyV1(bundle.ChapterWorldSimulation.Sources)
 	wantInitialSelfIntent := HasCharacterInitialSelfIntentPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	wantMemoryText := HasCharacterMemoryTextTransportPolicyV1(bundle.ChapterWorldSimulation.Sources)
+	if wantMemoryText && (!wantV3 || !wantInitialSelfIntent) {
+		return fmt.Errorf("memory text transport requires its v3 generation policies")
+	}
 	if wantInitialSelfIntent && (!wantV3 || !wantIncomingRead) {
 		return fmt.Errorf("initial self-intent history requires its v3 generation policies")
 	}
@@ -98,6 +105,9 @@ func validateGenerationActivationPolicySources(policy string, bundle ProjectedCh
 		return fmt.Errorf("timed resource observations require a v3 generation")
 	}
 	check := func(label string, sources []string) error {
+		if HasCharacterMemoryTextTransportPolicyV1(sources) != wantMemoryText {
+			return fmt.Errorf("generation memory text transport policy differs from %s", label)
+		}
 		if HasCharacterInitialSelfIntentPolicyV1(sources) != wantInitialSelfIntent {
 			return fmt.Errorf("generation initial self-intent policy differs from %s", label)
 		}

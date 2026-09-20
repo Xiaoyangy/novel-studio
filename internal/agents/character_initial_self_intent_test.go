@@ -12,18 +12,19 @@ import (
 
 func TestInitialSelfIntentProducerPreservesHistoricalSchemaAndInventories(t *testing.T) {
 	current, old := characterActivationProtocolV3InitialSelfIntentDigest(), characterActivationProtocolV3IncomingReadDigest()
-	if current == "" || current == old || characterActivationProtocolForPolicy(domain.CharacterActivationCyclePolicyV3) != current {
-		t.Fatal("opening-intent history must select a distinct fresh producer")
+	if current == "" || current == old || CharacterActivationProtocolWithProducer(domain.CharacterActivationCyclePolicyV3, current) != current {
+		t.Fatal("opening-intent history must retain its executable producer")
 	}
 	if old != "sha256:2556d28206cb95b06153a3249b0fc1c233bfbc52650c8729ff1d124084a78651" {
 		t.Fatal("immediately preceding frozen producer changed", old)
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		if domain.HasCharacterInitialSelfIntentPolicyV1(policies) != (producer == current) || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
+		want := producer == current || producer == characterActivationProtocolV3MemoryTextDigest()
+		if domain.HasCharacterInitialSelfIntentPolicyV1(policies) != want || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("initial intention crossed its executable source inventory")
 		}
-		if producer != current {
+		if !want {
 			mixed := append(policies, domain.CharacterInitialSelfIntentPolicyV1)
 			if producer != old && characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: mixed}) != "" {
 				t.Fatal("incomplete historical inventory acquired new producer")

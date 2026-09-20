@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3IncomingReadDigest(), characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3InitialSelfIntentDigest(), characterActivationProtocolV3IncomingReadDigest(), characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -31,6 +31,9 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
+	if domain.HasCharacterMemoryTextTransportPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterInitialSelfIntentPolicyV1(stimulus.Sources)) {
+		return ""
+	}
 	if domain.HasCharacterInitialSelfIntentPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources)) {
 		return ""
 	}
@@ -56,6 +59,9 @@ func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket)
 		if !domain.HasCharacterInitialSelfIntentPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3IncomingReadDigest()
 		}
+		if !domain.HasCharacterMemoryTextTransportPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3InitialSelfIntentDigest()
+		}
 	}
 	return characterActivationProtocolForPolicy(policy)
 }
@@ -74,6 +80,8 @@ func characterActivationV3PoliciesForProducer(producer string) []string {
 		return characterActivationV3IncomingReadPolicies()
 	case characterActivationProtocolV3InitialSelfIntentDigest():
 		return characterActivationV3InitialSelfIntentPolicies()
+	case characterActivationProtocolV3MemoryTextDigest():
+		return characterActivationV3MemoryTextPolicies()
 	}
 	return nil
 }

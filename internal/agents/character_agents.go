@@ -1645,7 +1645,15 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		if err != nil {
 			return err
 		}
-		raw, err = json.Marshal(codec.ModelView())
+		if domain.HasCharacterMemoryTextTransportPolicyV1(observation.Sources) {
+			var encoded bool
+			raw, encoded, err = modelinput.EncodeCharacterMemoryModelViewV1(codec.ModelView())
+			if encoded {
+				characterPrompt += modelinput.CharacterMemoryModelViewHelpV1
+			}
+		} else {
+			raw, err = json.Marshal(codec.ModelView())
+		}
 		if err != nil {
 			return err
 		}

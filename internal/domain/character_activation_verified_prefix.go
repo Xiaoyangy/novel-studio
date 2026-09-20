@@ -205,6 +205,9 @@ func validateVerifiedActivationInputSession(prefix VerifiedCharacterActivationPr
 	if err := ValidateCharacterActivationInputSet(input); err != nil {
 		return err
 	}
+	if len(prefix.steps) > 0 && HasCharacterMemoryTextTransportPolicyV1(input.Stimulus.Sources) != HasCharacterMemoryTextTransportPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
+		return fmt.Errorf("memory text transport policy cannot change inside a verified generation prefix")
+	}
 	if len(prefix.steps) > 0 && HasCharacterInitialSelfIntentPolicyV1(input.Stimulus.Sources) != HasCharacterInitialSelfIntentPolicyV1(prefix.steps[0].input.Stimulus.Sources) {
 		return fmt.Errorf("initial self-intent policy cannot change inside a verified generation prefix")
 	}
