@@ -9,6 +9,13 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
+// RequireFrozenBookCompletion exposes the same read-only delivery contract to
+// mechanical host stages. Callers must separately require a frozen contract
+// when legacy open-ended completion is not an allowed mode.
+func RequireFrozenBookCompletion(st *store.Store, progress *domain.Progress) error {
+	return requireFrozenBookCompletion(st, progress)
+}
+
 // Only host-frozen whole-book contracts add this mechanical terminal gate.
 // Legacy open-ended projects keep their existing completion/review behavior.
 // This proves delivered scope and current body reviews, not narrative closure.

@@ -114,7 +114,7 @@ func pipelineWindowCompletionTestRehearsal(t *testing.T, st *store.Store, source
 
 // Each call creates exactly three complete formal chapters. No fixture turns
 // a coarse forecast into a sealed bundle or rewrites an already accepted body.
-func pipelineWindowCompletionTestWindow(t *testing.T, st *store.Store, first, arcFirst, arcLast, arcIndex int, previous *domain.PlanningGenerationV2, accept bool) *domain.PlanningGenerationV2 {
+func pipelineWindowCompletionTestWindow(t *testing.T, st *store.Store, first, arcFirst, arcLast, arcIndex int, previous *domain.PlanningGenerationV2, accept bool, planningParents ...string) *domain.PlanningGenerationV2 {
 	t.Helper()
 	generation, registry := projectAllCmdTestGenerationAndRegistry(t, 3)
 	progress, err := st.Progress.Load()
@@ -124,6 +124,13 @@ func pipelineWindowCompletionTestWindow(t *testing.T, st *store.Store, first, ar
 	bookLast := progress.TotalChapters
 	generation.ProjectionScope, generation.ScopeID, generation.BookHorizonChapter = domain.PlanningProjectionScopeArcV2, domain.DeriveArcCycleID(1, arcIndex, arcFirst, arcLast), bookLast
 	generation.BaseCanonChapter, generation.FirstProjectedChapter, generation.LastProjectedChapter = first-1, first, first+2
+	if len(planningParents) > 0 {
+		if len(planningParents) != 1 || first != 1 || previous != nil {
+			t.Fatal("planning-parent fixture is only a canon-zero restart")
+		}
+		generation.ParentGenerationID = planningParents[0]
+		generation.AttemptID += "-restarted"
+	}
 	var boundary *store.AcceptedPlanningWindowBoundaryV1
 	if previous != nil {
 		boundary, err = st.ProjectedV2().LoadAcceptedPlanningWindowBoundaryV1(previous.GenerationID)
@@ -154,7 +161,7 @@ func pipelineWindowCompletionTestWindow(t *testing.T, st *store.Store, first, ar
 	if err := p.CreateBuildingGeneration(generation, source, registry); err != nil {
 		t.Fatal(err)
 	}
-	if previous != nil {
+	if previous != nil || len(planningParents) > 0 {
 		if err := p.ResetProjectionCursorForRestart(generation.GenerationID); err != nil {
 			t.Fatal(err)
 		}

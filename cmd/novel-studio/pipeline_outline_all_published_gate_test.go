@@ -91,6 +91,7 @@ func writeOutlineAllGateCompleteReceipt(
 	outputDir string,
 	candidateDir string,
 	expectedLiveRoot string,
+	evidencePolicies ...string,
 ) domain.OutlineAllExecutionReceipt {
 	t.Helper()
 	st := store.NewStore(outputDir)
@@ -216,6 +217,16 @@ func writeOutlineAllGateCompleteReceipt(
 	receipt, err = domain.SignOutlineAllExecutionReceipt(receipt)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(evidencePolicies) > 0 {
+		if len(evidencePolicies) != 1 {
+			t.Fatal("fixture accepts one frozen contract evidence policy")
+		}
+		receipt.ContractEvidencePolicy = evidencePolicies[0]
+		receipt, err = domain.SignOutlineAllExecutionReceipt(receipt)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := st.SaveOutlineAllExecutionReceipt(receipt); err != nil {
 		t.Fatal(err)

@@ -31,7 +31,7 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		CheckedAt: time.Now(),
 	}
 	switch stage {
-	case "zero-init", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render":
+	case "zero-init", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render", "complete-book":
 		_, releaseControl, err := acquirePublishedOutlineAllStageAtOutput(outputDir)
 		if err != nil {
 			return evidence, fmt.Errorf("%s verifier requires published outline-all: %w", stage, err)
@@ -73,6 +73,8 @@ func verifyPipelineStage(stage, outputDir string, flags pipelineFlags, state *do
 		return verifyPipelineRewriteStage(outputDir, flags, evidence)
 	case "finalize":
 		return verifyPipelineFinalizeStage(outputDir, evidence)
+	case "complete-book":
+		return verifyPipelineCompleteBookStage(outputDir, flags, evidence)
 	case "deliver":
 		return verifyPipelineDeliverStage(outputDir, flags, evidence)
 	default:

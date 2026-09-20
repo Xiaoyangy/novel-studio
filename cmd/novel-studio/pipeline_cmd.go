@@ -45,7 +45,7 @@ var knownPipelineStages = map[string]bool{
 	"cocreate": true, "architect": true, "outline-all": true, "zero-init": true,
 	"preplan": true, "rehearse-arc": true, "project-all": true, "seal": true, "promote": true,
 	"plan": true, "render": true,
-	"write": true, "review": true, "rewrite": true, "finalize": true, "deliver": true,
+	"write": true, "review": true, "rewrite": true, "finalize": true, "complete-book": true, "deliver": true,
 }
 
 type pipelineFlags struct {
@@ -81,7 +81,8 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "用法: novel-studio --pipeline [--prompt <text> | --prompt-file <path>] [--stages a,b,c] [--restart]\n\n")
 		fmt.Fprintf(os.Stderr, "按阶段顺序跑完整流程，状态存 meta/pipeline.json，可断点续跑。\n")
-		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / rehearse-arc / project-all / seal / promote / plan / render / write / review / rewrite / finalize / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintf(os.Stderr, "阶段：cocreate / architect / outline-all / zero-init / preplan / rehearse-arc / project-all / seal / promote / plan / render / write / review / rewrite / finalize / complete-book / deliver（默认 %s）\n", strings.Join(defaultPipelineStages, ","))
+		fmt.Fprintln(os.Stderr, "长篇终态：全部冻结章节与逻辑弧真实验收后，显式执行 --stages complete-book,deliver；机械合并正文并收口，不冒充短篇全文 LLM 终审。")
 		fmt.Fprintln(os.Stderr, "全书结构：outline-all 在第0章隔离工作区先完成全部卷/弧/章合同，再由 zero-init 与后续全书推演消费。")
 		fmt.Fprintln(os.Stderr, "弧式写作：preplan 保留全书稳定章位；新项目/新弧先整弧条件预演，project-all/seal 详细推进最多三章；逐章写审后更新预演再推进下一窗口；完整整弧证明通过才开放下一弧；短篇末章后显式执行 finalize。")
 		fmt.Fprintln(os.Stderr, "兼容路径：preplan → plan → render 仍可逐章规划，但不等同于全书先推演。")
@@ -602,7 +603,7 @@ func invalidateExplicitArchitectRefresh(state *domain.PipelineState, refresh boo
 	downstream := map[string]struct{}{
 		"architect": {}, "outline-all": {}, "zero-init": {}, "preplan": {}, "rehearse-arc": {},
 		"project-all": {}, "seal": {}, "promote": {}, "plan": {}, "render": {},
-		"write": {}, "review": {}, "rewrite": {}, "finalize": {}, "deliver": {},
+		"write": {}, "review": {}, "rewrite": {}, "finalize": {}, "complete-book": {}, "deliver": {},
 	}
 	changed := false
 	for _, stage := range state.Stages {
@@ -891,7 +892,7 @@ func pipelineStagesConsumePublishedOutlineAll(stages []string) bool {
 func pipelineStagesNeedQdrant(stages []string) bool {
 	for _, stage := range stages {
 		switch normalizePipelineStageName(stage) {
-		case "outline-all", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render":
+		case "outline-all", "preplan", "rehearse-arc", "project-all", "seal", "promote", "render", "complete-book":
 			continue
 		default:
 			return true
@@ -1048,6 +1049,8 @@ func runPipelineStage(stage string, opts cliOptions, flags pipelineFlags, state 
 		return pipelineCausalRewrite(opts, flags, state, stageArgs["review"], stageArgs["rewrite"])
 	case "finalize":
 		return pipelineFinalize(opts, flags)
+	case "complete-book":
+		return pipelineCompleteBook(opts, flags)
 	case "deliver":
 		cfg, _, err := loadCfgBundle(opts)
 		if err != nil {
