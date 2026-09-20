@@ -21,15 +21,18 @@ func validateIncomingMaterialReadPolicyV1(stimulus WorldStimulusPacket) error {
 }
 
 func validateIncomingMaterialReadIntentV1(proposal CharacterDecisionProposal, observation CharacterObservationPacket) error {
-	for _, request := range proposal.ResourceReads {
+	for index, request := range proposal.ResourceReads {
 		if request.TaskID == "" {
 			continue // Keep the original foundation/document read path unchanged.
 		}
+		if request.ResourceID != "" {
+			return fmt.Errorf("resource_reads[%d]: resource_id and task_id cannot be combined; ordinary known-document reading uses resource_id only (omit task_id and incoming_delivery_from); conditional incoming reading uses incoming_delivery_from plus the receiver's original work task_id and omits resource_id", index)
+		}
 		if !HasCharacterIncomingMaterialReadPolicyV1(observation.Sources) || !HasCharacterWorkArtifactPolicyV1(observation.Sources) ||
-			!HasCharacterSelfExperiencePolicyV2(observation.Sources) || request.ResourceID != "" ||
+			!HasCharacterSelfExperiencePolicyV2(observation.Sources) ||
 			!operationalBoundedV1(request.IncomingDeliveryFrom, 160) || strings.TrimSpace(request.IncomingDeliveryFrom) != request.IncomingDeliveryFrom || request.IncomingDeliveryFrom == proposal.Character ||
 			!physicalIdentityV2(request.TaskID) {
-			return fmt.Errorf("incoming artifact reading requires the new policy, an explicit other sender and original owner work task")
+			return fmt.Errorf("resource_reads[%d]: incoming artifact reading requires the new policy, an explicit other sender and original owner work task", index)
 		}
 		count := 0
 		for _, task := range proposal.SelfTasks {
@@ -38,7 +41,7 @@ func validateIncomingMaterialReadIntentV1(proposal CharacterDecisionProposal, ob
 			}
 		}
 		if count != 1 {
-			return fmt.Errorf("incoming read task_id must name exactly one original owner work task")
+			return fmt.Errorf("resource_reads[%d].task_id must name exactly one original receiver-owned work task", index)
 		}
 	}
 	return nil
