@@ -1000,8 +1000,8 @@ func foundationShapeHint(typeName string) string {
 		`"ability_tiers":[{"order":1,"name":"…","magnitude":"…","limits":"…","promotion":"…","cost":"…"}],` +
 		`"skill_domains":[{"name":"…","description":"…","tier_binding":"…","constraints":["…"]}],` +
 		`"races":[{"name":"…","description":"…","constraints":["…"]}],` +
-		`"weapon_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…"}],` +
-		`"equipment_categories":[同 weapon_categories 结构],` +
+		`"weapon_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…","constraints":["…"]}],` +
+		`"equipment_categories":[{"name":"…","description":"…","grades":["低→高"],"tier_binding":"…","constraints":["…"]}],` +
 		`"sections":[{"key":"…","content":"…","rules":["…"]} 或 {"key":"…","not_applicable":true,"reason":"…"}],` +
 		`"mechanisms":[{"id":"…","name":"…","visibility":"formal","section_refs":["mechanism_structure"],"actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…","character_view":{"name":"…","actor_scope":["…"],"trigger":"…","preconditions":["…"],"inputs":["…"],"costs":["…"],"effects":["…"],"failure_modes":["…"],"observability":["…"],"timing":"…"}}],` +
 		`"counterfactual_tests":[{"id":"…","given":["…"],"action":"…","expected_outcome":"…","forbidden_outcome":"…","mechanism_refs":["…"]}],` +
