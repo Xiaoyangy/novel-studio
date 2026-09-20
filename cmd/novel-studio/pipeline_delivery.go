@@ -1291,10 +1291,15 @@ func pipelineArchitectShortRefreshRunPrompt(base string, run int) string {
 }
 
 func pipelineArchitectShortRefreshTargetPrompt(base string, target pipelineArchitectShortRefreshTarget) string {
+	contextInstruction := "由 architect_long 先且只调用一次 novel_context(chapter=1, profile=planning) 获取紧凑上下文；若读取失败，直接依据下方创作总令完成本类型，不得改用无 chapter 的完整上下文。"
+	if strings.HasPrefix(base, "[Pipeline Architect 显式 rebase 后章零长篇来源刷新]\n") {
+		contextInstruction = "由 architect_long 必须先完整读取本轮目标：novel_context() 默认返回该目标的逐字原源及source_sha256，不是裁剪后的章节记忆。为保持跨源一致性，确有必要时可另读白名单依赖源，例如 novel_context(source=\"world_rules.json\") 或 novel_context(source=\"book_world.json\")；每次一份完整源，不反复读取同一未变化来源。目标或必要依赖源读取失败时停止并说明具体缺口，不得凭裁剪记忆或猜测全量覆写。只读依赖不扩大本回合唯一保存类型。"
+	}
 	return fmt.Sprintf(
-		"[宿主强制路由：Coordinator 必须逐字服从]\n当前顶层角色是 Coordinator。Coordinator 本轮唯一合法动作是立即调用 subagent(agent=\"architect_long\", task=<本提示中从“Architect 执行任务”开始的全部要求>)。Coordinator 自己禁止调用 novel_context 或任何 foundation/章节工具，禁止服从 flow router 的 writer 指令，禁止派 writer/drafter/editor，也禁止先输出分析；必须把本任务交给 architect_long。\n\n[Architect 执行任务]\n本回合只允许调用一次 save_foundation(type=%q)，任务：%s。禁止保存或重存任何其他 foundation 类型；即使其他项仍有问题也留给后续宿主回合。由 architect_long 先且只调用一次 novel_context(chapter=1, profile=planning) 获取紧凑上下文；若读取失败，直接依据下方创作总令完成本类型，不得改用无 chapter 的完整上下文。保存后立即停止，严禁派 writer。\n\n%s\n\n[再次确认本轮边界]\nCoordinator 只能派 architect_long；architect_long 唯一允许的持久化调用是 save_foundation(type=%q)。不得调用 premise/characters/world_rules/book_world/world_codex/update_compass/layered_outline 中的其他类型，保存后立即结束。\n",
+		"[宿主强制路由：Coordinator 必须逐字服从]\n当前顶层角色是 Coordinator。Coordinator 本轮唯一合法动作是立即调用 subagent(agent=\"architect_long\", task=<本提示中从“Architect 执行任务”开始的全部要求>)。Coordinator 自己禁止调用 novel_context 或任何 foundation/章节工具，禁止服从 flow router 的 writer 指令，禁止派 writer/drafter/editor，也禁止先输出分析；必须把本任务交给 architect_long。\n\n[Architect 执行任务]\n本回合只允许调用一次 save_foundation(type=%q)，任务：%s。禁止保存或重存任何其他 foundation 类型；即使其他项仍有问题也留给后续宿主回合。%s保存后立即停止，严禁派 writer。\n\n%s\n\n[再次确认本轮边界]\nCoordinator 只能派 architect_long；architect_long 唯一允许的持久化调用是 save_foundation(type=%q)。不得调用 premise/characters/world_rules/book_world/world_codex/update_compass/layered_outline 中的其他类型，保存后立即结束。\n",
 		target.Type,
 		target.Description,
+		contextInstruction,
 		base,
 		target.Type,
 	)
