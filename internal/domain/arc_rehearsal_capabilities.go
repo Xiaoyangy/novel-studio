@@ -170,6 +170,37 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			mechanisms[m.ID] = CodexMechanismVisibility(m) != "secret" && m.CharacterView != nil
 		}
 	}
+	// The ordered validator below remains the sole acceptance decision. On
+	// rejection, also report independent field predicates in other operations;
+	// never execute invalid steps or insert them into the dependency graph.
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		diagnostics := []error{resultErr}
+		for i, m := range body.MaterialChecks {
+			if m.Status != "available" || len(m.CapabilityRequirements) > 16 {
+				continue
+			}
+			for j, r := range m.CapabilityRequirements {
+				if i == materialIndex && j == requirementIndex || !rehearsalCapabilityKeyV1(r.Key) {
+					continue
+				}
+				problems := rehearsalIndependentCapabilityFieldsV1(m, r, resources, mechanisms)
+				if len(problems) == 0 {
+					continue
+				}
+				diagnostics = append(diagnostics, fmt.Errorf("material_checks[%d].capability_requirements[%d] key=%s kind=%s: independent field violations: %s", i, j,
+					rehearsalCapabilityDiagnosticValueV1(r.Key), rehearsalCapabilityDiagnosticValueV1(r.Kind), strings.Join(problems, "; ")))
+				if len(diagnostics) == 17 {
+					diagnostics = append(diagnostics, errors.New("independent diagnostics limited to 16 additional requirements; this is not an exhaustive dependency-graph validation"))
+					resultErr = errors.Join(diagnostics...)
+					return
+				}
+			}
+		}
+		resultErr = errors.Join(diagnostics...)
+	}()
 	type priorRequirement struct {
 		value     ArcRehearsalCapabilityRequirementV1
 		available bool
@@ -272,7 +303,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 				}
 			case "operational_observation":
 				if !single || !operationalResourceV1(resource) || len(r.MechanismRefs) == 0 {
-					return fmt.Errorf("operational_observation requires one existing qualitative non-document resource and public mechanism; it cannot certify quantities or overall safety")
+					return fmt.Errorf("operational_observation requires one existing qualitative non-document resource and public mechanism; it cannot certify quantities or overall safety; failed fields: %s", strings.Join(rehearsalIndependentCapabilityFieldsV1(m, r, resources, mechanisms), "; "))
 				}
 			case "resource_use":
 				if len(r.ResourceRefs) == 0 {
@@ -316,7 +347,13 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 				if single && resource.Artifact != nil {
 					creator = resource.Artifact.CreatorAgentID
 				}
-				if creator == "" || r.Kind == "artifact_read" && !m.RequiresReadable {
+				if r.Kind == "artifact_read" && !m.RequiresReadable {
+					return fmt.Errorf("artifact_read requires material_checks[%d].requires_readable=true; actual=false (artifact identity and earlier-write dependencies are separate checks)", i)
+				}
+				if creator == "" {
+					if r.Kind == "artifact_read" {
+						return fmt.Errorf("artifact read/sign requires an actual artifact or earlier expected write, not an ordinary document; failed fields: %s", strings.Join(rehearsalIndependentCapabilityFieldsV1(m, r, resources, mechanisms), "; "))
+					}
 					return fmt.Errorf("artifact read/sign requires an actual artifact or earlier expected write, not an ordinary document")
 				}
 			}
@@ -347,6 +384,53 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 		}
 	}
 	return nil
+}
+
+// Only predicates that do not require accepting another proposed step belong
+// here. Missing/invalid future writers and access paths stay with the ordered
+// validator; these diagnostics cannot claim that such a chain exists or not.
+func rehearsalIndependentCapabilityFieldsV1(m ArcRehearsalMaterialCheck, r ArcRehearsalCapabilityRequirementV1, resources map[string]WorldResourceBalanceV2, mechanisms map[string]bool) []string {
+	var problems []string
+	switch r.Kind {
+	case "operational_observation":
+		if len(r.ResourceRefs) != 1 {
+			problems = append(problems, fmt.Sprintf("resource_refs count=%d; requires exactly one existing target", len(r.ResourceRefs)))
+		} else if resource, exists := resources[r.ResourceRefs[0]]; exists {
+			if resource.Unit != "" {
+				problems = append(problems, "resource_refs[0].unit is nonempty; requires a qualitative target with empty unit")
+			}
+			if resource.ActualAmount != nil {
+				problems = append(problems, "resource_refs[0].actual_amount is defined; operational_observation cannot certify a numeric target")
+			}
+			if len(resource.ReadableFacts) != 0 {
+				problems = append(problems, "resource_refs[0].readable_facts is nonempty; requires a non-document target")
+			}
+		} else {
+			problems = append(problems, "resource_refs[0] is not an existing world_state resource")
+		}
+		if len(r.MechanismRefs) == 0 {
+			problems = append(problems, "mechanism_refs is empty; requires at least one public mechanism with character_view")
+		}
+		for i, id := range r.MechanismRefs {
+			if !mechanisms[id] {
+				problems = append(problems, fmt.Sprintf("mechanism_refs[%d] is undefined, secret or lacks character_view", i))
+			}
+		}
+	case "artifact_read":
+		if !m.RequiresReadable {
+			problems = append(problems, "requires_readable=false; artifact_read requires its material_check.requires_readable=true")
+		}
+		if r.ArtifactRef == "" {
+			if len(r.ResourceRefs) != 1 {
+				problems = append(problems, fmt.Sprintf("artifact_ref is empty and resource_refs count=%d; requires one existing artifact resource", len(r.ResourceRefs)))
+			} else if resource, exists := resources[r.ResourceRefs[0]]; exists && resource.Artifact == nil {
+				problems = append(problems, "resource_refs[0].artifact is absent and artifact_ref is empty; ordinary document readable_facts are not artifact metadata")
+			} else if exists && resource.Artifact.CreatorAgentID == "" {
+				problems = append(problems, "resource_refs[0].artifact.creator_agent_id is empty")
+			}
+		}
+	}
+	return problems
 }
 
 func rehearsalCapabilityDiagnosticValueV1(value string) string {
