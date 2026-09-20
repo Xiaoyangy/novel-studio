@@ -34,7 +34,7 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 			t.Fatal("producer candidates are not distinct exact executable inventories")
 		}
 		seen[producer] = true
-		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest()
 		if domain.HasCharacterSurfaceInspectionPolicyV1(policies) != wantSurface {
 			t.Fatal("old producer gained or current producer lost surface capability")
 		}
@@ -48,7 +48,7 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 			}
 		}
 	}
-	if len(seen) != 5 {
+	if len(seen) != 6 {
 		t.Fatal("missing historical executable producer")
 	}
 	for _, old := range [][]string{characterActivationV3LegacyPolicies(), characterActivationV3HistoryPolicies()} {
@@ -124,7 +124,7 @@ func TestSurfaceInspectionPromptAndOwnerCapabilityAreProducerBound(t *testing.T)
 			}
 			selectionMust(t, st.Characters.Save(characters))
 			cfg.CharacterAgents.FrozenActivationProducer, boundary.FrozenActivationProducer = producer, producer
-			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()}
+			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest()}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "surface-view", model)}
 			_, err = runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_surface_view", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 			if !errors.Is(err, context.Canceled) || model.seen.Load() != 1 {

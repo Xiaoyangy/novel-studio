@@ -58,7 +58,7 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 		if domain.HasCharacterSelfCompletionViewPolicyV1(view.Input().Stimulus.Sources) != completions {
 			t.Fatal("initial source changed its frozen completion strategy")
 		}
-		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest()
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest()
 		if domain.HasCharacterSurfaceInspectionPolicyV1(view.Input().Stimulus.Sources) != wantSurface {
 			t.Fatal("initial source changed its frozen surface strategy")
 		}
@@ -124,5 +124,23 @@ func continuationProducerNextChapterInput(t *testing.T, st *store.Store, boundar
 	selectionMust(t, validateCharacterActivationInputPolicy(input, session, domain.CharacterActivationCyclePolicyV3, producer))
 	if characterActivationProtocolForStimulus(input.Stimulus) != producer {
 		t.Fatal("later chapter silently selected the current producer")
+	}
+	for _, observation := range input.Observations {
+		count := 0
+		for _, fact := range observation.KnownFacts {
+			if fact.Kind == "initial_self_intent" {
+				count++
+				if fact.Text != "完成本人检查" || fact.Visibility != "private" {
+					t.Fatal("next chapter changed the owner's actual opening intention")
+				}
+			}
+		}
+		want := 0
+		if producer == characterActivationProtocolV3InitialSelfIntentDigest() {
+			want = 1
+		}
+		if count != want {
+			t.Fatal("next chapter lost or retroactively injected opening intention")
+		}
 	}
 }

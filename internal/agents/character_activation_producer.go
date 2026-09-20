@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3IncomingReadDigest(), characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -31,6 +31,9 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
+	if domain.HasCharacterInitialSelfIntentPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources)) {
+		return ""
+	}
 	if domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterSurfaceInspectionPolicyV1(stimulus.Sources)) {
 		return ""
 	}
@@ -50,6 +53,9 @@ func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket)
 		if !domain.HasCharacterIncomingMaterialReadPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3Digest()
 		}
+		if !domain.HasCharacterInitialSelfIntentPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3IncomingReadDigest()
+		}
 	}
 	return characterActivationProtocolForPolicy(policy)
 }
@@ -66,6 +72,8 @@ func characterActivationV3PoliciesForProducer(producer string) []string {
 		return characterActivationV3Policies()
 	case characterActivationProtocolV3IncomingReadDigest():
 		return characterActivationV3IncomingReadPolicies()
+	case characterActivationProtocolV3InitialSelfIntentDigest():
+		return characterActivationV3InitialSelfIntentPolicies()
 	}
 	return nil
 }

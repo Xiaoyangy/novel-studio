@@ -1083,6 +1083,7 @@ func buildCharacterObservationDraft(st *store.Store, generationID string, chapte
 		"特征：" + strings.Join(profile.Character.Traits, "、"),
 	}), "；"))
 	observation.KnownFacts = append(observation.KnownFacts, newCharacterAgentFact("self_profile", selfProfile, "characters.json", "private"))
+	projectCharacterInitialSelfIntent(&observation, profile)
 	if initial := profile.Character.InitialState; initial != nil && chapter == 1 {
 		if stimulus.StoryClock == nil {
 			observation.TimeWindow = firstAgentText(initial.Time, observation.TimeWindow)
@@ -1625,6 +1626,9 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		}
 		if domain.HasCharacterIncomingMaterialReadPolicyV1(observation.Sources) {
 			characterPrompt += characterIncomingMaterialReadPromptV1
+		}
+		if domain.HasCharacterInitialSelfIntentPolicyV1(observation.Sources) {
+			characterPrompt += characterInitialSelfIntentPromptV1
 		}
 	}
 	var executionTool agentcore.Tool = tool

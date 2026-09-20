@@ -20,12 +20,12 @@ func incomingReadItemsProperties(t *testing.T, value map[string]any, field strin
 
 func TestIncomingMaterialReadProducerKeepsHistoricalWireBoundaries(t *testing.T) {
 	current := characterActivationProtocolV3IncomingReadDigest()
-	if current == "" || current == characterActivationProtocolV3Digest() || characterActivationProtocolForPolicy(domain.CharacterActivationCyclePolicyV3) != current {
-		t.Fatal("new default must bind a distinct executable producer")
+	if current == "" || current == characterActivationProtocolV3Digest() || CharacterActivationProtocolWithProducer(domain.CharacterActivationCyclePolicyV3, current) != current {
+		t.Fatal("incoming read must retain a distinct executable producer")
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		want := producer == current
+		want := producer == current || producer == characterActivationProtocolV3InitialSelfIntentDigest()
 		if domain.HasCharacterIncomingMaterialReadPolicyV1(policies) != want || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("incoming read crossed frozen source inventory")
 		}
@@ -84,7 +84,7 @@ func TestIncomingMaterialReadActualActorDispatchUsesOnlyFrozenHelp(t *testing.T)
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			st, cfg, boundary := activationV3RuntimeFixture(t)
 			cfg.CharacterAgents.FrozenActivationProducer, boundary.FrozenActivationProducer = producer, producer
-			model := &incomingReadPromptProbe{want: producer == characterActivationProtocolV3IncomingReadDigest()}
+			model := &incomingReadPromptProbe{want: producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest()}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "incoming-read-help", model)}
 			_, err := runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_incoming_help", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 			if !errors.Is(err, context.Canceled) || model.calls != 1 {

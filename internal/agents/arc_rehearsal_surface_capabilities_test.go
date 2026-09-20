@@ -156,7 +156,7 @@ func TestSurfaceRehearsalProfilePreservesEveryHistoricalProducer(t *testing.T) {
 		selected.CharacterAgents.FrozenActivationProducer = producer
 		profile, err := ArcRehearsalExecutionCapabilities(selected)
 		selectionMust(t, err)
-		if producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() {
+		if producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() {
 			if profile.Policy != domain.ArcRehearsalCapabilityPolicyV2 || !slices.Contains(profile.ActionKinds, "surface_inspection") {
 				t.Fatal("new producer lost its explicit surface capability")
 			}
