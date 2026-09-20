@@ -119,15 +119,18 @@ func (s *Store) armChapterDeliveryBudget(generation domain.PlanningGenerationV2,
 	})
 }
 
-func (s *Store) BeginChapterDelivery(generation domain.PlanningGenerationV2, chapter int, now time.Time) (*ChapterDeliveryTimingV1, error) {
-	return s.beginChapterDelivery(generation, chapter, func() time.Time { return now })
+func (s *Store) BeginChapterDelivery(generation domain.PlanningGenerationV2, chapter int, now time.Time, executionStores ...*Store) (*ChapterDeliveryTimingV1, error) {
+	return s.beginChapterDelivery(generation, chapter, func() time.Time { return now }, executionStores...)
 }
 
-func (s *Store) BeginChapterDeliveryNow(generation domain.PlanningGenerationV2, chapter int) (*ChapterDeliveryTimingV1, error) {
-	return s.beginChapterDelivery(generation, chapter, time.Now)
+// executionStores are the already-bound isolated planning workspaces. They
+// only add evidence that forbids inventing a missing start; they never grant
+// authority, replace the live ledger, or modify an existing start/deadline.
+func (s *Store) BeginChapterDeliveryNow(generation domain.PlanningGenerationV2, chapter int, executionStores ...*Store) (*ChapterDeliveryTimingV1, error) {
+	return s.beginChapterDelivery(generation, chapter, time.Now, executionStores...)
 }
 
-func (s *Store) beginChapterDelivery(generation domain.PlanningGenerationV2, chapter int, clock func() time.Time) (*ChapterDeliveryTimingV1, error) {
+func (s *Store) beginChapterDelivery(generation domain.PlanningGenerationV2, chapter int, clock func() time.Time, executionStores ...*Store) (*ChapterDeliveryTimingV1, error) {
 	actual, err := s.authenticateChapterDeliveryGeneration(generation)
 	if err != nil {
 		return nil, err
@@ -170,7 +173,7 @@ func (s *Store) beginChapterDelivery(generation domain.PlanningGenerationV2, cha
 		timing := &entry.Chapters[chapter-entry.FirstChapter]
 		deadlineErr := chapterDeliveryDeadline(ledger, now)
 		if deadlineErr == nil && timing.StartedAt.IsZero() {
-			if err := s.requireUnprojectedChapterDeliveryStart(actual.GenerationID, chapter); err != nil {
+			if err := s.requireUnprojectedChapterDeliveryStart(actual.GenerationID, chapter, executionStores...); err != nil {
 				return err
 			}
 			timing.StartedAt = now.UTC().Round(0)
@@ -190,7 +193,7 @@ func (s *Store) beginChapterDelivery(generation domain.PlanningGenerationV2, cha
 // A start can be created only before formal chapter projection. An armed but
 // unstarted slot after projection is missing timing evidence, not permission
 // to restart the clock at render time.
-func (s *Store) requireUnprojectedChapterDeliveryStart(generationID string, chapter int) error {
+func (s *Store) requireUnprojectedChapterDeliveryStart(generationID string, chapter int, executionStores ...*Store) error {
 	p := s.ProjectedV2()
 	return p.withProjectedReadLock(func() error {
 		sealed, err := p.generationExistsUnlocked(projectedGenerationsDir, generationID)
@@ -217,6 +220,14 @@ func (s *Store) requireUnprojectedChapterDeliveryStart(generationID string, chap
 		}
 		if !os.IsNotExist(err) {
 			return err
+		}
+		for _, execution := range append([]*Store{s}, executionStores...) {
+			if execution == nil {
+				return fmt.Errorf("chapter delivery fresh start requires a non-nil execution store")
+			}
+			if err := execution.requireNoChapterDeliveryExecutionEvidence(generationID, chapter); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

@@ -312,7 +312,7 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 			last,
 		)
 		if currentGeneration.ChapterDeliveryBudget != nil {
-			if _, err := st.BeginChapterDeliveryNow(*currentGeneration, chapter); err != nil {
+			if _, err := st.BeginChapterDeliveryNow(*currentGeneration, chapter, shadow); err != nil {
 				return err
 			}
 		}
