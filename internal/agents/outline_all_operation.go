@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -129,6 +130,7 @@ func runOutlineAllOperationWithModel(
 	var mutationMu sync.Mutex
 	mutationComplete := false
 	pendingRetryReminder := ""
+	var lastSaveErr error
 	stopAfterSuccessfulSave := func(toolName string, result json.RawMessage) bool {
 		if toolName != "save_foundation" || !successfulOutlineAllSave(result) {
 			return false
@@ -152,9 +154,11 @@ func runOutlineAllOperationWithModel(
 		result, err := next(ctx, call.Args)
 		mutationMu.Lock()
 		if err != nil {
+			lastSaveErr = err
 			pendingRetryReminder = outlineAllRetryReminder(finalAuthorization, err)
 		} else if successfulOutlineAllSave(result) {
 			mutationComplete = true
+			lastSaveErr = nil
 			pendingRetryReminder = ""
 		}
 		mutationMu.Unlock()
@@ -169,6 +173,25 @@ func runOutlineAllOperationWithModel(
 		reminder := pendingRetryReminder
 		pendingRetryReminder = ""
 		return []agentcore.AgentMessage{agentcore.UserMsg(reminder)}
+	}
+	guardIncompleteTurn := func(ctx context.Context, stop agentcore.StopInfo) agentcore.StopDecision {
+		mutationMu.Lock()
+		defer mutationMu.Unlock()
+		if mutationComplete || ctx.Err() != nil || stop.Trigger != agentcore.StopTriggerEndTurn {
+			return agentcore.StopDecision{Allow: true}
+		}
+		// Only recover an ordinary premature end. Provider safety/error/abort
+		// and exhausted length recovery are not permission to keep retrying.
+		if stop.Message.StopReason != "" && stop.Message.StopReason != agentcore.StopReasonStop {
+			return agentcore.StopDecision{Allow: true}
+		}
+		reminder := finalAuthorization + "\n\n尚未收到 saved=true 且 outline_all=true 的工具回执。文字说明或声称已完成不算保存；请执行上述唯一授权的 save_foundation 变更。"
+		if lastSaveErr != nil {
+			reminder = outlineAllRetryReminder(finalAuthorization, lastSaveErr)
+		}
+		// The existing total MaxTurns cap also bounds these follow-ups. Keep
+		// the original prompt, intent, model, and one-mutation gate unchanged.
+		return agentcore.StopDecision{InjectMessage: reminder}
 	}
 
 	model := &outlineAllUsageModel{ChatModel: resolved.ChatModel, usage: &usage}
@@ -196,6 +219,7 @@ func runOutlineAllOperationWithModel(
 			CacheLastMessage:    promptCacheControl,
 			PromptCacheKey:      agentPromptCacheKey("architect_outline_all", st.Dir(), prompt),
 			GetSteeringMessages: takeRetryReminder,
+			StopGuard:           guardIncompleteTurn,
 			Middlewares:         []agentcore.ToolMiddleware{preventSecondMutation},
 			StopAfterToolResult: stopAfterSuccessfulSave,
 			OnMessage: func(msg agentcore.AgentMessage) {
@@ -204,7 +228,13 @@ func runOutlineAllOperationWithModel(
 		},
 	)
 	var runErr error
+	var lastStopReason agentcore.StopReason
 	for event := range events {
+		if event.Type == agentcore.EventModelResponse {
+			if message, ok := event.Message.(agentcore.Message); ok {
+				lastStopReason = message.StopReason
+			}
+		}
 		if event.Type == agentcore.EventError || event.Type == agentcore.EventRetry {
 			usage.observeError(event.Err)
 		}
@@ -212,14 +242,16 @@ func runOutlineAllOperationWithModel(
 			runErr = event.Err
 		}
 	}
-	if runErr != nil {
-		return fmt.Errorf("outline-all direct Architect run: %w", runErr)
-	}
 	mutationMu.Lock()
 	completed := mutationComplete
+	rejection := lastSaveErr
 	mutationMu.Unlock()
+	if runErr != nil {
+		return fmt.Errorf("outline-all direct Architect run: %w", errors.Join(runErr, rejection))
+	}
 	if !completed {
-		return fmt.Errorf("outline-all direct Architect returned without a successful outline-all save_foundation mutation")
+		err := fmt.Errorf("outline-all direct Architect returned without a successful outline-all save_foundation mutation (stop_reason=%q)", lastStopReason)
+		return errors.Join(err, rejection)
 	}
 	return nil
 }
