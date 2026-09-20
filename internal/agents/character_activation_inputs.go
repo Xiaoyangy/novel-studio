@@ -54,11 +54,12 @@ func loadOrPrepareCharacterActivationInputs(st *store.Store, session domain.Char
 		if prefix == nil || !sameCharacterCycleValue(prefix.Session(), session) {
 			return empty, fmt.Errorf("activation is missing its exact verified source prefix")
 		}
-		steps := prefix.Steps()
-		if len(steps) != len(session.CycleDigests) {
+		// The verified prefix already binds the exact session and step count.
+		// Only its last step is consumed; do not deep-copy all prior histories.
+		last, ok := prefix.Step(len(session.CycleDigests) - 1)
+		if !ok {
 			return empty, fmt.Errorf("activation source prefix has an incomplete committed step set")
 		}
-		last := steps[len(steps)-1]
 		input, err = buildNextCharacterActivationInputsFromStep(last.Input(), last, session)
 	} else {
 		previous, loadErr := st.LoadCharacterActivationCycle(session.GenerationID, session.Chapter, len(session.CycleDigests))
