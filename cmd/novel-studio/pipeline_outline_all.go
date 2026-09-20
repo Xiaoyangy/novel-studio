@@ -1029,7 +1029,7 @@ func recoverOrRunPipelineOutlineAllOperation(
 	if err := validatePipelineOutlineAllCandidateNamespace(live.Dir(), st.Dir(), receipt.AttemptID, true); err != nil {
 		return receipt, err
 	}
-	return st.UpdateOutlineAllExecutionReceipt(receipt.ReceiptDigest, func(currentReceipt *domain.OutlineAllExecutionReceipt) error {
+	committed, err := st.UpdateOutlineAllExecutionReceipt(receipt.ReceiptDigest, func(currentReceipt *domain.OutlineAllExecutionReceipt) error {
 		if currentReceipt.PendingAction == nil || !domain.OutlineAllPendingActionEqual(*currentReceipt.PendingAction, action) {
 			return fmt.Errorf("outline-all pending action changed before completion checkpoint")
 		}
@@ -1038,6 +1038,18 @@ func recoverOrRunPipelineOutlineAllOperation(
 		currentReceipt.UpdatedAt = time.Now().UTC()
 		return nil
 	})
+	if err != nil {
+		return committed, err
+	}
+	// The verified operation and pending -> completed CAS are the durable
+	// progress boundary. Merely reading/replaying an immutable receipt cannot
+	// pass this CAS twice, and a heartbeat/model response alone is not progress.
+	if err := pipelineWatchdogProgress("outline_all_operation_committed"); err != nil {
+		// Monitoring must not turn an already committed paid operation into a
+		// business failure or retry. Never disclose the underlying error text.
+		fmt.Fprintf(os.Stderr, "[pipeline:watchdog] outline-all observer unavailable diagnostic=%s\n", pipelineBytesSHA([]byte(err.Error())))
+	}
+	return committed, nil
 }
 
 func pipelineOutlineAllOperationPrompt(
