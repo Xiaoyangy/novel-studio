@@ -50,14 +50,15 @@ type ChapterDeliveryProofFileV1 struct {
 }
 
 type chapterDeliveryGenerationV1 struct {
-	GenerationID string                    `json:"generation_id"`
-	CreatedAt    string                    `json:"created_at"`
-	FirstChapter int                       `json:"first_chapter"`
-	LastChapter  int                       `json:"last_chapter"`
-	Policy       string                    `json:"policy"`
-	LimitSeconds int                       `json:"limit_seconds"`
-	ArmedAt      time.Time                 `json:"armed_at"`
-	Chapters     []ChapterDeliveryTimingV1 `json:"chapters"`
+	GenerationID string                         `json:"generation_id"`
+	CreatedAt    string                         `json:"created_at"`
+	FirstChapter int                            `json:"first_chapter"`
+	LastChapter  int                            `json:"last_chapter"`
+	Policy       string                         `json:"policy"`
+	LimitSeconds int                            `json:"limit_seconds"`
+	ArmedAt      time.Time                      `json:"armed_at"`
+	Continuation *ChapterDeliveryContinuationV1 `json:"continuation,omitempty"`
+	Chapters     []ChapterDeliveryTimingV1      `json:"chapters"`
 }
 
 type chapterDeliveryLedgerV1 struct {
@@ -452,6 +453,9 @@ func chapterDeliveryObserve(ledger *chapterDeliveryLedgerV1, now time.Time) erro
 func chapterDeliveryDeadline(ledger *chapterDeliveryLedgerV1, now time.Time) error {
 	var earliest *ChapterDeliveryTimingV1
 	for _, entry := range ledger.Generations {
+		if entry.Continuation != nil && entry.Continuation.Mode == chapterDeliveryObserveOnly {
+			continue // Explicit grant changes enforcement only, never the clock.
+		}
 		for i := range entry.Chapters {
 			timing := &entry.Chapters[i]
 			if !timing.StartedAt.IsZero() && timing.ClosedAt.IsZero() && (earliest == nil || timing.DeadlineAt.Before(earliest.DeadlineAt) ||
@@ -856,6 +860,9 @@ func validateChapterDeliveryLedger(ledger chapterDeliveryLedgerV1) error {
 			entry.Policy != domain.ChapterDeliveryBudgetPolicyV1 || entry.LimitSeconds <= 0 || entry.LimitSeconds > 86400 ||
 			entry.ArmedAt.IsZero() || entry.ArmedAt.After(ledger.LastObserved) || len(entry.Chapters) != entry.LastChapter-entry.FirstChapter+1 {
 			return fmt.Errorf("chapter delivery ledger generation shape or policy is invalid")
+		}
+		if err := validateChapterDeliveryContinuation(entry, ledger.LastObserved); err != nil {
+			return err
 		}
 		for i, timing := range entry.Chapters {
 			if timing.GenerationID != id || timing.Chapter != entry.FirstChapter+i || timing.Policy != entry.Policy || timing.LimitSeconds != entry.LimitSeconds {

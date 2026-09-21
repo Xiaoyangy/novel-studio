@@ -133,6 +133,22 @@ projected state delta。
 
 完整数据合同见 [Project-All 架构规范](docs/project-all-architecture.md)。
 
+### 单章时限与人工批准续跑
+
+`budget.chapter_delivery_seconds` 是新 generation 冻结的章节细推到正文接受的墙钟时限。计时开始后，重跑命令、等待或切换到后续章都不会重新计时；generation 内最早到期的未接受章节会阻止后续模型调用。详细窗口包含多章时，前章的计时也包含后续章细推期间的等待。
+
+确需优先完成交付时，人工可明确授权当前 generation 超时继续：
+
+```bash
+novel-studio --pipeline --dir <RUN> \
+  --stages project-all,seal,promote,render \
+  --delivery-overrun-reason "已人工确认继续产出，保留原始时限和超时记录"
+```
+
+此选项不是模型工具权限，也不能从创作提示词中自动获得。它在当前 generation 的运行时账本写入带摘要的授权理由、实际授权时间及原预算，令该 generation 的时限只作观察统计；原始 `started_at`、`deadline_at`、时限、冻结 generation 与正文接受要求均不改变。超时后才接受的正文仍记录迟到，不会被报告成按时交付。
+
+授权仅针对本次 `project-all` 实际选中的 generation，不自动跨新 generation 或跨书继承；新窗口需再次明确带参调用。同一理由重跑幂等，不重写授权时间；不同理由不能覆盖已有记录。可为 building 或 sealed generation 授权，但不能配合 `--restart`、`--rebase-all-chapters`、`--new-novel`、`--init-only` 使用。缺失或损坏的原计时、竞争中的执行锁及缺少真实接受证明，仍会失败关闭。正常不带该参数的项目继续执行原硬时限。
+
 ### 2026-07-16 主干升级摘要
 
 - 新增 `ProjectedStoreV2`、正式 chapter bundle、obligation registry、projection/realization 双 cursor、immutable seal、promotion/outcome/lifecycle receipts。

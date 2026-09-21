@@ -10,6 +10,17 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
+func authorizePipelineDeliveryOverrun(st *store.Store, generation domain.PlanningGenerationV2, reason, owner string) error {
+	if reason == "" {
+		return nil
+	}
+	if err := st.AuthorizeChapterDeliveryOverrunNow(generation, reason, owner); err != nil {
+		return fmt.Errorf("project-all explicit delivery continuation: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:delivery] generation %s 已确认人工授权超时续跑；原始计时/截止保留，不代表时限达标，不放宽接受门禁\n", generation.GenerationID)
+	return nil
+}
+
 // A runtime callback, never model data or serialized CLI configuration.
 type pipelineProviderCallGuard struct {
 	check func() error

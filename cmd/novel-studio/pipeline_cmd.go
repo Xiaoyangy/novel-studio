@@ -74,6 +74,7 @@ type pipelineFlags struct {
 	OutlineRepairFile   string
 	OutlineRepairDigest string
 	ArchitectRepairFile string
+	OverrunReason       string
 }
 
 func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
@@ -113,8 +114,22 @@ func parsePipelineFlags(argv []string) (pipelineFlags, []string, error) {
 	fs.BoolVar(&f.RebaseAllChapters, "rebase-all-chapters", false, "将现有正文和活动台账完整归档后，把正史安全回到第0章，再按逐弧闭环重推")
 	fs.StringVar(&f.OutlineRepairFile, "outline-repair-file", "", "fresh outline-all 前在隔离候选中应用 chapter-zero 定向大纲修复 manifest")
 	fs.StringVar(&f.ArchitectRepairFile, "architect-repair-file", "", "章零隔离候选的定向源修复 manifest；须 refresh-architect、明确 target 与单独 architect 阶段，不替换创作总令")
+	fs.StringVar(&f.OverrunReason, "delivery-overrun-reason", "", "人工明确授权本次 project-all generation 超时续跑的理由；原始计时/截止与超时事实保留，不放宽正文或接受门禁")
 	if err := fs.Parse(argv); err != nil {
 		return f, nil, err
+	}
+	overrunRequested := false
+	fs.Visit(func(value *flag.Flag) {
+		if value.Name == "delivery-overrun-reason" {
+			overrunRequested = true
+		}
+	})
+	if overrunRequested {
+		f.OverrunReason = strings.TrimSpace(f.OverrunReason)
+		stages, stageErr := resolveStages(f.Stages)
+		if f.OverrunReason == "" || stageErr != nil || !slices.Contains(stages, "project-all") || f.Restart || f.RebaseAllChapters || f.NewNovel || f.InitializeOnly {
+			return f, nil, fmt.Errorf("--delivery-overrun-reason requires a nonempty human reason and project-all; it cannot accompany restart, rebase, new-novel or init-only")
+		}
 	}
 	if f.ArchitectRepairFile != "" && (!f.RefreshArchitect || f.ArchitectTarget == "" || f.Stages != "architect" || f.InitializeOnly || f.NewNovel || f.OutlineRepairFile != "") {
 		return f, nil, fmt.Errorf("--architect-repair-file requires --refresh-architect, an explicit --architect-target and --stages architect only")

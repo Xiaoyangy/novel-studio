@@ -202,6 +202,9 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 		if err := validatePipelineProjectAllGenerationIdentity(*sealed, identity.Generation); err != nil {
 			return err
 		}
+		if err := authorizePipelineDeliveryOverrun(st, *sealed, flags.OverrunReason, owner); err != nil {
+			return err
+		}
 		fmt.Fprintf(os.Stderr, "[pipeline:project-all] generation %s 已封版，跳过重复推演\n", sealed.GenerationID)
 		return nil
 	}
@@ -220,6 +223,9 @@ func pipelineProjectAllOnce(opts cliOptions, flags pipelineFlags) (returnErr err
 		}
 		building = &identity.Generation
 	} else if err := validatePipelineProjectAllGenerationIdentity(*building, identity.Generation); err != nil {
+		return err
+	}
+	if err := authorizePipelineDeliveryOverrun(st, *building, flags.OverrunReason, owner); err != nil {
 		return err
 	}
 	// Projection cursor is a derived pointer for the currently building arc,
