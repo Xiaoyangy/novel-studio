@@ -16,6 +16,13 @@ const planGroundingPartialReceiptKey = "_grounding_review"
 
 var ErrPlanGroundingReviewRequired = errors.New("plan grounding requires an explicit model-review lane")
 
+// Only a validated, persisted verdict may select factual-repair guidance.
+// Keep this runtime classification out of immutable audits and protocol hashes.
+type planGroundingRejectionError struct{ cause error }
+
+func (e *planGroundingRejectionError) Error() string { return e.cause.Error() }
+func (e *planGroundingRejectionError) Unwrap() error { return e.cause }
+
 type PlanGroundingReviewer struct {
 	Protocol string
 	Review   func(context.Context, domain.PlanGroundingInput) (domain.PlanGroundingVerdict, error)
@@ -146,7 +153,7 @@ func reviewChapterPlanGrounding(s *store.Store, plan *domain.ChapterPlan, option
 		for _, finding := range audit.Receipt.Verdict.Findings {
 			findings = append(findings, fmt.Sprintf("%s: %s（计划 %q；裁决依据 %s: %q）", finding.PlanPath, finding.Explanation, finding.PlanQuote, finding.SourcePath, finding.SourceQuote))
 		}
-		return fmt.Errorf("计划违背最终角色裁决：%s。只修指出的计划字段，角色选择与裁决不可改；不要仅重绑 simulation_id 或重发未改变的 finalize: %w", strings.Join(findings, "；"), errs.ErrToolPrecondition)
+		return &planGroundingRejectionError{cause: fmt.Errorf("计划违背最终角色裁决：%s。只修指出的计划字段及同一矛盾的关联表述，角色选择与裁决不可改；不要仅重绑 simulation_id 或重发未改变的 finalize: %w", strings.Join(findings, "；"), errs.ErrToolPrecondition)}
 	}
 	plan.GroundingReview = &audit.Receipt
 	if partial != nil {

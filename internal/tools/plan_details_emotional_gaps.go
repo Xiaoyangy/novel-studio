@@ -18,6 +18,13 @@ func planEmotionalLogicMissingCharacters(s *store.Store, records []domain.Charac
 	return missingEmotionalLogicCoverage(compactStrings([]string{inferCommitProtagonist(s)}), records)
 }
 
+// Use the same project/chapter predicate and completeness check as finalize.
+// An optional opening on a short book or a later chapter stays optional.
+func planLongformOpeningMissing(s *store.Store, plan domain.ChapterPlan) bool {
+	return s != nil && attractionRequirementsForChapter(s, plan.Chapter).Longform &&
+		!domain.CompleteLongformOpeningDesign(plan.CausalSimulation.LongformOpening)
+}
+
 func planDetailsRecommendedBatchesForState(s *store.Store, chapter int, partial, merged map[string]any) []string {
 	batches := planDetailsRecommendedBatches()
 	plan, err := chapterPlanFromPartial(chapter, partial, merged)
@@ -25,12 +32,18 @@ func planDetailsRecommendedBatchesForState(s *store.Store, chapter int, partial,
 		return batches
 	}
 	missing := planEmotionalLogicMissingCharacters(s, plan.CausalSimulation.EmotionalLogic)
-	if len(missing) == 0 {
+	missingOpening := planLongformOpeningMissing(s, plan)
+	if len(missing) == 0 && !missingOpening {
 		return batches
 	}
 	for i, batch := range batches {
 		if strings.HasPrefix(batch, "batch4_project_contracts_if_required:") {
-			batches[i] = batch + "；本章当前必补：" + formatMissingCharacterCoverage("emotional_logic", missing) + "。只补缺失角色的既有必需项，保留已保存字段；不扩展为全角色心理矩阵"
+			if len(missing) > 0 {
+				batches[i] += "；本章当前必补：" + formatMissingCharacterCoverage("emotional_logic", missing) + "。只补缺失角色的既有必需项，保留已保存字段；不扩展为全角色心理矩阵"
+			}
+			if missingOpening {
+				batches[i] += "；本章当前必补：longform_opening（当前长篇首章的既有验收要求，缺失或不完整）；补齐后再 finalize，保留其他已保存字段"
+			}
 			break
 		}
 	}

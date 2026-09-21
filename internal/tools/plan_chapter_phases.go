@@ -1526,6 +1526,11 @@ func planDetailsFinalizeRepairError(chapter int, merged map[string]any, cause er
 		"saved_fields", strings.Join(sortedKeys(merged), ", "),
 		"cause", cause,
 	)
+	var grounding *planGroundingRejectionError
+	if errors.As(cause, &grounding) {
+		return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%w。已保存字段：%s。修复协议：这是已验证的裁决忠实性拒绝，不是缺项补齐。对同一事实矛盾，核对指出的字段及 causal_beats、render_capacity.scene_units 的关联表述，将所有受影响字段的最小修正一次提交；不要只改因果节拍却保留场景中的旧时序。保留无关字段，不新增事实或重写整份计划；角色选择与裁决不可改。修正完整后再 finalize=true: %w",
+			chapter, cause, strings.Join(sortedKeys(merged), ", "), errs.ErrToolPrecondition)
+	}
 	return fmt.Errorf("第 %d 章 plan_details finalize 未通过：%w。已保存字段：%s。修复协议：不要一次性重发所有字段，也不要立刻 finalize=true；下一轮只补 recommended_batches 中最靠前且未完成的一组，保留已保存字段，最后一组补完后再传 finalize=true。recommended_batches=%s: %w",
 		chapter,
 		cause,
@@ -1586,6 +1591,9 @@ func planDetailsGapSummary(s *store.Store, chapter int, partial, merged map[stri
 	}
 	plan, err := chapterPlanFromPartial(chapter, partial, merged)
 	if err == nil {
+		if planLongformOpeningMissing(s, plan) {
+			gaps = append(gaps, "missing or incomplete longform_opening")
+		}
 		protagonist := inferCommitProtagonist(s)
 		protagonistOnly := compactStrings([]string{protagonist})
 		if missing := missingInitialStateCoverage(protagonistOnly, plan.CausalSimulation.InitialState); len(missing) > 0 {
