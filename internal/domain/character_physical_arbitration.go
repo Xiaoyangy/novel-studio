@@ -261,6 +261,39 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 			perceptionErrors = append(perceptionErrors, err)
 		}
 	}
+	// Run only after the existing first access-gain rejection. Inspect the
+	// same independent transition for other resources, not knowledge or
+	// execution derived from an already invalid post-state.
+	accessGainFeedback := func() error {
+		var defects []error
+		count := 0
+		for _, agentID := range agentIDs {
+			oldHoldings := map[string]CharacterResourceHoldingV2{}
+			for _, holding := range before.Actors[actorIndex[agentID]].Resources {
+				oldHoldings[holding.ResourceID] = holding
+			}
+			holdings := append([]CharacterResourceHoldingV2(nil), resolved[agentID].PostState.Resources...)
+			sort.Slice(holdings, func(i, j int) bool { return holdings[i].ResourceID < holdings[j].ResourceID })
+			for _, holding := range holdings {
+				previous, existed := oldHoldings[holding.ResourceID]
+				if artifactTransition.creationGain(agentID, holding.ResourceID) || !resourceAccessGainV2(previous, existed, holding) || hasResourceDeliveryV2(receipt, holding.ResourceID, "", agentID, "", "", holding.Access) {
+					continue
+				}
+				count++
+				if len(defects) < 8 {
+					oldAccess := previous.Access
+					if !existed {
+						oldAccess = "absent"
+					}
+					defects = append(defects, fmt.Errorf("actor %s resource %s access gain lacks an actual delivery (access: %s -> %s)", agentID, holding.ResourceID, oldAccess, holding.Access))
+				}
+			}
+		}
+		if omitted := count - len(defects); omitted > 0 {
+			defects = append(defects, fmt.Errorf("%d additional resource access errors omitted", omitted))
+		}
+		return fmt.Errorf("%w\nResource access repair: shared -> exclusive is an access gain even for a previous holder. Without an actual authorized delivery, preserve the prior access; omit access from resource_updates (or omit an unchanged resource update). Ending another actor's access does not itself prove a delivery to this actor. Keep the original proposals and actual outcomes; do not invent a delivery or change character intent to satisfy validation", errors.Join(defects...))
+	}
 	for _, agentID := range agentIDs {
 		resolution := resolved[agentID]
 		old := before.Actors[actorIndex[agentID]]
@@ -275,8 +308,8 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 				continue
 			}
 			previous, existed := oldHoldings[holding.ResourceID]
-			if (holding.Access == "exclusive" || holding.Access == "shared") && (!existed || previous.Access == "none" || (previous.Access == "shared" && holding.Access == "exclusive")) && !hasResourceDeliveryV2(receipt, holding.ResourceID, "", agentID, "", "", holding.Access) {
-				return after, fmt.Errorf("actor %s resource %s access gain lacks an actual delivery", agentID, holding.ResourceID)
+			if resourceAccessGainV2(previous, existed, holding) && !hasResourceDeliveryV2(receipt, holding.ResourceID, "", agentID, "", "", holding.Access) {
+				return after, accessGainFeedback()
 			}
 			if (!existed || previous.Perception.Kind == "unaware") && holding.Perception.Kind != "unaware" && !hasResourceDeliveryV2(receipt, holding.ResourceID, "", agentID, "", "", "") {
 				return after, fmt.Errorf("actor %s learned a resource without actual discovery/delivery", agentID)
@@ -439,4 +472,8 @@ func physicalContainsAllRefsV2(refs, wanted []string) bool {
 }
 func physicalAmountsCloseV2(a, b float64) bool {
 	return !math.IsNaN(a) && !math.IsInf(a, 0) && math.Abs(a-b) <= 1e-9*math.Max(1, math.Max(math.Abs(a), math.Abs(b)))
+}
+
+func resourceAccessGainV2(previous CharacterResourceHoldingV2, existed bool, holding CharacterResourceHoldingV2) bool {
+	return (holding.Access == "exclusive" || holding.Access == "shared") && (!existed || previous.Access == "none" || (previous.Access == "shared" && holding.Access == "exclusive"))
 }
