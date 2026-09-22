@@ -386,7 +386,7 @@ func BuildCoordinatorWithOptions(
 		// An exact-target refresh is a mutation sidecar, not a general Architect
 		// session. Capability narrowing makes the prompt's one-read/one-save
 		// contract structural: no world tick, research, or craft mutation can run.
-		architectTools = []agentcore.Tool{tools.NewFoundationSourceContextTool(store, buildOpts.FoundationRefreshTarget), saveFoundation}
+		architectTools = []agentcore.Tool{foundationSourceContextForBuild(store, buildOpts), saveFoundation}
 	}
 	// 阶段拆分：推演（planner=writer）与正文渲染（drafter）各自独立上下文，
 	// 每阶段只拿本阶段所需上下文——planner 吃全量规划上下文产出完整计划落盘，
@@ -898,6 +898,11 @@ func BuildCoordinatorWithOptions(
 	}
 
 	return agent, askUser, restore, coordinatorEngine, applyThinking
+}
+
+func foundationSourceContextForBuild(st *store.Store, opts CoordinatorBuildOptions) *tools.FoundationSourceContextTool {
+	return tools.NewFoundationSourceContextTool(st, opts.FoundationRefreshTarget).
+		WithCompleteSource(opts.OneShotFoundationRefresh && opts.RecordFoundationRefreshEpoch)
 }
 
 func foundationRefreshCoordinatorGate(target string) agentcore.ToolGate {

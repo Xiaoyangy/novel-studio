@@ -1620,6 +1620,22 @@ func buildCodexPromptWithExactBudget(messages []agentcore.Message, tools []agent
 	if err != nil {
 		return "", err
 	}
+	// Only already validated novel_context tool results can carry this
+	// Host-granted capability. Ordinary source packets retain the legacy
+	// 90k-rune path; complete refreshes reuse the configured exact budget.
+	completeFoundationSource := false
+	for index := range sourceReplacements {
+		var packet struct {
+			CompleteSource bool `json:"complete_source"`
+		}
+		if err := json.Unmarshal([]byte(messages[index].TextContent()), &packet); err != nil {
+			return "", fmt.Errorf("complete foundation source capability: %w", err)
+		}
+		completeFoundationSource = completeFoundationSource || packet.CompleteSource
+	}
+	if completeFoundationSource && budget.contextWindow <= 0 {
+		return "", fmt.Errorf("complete foundation source requires a configured exact input budget; no source truncated or provider call")
+	}
 	exactPackets, err := codexExactAgentPackets(messages)
 	if err != nil {
 		return "", err
@@ -1633,7 +1649,7 @@ func buildCodexPromptWithExactBudget(messages []agentcore.Message, tools []agent
 		prefix.WriteString("## 可用工具\n")
 		for _, t := range tools {
 			params, marshalErr := json.Marshal(t.Parameters)
-			if marshalErr != nil && len(exactPackets) > 0 && budget.contextWindow != 0 {
+			if marshalErr != nil && (len(exactPackets) > 0 || completeFoundationSource) && budget.contextWindow != 0 {
 				return "", fmt.Errorf("exact agent packet tool schema is not serializable; no provider call: %w", marshalErr)
 			}
 			fmt.Fprintf(&prefix, "- %s：%s\n  参数 schema：%s\n", t.Name, t.Description, string(params))
@@ -1659,10 +1675,29 @@ func buildCodexPromptWithExactBudget(messages []agentcore.Message, tools []agent
 		"要给最终文本时 action=\"final\"、text 填内容、tool_name=null、arguments_json=null。\n" +
 		"特别地：调用 draft_chapter 写正文时，arguments_json 的 content 字段**只填一句占位符**（例如「[待渲染]」）即可，" +
 		"真正的整章正文会在随后单独以自由文本渲染——不要在这里把上千字正文塞进 JSON 字符串（会拖慢并损伤正文质量）。"
-	if len(exactPackets) > 0 {
+	if len(exactPackets) > 0 || completeFoundationSource {
 		budget.responseSchema, err = json.Marshal(buildResponseSchema(tools))
 		if err != nil {
 			return "", fmt.Errorf("exact agent packet output schema is not serializable: %w", err)
+		}
+		if completeFoundationSource {
+			// A narrow full-object repair depends on both its original task and
+			// earlier validator feedback. Preserve the whole conversation with
+			// its original role labels; only superseded source reads are folded.
+			// The existing exact assembler protects systems and applies the
+			// configured aggregate budget without a second history cutter.
+			var history strings.Builder
+			var systems []agentcore.Message
+			for index, message := range messages {
+				if message.Role == agentcore.RoleSystem {
+					systems = append(systems, message)
+				} else if replacement, ok := sourceReplacements[index]; ok {
+					fmt.Fprintf(&history, "[%s]\n%s\n\n", message.Role, replacement)
+				} else {
+					history.WriteString(codexExactHistoryMessage(message))
+				}
+			}
+			return assembleCodexExactAgentPrompt(prefix.String(), suffix, systems, nil, nil, exactSources+"## 完整受限修订对话\n"+history.String(), budget)
 		}
 		return assembleCodexExactAgentPrompt(prefix.String(), suffix, messages, exactPackets, sourceReplacements, exactSources, budget)
 	}

@@ -22,6 +22,7 @@ import (
 
 const FoundationSourceContextVersion = "foundation-source-context.v1"
 const foundationSourceMaxRunes = 45000
+const foundationCompleteSourceMaxBytes = 2 * 1024 * 1024
 
 var foundationSourcePaths = []string{
 	"characters.json", "world_codex.json", "world_rules.json", "book_world.json",
@@ -31,12 +32,22 @@ var foundationSourcePaths = []string{
 // FoundationSourceContextTool replaces only an exact-target Architect sidecar's
 // context capability. It never builds planning context, RAG or writing memory.
 type FoundationSourceContextTool struct {
-	store         *store.Store
-	defaultSource string
+	store          *store.Store
+	defaultSource  string
+	completeSource bool
 }
 
 func NewFoundationSourceContextTool(st *store.Store, target string) *FoundationSourceContextTool {
 	return &FoundationSourceContextTool{store: st, defaultSource: foundationSourcePath(target)}
+}
+
+// WithCompleteSource is a Host-only capability for a restricted foundation
+// refresh. The model cannot request it through tool arguments. It changes only
+// the source-file admission limit; exact transport and provider input budgets
+// still fail closed instead of truncating an oversized source.
+func (t *FoundationSourceContextTool) WithCompleteSource(allow bool) *FoundationSourceContextTool {
+	t.completeSource = allow
+	return t
 }
 
 func (*FoundationSourceContextTool) Name() string  { return "novel_context" }
@@ -119,11 +130,18 @@ func (t *FoundationSourceContextTool) Execute(ctx context.Context, args json.Raw
 	if err != nil {
 		return nil, err
 	}
-	raw, err := readFoundationSourceFile(root, source, foundationSourceMaxRunes*utf8.UTFMax)
+	limit := foundationSourceMaxRunes * utf8.UTFMax
+	if t.completeSource {
+		limit = foundationCompleteSourceMaxBytes
+	}
+	raw, err := readFoundationSourceFile(root, source, limit)
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) == 0 || !utf8.Valid(raw) || utf8.RuneCount(raw) > foundationSourceMaxRunes {
+	if len(raw) == 0 || !utf8.Valid(raw) {
+		return nil, fmt.Errorf("foundation source %s is empty or invalid UTF-8; no partial content returned: %w", source, errs.ErrToolPrecondition)
+	}
+	if !t.completeSource && utf8.RuneCount(raw) > foundationSourceMaxRunes {
 		return nil, fmt.Errorf("foundation source %s is invalid UTF-8 or exceeds %d-rune exact packet budget; no partial content returned: %w", source, foundationSourceMaxRunes, errs.ErrToolPrecondition)
 	}
 	if strings.HasSuffix(source, ".json") && !json.Valid(raw) {
@@ -142,12 +160,13 @@ func (t *FoundationSourceContextTool) Execute(ctx context.Context, args json.Raw
 	}
 	digest := sha256.Sum256(raw)
 	return json.Marshal(struct {
-		Version      string `json:"version"`
-		Source       string `json:"source"`
-		SourceSHA256 string `json:"source_sha256"`
-		Content      string `json:"content"`
-		Truncated    bool   `json:"truncated"`
-	}{FoundationSourceContextVersion, source, "sha256:" + hex.EncodeToString(digest[:]), string(raw), false})
+		Version        string `json:"version"`
+		Source         string `json:"source"`
+		SourceSHA256   string `json:"source_sha256"`
+		Content        string `json:"content"`
+		Truncated      bool   `json:"truncated"`
+		CompleteSource bool   `json:"complete_source,omitempty"`
+	}{FoundationSourceContextVersion, source, "sha256:" + hex.EncodeToString(digest[:]), string(raw), false, t.completeSource})
 }
 
 func foundationSourceLease(root *os.Root) ([]byte, error) {
