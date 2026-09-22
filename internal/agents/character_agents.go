@@ -1637,6 +1637,13 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		if domain.HasCharacterWorkArtifactPolicyV1(observation.Sources) {
 			makeCodec = modelinput.NewScopedArtifactReferenceCodecV1
 		}
+		if observation.HostLocationMetadataPolicy == domain.CharacterHostLocationMetadataPolicyV1 {
+			if !domain.HasCharacterHostLocationMetadataPolicyV1(observation.Sources) {
+				return fmt.Errorf("source-selected location privacy requires its frozen producer")
+			}
+			makeCodec = modelinput.NewScopedLocationMetadataCodecV1
+			characterPrompt += characterHostLocationMetadataPromptV1
+		}
 		codec, err := makeCodec(modelinput.KindCharacterObservation, observation)
 		if err != nil {
 			return err

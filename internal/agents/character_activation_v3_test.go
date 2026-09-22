@@ -113,7 +113,11 @@ func (m *activationV3RuntimeModel) Generate(ctx context.Context, messages []agen
 			return nil, fmt.Errorf("actor lacks explicit v3/actual facts")
 		}
 		m.actorCalls++
-		if view.Binding.Policy != modelinput.ScopedArtifactReferenceViewPolicyV1 {
+		wantReferencePolicy := modelinput.ScopedArtifactReferenceViewPolicyV1
+		if o.HostLocationMetadataPolicy == domain.CharacterHostLocationMetadataPolicyV1 {
+			wantReferencePolicy = modelinput.ScopedLocationMetadataViewPolicyV1
+		}
+		if view.Binding.Policy != wantReferencePolicy {
 			return nil, fmt.Errorf("v3 artifact view did not select explicit reference codec")
 		}
 		m.seenActors = append(m.seenActors, o)

@@ -58,7 +58,7 @@ func testContinuationProducerRuntimeRecovery(t *testing.T, name, producer string
 		if domain.HasCharacterSelfCompletionViewPolicyV1(view.Input().Stimulus.Sources) != completions {
 			t.Fatal("initial source changed its frozen completion strategy")
 		}
-		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest()
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
 		if domain.HasCharacterSurfaceInspectionPolicyV1(view.Input().Stimulus.Sources) != wantSurface {
 			t.Fatal("initial source changed its frozen surface strategy")
 		}
@@ -136,7 +136,7 @@ func continuationProducerNextChapterInput(t *testing.T, st *store.Store, boundar
 			}
 		}
 		want := 0
-		if producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() {
+		if producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest() {
 			want = 1
 		}
 		if count != want {

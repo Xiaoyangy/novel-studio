@@ -204,7 +204,7 @@ func TestMemoryTextTransportActualDispatchKeepsOriginalToolAuthorityAndOldRecove
 				original[record.AgentID] = *saved
 			}
 			const generation = "pg2_memory_transport_probe"
-			encoded := producer == characterActivationProtocolV3MemoryTextDigest()
+			encoded := producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
 			model := &memoryTransportProbeModel{st: st, generation: generation, ownerID: owner.AgentID, wantEncoded: encoded, tamper: encoded, wires: map[string][]byte{}, views: map[string]modelinput.ScopedReferenceModelView{}}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("fixture", "memory-transport", model)}
 			_, err = runCharacterActivationChapter(t.Context(), cfg, st, models, generation, 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
@@ -294,12 +294,16 @@ func TestMemoryTextTransportProducerPreservesBDD8AndSchema(t *testing.T) {
 		t.Fatal("BDD8 producer changed", got)
 	}
 	current := characterActivationProtocolV3MemoryTextDigest()
-	if current == "" || current == characterActivationProtocolV3InitialSelfIntentDigest() || characterActivationProtocolForPolicy(domain.CharacterActivationCyclePolicyV3) != current {
-		t.Fatal("transport lacks a distinct fresh producer")
+	if current == "" || current == characterActivationProtocolV3InitialSelfIntentDigest() || CharacterActivationProtocolWithProducer(domain.CharacterActivationCyclePolicyV3, current) != current {
+		t.Fatal("historical transport producer is no longer recoverable")
+	}
+	fresh := characterActivationProtocolForPolicy(domain.CharacterActivationCyclePolicyV3)
+	if fresh != characterActivationProtocolV3HostLocationDigest() || fresh == current {
+		t.Fatal("fresh producer did not advance while preserving transport history")
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		if domain.HasCharacterMemoryTextTransportPolicyV1(policies) != (producer == current) || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
+		if domain.HasCharacterMemoryTextTransportPolicyV1(policies) != (producer == current || producer == fresh) || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("transport crossed frozen inventory")
 		}
 	}

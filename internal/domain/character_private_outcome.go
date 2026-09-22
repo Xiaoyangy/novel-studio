@@ -20,21 +20,31 @@ func CharacterPrivateOutcomeV2(proposal CharacterDecisionProposal, resolution Ch
 		return "", err
 	}
 	var currentExperiences map[string]bool
+	hideLocationMetadata := false
 	for _, actor := range state.Actors {
 		if actor.AgentID != proposal.AgentID {
 			continue
+		}
+		hideLocationMetadata = actor.HostLocationMetadataPolicy == CharacterHostLocationMetadataPolicyV1
+		if actor.HostLocationMetadataPolicy != resolution.PostState.HostLocationMetadataPolicy {
+			return "", fmt.Errorf("private outcome location policy differs from owner post-state")
 		}
 		currentExperiences, err = privateOutcomeChronologyScopeV1(proposal, resolution, actor, receipts)
 		if err != nil {
 			return "", err
 		}
 	}
-	parts := []string{"决定：" + proposal.Decision, "行动：" + proposal.IntendedAction, "完成度：" + resolution.CompletionState, "位置：" + resolution.PostState.Location}
+	location := resolution.PostState.Location
+	if hideLocationMetadata {
+		location = "本轮实际所在处（Host定位元数据不授予地点名称知识）"
+		views = privateLocationResourceViewsV1(views)
+	}
+	parts := []string{"决定：" + proposal.Decision, "行动：" + proposal.IntendedAction, "完成度：" + resolution.CompletionState, "位置：" + location}
 	if len(resolution.SelfExecutions) > 0 {
 		// Keep the old formatter byte-identical for already sealed receipts.
 		// New policy explicitly separates the proposed whole action from the
 		// owner-visible segments that actually happened in this chapter.
-		parts = []string{"本轮决定：" + proposal.Decision, "本轮意图（不代表全部完成）：" + proposal.IntendedAction, "完成度：" + resolution.CompletionState, "位置：" + resolution.PostState.Location}
+		parts = []string{"本轮决定：" + proposal.Decision, "本轮意图（不代表全部完成）：" + proposal.IntendedAction, "完成度：" + resolution.CompletionState, "位置：" + location}
 		for _, actor := range state.Actors {
 			if actor.AgentID != proposal.AgentID {
 				continue
@@ -43,6 +53,9 @@ func CharacterPrivateOutcomeV2(proposal CharacterDecisionProposal, resolution Ch
 			taskIDs := map[string]bool{}
 			for _, experience := range actor.SelfExperiences {
 				if experience.Chapter == proposal.Chapter && experience.SourceProposalDigest == proposal.Digest && (currentExperiences == nil || currentExperiences[experience.ID]) {
+					if hideLocationMetadata && experience.Location != "" {
+						experience.Location = fmt.Sprintf("第%d章本人任务%s的该次实际执行地点", experience.Chapter, experience.TaskID)
+					}
 					experiences = append(experiences, experience)
 					taskIDs[experience.TaskID] = true
 				}
@@ -76,6 +89,9 @@ func CharacterPrivateOutcomeV2(proposal CharacterDecisionProposal, resolution Ch
 			}
 			if len(receipts) != 1 || knowledge.GenerationID != receipts[0].GenerationID || !artifactReceiptTimeV1(receipts[0], knowledge.AtDay) || knowledge.AtDay <= receipts[0].StoryTime.StartDay {
 				continue
+			}
+			if hideLocationMetadata {
+				knowledge.Placement.Location = "该次产物操作发生处（Host定位名不作为本人知识）"
 			}
 			parts = append(parts, FormatCharacterArtifactKnowledgeV1(knowledge)...)
 		}

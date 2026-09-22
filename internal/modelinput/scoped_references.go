@@ -30,13 +30,14 @@ type ScopedReferenceModelView struct {
 // filter or an authorization source: callers must first validate/project the
 // actual character/arbiter input, and validate expanded tool args normally.
 type ScopedReferenceCodec struct {
-	binding        ScopedReferenceBinding
-	body           json.RawMessage
-	forward        map[string]string
-	reverse        map[string]string
-	literals       map[string]bool
-	literalHandles map[string]bool
-	artifacts      bool
+	binding          ScopedReferenceBinding
+	body             json.RawMessage
+	forward          map[string]string
+	reverse          map[string]string
+	literals         map[string]bool
+	literalHandles   map[string]bool
+	artifacts        bool
+	locationMetadata *scopedLocationMetadataV1
 }
 
 var opaqueModelReference = regexp.MustCompile(`^(sha256:[a-f0-9]{64}|(?:src_|self_|oper_|recv_)[a-f0-9]{64}|(?:res_|ca_|fact_|mem_|received_)[a-f0-9]{16,64})$`)
@@ -249,6 +250,17 @@ func (c *ScopedReferenceCodec) ExpandArguments(raw json.RawMessage, binding Scop
 	if err != nil {
 		return nil, err
 	}
+	if c.locationMetadata != nil {
+		if err := c.validateLocationMetadataArgumentsV1(value); err != nil {
+			return nil, err
+		}
+		object := value.(map[string]any)
+		if location, ok := object["location"].(string); ok {
+			if canonical, exists := c.locationMetadata.reverse[location]; exists {
+				object["location"] = canonical
+			}
+		}
+	}
 	visitReferences := visitTypedReferences
 	if c.artifacts {
 		visitReferences = visitArtifactTypedReferences
@@ -271,6 +283,11 @@ func (c *ScopedReferenceCodec) ValidateModelArguments(raw json.RawMessage, bindi
 	value, err := referenceJSON(raw)
 	if err != nil {
 		return err
+	}
+	if c.locationMetadata != nil {
+		if err := c.validateLocationMetadataArgumentsV1(value); err != nil {
+			return err
+		}
 	}
 	if c.artifacts {
 		return c.validateArtifactModelArguments(value)

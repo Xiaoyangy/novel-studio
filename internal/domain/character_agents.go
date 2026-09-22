@@ -448,6 +448,9 @@ func ComputeWorldStimulusPacketDigest(p WorldStimulusPacket) (string, error) {
 }
 
 func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, error) {
+	if err := validateHostLocationMetadataStimulusV1(p); err != nil {
+		return p, err
+	}
 	if err := validateSurfaceInspectionStimulusV1(p); err != nil {
 		return p, err
 	}
@@ -512,37 +515,38 @@ func FinalizeWorldStimulusPacket(p WorldStimulusPacket) (WorldStimulusPacket, er
 }
 
 type CharacterObservationPacket struct {
-	ArtifactViews           []CharacterArtifactViewV1           `json:"artifact_views,omitempty"`
-	OperationalObservations []CharacterOperationalObservationV1 `json:"operational_observations,omitempty"`
-	CycleContext            *CharacterObservationCycleContext   `json:"cycle_context,omitempty"`
-	Version                 string                              `json:"version"`
-	GenerationID            string                              `json:"generation_id"`
-	Chapter                 int                                 `json:"chapter"`
-	Round                   int                                 `json:"round"`
-	AgentID                 string                              `json:"agent_id"`
-	Character               string                              `json:"character"`
-	Tier                    string                              `json:"tier"`
-	TimeWindow              string                              `json:"time_window"`
-	Location                string                              `json:"location,omitempty"`
-	CurrentGoal             string                              `json:"current_goal"`
-	Pressure                string                              `json:"pressure"`
-	Resources               []string                            `json:"resources,omitempty"`
-	ResourceViews           []CharacterResourceViewV2           `json:"resource_views,omitempty"`
-	SelfExperiences         []CharacterSelfExperienceV2         `json:"self_experiences,omitempty"`
-	TaskProgress            []CharacterTaskProgressV2           `json:"task_progress,omitempty"`
-	Relationships           []string                            `json:"relationships,omitempty"`
-	Commitments             []string                            `json:"commitments,omitempty"`
-	KnownFacts              []CharacterAgentFact                `json:"known_facts,omitempty"`
-	PerceivedEvents         []CharacterAgentFact                `json:"perceived_events,omitempty"`
-	PublicRules             []CharacterAgentFact                `json:"public_rules,omitempty"`
-	PublicMechanisms        []CodexMechanism                    `json:"public_mechanisms,omitempty"`
-	Memory                  []CharacterAgentMemoryFact          `json:"memory,omitempty"`
-	ConflictFeedback        []string                            `json:"conflict_feedback,omitempty"`
-	StimulusDigest          string                              `json:"stimulus_digest"`
-	MemoryRoot              string                              `json:"memory_root,omitempty"`
-	Sources                 []string                            `json:"sources,omitempty"`
-	GeneratedAt             string                              `json:"generated_at,omitempty"`
-	Digest                  string                              `json:"digest"`
+	HostLocationMetadataPolicy string                              `json:"host_location_metadata_policy,omitempty"`
+	ArtifactViews              []CharacterArtifactViewV1           `json:"artifact_views,omitempty"`
+	OperationalObservations    []CharacterOperationalObservationV1 `json:"operational_observations,omitempty"`
+	CycleContext               *CharacterObservationCycleContext   `json:"cycle_context,omitempty"`
+	Version                    string                              `json:"version"`
+	GenerationID               string                              `json:"generation_id"`
+	Chapter                    int                                 `json:"chapter"`
+	Round                      int                                 `json:"round"`
+	AgentID                    string                              `json:"agent_id"`
+	Character                  string                              `json:"character"`
+	Tier                       string                              `json:"tier"`
+	TimeWindow                 string                              `json:"time_window"`
+	Location                   string                              `json:"location,omitempty"`
+	CurrentGoal                string                              `json:"current_goal"`
+	Pressure                   string                              `json:"pressure"`
+	Resources                  []string                            `json:"resources,omitempty"`
+	ResourceViews              []CharacterResourceViewV2           `json:"resource_views,omitempty"`
+	SelfExperiences            []CharacterSelfExperienceV2         `json:"self_experiences,omitempty"`
+	TaskProgress               []CharacterTaskProgressV2           `json:"task_progress,omitempty"`
+	Relationships              []string                            `json:"relationships,omitempty"`
+	Commitments                []string                            `json:"commitments,omitempty"`
+	KnownFacts                 []CharacterAgentFact                `json:"known_facts,omitempty"`
+	PerceivedEvents            []CharacterAgentFact                `json:"perceived_events,omitempty"`
+	PublicRules                []CharacterAgentFact                `json:"public_rules,omitempty"`
+	PublicMechanisms           []CodexMechanism                    `json:"public_mechanisms,omitempty"`
+	Memory                     []CharacterAgentMemoryFact          `json:"memory,omitempty"`
+	ConflictFeedback           []string                            `json:"conflict_feedback,omitempty"`
+	StimulusDigest             string                              `json:"stimulus_digest"`
+	MemoryRoot                 string                              `json:"memory_root,omitempty"`
+	Sources                    []string                            `json:"sources,omitempty"`
+	GeneratedAt                string                              `json:"generated_at,omitempty"`
+	Digest                     string                              `json:"digest"`
 }
 
 func (p CharacterObservationPacket) AllowedFactIDs() map[string]struct{} {
@@ -615,6 +619,9 @@ func ComputeCharacterObservationDigest(p CharacterObservationPacket) (string, er
 }
 
 func FinalizeCharacterObservationPacket(p CharacterObservationPacket) (CharacterObservationPacket, error) {
+	if p.HostLocationMetadataPolicy != "" && (p.HostLocationMetadataPolicy != CharacterHostLocationMetadataPolicyV1 || !HasCharacterHostLocationMetadataPolicyV1(p.Sources)) {
+		return p, fmt.Errorf("character location metadata view lacks its explicit new producer policy")
+	}
 	if err := validateWorkArtifactObservationV1(p); err != nil {
 		return p, err
 	}

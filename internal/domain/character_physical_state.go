@@ -51,16 +51,17 @@ type CharacterResourceHoldingV2 struct {
 }
 
 type CharacterPhysicalStateV2 struct {
-	ArtifactKnowledge       []CharacterArtifactKnowledgeV1      `json:"artifact_knowledge,omitempty"`
-	SelfChronologyBaseline  *CharacterSelfChronologyBaselineV1  `json:"self_chronology_baseline,omitempty"`
-	OperationalObservations []CharacterOperationalObservationV1 `json:"operational_observations,omitempty"`
-	AgentID                 string                              `json:"agent_id"`
-	Character               string                              `json:"character"`
-	Location                string                              `json:"location"`
-	Resources               []CharacterResourceHoldingV2        `json:"resources"`
-	ReceivedFacts           []CharacterReceivedFactV2           `json:"received_facts,omitempty"`
-	SelfExperiences         []CharacterSelfExperienceV2         `json:"self_experiences,omitempty"`
-	TaskProgress            []CharacterTaskProgressV2           `json:"task_progress,omitempty"`
+	HostLocationMetadataPolicy string                              `json:"host_location_metadata_policy,omitempty"`
+	ArtifactKnowledge          []CharacterArtifactKnowledgeV1      `json:"artifact_knowledge,omitempty"`
+	SelfChronologyBaseline     *CharacterSelfChronologyBaselineV1  `json:"self_chronology_baseline,omitempty"`
+	OperationalObservations    []CharacterOperationalObservationV1 `json:"operational_observations,omitempty"`
+	AgentID                    string                              `json:"agent_id"`
+	Character                  string                              `json:"character"`
+	Location                   string                              `json:"location"`
+	Resources                  []CharacterResourceHoldingV2        `json:"resources"`
+	ReceivedFacts              []CharacterReceivedFactV2           `json:"received_facts,omitempty"`
+	SelfExperiences            []CharacterSelfExperienceV2         `json:"self_experiences,omitempty"`
+	TaskProgress               []CharacterTaskProgressV2           `json:"task_progress,omitempty"`
 }
 
 type WorldPhysicalStateV2 struct {
@@ -225,6 +226,9 @@ func validateWorldResourceBalanceV2(balance WorldResourceBalanceV2) error {
 }
 
 func validateCharacterPhysicalStateV2(actor CharacterPhysicalStateV2, catalog map[string]WorldResourceBalanceV2) error {
+	if actor.HostLocationMetadataPolicy != "" && actor.HostLocationMetadataPolicy != CharacterHostLocationMetadataPolicyV1 {
+		return fmt.Errorf("physical actor has an unsupported host location metadata policy")
+	}
 	if !physicalIdentityV2(actor.AgentID) || strings.TrimSpace(actor.Character) == "" || strings.TrimSpace(actor.Location) == "" {
 		return fmt.Errorf("physical state v2: actor id, character and actual location are required")
 	}
@@ -388,6 +392,9 @@ func BuildWorldPhysicalStateFromInitialV2(characters []Character, registry Chara
 			return state, fmt.Errorf("physical initial state has no registered actor %q", character.Name)
 		}
 		actor := CharacterPhysicalStateV2{AgentID: record.AgentID, Character: record.Character, Location: character.InitialState.Location, Resources: []CharacterResourceHoldingV2{}}
+		if known := character.InitialState.LocationNameKnown; known != nil && !*known {
+			actor.HostLocationMetadataPolicy = CharacterHostLocationMetadataPolicyV1
+		}
 		for _, initial := range character.InitialState.ResourceBalances {
 			balance := WorldResourceBalanceV2{ResourceID: initial.ResourceID, Name: initial.Name, Unit: initial.Unit, ActualAmount: initial.ActualAmount, ReadableFacts: initial.ReadableFacts, AccessRequiresAny: initial.AccessRequiresAny, InspectableSurfaces: initial.InspectableSurfaces}
 			if previous, ok := catalog[balance.ResourceID]; ok {

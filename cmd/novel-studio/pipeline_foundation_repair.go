@@ -21,6 +21,7 @@ const pipelineFoundationRepairVersion = "chapter-zero-foundation-repair.v1"
 // It deliberately names exact leaves instead of accepting a general JSON patch.
 type pipelineFoundationRepairManifest struct {
 	Version              string                              `json:"version"`
+	Mode                 string                              `json:"mode,omitempty"`
 	Target               string                              `json:"target"`
 	Instruction          string                              `json:"instruction"`
 	ReportDigest         string                              `json:"report_digest"`
@@ -29,6 +30,8 @@ type pipelineFoundationRepairManifest struct {
 	AllowedJSONPointers  []string                            `json:"allowed_json_pointers"`
 	NewResources         []pipelineFoundationRepairResource  `json:"new_resources,omitempty"`
 	RequiredAuthorRefs   []domain.AuthorSourceParagraphRefV1 `json:"required_author_refs,omitempty"`
+	LeafChanges          []pipelineFoundationLeafChange      `json:"leaf_changes,omitempty"`
+	LocationNameUnknown  *pipelineFoundationLocationNameCAS  `json:"location_name_unknown,omitempty"`
 }
 
 type pipelineFoundationRepairResource struct {
@@ -73,6 +76,12 @@ func loadPipelineFoundationRepairManifest(path string) (pipelineFoundationRepair
 func validatePipelineFoundationRepairManifest(m pipelineFoundationRepairManifest) error {
 	if m.Version != pipelineFoundationRepairVersion || strings.TrimSpace(m.Instruction) == "" || len(m.Instruction) > 32768 {
 		return fmt.Errorf("Architect repair requires its explicit version and a bounded instruction")
+	}
+	if m.Mode != "" {
+		return validatePipelineFoundationLeafManifest(m)
+	}
+	if len(m.LeafChanges) != 0 || m.LocationNameUnknown != nil {
+		return fmt.Errorf("leaf_changes requires its explicit host CAS mode")
 	}
 	for name, digest := range map[string]string{"report_digest": m.ReportDigest, "expected_source_digest": m.ExpectedSourceDigest} {
 		if err := validatePipelineOutlineRepairDigest(name, digest); err != nil {
@@ -129,6 +138,9 @@ func validatePipelineFoundationRepairManifest(m pipelineFoundationRepairManifest
 func validatePipelineFoundationRepairChange(m pipelineFoundationRepairManifest, before, after []byte) error {
 	if err := validatePipelineFoundationRepairManifest(m); err != nil {
 		return err
+	}
+	if m.Mode == pipelineFoundationLeafCASMode {
+		return validatePipelineFoundationLeafChange(m, before, after)
 	}
 	decode := func(raw []byte) (any, error) {
 		d := json.NewDecoder(bytes.NewReader(raw))

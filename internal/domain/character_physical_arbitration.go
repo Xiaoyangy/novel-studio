@@ -177,6 +177,10 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 			return after, fmt.Errorf("v2 arbitration requires exactly one explicit post_state per resolved host actor")
 		}
 		post := *resolution.PostState
+		if post.HostLocationMetadataPolicy != "" && post.HostLocationMetadataPolicy != before.Actors[index].HostLocationMetadataPolicy {
+			return after, fmt.Errorf("arbiter cannot change the source-selected host location metadata policy")
+		}
+		post.HostLocationMetadataPolicy = before.Actors[index].HostLocationMetadataPolicy
 		if post.SelfChronologyBaseline != nil && !samePhysicalValueV2(post.SelfChronologyBaseline, before.Actors[index].SelfChronologyBaseline) {
 			return after, fmt.Errorf("arbiter cannot change the host self chronology baseline")
 		}

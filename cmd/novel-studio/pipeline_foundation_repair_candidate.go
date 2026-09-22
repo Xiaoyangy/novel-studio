@@ -49,6 +49,9 @@ func runPipelineFoundationRepair(opts cliOptions, flags pipelineFlags, prompt st
 	if m.Target != flags.ArchitectTarget {
 		return fmt.Errorf("Architect repair manifest target differs from --architect-target")
 	}
+	if m.Mode == pipelineFoundationLeafCASMode && flags.RebaseAllChapters {
+		return fmt.Errorf("host leaf CAS requires an already verified chapter-zero rebase; it cannot perform rebase")
+	}
 	plan := &pipelineFoundationRepairPlan{Manifest: m, Digest: digest, ExplicitPrompt: prompt}
 	if flags.RebaseAllChapters {
 		return pipelineRebaseAllChaptersWithFoundationRepair(opts, plan)
@@ -161,6 +164,9 @@ func pipelineFoundationRepairSHA(raw []byte) string {
 }
 
 func (p *pipelineFoundationRepairPlan) preflight(live string) error {
+	if p.Manifest.Mode == pipelineFoundationLeafCASMode {
+		return p.preflightHostLeafCAS(live)
+	}
 	st := store.NewStore(live)
 	if lock, err := st.Runtime.InspectPipelineExecution(); err != nil {
 		return err
@@ -336,8 +342,14 @@ func (p *pipelineFoundationRepairPlan) prepare(cfg bootstrap.Config, live, candi
 			if err := pipelineWatchdogProgress(pipelineWatchdogEventStageDispatched); err != nil {
 				return err
 			}
-			if err := pipelineFoundationRepairHost(cfg, bundle, opts); err != nil {
-				return err
+			var saveErr error
+			if p.Manifest.Mode == pipelineFoundationLeafCASMode {
+				saveErr = p.saveHostLeafCAS(candidate)
+			} else {
+				saveErr = pipelineFoundationRepairHost(cfg, bundle, opts)
+			}
+			if saveErr != nil {
+				return saveErr
 			}
 			return pipelineWatchdogProgress(pipelineWatchdogEventStageExecutionCompleted)
 		})
@@ -377,6 +389,9 @@ func (p *pipelineFoundationRepairPlan) prepare(cfg bootstrap.Config, live, candi
 	}
 	if !bytes.HasPrefix(journal, oldJournal) {
 		return fmt.Errorf("Architect repair lost existing usage audit history")
+	}
+	if p.Manifest.Mode == pipelineFoundationLeafCASMode && !bytes.Equal(journal, oldJournal) {
+		return fmt.Errorf("host leaf CAS must not create or alter model usage records")
 	}
 	// Validate complete typed source and resulting source-bound compass before
 	// publishing; a valid field mask alone does not prove a valid foundation.
@@ -430,6 +445,13 @@ func (p *pipelineFoundationRepairPlan) prepare(cfg bootstrap.Config, live, candi
 	if err := savePipelineState(filepath.Join(candidate, "meta/pipeline.json"), &state); err != nil {
 		return err
 	}
+	executionMode := ""
+	var modelCalls *int
+	if p.Manifest.Mode == pipelineFoundationLeafCASMode {
+		executionMode = "host_leaf_cas"
+		zero := 0
+		modelCalls = &zero
+	}
 	record := struct {
 		Version            string                           `json:"version"`
 		Manifest           pipelineFoundationRepairManifest `json:"manifest"`
@@ -437,7 +459,9 @@ func (p *pipelineFoundationRepairPlan) prepare(cfg bootstrap.Config, live, candi
 		SourceBefore       string                           `json:"source_before"`
 		SourceAfter        string                           `json:"source_after"`
 		AuthorPromptDigest string                           `json:"author_prompt_digest"`
-	}{pipelineFoundationRepairVersion, p.Manifest, p.Digest, p.Manifest.ExpectedSourceDigest, pipelineFoundationRepairSHA(after), pipelineFoundationRepairSHA([]byte(p.State.Prompt))}
+		ExecutionMode      string                           `json:"execution_mode,omitempty"`
+		ModelCalls         *int                             `json:"model_calls,omitempty"`
+	}{pipelineFoundationRepairVersion, p.Manifest, p.Digest, p.Manifest.ExpectedSourceDigest, pipelineFoundationRepairSHA(after), pipelineFoundationRepairSHA([]byte(p.State.Prompt)), executionMode, modelCalls}
 	_, err = writePipelinePlanningJSON(filepath.Join(candidate, "meta/foundation_repairs", strings.TrimPrefix(p.Digest, "sha256:")+".json"), record)
 	return err
 }

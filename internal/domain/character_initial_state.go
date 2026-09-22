@@ -9,16 +9,19 @@ import (
 // Unknown optional values stay empty; callers must not fill them from a future
 // chapter's core_event, another character's secrets, or the author's Arc.
 type CharacterInitialState struct {
-	Time             string                       `json:"time,omitempty"`
-	Location         string                       `json:"location"`
-	CurrentGoal      string                       `json:"current_goal"`
-	CurrentAction    string                       `json:"current_action,omitempty"`
-	Pressure         string                       `json:"pressure"`
-	KnownFacts       []string                     `json:"known_facts"`
-	Resources        []string                     `json:"resources"`
-	ResourceBalances []InitialCharacterResourceV2 `json:"resource_balances,omitempty"`
-	Relationships    []string                     `json:"relationships"`
-	Commitments      []string                     `json:"commitments"`
+	Time     string `json:"time,omitempty"`
+	Location string `json:"location"`
+	// Only explicit false opts into opaque Host location metadata. It does not
+	// prevent learning a place name through actual received facts later.
+	LocationNameKnown *bool                        `json:"location_name_known,omitempty"`
+	CurrentGoal       string                       `json:"current_goal"`
+	CurrentAction     string                       `json:"current_action,omitempty"`
+	Pressure          string                       `json:"pressure"`
+	KnownFacts        []string                     `json:"known_facts"`
+	Resources         []string                     `json:"resources"`
+	ResourceBalances  []InitialCharacterResourceV2 `json:"resource_balances,omitempty"`
+	Relationships     []string                     `json:"relationships"`
+	Commitments       []string                     `json:"commitments"`
 }
 
 // ValidateCharacterInitialState validates an explicitly supplied baseline,

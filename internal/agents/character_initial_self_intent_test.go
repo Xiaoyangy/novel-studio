@@ -20,7 +20,7 @@ func TestInitialSelfIntentProducerPreservesHistoricalSchemaAndInventories(t *tes
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		want := producer == current || producer == characterActivationProtocolV3MemoryTextDigest()
+		want := producer == current || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
 		if domain.HasCharacterInitialSelfIntentPolicyV1(policies) != want || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("initial intention crossed its executable source inventory")
 		}

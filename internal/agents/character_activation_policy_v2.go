@@ -33,7 +33,7 @@ func characterActivationPolicyForStimulus(stimulus domain.WorldStimulusPacket) s
 
 func characterActivationProtocolForPolicy(policy string) string {
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return characterActivationProtocolV3MemoryTextDigest()
+		return characterActivationProtocolV3HostLocationDigest()
 	}
 	if policy == domain.CharacterActivationCyclePolicy {
 		return characterActivationProtocolDigest()
