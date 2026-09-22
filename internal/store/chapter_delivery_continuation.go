@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -55,7 +56,7 @@ func (s *Store) authorizeChapterDeliveryOverrun(generation domain.PlanningGenera
 	}
 	// Reject missing/corrupt/unarmed ledgers before creating any transaction
 	// guards. The authoritative read is repeated under both locks below.
-	ledger, err := s.readChapterDeliveryLedger()
+	ledger, err := s.readChapterDeliveryAuthorizationPreflight()
 	if err != nil {
 		return err
 	}
@@ -117,6 +118,45 @@ func (s *Store) authorizeChapterDeliveryOverrun(generation domain.PlanningGenera
 			return s.writeChapterDeliveryLedger(ledger)
 		})
 	})
+}
+
+// The runtime ledger is replaced atomically, not immutable. Its strict
+// path/inode reader must share the existing writer's flock so a concurrent
+// rename cannot unlink the inode being authenticated. This preflight never
+// creates directories or guards: malformed/unarmed requests remain read-only.
+// Release this lock before entering the process -> runtime -> delivery order.
+func (s *Store) readChapterDeliveryAuthorizationPreflight() (*chapterDeliveryLedgerV1, error) {
+	path, before, err := validateArcCycleSealedEvidenceFilesystemPath(s.dir, filepath.Join(chapterDeliveryRoot, ".write.lock"))
+	if err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	opened, err := lock.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateArcCycleSealedEvidenceFileInfo(opened); err != nil {
+		return nil, err
+	}
+	if !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("chapter delivery preflight lock changed before open")
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_, current, err := validateArcCycleSealedEvidenceFilesystemPath(s.dir, filepath.Join(chapterDeliveryRoot, ".write.lock"))
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(opened, current) {
+		return nil, fmt.Errorf("chapter delivery preflight lock changed while acquiring")
+	}
+	return s.readChapterDeliveryLedger()
 }
 
 func (s *Store) validateChapterDeliveryAuthorizationLease(generation domain.PlanningGenerationV2, now time.Time, owners []string) error {
