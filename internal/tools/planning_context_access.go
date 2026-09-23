@@ -82,6 +82,15 @@ func (t *ContextTool) finalizeContextWithAccessReceipt(
 		}
 	}
 	raw, err := finalizeContextResult(result, chapter, profile)
+	if err != nil && errors.Is(err, errs.ErrToolPrecondition) && strings.HasPrefix(err.Error(), `novel_context profile="planning" 的关键上下文无法安全收敛：`) {
+		compacted, compactErr := t.compactRejectedPlanningProjection(result, chapter, profile)
+		if compactErr != nil {
+			return nil, compactErr
+		}
+		if compacted {
+			raw, err = finalizeContextResult(result, chapter, profile)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
