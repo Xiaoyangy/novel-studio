@@ -8,6 +8,8 @@ import (
 type CharacterCommunicationV2 struct {
 	ID                     string   `json:"id"`
 	ToCharacter            string   `json:"to_character"`
+	RecipientHint          string   `json:"recipient_hint,omitempty"`
+	ReplyToReceivedFactID  string   `json:"reply_to_received_fact_id,omitempty"`
 	Kind                   string   `json:"kind"`
 	Text                   string   `json:"text"`
 	KnowledgeRefs          []string `json:"knowledge_refs"`
@@ -104,8 +106,11 @@ func ValidateCharacterKnowledgeIntentV2(proposal CharacterDecisionProposal, obse
 	allowed := observation.AllowedFactIDs()
 	seen := map[string]bool{}
 	for _, communication := range proposal.Communications {
-		if !physicalIdentityV2(communication.ID) || seen[communication.ID] || strings.TrimSpace(communication.ToCharacter) == "" || strings.TrimSpace(communication.Text) == "" || !communicationKindV2(communication.Kind) || len(communication.KnowledgeRefs) == 0 {
+		if !physicalIdentityV2(communication.ID) || seen[communication.ID] || strings.TrimSpace(communication.Text) == "" || !communicationKindV2(communication.Kind) || len(communication.KnowledgeRefs) == 0 {
 			return fmt.Errorf("invalid or duplicate communication intent")
+		}
+		if err := validateCharacterCommunicationAddressV1(communication, observation); err != nil {
+			return err
 		}
 		seen[communication.ID] = true
 		for _, ref := range communication.KnowledgeRefs {
@@ -114,7 +119,20 @@ func ValidateCharacterKnowledgeIntentV2(proposal CharacterDecisionProposal, obse
 			}
 		}
 		if communication.Kind == "conditional_response" {
-			if communication.ConditionFromCharacter == "" || !communicationKindV2(communication.ConditionKind) || communication.ConditionKind == "conditional_response" {
+			if communication.RecipientHint != "" || communication.ReplyToReceivedFactID != "" {
+				if communication.ReplyToReceivedFactID == "" || communication.ConditionFromCharacter != "" || !communicationKindV2(communication.ConditionKind) || communication.ConditionKind == "conditional_response" {
+					return fmt.Errorf("non-named conditional response requires its exact already-received reply fact, not a canonical-name or future-event condition")
+				}
+				matched := false
+				for _, fact := range observation.KnownFacts {
+					if fact.ID == communication.ReplyToReceivedFactID && fact.Kind == "received_"+communication.ConditionKind {
+						matched = true
+					}
+				}
+				if !matched {
+					return fmt.Errorf("conditional reply kind differs from its received fact")
+				}
+			} else if communication.ConditionFromCharacter == "" || !communicationKindV2(communication.ConditionKind) || communication.ConditionKind == "conditional_response" {
 				return fmt.Errorf("conditional response requires a grounded source character and nonconditional communication kind")
 			}
 		} else if communication.ConditionFromCharacter != "" || communication.ConditionKind != "" {
@@ -173,6 +191,9 @@ func validateReceivedFactsTransitionV2(receipt WorldArbitrationReceipt, before, 
 			}
 			if fact.Chapter != receipt.Chapter {
 				issues.add("new received fact must bind current chapter", path, "chapter_mismatch", fact.SourceID, "")
+				continue
+			}
+			if isCommunicationReceptionFactV1(receipt, actor.AgentID, fact, proposals) {
 				continue
 			}
 			if fact.ReceivedAtDay != nil {

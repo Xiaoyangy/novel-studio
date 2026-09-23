@@ -204,7 +204,7 @@ func TestMemoryTextTransportActualDispatchKeepsOriginalToolAuthorityAndOldRecove
 				original[record.AgentID] = *saved
 			}
 			const generation = "pg2_memory_transport_probe"
-			encoded := producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
+			encoded := producer == characterActivationProtocolV3MemoryTextDigest() || (producer == characterActivationProtocolV3HostLocationDigest() || producer == characterActivationProtocolV3AddressingDigest())
 			model := &memoryTransportProbeModel{st: st, generation: generation, ownerID: owner.AgentID, wantEncoded: encoded, tamper: encoded, wires: map[string][]byte{}, views: map[string]modelinput.ScopedReferenceModelView{}}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("fixture", "memory-transport", model)}
 			_, err = runCharacterActivationChapter(t.Context(), cfg, st, models, generation, 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
@@ -238,6 +238,10 @@ func TestMemoryTextTransportActualDispatchKeepsOriginalToolAuthorityAndOldRecove
 				}
 				codec, err := modelinput.NewScopedArtifactReferenceCodecV1(modelinput.KindCharacterObservation, observation)
 				selectionMust(t, err)
+				if domain.HasCharacterCommunicationAddressingPolicyV1(observation.Sources) {
+					codec, err = modelinput.WithScopedCommunicationReferencesV1(codec)
+					selectionMust(t, err)
+				}
 				want := codec.ModelView()
 				got := model.views[observation.Character]
 				var wantBody, gotBody any
@@ -298,12 +302,12 @@ func TestMemoryTextTransportProducerPreservesBDD8AndSchema(t *testing.T) {
 		t.Fatal("historical transport producer is no longer recoverable")
 	}
 	fresh := characterActivationProtocolForPolicy(domain.CharacterActivationCyclePolicyV3)
-	if fresh != characterActivationProtocolV3HostLocationDigest() || fresh == current {
+	if fresh != characterActivationProtocolV3AddressingDigest() || fresh == current {
 		t.Fatal("fresh producer did not advance while preserving transport history")
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		if domain.HasCharacterMemoryTextTransportPolicyV1(policies) != (producer == current || producer == fresh) || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
+		if domain.HasCharacterMemoryTextTransportPolicyV1(policies) != (producer == current || producer == characterActivationProtocolV3HostLocationDigest() || producer == fresh) || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("transport crossed frozen inventory")
 		}
 	}

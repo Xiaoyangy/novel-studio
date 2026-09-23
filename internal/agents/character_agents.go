@@ -1648,6 +1648,13 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 		if err != nil {
 			return err
 		}
+		if domain.HasCharacterCommunicationAddressingPolicyV1(observation.Sources) {
+			codec, err = modelinput.WithScopedCommunicationReferencesV1(codec)
+			if err != nil {
+				return err
+			}
+			characterPrompt += characterCommunicationAddressingPromptV1
+		}
 		executionTool, err = newScopedReferenceTool(tool, codec)
 		if err != nil {
 			return err

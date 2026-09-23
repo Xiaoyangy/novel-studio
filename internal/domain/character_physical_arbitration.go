@@ -366,6 +366,9 @@ func applyArbitrationPhysicalStateWithArtifactSourcesV1(receipt WorldArbitration
 	if err := applyCharacterPassiveReceptionsV2(receipt, stimulus, before, &after, proposalByAgent, resolved); err != nil {
 		return after, err
 	}
+	if err := applyCharacterCommunicationReceptionsV1(receipt, stimulus, before, &after, proposalByAgent, resolved); err != nil {
+		return after, err
+	}
 	if err := artifactTransition.finish(receipt, stimulus, before, &after, proposalByAgent, resolved); err != nil {
 		return after, err
 	}

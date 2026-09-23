@@ -89,6 +89,9 @@ func (t *SubmitCharacterDecisionTool) Schema() map[string]any {
 	if t.observation.Version == domain.CharacterObservationV2Version {
 		properties := result["properties"].(map[string]any)
 		properties["communications"] = characterCommunicationsSchema()
+		if domain.HasCharacterCommunicationAddressingPolicyV1(t.observation.Sources) {
+			properties["communications"] = characterAddressedCommunicationsSchemaV1()
+		}
 		properties["resource_reads"] = characterResourceReadsSchema()
 		if domain.HasCharacterIncomingMaterialReadPolicyV1(t.observation.Sources) {
 			properties["resource_reads"] = characterIncomingMaterialReadsSchemaV1()
@@ -472,6 +475,9 @@ func (t *ResolveChapterWorldTool) Schema() map[string]any {
 		if domain.HasCharacterPassiveReceptionPolicyV2(t.stimulus.Sources) {
 			result["properties"].(map[string]any)["passive_receptions"] = characterPassiveReceptionsSchema()
 		}
+		if domain.HasCharacterCommunicationAddressingPolicyV1(t.stimulus.Sources) {
+			result["properties"].(map[string]any)["communication_receptions"] = characterCommunicationReceptionsSchemaV1()
+		}
 	}
 	return t.characterActivationArbitrationSchema(result)
 }
@@ -488,17 +494,18 @@ func (t *ResolveChapterWorldTool) Execute(_ context.Context, args json.RawMessag
 		}
 	}
 	var input struct {
-		TimeWindow            string                               `json:"time_window"`
-		StoryTime             *arbitrationStoryTimeInput           `json:"story_time"`
-		Resolutions           []arbitrationResolutionInput         `json:"resolutions"`
-		Conflicts             []domain.WorldArbitrationConflict    `json:"conflicts"`
-		HardContractStatus    string                               `json:"hard_contract_status"`
-		HardContractConflicts []string                             `json:"hard_contract_conflicts"`
-		ProtagonistProjection domain.ProtagonistDecisionProjection `json:"protagonist_projection"`
-		Finalized             bool                                 `json:"finalized"`
-		ResourceSettlements   []domain.ResourceSettlementV2        `json:"resource_settlements"`
-		ResourceDeliveries    []domain.ResourceDeliveryV2          `json:"resource_deliveries"`
-		PassiveReceptions     []domain.CharacterPassiveReceptionV2 `json:"passive_receptions"`
+		TimeWindow              string                                     `json:"time_window"`
+		StoryTime               *arbitrationStoryTimeInput                 `json:"story_time"`
+		Resolutions             []arbitrationResolutionInput               `json:"resolutions"`
+		Conflicts               []domain.WorldArbitrationConflict          `json:"conflicts"`
+		HardContractStatus      string                                     `json:"hard_contract_status"`
+		HardContractConflicts   []string                                   `json:"hard_contract_conflicts"`
+		ProtagonistProjection   domain.ProtagonistDecisionProjection       `json:"protagonist_projection"`
+		Finalized               bool                                       `json:"finalized"`
+		ResourceSettlements     []domain.ResourceSettlementV2              `json:"resource_settlements"`
+		ResourceDeliveries      []domain.ResourceDeliveryV2                `json:"resource_deliveries"`
+		PassiveReceptions       []domain.CharacterPassiveReceptionV2       `json:"passive_receptions"`
+		CommunicationReceptions []domain.CharacterCommunicationReceptionV1 `json:"communication_receptions"`
 	}
 	if err := unmarshalToolArgs(args, &input); err != nil {
 		return nil, fmt.Errorf("invalid args: %w: %w", errs.ErrToolArgs, err)
@@ -525,24 +532,25 @@ func (t *ResolveChapterWorldTool) Execute(_ context.Context, args json.RawMessag
 		round = t.roundSourcesV3.CurrentRound()
 	}
 	receipt := domain.WorldArbitrationReceipt{
-		Version:               domain.WorldArbitrationReceiptVersion,
-		GenerationID:          t.stimulus.GenerationID,
-		Chapter:               t.stimulus.Chapter,
-		Round:                 round,
-		StoryTime:             storyTime,
-		StimulusDigest:        t.stimulus.Digest,
-		ActivationDigest:      t.activation.Digest,
-		ProposalDigests:       proposalDigests,
-		Resolutions:           resolutions,
-		Conflicts:             input.Conflicts,
-		HardContractStatus:    input.HardContractStatus,
-		HardContractConflicts: input.HardContractConflicts,
-		ProtagonistProjection: input.ProtagonistProjection,
-		Finalized:             input.Finalized,
-		GeneratedAt:           time.Now().UTC().Format(time.RFC3339Nano),
-		ResourceSettlements:   input.ResourceSettlements,
-		ResourceDeliveries:    input.ResourceDeliveries,
-		PassiveReceptions:     input.PassiveReceptions,
+		Version:                 domain.WorldArbitrationReceiptVersion,
+		GenerationID:            t.stimulus.GenerationID,
+		Chapter:                 t.stimulus.Chapter,
+		Round:                   round,
+		StoryTime:               storyTime,
+		StimulusDigest:          t.stimulus.Digest,
+		ActivationDigest:        t.activation.Digest,
+		ProposalDigests:         proposalDigests,
+		Resolutions:             resolutions,
+		Conflicts:               input.Conflicts,
+		HardContractStatus:      input.HardContractStatus,
+		HardContractConflicts:   input.HardContractConflicts,
+		ProtagonistProjection:   input.ProtagonistProjection,
+		Finalized:               input.Finalized,
+		GeneratedAt:             time.Now().UTC().Format(time.RFC3339Nano),
+		ResourceSettlements:     input.ResourceSettlements,
+		ResourceDeliveries:      input.ResourceDeliveries,
+		PassiveReceptions:       input.PassiveReceptions,
+		CommunicationReceptions: input.CommunicationReceptions,
 	}
 	if t.stimulus.Version == domain.WorldStimulusPacketV2Version {
 		receipt.Version = domain.WorldArbitrationReceiptV2Version

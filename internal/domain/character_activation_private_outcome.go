@@ -18,6 +18,21 @@ func CharacterActivationPrivateOutcome(proposal CharacterDecisionProposal, resol
 			}
 		}
 	}
+	for _, reception := range receipt.CommunicationReceptions {
+		if reception.FromAgentID != proposal.AgentID || reception.SourceProposalDigest != proposal.Digest {
+			continue
+		}
+		for _, message := range proposal.Communications {
+			if message.ID != reception.CommunicationID {
+				continue
+			}
+			recipient := message.RecipientHint
+			if message.ReplyToReceivedFactID != "" {
+				recipient = "该已收通信的发送者"
+			}
+			sent = append(sent, "向"+recipient+"发出"+message.Kind+"："+message.Text)
+		}
+	}
 	if len(sent) > 0 {
 		text += "；本人已发出的通信（不代表知道对方收到或同意）：" + strings.Join(sent, "；")
 	}

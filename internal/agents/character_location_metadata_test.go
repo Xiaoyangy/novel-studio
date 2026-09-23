@@ -23,7 +23,7 @@ func TestLocationMetadataFreshProducerRetainsOldRecovery(t *testing.T) {
 	}
 	for _, p := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(p)
-		if domain.HasCharacterHostLocationMetadataPolicyV1(policies) != (p == fresh) {
+		if domain.HasCharacterHostLocationMetadataPolicyV1(policies) != (p == fresh || p == characterActivationProtocolV3HostLocationDigest()) {
 			t.Fatal("location visibility was retrofitted into a frozen producer")
 		}
 		if characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != p {

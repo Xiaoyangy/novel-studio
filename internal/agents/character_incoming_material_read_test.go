@@ -25,7 +25,7 @@ func TestIncomingMaterialReadProducerKeepsHistoricalWireBoundaries(t *testing.T)
 	}
 	for _, producer := range CharacterActivationProducerCandidates(domain.CharacterActivationCyclePolicyV3) {
 		policies := characterActivationV3PoliciesForProducer(producer)
-		want := producer == current || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
+		want := producer == current || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || (producer == characterActivationProtocolV3HostLocationDigest() || producer == characterActivationProtocolV3AddressingDigest())
 		if domain.HasCharacterIncomingMaterialReadPolicyV1(policies) != want || characterActivationProtocolForStimulus(domain.WorldStimulusPacket{Sources: policies}) != producer {
 			t.Fatal("incoming read crossed frozen source inventory")
 		}
@@ -84,7 +84,7 @@ func TestIncomingMaterialReadActualActorDispatchUsesOnlyFrozenHelp(t *testing.T)
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			st, cfg, boundary := activationV3RuntimeFixture(t)
 			cfg.CharacterAgents.FrozenActivationProducer, boundary.FrozenActivationProducer = producer, producer
-			model := &incomingReadPromptProbe{want: producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()}
+			model := &incomingReadPromptProbe{want: producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || (producer == characterActivationProtocolV3HostLocationDigest() || producer == characterActivationProtocolV3AddressingDigest())}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "incoming-read-help", model)}
 			_, err := runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_incoming_help", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 			if !errors.Is(err, context.Canceled) || model.calls != 1 {

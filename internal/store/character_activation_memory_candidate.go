@@ -67,7 +67,7 @@ func activationMemoryFactGroups(bundle domain.ProjectedChapterBundle, outcome do
 				add(proposal.AgentID, proposal.Character, "accepted_cycle_decision_outcome", cycle.Digest, text, proposal.KnowledgeRefs)
 			}
 		}
-		for _, reception := range receipt.PassiveReceptions {
+		for _, reception := range characterSleepingReceptionSources(receipt) {
 			for _, actor := range state.Actors {
 				if actor.AgentID != reception.ToAgentID {
 					continue
@@ -86,6 +86,24 @@ func activationMemoryFactGroups(bundle domain.ProjectedChapterBundle, outcome do
 		}
 	}
 	return groups, nil
+}
+
+// These are already validated deliveries, not new message routing. Active
+// receivers are covered by their existing outcome memory; only sleeping
+// recipients need a separate received-communication fact and publication path.
+func characterSleepingReceptionSources(receipt domain.WorldArbitrationReceipt) []domain.CharacterPassiveReceptionV2 {
+	result := append([]domain.CharacterPassiveReceptionV2(nil), receipt.PassiveReceptions...)
+	active := map[string]bool{}
+	for _, resolution := range receipt.Resolutions {
+		active[resolution.AgentID] = true
+	}
+	for _, reception := range receipt.CommunicationReceptions {
+		if active[reception.ToAgentID] {
+			continue
+		}
+		result = append(result, domain.CharacterPassiveReceptionV2{ToAgentID: reception.ToAgentID, FromAgentID: reception.FromAgentID, SourceProposalDigest: reception.SourceProposalDigest, CommunicationID: reception.CommunicationID})
+	}
+	return result
 }
 
 func deriveActivationMemoryPublicationFiles(bundle domain.ProjectedChapterBundle, outcome domain.ActualOutcomeReceiptV2, paths []string, before map[string]CharacterMemoryPublicationFile) ([]CharacterMemoryPublicationFile, error) {

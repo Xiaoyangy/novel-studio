@@ -916,7 +916,7 @@ func (s *Store) PromoteReviewedCharacterAgentMemory(chapter int, acceptedAt stri
 			for _, resolution := range last.Resolutions {
 				ids[resolution.AgentID] = true
 			}
-			for _, reception := range last.PassiveReceptions {
+			for _, reception := range characterSleepingReceptionSources(last) {
 				ids[reception.ToAgentID] = true
 			}
 		}

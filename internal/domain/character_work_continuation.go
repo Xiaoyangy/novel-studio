@@ -547,6 +547,11 @@ func authenticateContinuationExecutionV1(ledger CharacterWorkContinuationLedgerV
 			return entry, state, fmt.Errorf("continuation cannot repeat communication")
 		}
 	}
+	for _, reception := range arbitration.CommunicationReceptions {
+		if reception.FromAgentID == state.proposal.AgentID {
+			return entry, state, fmt.Errorf("continuation cannot repeat communication")
+		}
+	}
 	active := map[string]bool{}
 	for _, actor := range input.Activation.Entries {
 		if actor.State == CharacterAgentActive {

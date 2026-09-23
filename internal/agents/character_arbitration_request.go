@@ -66,6 +66,9 @@ func prepareCharacterArbitrationRequest(inputs characterAgentChapterInputs, prop
 		if domain.HasCharacterIncomingMaterialReadPolicyV1(inputs.Stimulus.Sources) {
 			arbiterPrompt += worldArbiterIncomingMaterialReadPromptV1
 		}
+		if domain.HasCharacterCommunicationAddressingPolicyV1(inputs.Stimulus.Sources) {
+			arbiterPrompt += worldArbiterCommunicationAddressingPromptV1
+		}
 	}
 	if inputs.CycleSession != nil {
 		arbiterPrompt += worldArbiterActivationProjectionPromptV1
@@ -85,6 +88,12 @@ func prepareCharacterArbitrationRequest(inputs characterAgentChapterInputs, prop
 		codec, err := makeCodec(modelinput.KindWorldArbitration, json.RawMessage(payload))
 		if err != nil {
 			return "", "", nil, err
+		}
+		if domain.HasCharacterCommunicationAddressingPolicyV1(inputs.Stimulus.Sources) {
+			codec, err = modelinput.WithScopedCommunicationReferencesV1(codec)
+			if err != nil {
+				return "", "", nil, err
+			}
 		}
 		executionTool, err = newScopedReferenceTool(tool, codec)
 		if err != nil {

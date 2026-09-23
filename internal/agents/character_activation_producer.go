@@ -12,7 +12,7 @@ import (
 func CharacterActivationProducerCandidates(policy string) []string {
 	current := characterActivationProtocolForPolicy(policy)
 	if policy == domain.CharacterActivationCyclePolicyV3 {
-		return []string{current, characterActivationProtocolV3MemoryTextDigest(), characterActivationProtocolV3InitialSelfIntentDigest(), characterActivationProtocolV3IncomingReadDigest(), characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
+		return []string{current, characterActivationProtocolV3HostLocationDigest(), characterActivationProtocolV3MemoryTextDigest(), characterActivationProtocolV3InitialSelfIntentDigest(), characterActivationProtocolV3IncomingReadDigest(), characterActivationProtocolV3Digest(), characterActivationProtocolV3CompletionDigest(), characterActivationProtocolV3HistoryDigest(), characterActivationProtocolV3LegacyDigest()}
 	}
 	return []string{current}
 }
@@ -31,6 +31,9 @@ func CharacterActivationProtocolWithProducer(policy, producer string) string {
 
 func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket) string {
 	policy := characterActivationPolicyForStimulus(stimulus)
+	if domain.HasCharacterCommunicationAddressingPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterHostLocationMetadataPolicyV1(stimulus.Sources)) {
+		return ""
+	}
 	if domain.HasCharacterHostLocationMetadataPolicyV1(stimulus.Sources) && (policy != domain.CharacterActivationCyclePolicyV3 || !domain.HasCharacterMemoryTextTransportPolicyV1(stimulus.Sources)) {
 		return ""
 	}
@@ -68,6 +71,9 @@ func characterActivationProtocolForStimulus(stimulus domain.WorldStimulusPacket)
 		if !domain.HasCharacterHostLocationMetadataPolicyV1(stimulus.Sources) {
 			return characterActivationProtocolV3MemoryTextDigest()
 		}
+		if !domain.HasCharacterCommunicationAddressingPolicyV1(stimulus.Sources) {
+			return characterActivationProtocolV3HostLocationDigest()
+		}
 	}
 	return characterActivationProtocolForPolicy(policy)
 }
@@ -90,6 +96,8 @@ func characterActivationV3PoliciesForProducer(producer string) []string {
 		return characterActivationV3MemoryTextPolicies()
 	case characterActivationProtocolV3HostLocationDigest():
 		return characterActivationV3HostLocationPolicies()
+	case characterActivationProtocolV3AddressingDigest():
+		return characterActivationV3AddressingPolicies()
 	}
 	return nil
 }

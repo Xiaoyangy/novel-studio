@@ -193,6 +193,11 @@ func validateContinuationBatchArbitrationV1(input CharacterActivationInputSet, s
 			return empty, "", fmt.Errorf("continuation cannot repeat communication")
 		}
 	}
+	for _, reception := range arbitration.CommunicationReceptions {
+		if owners[reception.FromAgentID] {
+			return empty, "", fmt.Errorf("continuation cannot repeat communication")
+		}
+	}
 	valid, err := FinalizeWorldArbitrationReceipt(continuationCloneV1(arbitration), input.Stimulus, input.Activation, proposals, 1)
 	if err != nil {
 		return empty, "", err

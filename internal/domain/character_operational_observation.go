@@ -208,7 +208,7 @@ func operationalRequestCanReviseV1(receipt WorldArbitrationReceipt, stimulus Wor
 	if receipt.Finalized || receipt.Round != 1 || receipt.HardContractStatus != "feasible" ||
 		!physicalContainsRefV2(stimulus.Sources, CharacterActivationCyclePolicyV3) || !physicalContainsRefV2(stimulus.Sources, CharacterArbitrationRoundSourcesPolicyV1) ||
 		receipt.StoryTime == nil || stimulus.StoryClock == nil || receipt.StoryTime.StartDay != stimulus.StoryClock.CurrentDay || receipt.StoryTime.EndDay != stimulus.StoryClock.CurrentDay ||
-		len(receipt.ResourceSettlements)+len(receipt.ResourceDeliveries)+len(receipt.PassiveReceptions) != 0 ||
+		len(receipt.ResourceSettlements)+len(receipt.ResourceDeliveries)+len(receipt.PassiveReceptions)+len(receipt.CommunicationReceptions) != 0 ||
 		!samePhysicalValueV2(before, after) {
 		return false
 	}

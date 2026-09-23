@@ -817,25 +817,26 @@ type CharacterDecisionResolution struct {
 }
 
 type WorldArbitrationReceipt struct {
-	Version               string                        `json:"version"`
-	GenerationID          string                        `json:"generation_id"`
-	Chapter               int                           `json:"chapter"`
-	Round                 int                           `json:"round"`
-	StoryTime             *StoryTimeChapterSchedule     `json:"story_time,omitempty"`
-	StimulusDigest        string                        `json:"stimulus_digest"`
-	ActivationDigest      string                        `json:"activation_digest"`
-	ProposalDigests       []string                      `json:"proposal_digests"`
-	Resolutions           []CharacterDecisionResolution `json:"resolutions"`
-	ResourceSettlements   []ResourceSettlementV2        `json:"resource_settlements,omitempty"`
-	ResourceDeliveries    []ResourceDeliveryV2          `json:"resource_deliveries,omitempty"`
-	PassiveReceptions     []CharacterPassiveReceptionV2 `json:"passive_receptions,omitempty"`
-	Conflicts             []WorldArbitrationConflict    `json:"conflicts,omitempty"`
-	HardContractStatus    string                        `json:"hard_contract_status"` // feasible / infeasible
-	HardContractConflicts []string                      `json:"hard_contract_conflicts,omitempty"`
-	ProtagonistProjection ProtagonistDecisionProjection `json:"protagonist_projection"`
-	Finalized             bool                          `json:"finalized"`
-	GeneratedAt           string                        `json:"generated_at,omitempty"`
-	Digest                string                        `json:"digest"`
+	Version                 string                              `json:"version"`
+	GenerationID            string                              `json:"generation_id"`
+	Chapter                 int                                 `json:"chapter"`
+	Round                   int                                 `json:"round"`
+	StoryTime               *StoryTimeChapterSchedule           `json:"story_time,omitempty"`
+	StimulusDigest          string                              `json:"stimulus_digest"`
+	ActivationDigest        string                              `json:"activation_digest"`
+	ProposalDigests         []string                            `json:"proposal_digests"`
+	Resolutions             []CharacterDecisionResolution       `json:"resolutions"`
+	ResourceSettlements     []ResourceSettlementV2              `json:"resource_settlements,omitempty"`
+	ResourceDeliveries      []ResourceDeliveryV2                `json:"resource_deliveries,omitempty"`
+	PassiveReceptions       []CharacterPassiveReceptionV2       `json:"passive_receptions,omitempty"`
+	CommunicationReceptions []CharacterCommunicationReceptionV1 `json:"communication_receptions,omitempty"`
+	Conflicts               []WorldArbitrationConflict          `json:"conflicts,omitempty"`
+	HardContractStatus      string                              `json:"hard_contract_status"` // feasible / infeasible
+	HardContractConflicts   []string                            `json:"hard_contract_conflicts,omitempty"`
+	ProtagonistProjection   ProtagonistDecisionProjection       `json:"protagonist_projection"`
+	Finalized               bool                                `json:"finalized"`
+	GeneratedAt             string                              `json:"generated_at,omitempty"`
+	Digest                  string                              `json:"digest"`
 }
 
 func ComputeWorldArbitrationReceiptDigest(r WorldArbitrationReceipt) (string, error) {
@@ -905,8 +906,22 @@ func finalizeWorldArbitrationReceiptWithPriorSources(r WorldArbitrationReceipt, 
 			}
 		}
 	}
+	if len(r.CommunicationReceptions) > 0 {
+		if !HasCharacterCommunicationAddressingPolicyV1(stimulus.Sources) || r.Version != WorldArbitrationReceiptV2Version {
+			return r, fmt.Errorf("non-named receptions require their new v2 policy")
+		}
+		registered := map[string]bool{}
+		for _, entry := range activation.Entries {
+			registered[entry.AgentID] = entry.State == CharacterAgentActive || entry.State == CharacterAgentSleeping
+		}
+		for _, reception := range r.CommunicationReceptions {
+			if !registered[reception.ToAgentID] {
+				return r, fmt.Errorf("communication recipient is outside the actual activation baseline")
+			}
+		}
+	}
 	if r.Version == WorldArbitrationReceiptVersion {
-		if len(r.ResourceSettlements)+len(r.ResourceDeliveries)+len(r.PassiveReceptions) > 0 {
+		if len(r.ResourceSettlements)+len(r.ResourceDeliveries)+len(r.PassiveReceptions)+len(r.CommunicationReceptions) > 0 {
 			return r, fmt.Errorf("resource_settlements require v2 arbitration")
 		}
 		for _, resolution := range r.Resolutions {

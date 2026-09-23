@@ -590,7 +590,7 @@ func FinalizeCharacterArbitrationRoundV1(sources VerifiedCharacterArbitrationSou
 	}
 	if !r.Finalized {
 		clock := s.input.Stimulus.StoryClock
-		if r.StoryTime == nil || r.StoryTime.StartDay != clock.CurrentDay || r.StoryTime.EndDay != clock.CurrentDay || len(r.ResourceSettlements)+len(r.ResourceDeliveries)+len(r.PassiveReceptions) != 0 {
+		if r.StoryTime == nil || r.StoryTime.StartDay != clock.CurrentDay || r.StoryTime.EndDay != clock.CurrentDay || len(r.ResourceSettlements)+len(r.ResourceDeliveries)+len(r.PassiveReceptions)+len(r.CommunicationReceptions) != 0 {
 			return empty, fmt.Errorf("nonfinal/hard arbitration cannot advance clock, resources or deliveries")
 		}
 		for _, resolution := range r.Resolutions {
@@ -613,6 +613,11 @@ func FinalizeCharacterArbitrationRoundV1(sources VerifiedCharacterArbitrationSou
 				}
 			}
 			for _, reception := range r.PassiveReceptions {
+				if reception.FromAgentID == owner {
+					return empty, fmt.Errorf("continuation cannot initiate communication")
+				}
+			}
+			for _, reception := range r.CommunicationReceptions {
 				if reception.FromAgentID == owner {
 					return empty, fmt.Errorf("continuation cannot initiate communication")
 				}

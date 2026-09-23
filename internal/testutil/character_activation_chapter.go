@@ -22,6 +22,46 @@ func CharacterActivationChapterWithPassive(t *testing.T) domain.CharacterActivat
 	return characterActivationChapterFromInputs(t, context, cycle, f.Inputs, f.Proposal, f.Receipt)
 }
 
+func CharacterActivationChapterWithAddressedCommunication(t *testing.T) domain.CharacterActivationChapterEvidence {
+	t.Helper()
+	context, _, cycle, _ := CharacterReadiness(t, false)
+	f := CharacterPassiveReception(t, false, true, context.Digest)
+	f.Inputs.Stimulus.Sources = append(f.Inputs.Stimulus.Sources, domain.CharacterCommunicationAddressingPolicyV1)
+	var err error
+	f.Inputs.Stimulus, err = domain.FinalizeWorldStimulusPacket(f.Inputs.Stimulus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range f.Inputs.Observations {
+		o := &f.Inputs.Observations[i]
+		o.StimulusDigest = f.Inputs.Stimulus.Digest
+		o.Sources = append(o.Sources, domain.CharacterCommunicationAddressingPolicyV1)
+		*o, err = domain.FinalizeCharacterObservationPacket(*o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j := range f.Inputs.Activation.Entries {
+			entry := &f.Inputs.Activation.Entries[j]
+			if entry.AgentID == o.AgentID && entry.State == domain.CharacterAgentActive {
+				entry.ObservationDigest = o.Digest
+			}
+		}
+	}
+	f.Inputs.Activation, err = domain.FinalizeCharacterAgentActivation(f.Inputs.Activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Inputs, err = domain.FinalizeCharacterActivationInputSet(f.Inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Proposal.Communications[0].ToCharacter, f.Proposal.Communications[0].RecipientHint = "", "面前的人"
+	r := f.Receipt.PassiveReceptions[0]
+	f.Receipt.PassiveReceptions = nil
+	f.Receipt.CommunicationReceptions = []domain.CharacterCommunicationReceptionV1{{ToAgentID: r.ToAgentID, FromAgentID: r.FromAgentID, CommunicationID: r.CommunicationID, DeliveredAtDay: r.DeliveredAtDay, Channel: r.Channel, RecipientResolution: "unique", EvidenceRefs: f.Proposal.Communications[0].KnowledgeRefs}}
+	return characterActivationChapterFromInputs(t, context, cycle, f.Inputs, f.Proposal, f.Receipt)
+}
+
 func characterActivationChapterFromInputs(t *testing.T, context domain.CharacterReadinessContext, cycle domain.CharacterActivationCycle, input domain.CharacterActivationInputSet, proposal domain.CharacterDecisionProposal, receipt domain.WorldArbitrationReceipt) domain.CharacterActivationChapterEvidence {
 	t.Helper()
 	var observation domain.CharacterObservationPacket
@@ -43,6 +83,9 @@ func characterActivationChapterFromInputs(t *testing.T, context domain.Character
 	receipt.ResourceSettlements[0].EvidenceRefs = []string{proposal.Digest}
 	for i := range receipt.PassiveReceptions {
 		receipt.PassiveReceptions[i].SourceProposalDigest = proposal.Digest
+	}
+	for i := range receipt.CommunicationReceptions {
+		receipt.CommunicationReceptions[i].SourceProposalDigest = proposal.Digest
 	}
 	receipt, err = domain.FinalizeWorldArbitrationReceipt(receipt, input.Stimulus, input.Activation, []domain.CharacterDecisionProposal{proposal}, 1)
 	if err != nil {

@@ -34,7 +34,7 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 			t.Fatal("producer candidates are not distinct exact executable inventories")
 		}
 		seen[producer] = true
-		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()
+		wantSurface := producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || (producer == characterActivationProtocolV3HostLocationDigest() || producer == characterActivationProtocolV3AddressingDigest())
 		if domain.HasCharacterSurfaceInspectionPolicyV1(policies) != wantSurface {
 			t.Fatal("old producer gained or current producer lost surface capability")
 		}
@@ -48,7 +48,7 @@ func TestSurfaceInspectionProducerPreservesThreeHistoricalIdentities(t *testing.
 			}
 		}
 	}
-	if len(seen) != 8 {
+	if len(seen) != 9 {
 		t.Fatal("missing historical executable producer")
 	}
 	for _, old := range [][]string{characterActivationV3LegacyPolicies(), characterActivationV3HistoryPolicies()} {
@@ -124,7 +124,7 @@ func TestSurfaceInspectionPromptAndOwnerCapabilityAreProducerBound(t *testing.T)
 			}
 			selectionMust(t, st.Characters.Save(characters))
 			cfg.CharacterAgents.FrozenActivationProducer, boundary.FrozenActivationProducer = producer, producer
-			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || producer == characterActivationProtocolV3HostLocationDigest()}
+			model := &surfacePromptModel{want: producer == characterActivationProtocolV3Digest() || producer == characterActivationProtocolV3IncomingReadDigest() || producer == characterActivationProtocolV3InitialSelfIntentDigest() || producer == characterActivationProtocolV3MemoryTextDigest() || (producer == characterActivationProtocolV3HostLocationDigest() || producer == characterActivationProtocolV3AddressingDigest())}
 			models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("test", "surface-view", model)}
 			_, err = runCharacterActivationChapter(context.Background(), cfg, st, models, "pg2_surface_view", 1, boundary, domain.ProjectedPlanningContextV2{}, nil, 4)
 			if !errors.Is(err, context.Canceled) || model.seen.Load() != 1 {

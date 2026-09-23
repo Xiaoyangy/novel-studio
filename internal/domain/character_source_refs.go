@@ -62,6 +62,9 @@ func validateCharacterObservationSourceRefsV2(observation CharacterObservationPa
 		return fmt.Errorf("opaque character source policy rejects raw %s", field)
 	}
 	for _, ref := range observation.Sources {
+		if ref == CharacterCommunicationAddressingPolicyV1 {
+			continue
+		}
 		if ref != CharacterHostLocationMetadataPolicyV1 && ref != CharacterMemoryTextTransportPolicyV1 && ref != CharacterInitialSelfIntentPolicyV1 && ref != CharacterIncomingMaterialReadPolicyV1 && ref != CharacterSurfaceInspectionPolicyV1 && ref != CharacterSelfCompletionViewPolicyV1 && ref != CharacterWorkContinuationHistoryPolicyV1 && ref != CharacterResourceObservationTimePolicyV1 && ref != CharacterSourceRefPolicyV2 && ref != CharacterSelfExperiencePolicyV2 && ref != CharacterOperationalAvailabilityPolicyV1 && ref != CharacterSelfChronologyPolicyV1 && ref != CharacterWorkContinuationPolicyV1 && ref != CharacterActivationCyclePolicyV3 && ref != CharacterArbitrationRoundSourcesPolicyV1 && ref != CharacterWorkArtifactPolicyV1 && ref != CharacterRevisionFeedbackPolicyV1 {
 			if err := require(ref, false, "sources"); err != nil {
 				return err
@@ -139,6 +142,9 @@ func ValidateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacke
 }
 
 func validateCharacterResourceViewsAgainstStimulusV2(stimulus WorldStimulusPacket, observation CharacterObservationPacket) error {
+	if HasCharacterCommunicationAddressingPolicyV1(stimulus.Sources) != HasCharacterCommunicationAddressingPolicyV1(observation.Sources) {
+		return fmt.Errorf("character communication addressing policy differs from its stimulus")
+	}
 	if HasCharacterHostLocationMetadataPolicyV1(stimulus.Sources) != HasCharacterHostLocationMetadataPolicyV1(observation.Sources) {
 		return fmt.Errorf("character host location policy differs from its stimulus")
 	}
