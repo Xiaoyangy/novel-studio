@@ -7,16 +7,14 @@ import (
 	"github.com/chenhongyang/novel-studio/internal/store"
 )
 
-func loadCurrentCharacterActivationEvidence(st *store.Store, simulation domain.ChapterWorldSimulation) (*domain.CharacterActivationChapterEvidence, error) {
+func validateCurrentCharacterActivationEvidence(st *store.Store, simulation domain.ChapterWorldSimulation) error {
 	verified, err := loadCurrentVerifiedCharacterActivationEvidence(st, simulation)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := verified.ValidateSimulation(simulation); err != nil {
-		return nil, err
-	}
-	evidence := verified.Evidence()
-	return &evidence, nil
+	// The caller needs validation only. Evidence() makes a detached full proof
+	// copy for data consumers; producing and discarding it here adds no check.
+	return verified.ValidateSimulation(simulation)
 }
 
 func loadCurrentVerifiedCharacterActivationEvidence(st *store.Store, simulation domain.ChapterWorldSimulation) (*domain.VerifiedCharacterActivationChapter, error) {

@@ -682,8 +682,7 @@ func (t *ResolveChapterWorldTool) Execute(_ context.Context, args json.RawMessag
 
 func validateStoredCharacterAgentProtocol(st *store.Store, simulation domain.ChapterWorldSimulation) error {
 	if simulation.CharacterActivation != nil {
-		_, err := loadCurrentCharacterActivationEvidence(st, simulation)
-		return err
+		return validateCurrentCharacterActivationEvidence(st, simulation)
 	}
 	if len(simulation.CharacterDecisionTrace) > 0 {
 		return fmt.Errorf("unbound chapter activation decision trace")

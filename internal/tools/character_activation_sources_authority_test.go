@@ -45,10 +45,14 @@ func TestActivationGroundingSourceAuthorityMatchesPublicInputAndRereads(t *testi
 	if !bytes.Equal(a, b) {
 		t.Fatal("source-aware input changed public JSON/hash")
 	}
-	loaded, err := loadCurrentCharacterActivationEvidence(st, sim)
+	if err := validateCurrentCharacterActivationEvidence(st, sim); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := loadCurrentVerifiedCharacterActivationEvidence(st, sim)
 	if err != nil {
 		t.Fatal(err)
 	}
+	loaded := verified.Evidence()
 	loadedJSON, _ := json.Marshal(loaded)
 	if !bytes.Equal(raw, loadedJSON) {
 		t.Fatal("compatibility evidence loader changed source")
