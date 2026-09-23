@@ -172,6 +172,9 @@ func runPlanGroundingReview(ctx context.Context, model agentcore.ChatModel, thin
 	}
 	response, err := model.Generate(ctx, messages, []agentcore.ToolSpec{planGroundingToolSpec()}, agentcore.WithThinking(thinking), agentcore.WithMaxTokens(6144))
 	if err != nil {
+		response, err = retryPlanGroundingModelView(ctx, model, thinking, input, raw, messages, err)
+	}
+	if err != nil {
 		return verdict, classifyPlanGroundingInputBudgetError(model, input, err)
 	}
 	if response == nil {

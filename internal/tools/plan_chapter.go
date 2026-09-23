@@ -1031,7 +1031,7 @@ func compactStrings(items []string) []string {
 func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, rewrite bool) error {
 	sim := plan.CausalSimulation
 	if !hasChapterCausalSimulation(sim) {
-		return fmt.Errorf("第 %d 章缺少写前 causal_simulation：正文写作必须先推演前文/时间线/卷弧/未来窗口、角色状态、资源账本和 AI 味风险: %w", plan.Chapter, errs.ErrToolPrecondition)
+		return &incompletePlanDetailsError{cause: fmt.Errorf("第 %d 章缺少写前 causal_simulation：正文写作必须先推演前文/时间线/卷弧/未来窗口、角色状态、资源账本和 AI 味风险: %w", plan.Chapter, errs.ErrToolPrecondition)}
 	}
 	if err := validateChapterWorldSimulationReference(s, plan); err != nil {
 		return err
@@ -1362,7 +1362,7 @@ func validateChapterPrewriteSimulation(s *store.Store, plan domain.ChapterPlan, 
 		require(conflict.NextEscalation != "", prefix+".next_escalation")
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("第 %d 章写前推演不完整，缺少：%s: %w", plan.Chapter, strings.Join(missing, ", "), errs.ErrToolPrecondition)
+		return &incompletePlanDetailsError{cause: fmt.Errorf("第 %d 章写前推演不完整，缺少：%s: %w", plan.Chapter, strings.Join(missing, ", "), errs.ErrToolPrecondition)}
 	}
 	return nil
 }
