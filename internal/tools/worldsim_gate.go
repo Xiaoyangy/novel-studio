@@ -203,8 +203,11 @@ func worldTickChapterOneTimeAnchorIssues(st *store.Store, events []domain.WorldE
 func worldTickExtractChapterOneTimeAnchors(text string) []string {
 	seen := map[string]struct{}{}
 	var anchors []string
-	for _, anchor := range worldTickExplicitDurationRE.FindAllString(text, -1) {
-		anchor = strings.TrimSpace(anchor)
+	for _, span := range worldTickExplicitDurationRE.FindAllStringIndex(text, -1) {
+		if worldTickHistoricalDuration(text, span[0], span[1]) {
+			continue
+		}
+		anchor := strings.TrimSpace(text[span[0]:span[1]])
 		if anchor == "" {
 			continue
 		}

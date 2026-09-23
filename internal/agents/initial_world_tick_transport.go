@@ -14,16 +14,21 @@ import (
 
 type initialWorldTickTransport struct {
 	agentcore.ChatModel
-	store        *store.Store
-	initialError error
+	store         *store.Store
+	initialError  error
+	retryFeedback string
 }
 
-func withInitialWorldTickTransport(model agentcore.ChatModel, st *store.Store) agentcore.ChatModel {
+func withInitialWorldTickTransport(model agentcore.ChatModel, st *store.Store, retryFeedback ...string) agentcore.ChatModel {
 	_, active, err := tools.InitialWorldTickExactContext(st)
 	if !active && err == nil {
 		return model
 	}
-	return &initialWorldTickTransport{ChatModel: model, store: st, initialError: err}
+	feedback := ""
+	if len(retryFeedback) > 0 {
+		feedback = retryFeedback[0]
+	}
+	return &initialWorldTickTransport{ChatModel: model, store: st, initialError: err, retryFeedback: feedback}
 }
 
 func (m *initialWorldTickTransport) messages(messages []agentcore.Message) ([]agentcore.Message, error) {
@@ -77,6 +82,22 @@ func (m *initialWorldTickTransport) messages(messages []agentcore.Message) ([]ag
 	}
 	if !dispatchFound {
 		return nil, fmt.Errorf("initial world_tick Architect input lacks the complete current dispatch contract; no provider call")
+	}
+	if m.retryFeedback != "" {
+		found := false
+		for _, message := range result {
+			if message.Role == agentcore.RoleUser && strings.Contains(message.TextContent(), m.retryFeedback) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			packet, err := modelinput.NewExactAgentPacketMessage(modelinput.KindInitialWorldTick, m.retryFeedback)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, packet)
+		}
 	}
 	return result, nil
 }

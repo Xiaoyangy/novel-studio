@@ -122,6 +122,10 @@ func degraded(source, text string) rules.Candidate {
 }
 
 var explicitChapterWordsRangeRE = regexp.MustCompile(`(?i)(?:单章|每章|章节字数|chapter_words)[^0-9]{0,24}([0-9]{3,6})\s*[-–—~～至到]\s*([0-9]{3,6})\s*(?:字|字符|words?|runes?)?`)
+var historicalChapterWordsRE = regexp.MustCompile(`(?:旧|原|历史|此前的?)(?:篇幅|字数|章节)?(?:方案|预算|要求|口径)|(?:旧|原)(?:单章|每章|章节字数|chapter_words)`)
+var supersededChapterWordsRE = regexp.MustCompile(`已被替代|已废弃|已作废|不再适用|不是当前预算`)
+var retainedChapterWordsRE = regexp.MustCompile(`沿用|保持|保留`)
+var notRetainedChapterWordsRE = regexp.MustCompile(`(?:不再|不要|禁止|停止|不)(?:继续)?(?:沿用|保持|保留)`)
 
 // ExplicitChapterWords deterministically extracts an unambiguous per-chapter
 // range. The LLM normalizer remains responsible for contextual preferences,
@@ -129,16 +133,36 @@ var explicitChapterWordsRangeRE = regexp.MustCompile(`(?i)(?:单章|每章|章�
 // uncertain note. Requiring an explicit per-chapter marker prevents a total
 // book range (for example “正文2.8万—3万字”) from being misclassified.
 func ExplicitChapterWords(text string) *rules.WordRange {
-	match := explicitChapterWordsRangeRE.FindStringSubmatch(strings.TrimSpace(text))
-	if len(match) != 3 {
-		return nil
+	// Keep the first applicable range, not the largest or last range. Historical
+	// budgets in migration prompts are context, not a new active instruction.
+	// Scope the exclusion to its clause so “旧方案…，当前每章…” still works;
+	// words such as “旧港” or “历史小说” alone do not make a rule obsolete.
+	for _, match := range explicitChapterWordsRangeRE.FindAllStringSubmatchIndex(text, -1) {
+		start, end := match[0], match[1]
+		if i := strings.LastIndexAny(text[:start], "，,；;。.!！?？\n\r"); i >= 0 {
+			start = i // Including the delimiter keeps byte offsets UTF-8 safe.
+		} else {
+			start = 0
+		}
+		if i := strings.IndexAny(text[end:], "，,；;。.!！?？\n\r"); i >= 0 {
+			end += i
+		} else {
+			end = len(text)
+		}
+		clause := text[start:end]
+		retained := retainedChapterWordsRE.MatchString(clause) && !notRetainedChapterWordsRE.MatchString(clause)
+		if supersededChapterWordsRE.MatchString(clause) ||
+			(historicalChapterWordsRE.MatchString(clause) && !retained) {
+			continue
+		}
+		minWords, minErr := strconv.Atoi(text[match[2]:match[3]])
+		maxWords, maxErr := strconv.Atoi(text[match[4]:match[5]])
+		if minErr != nil || maxErr != nil || minWords <= 0 || maxWords < minWords {
+			return nil
+		}
+		return &rules.WordRange{Min: minWords, Max: maxWords}
 	}
-	minWords, minErr := strconv.Atoi(match[1])
-	maxWords, maxErr := strconv.Atoi(match[2])
-	if minErr != nil || maxErr != nil || minWords <= 0 || maxWords < minWords {
-		return nil
-	}
-	return &rules.WordRange{Min: minWords, Max: maxWords}
+	return nil
 }
 
 func applyExplicitChapterWords(candidate *rules.Candidate, text string) {

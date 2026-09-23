@@ -212,6 +212,7 @@ type ApplyThinking func(role string, level agentcore.ThinkingLevel)
 // gates, or any normal writer invocation.
 type CoordinatorBuildOptions struct {
 	WriterSessionIdentity             string
+	InitialWorldTickRetryFeedback     string
 	AllowChapterZeroFoundationRefresh bool
 	FoundationRefreshTarget           string
 	RecordFoundationRefreshEpoch      bool
@@ -476,7 +477,7 @@ func BuildCoordinatorWithOptions(
 		// spending the one-shot permit on a read/check/edit control response.
 		drafterTools = serverPrimedRenderTools(drafterTools)
 	}
-	architectModel := withInitialWorldTickTransport(roleModel("architect"), store)
+	architectModel := withInitialWorldTickTransport(roleModel("architect"), store, buildOpts.InitialWorldTickRetryFeedback)
 	writerModel := writersampler.New(roleModel("writer"))
 	drafterBaseModel := roleModel("drafter")
 	coordinatorModel := roleModel("coordinator")

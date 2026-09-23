@@ -2012,6 +2012,7 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 			fmt.Fprintln(os.Stderr, "[pipeline:zero-init] 初始 world_tick 已就绪")
 			return nil
 		}
+		attempt := pipelineInitialWorldTickAttemptOptions(cfg.OutputDir, prompt)
 		if err := pipelineResetInvalidInitialWorldTick(cfg.OutputDir); err != nil {
 			return err
 		}
@@ -2020,7 +2021,7 @@ func pipelineEnsureInitialWorldTick(cfg bootstrap.Config, bundle assets.Bundle) 
 		} else {
 			fmt.Fprintf(os.Stderr, "[pipeline:zero-init] 第 %d/%d 次恢复初始 world_tick\n", run, maxWorldTickRuns)
 		}
-		if err := headless.Run(cfg, bundle, pipelineInitialWorldTickHeadlessOptions(prompt)); err != nil {
+		if err := headless.Run(cfg, bundle, attempt); err != nil {
 			return err
 		}
 	}

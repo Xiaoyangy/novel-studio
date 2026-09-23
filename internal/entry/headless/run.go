@@ -26,6 +26,9 @@ var ErrFoundationChangeIncomplete = errors.New("foundation change incomplete")
 
 type Options struct {
 	Prompt string
+	// InitialWorldTickRetryFeedback is host-only quality feedback, transported
+	// directly to the initial Architect even if Coordinator delegation omits it.
+	InitialWorldTickRetryFeedback string
 	// UserRulesPrompt carries the author's creative requirements separately
 	// from host workflow instructions in Prompt. Empty keeps the ordinary
 	// quick-start behavior; PreserveUserRules always suppresses normalization.
@@ -94,6 +97,7 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	}
 	eng, err := host.NewWithOptions(cfg, bundle, host.NewOptions{
 		WriterSessionIdentity:             opts.WriterSessionIdentity,
+		InitialWorldTickRetryFeedback:     opts.InitialWorldTickRetryFeedback,
 		PreserveCheckpointsOnStart:        opts.PreserveCheckpointsOnStart,
 		DisableFlowRouter:                 opts.DisableFlowRouter,
 		AllowChapterZeroFoundationRefresh: opts.AllowChapterZeroFoundationRefresh,

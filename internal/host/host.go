@@ -81,6 +81,7 @@ const (
 // exposed through model tool schemas or persisted as reusable user input.
 type NewOptions struct {
 	WriterSessionIdentity             string
+	InitialWorldTickRetryFeedback     string
 	PreserveCheckpointsOnStart        bool
 	DisableFlowRouter                 bool
 	AllowChapterZeroFoundationRefresh bool
@@ -145,6 +146,7 @@ func NewWithOptions(cfg bootstrap.Config, bundle assets.Bundle, opts NewOptions)
 		}
 	}, agents.CoordinatorBuildOptions{
 		WriterSessionIdentity:             opts.WriterSessionIdentity,
+		InitialWorldTickRetryFeedback:     opts.InitialWorldTickRetryFeedback,
 		AllowChapterZeroFoundationRefresh: opts.AllowChapterZeroFoundationRefresh,
 		FoundationRefreshTarget:           opts.FoundationRefreshTarget,
 		RecordFoundationRefreshEpoch:      opts.RecordFoundationRefreshEpoch,
